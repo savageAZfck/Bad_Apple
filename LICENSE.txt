@@ -1,0 +1,25 @@
+FIREFLY AGI CORE - PROPRIETARY LICENSE
+
+Copyright (c) 2026 Adam Clark. All rights reserved.
+
+This source code and all associated files ("Firefly AGI Core") are the
+proprietary and confidential property of Adam Clark ("the Owner").
+
+Permission is hereby granted to select collaborators, contributors, and
+reviewers who have been expressly authorized in writing by the Owner to access,
+use, study, and privately modify this codebase for noncommercial purposes and
+private peer review only.
+
+No part of this repository may be published, distributed, sublicensed,
+disclosed, or used in any commercial system, product, or derivative work without
+the Owner's explicit prior written consent.
+
+Any unauthorized copying, sharing, reproduction, or public disclosure, in any
+form or by any means, is strictly prohibited.
+
+The Owner retains all rights to the Firefly AGI Core, including all rights to
+future commercialization, licensing, and public release.
+
+For permissions, please contact: savagetism@icloud.com
+
+ANY USE OUTSIDE OF THESE TERMS IS STRICTLY FORBIDDEN.

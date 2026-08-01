@@ -1,0 +1,27 @@
+[package]
+name = "sapient_soul"
+version = "0.1.0"
+edition = "2021"
+authors = ["Adam Clark <savagetism@icloud.com>"]
+license-file = "LICENSE.txt"
+description = "Firefly AGI Core — a local-first, self-training AGI research runtime"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+md-5 = "0.10"
+ndarray = "0.15"
+dashmap = "6.0"
+sysinfo = "0.30"
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+reqwest = { version = "0.12", features = ["json"] }
+starship-battery = "0.10"
+chrono = "0.4"
+candle-core = { version = "0.10.2", features = ["metal", "accelerate"] }
+candle-nn = { version = "0.10.2", features = ["metal"] }
+hmac = "0.13.0"
+sha2 = "0.11.0"
+base64 = "0.23.0"

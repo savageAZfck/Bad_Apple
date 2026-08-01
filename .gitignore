@@ -1,0 +1,30 @@
+# Build artifacts
+/target
+/target-clean
+
+# Cargo lock is intentionally committed for this binary
+# Cargo.lock
+
+# Runtime state and generated files
+*.json
+*.defense
+*.network
+*.safetensors
+*.weights
+metrics.jsonl
+firefly_soul.json
+sapient_agi_soul.json
+sapient_agi_soul_5001.*
+
+# Generated tool sandbox files
+/tools
+
+# Auto-generated curriculum
+/curriculum/auto_curriculum.txt
+
+# IDE / editor backups
+.*.rs
+*.rs.bak
+
+# Manual state backups
+/state-backup-*/
