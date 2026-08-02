@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use crate::metrics::MetricsLogger;
 use crate::{FullySapientSoulMatrix, Skill};
 use crate::ollama_client::OllamaClient;
+use crate::strategy_library::StrategyLibrary;
 use md5::{Md5, Digest};
 
 pub fn current_secs() -> u64 {
@@ -319,6 +320,7 @@ struct AppState {
     metrics: Arc<Mutex<MetricsLogger>>,
     core_mind: Arc<Mutex<FullySapientSoulMatrix>>,
     ollama: Arc<OllamaClient>,
+    strategy_library: Arc<StrategyLibrary>,
 }
 
 async fn telemetry_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -864,9 +866,10 @@ pub async fn run_telemetry_server(
     metrics: Arc<Mutex<MetricsLogger>>,
     core_mind: Arc<Mutex<FullySapientSoulMatrix>>,
     ollama: Arc<OllamaClient>,
+    strategy_library: Arc<StrategyLibrary>,
     port: u16,
 ) {
-    let state = AppState { telemetry, sensors, metrics, core_mind, ollama };
+    let state = AppState { telemetry, sensors, metrics, core_mind, ollama, strategy_library };
     let app = Router::new()
         .route("/telemetry", get(telemetry_handler))
         .route("/metrics", get(metrics_json_handler))

@@ -13,6 +13,8 @@ mod tensor_brain;
 mod data_feed;
 mod conscience_oracle;
 mod benchmark;
+mod strategy_library;
+mod wild_workspace;
 mod metrics;
 mod protocol;
 use protocol::{CompactEngramPacket, SignedUdpPacket, sign_packet, verify_packet, decode_payload, multi_agent_secret};
@@ -23,6 +25,8 @@ use conscience_oracle::ConscienceOracle;
 use tensor_brain::CandleBrain;
 use data_feed::{DataCurriculum, default_curriculum_dirs};
 use benchmark::{BenchmarkSuite, TransferSuite, TransferTask};
+use strategy_library::{StrategyLibrary, Strategy};
+use wild_workspace::{start_watcher, run_wild_loop};
 use dashmap::DashMap;
 
 // =========================================================================
@@ -5483,6 +5487,13 @@ async fn main() {
     });
     let core_mind = Arc::new(Mutex::new(matrix));
 
+    // 📚 Strategy library (Sled-backed) for durable learned procedural templates.
+    std::fs::create_dir_all("wild_workspace").ok();
+    let strategy_library = Arc::new(
+        StrategyLibrary::open("wild_workspace/strategies.sled")
+            .expect("Sled strategy library must open")
+    );
+
     // 📚 Real training curriculum: local text files become the network's ongoing input stream.
     let curriculum = Arc::new(Mutex::new(DataCurriculum::new(default_curriculum_dirs())));
     {
@@ -5516,9 +5527,24 @@ async fn main() {
     let telemetry_server_metrics = metrics_logger.clone();
     let telemetry_server_mind = Arc::clone(&core_mind);
     let telemetry_server_ollama = Arc::clone(&ollama);
+    let telemetry_server_strategy_library = Arc::clone(&strategy_library);
     tokio::spawn(async move {
-        run_telemetry_server(telemetry_server_telemetry, telemetry_server_sensors, telemetry_server_metrics, telemetry_server_mind, telemetry_server_ollama, 8080).await;
+        run_telemetry_server(telemetry_server_telemetry, telemetry_server_sensors, telemetry_server_metrics, telemetry_server_mind, telemetry_server_ollama, telemetry_server_strategy_library, 8080).await;
     });
+
+    // 🌿 WILD WORKSPACE: local file-watcher sandbox.
+    let wild_path = PathBuf::from("wild_workspace");
+    let wild_ollama = Arc::clone(&ollama);
+    let wild_model = ollama_model.clone();
+    tokio::spawn(async move {
+        match start_watcher(&wild_path) {
+            Ok(rx) => {
+                run_wild_loop(rx, wild_ollama, wild_model, wild_path).await;
+            }
+            Err(e) => eprintln!("🌿 [WILD] Could not start watcher: {}", e),
+        }
+    });
+
     {
         let reasoner = dual_process_reasoner.lock().unwrap();
         reasoner.add_rule("human", "mortal");
@@ -6268,6 +6294,7 @@ async fn main() {
     let agent_sensors = sensors.clone();
     let agent_telemetry = telemetry.clone();
     let agent_ollama = ollama.clone();
+    let agent_strategy_library = Arc::clone(&strategy_library);
     let agent_model = ollama_model.clone();
     tokio::spawn(async move {
         loop {
@@ -6305,12 +6332,14 @@ async fn main() {
                 }
             }
 
-            let (goal, emotional_state, memory_count, sensor_summary) = match agent_mind.lock() {
+            let (goal, emotional_state, memory_count, identity_context, primary_goals, sensor_summary) = match agent_mind.lock() {
                 Ok(mind) => {
                     let step = mind.current_plan.as_ref().and_then(|p| p.current_step_description()).map(|s| s.to_string());
                     let goal = step.unwrap_or_else(|| high_level_goal.clone());
                     let emotional_state = mind.emotions.active_primary_blend.clone();
                     let memory_count = mind.associative_memory_network.len();
+                    let identity_context = mind.narrative_identity();
+                    let primary_goals: Vec<String> = mind.goal_hierarchy.get_active_goals().iter().map(|g| g.goal.clone()).collect();
                     let sensor_summary = if let Ok(s) = agent_sensors.lock() {
                         format!("{:.1}% CPU, {:.1}% RAM, {:.0}% battery, photons={:.2}, audio={:.2}, mass={:.2}",
                             s.cpu_usage_percent, s.memory_pressure_percent, s.battery_percent,
@@ -6318,10 +6347,11 @@ async fn main() {
                     } else {
                         "sensors unavailable".to_string()
                     };
-                    (goal, emotional_state, memory_count, sensor_summary)
+                    (goal, emotional_state, memory_count, identity_context, primary_goals, sensor_summary)
                 }
                 Err(_) => continue,
             };
+            let identity_summary = format!("I am Firefly. My primary goals are: {:?}. My narrative identity: {}", primary_goals, identity_context.replace('\n', " "));
 
             // Snapshot sensors before the tool runs so the world model can learn action effects.
             let mut before_sensors: HashMap<String, f64> = if let Ok(s) = agent_sensors.lock() {
@@ -6339,8 +6369,8 @@ async fn main() {
             before_sensors.insert("execution_time_ms".into(), 0.0);
             before_sensors.insert("output_length".into(), 0.0);
 
-            // 🔮 Long-horizon planning + skill recall: if a learned skill matches the
-            // current plan step, use it directly; otherwise generate a fresh tool.
+            // 🔮 Long-horizon planning + skill recall: if a learned skill or
+            // cached strategy matches the current plan step, use it directly.
             let mut best_candidate: Option<(String, String, f64, HashMap<String, f64>)> = None;
             if let Ok(mind) = agent_mind.lock() {
                 if let Some((skill_key, skill)) = best_matching_skill(&mind, &goal) {
@@ -6352,12 +6382,26 @@ async fn main() {
                     best_candidate = Some((skill_key, runner, utility, predicted));
                 }
             }
+            if best_candidate.is_none() {
+                if let Some(strategy) = agent_strategy_library.best_match(&goal).await {
+                    let runner = format!("{}\nprint(skill({:?}))", strategy.code, high_level_goal);
+                    let predicted = if let Ok(mind) = agent_mind.lock() {
+                        mind.world_model.predict_action_effects(&strategy.key, &before_sensors)
+                    } else {
+                        before_sensors.clone()
+                    };
+                    let recent = if let Ok(mind) = agent_mind.lock() { mind.recent_tool_names.clone() } else { Vec::new() };
+                    let utility = compute_predicted_utility(&goal, &strategy.key, &recent, &predicted) * (0.5 + 0.5 * strategy.reliability);
+                    println!("🔧 Recalled Sled strategy '{}' for plan step '{}' (utility {:.3}, reliability {:.3})", strategy.key, goal, utility, strategy.reliability);
+                    best_candidate = Some((strategy.key, runner, utility, predicted));
+                }
+            }
 
             // 🔮 Model-based planning: generate up to 3 candidate tools,
             // predict each one's effects, and execute the highest-utility one.
             let prompt_template = format!(
-                "You are an autonomous agent with this active goal: '{}'\nEmotional state: {}\nMemory count: {}\nSensor summary: {}\n\nReturn ONLY a valid JSON object with exactly these fields: 'name' (short snake_case identifier), 'language' (must be the string 'python'), and 'code' (a short, self-contained Python 3 script that prints a useful result).\n\nSafety rules for the code:\n- It must be read-only or computational.\n- No file deletion, network, shell access, or writing to files.\n- Do not use: rm, dd, mkfs, sudo, su, wget, curl, ssh, scp, subprocess, os.system, exec, eval, compile, __import__, open, write, delete, destroy, socket, requests, urllib.\n- Allowed imports: math, random, statistics, json, datetime, itertools, collections, string, re.\n- For mean, stdev, variance, pstdev, pvariance, mode, median, harmonic_mean, and geometric_mean, use the `statistics` module (e.g. `statistics.mean(data)`).\n- Do NOT use `math.mean(...)`, `math.stdev(...)`, `math.variance(...)`, `math.pstdev(...)`, `math.pvariance(...)`, `math.mode(...)`, `math.median(...)`, `math.harmonic_mean(...)`, or `math.geometric_mean(...)` — these functions do not exist in the `math` module.\n- The script must not index into a scalar value. If you have a 2-D list, treat inner elements as scalars, not as lists to iterate over.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math, statistics; data=[1,2,3,4,5]; print(math.sqrt(sum((x-statistics.mean(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
-                goal, emotional_state, memory_count, sensor_summary
+                "You are an autonomous agent with this active goal: '{}'\nEmotional state: {}\nMemory count: {}\nSensor summary: {}\n{}\n\nWhen selecting an action, explicitly prefer tools and strategies that advance my primary goals and are consistent with my historical identity.\n\nReturn ONLY a valid JSON object with exactly these fields: 'name' (short snake_case identifier), 'language' (must be the string 'python'), and 'code' (a short, self-contained Python 3 script that prints a useful result).\n\nSafety rules for the code:\n- It must be read-only or computational.\n- No file deletion, network, shell access, or writing to files.\n- Do not use: rm, dd, mkfs, sudo, su, wget, curl, ssh, scp, subprocess, os.system, exec, eval, compile, __import__, open, write, delete, destroy, socket, requests, urllib.\n- Allowed imports: math, random, statistics, json, datetime, itertools, collections, string, re.\n- For mean, stdev, variance, pstdev, pvariance, mode, median, harmonic_mean, and geometric_mean, use the `statistics` module (e.g. `statistics.mean(data)`).\n- Do NOT use `math.mean(...)`, `math.stdev(...)`, `math.variance(...)`, `math.pstdev(...)`, `math.pvariance(...)`, `math.mode(...)`, `math.median(...)`, `math.harmonic_mean(...)`, or `math.geometric_mean(...)` — these functions do not exist in the `math` module.\n- The script must not index into a scalar value. If you have a 2-D list, treat inner elements as scalars, not as lists to iterate over.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math, statistics; data=[1,2,3,4,5]; print(math.sqrt(sum((x-statistics.mean(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
+                goal, emotional_state, memory_count, sensor_summary, identity_summary
             );
 
             for attempt in 0..3 {
@@ -6508,6 +6552,12 @@ async fn main() {
                         // Advance the long-horizon plan.
                         update_plan_after_step(&mut mind, true, None);
                     }
+
+                    // Cache a successful new tool as a Sled strategy for future replanning.
+                    let mut strategy = Strategy::new(name.clone(), goal.clone(), "python".to_string(), code.clone());
+                    strategy.record(true);
+                    let sl = Arc::clone(&agent_strategy_library);
+                    tokio::spawn(async move { let _ = sl.put(&strategy).await; });
                 }
                 Err(e) => {
                     eprintln!("⚠️ Agent tool '{}' failed: {}", name, e);
@@ -6526,6 +6576,16 @@ async fn main() {
                             mind.skill_reliability.insert(name.clone(), current * 0.7);
                         }
                     }
+
+                    // Record failure against the Sled strategy if one exists.
+                    let sl = Arc::clone(&agent_strategy_library);
+                    let key = name.clone();
+                    tokio::spawn(async move {
+                        if let Some(mut s) = sl.get(&key).await {
+                            s.record(false);
+                            let _ = sl.put(&s).await;
+                        }
+                    });
                 }
             }
         }
@@ -6637,6 +6697,18 @@ async fn main() {
                     mind.skill_memory.skills.insert(key.clone(), skill);
                     mind.skill_reliability.insert(key.clone(), 0.7);
                 }
+            }
+        }
+    });
+
+    // --- POLICY SELF-IMPROVEMENT: prune weak cached strategies from Sled ---
+    let policy_strategy_library = Arc::clone(&strategy_library);
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(300)).await;
+            match policy_strategy_library.prune_below(0.2).await {
+                0 => {}
+                n => println!("🧹 Policy self-improvement pruned {} weak strategies from Sled", n),
             }
         }
     });
