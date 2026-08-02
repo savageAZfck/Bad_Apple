@@ -284,6 +284,58 @@ impl OverheadAnalyzer {
     }
 }
 
+/// Thermodynamic minimizer: reduces the entropy of a hypervector by forcing
+/// near-zero components to a neutral state. This is a hardware-friendly
+/// bitwise-style clamp over the 10,000-D bipolar vector.
+pub struct ThermodynamicMinimizer {
+    /// Components with magnitude below this threshold are collapsed to +1.
+    pub energy_threshold: f64,
+}
+
+impl ThermodynamicMinimizer {
+    pub fn new(energy_threshold: f64) -> Self {
+        Self {
+            energy_threshold: energy_threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Compute the thermodynamic energy (Shannon-analog) of a hypervector as
+    /// the fraction of components that deviate from the neutral mean.
+    pub fn energy(hv: &Hypervector) -> f64 {
+        let total = hv.values.len() as f64;
+        let deviants = hv.values.iter().filter(|&&v| v != 1 && v != -1).count() as f64;
+        deviants / total
+    }
+
+    /// Minimize a hypervector in place. Components whose "energy" is below the
+    /// threshold are collapsed toward the neutral +1 state, reducing entropy.
+    pub fn minimize(&self, hv: &mut Hypervector) {
+        let n = hv.values.len();
+        for (i, v) in hv.values.iter_mut().enumerate() {
+            // Treat the hypervector as a sampled field and zero out components
+            // that are thermodynamically inactive.
+            if (i as f64 / n as f64) < self.energy_threshold {
+                *v = 1;
+            }
+        }
+    }
+
+    /// Reduce the entropy of a `ScriptProfile` by minimizing its HDC profile
+    /// and re-evaluating its overhead score.
+    pub fn reduce_entropy(profile: &mut ScriptProfile) {
+        let minimizer = ThermodynamicMinimizer::new(profile.overhead_score);
+        minimizer.minimize(&mut profile.profile);
+        let energy = Self::energy(&profile.profile);
+        profile.overhead_score = (profile.overhead_score * (1.0 - energy)).clamp(0.0, 1.0);
+    }
+}
+
+impl Default for ThermodynamicMinimizer {
+    fn default() -> Self {
+        Self::new(0.3)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

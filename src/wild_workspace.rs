@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::benchmark::RustValidator;
-use crate::hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder};
+use crate::hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
 use crate::is_safe_agent_code;
 use crate::ollama_client::OllamaClient;
 use crate::strategy_library::{RustSynthesizer, Strategy, StrategyLibrary};
@@ -163,9 +163,39 @@ pub async fn process_wild_payload(
     Ok((name, output))
 }
 
-/// Process an open-source script through the HDC profile → Rust synthesis →
-/// cargo check validation pipeline. If validation passes the 0.95 threshold,
-/// cache the generated Rust source as a Sled-backed strategy.
+/// Maps raw open-source scripts into a continuous HDC phase-space coordinate,
+/// then reduces thermodynamic entropy and synthesizes a fluid Rust policy.
+///
+/// This is a defensive, local-only harness: it processes `.py` and `.txt` files
+/// that the user drops into the wild workspace and never contacts the network.
+pub struct PhaseSpaceMapper;
+
+impl PhaseSpaceMapper {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Encode a script into a 10,000-D phase-space coordinate and minimize its
+    /// entropy. Returns the reduced profile and a diagnosis.
+    pub fn map(source: &str) -> (crate::hyperdimensional_core::ScriptProfile, String) {
+        let mut encoder = ScriptEncoder::new();
+        let mut profile = encoder.encode(source);
+        ThermodynamicMinimizer::reduce_entropy(&mut profile);
+        let (diagnosis, _) = OverheadAnalyzer::analyze(&profile);
+        (profile, diagnosis)
+    }
+}
+
+impl Default for PhaseSpaceMapper {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Process an open-source script through the HDC phase-space mapping →
+/// thermodynamic entropy reduction → Rust synthesis → cargo check validation
+/// pipeline. If validation passes the 0.99 equilibrium threshold, the generated
+/// Rust source is cached as a Sled-backed strategy.
 pub async fn process_script(
     source: &str,
     strategy_library: &StrategyLibrary,
@@ -173,13 +203,12 @@ pub async fn process_script(
     let source = source.to_string();
     let strategy_library = strategy_library.clone();
 
-    // Offload encoding and synthesis to spawn_blocking (HDC + pattern matching).
+    // Phase 1: Map the script into a continuous 10,000-D HDC phase-space
+    // coordinate, then apply thermodynamic entropy reduction.
     let (rust_source, profile) = spawn_blocking({
         let source = source.clone();
         move || {
-            let mut encoder = ScriptEncoder::new();
-            let profile = encoder.encode(&source);
-            let (diagnosis, _severity) = OverheadAnalyzer::analyze(&profile);
+            let (profile, diagnosis) = PhaseSpaceMapper::map(&source);
             let mut synthesizer = RustSynthesizer::new();
             let rust = synthesizer.synthesize(&profile);
             (rust, (profile, diagnosis))
@@ -188,19 +217,24 @@ pub async fn process_script(
     .await
     .map_err(|e| format!("script processing task failed: {}", e))?;
 
+    // Phase 2: Closed-loop equilibrium validation with up to 3 retries.
+    const EQUILIBRIUM_THRESHOLD: f64 = 0.99;
+    const MAX_RETRIES: usize = 3;
     let key = format!("rust_synth_{}", std::process::id());
-    let validation = RustValidator::validate(&key, &rust_source, 2).await;
+    let validation = RustValidator::validate(&key, &rust_source, MAX_RETRIES).await;
 
     let outcome = SynthesisOutcome {
         source,
         rust_source,
         diagnosis: profile.1,
-        compiled: validation.competence >= 0.95,
+        compiled: validation.competence >= EQUILIBRIUM_THRESHOLD,
         competence: validation.competence,
         diagnostics: validation.diagnostics.clone(),
+        energy: ThermodynamicMinimizer::energy(&profile.0.profile),
+        velocity_ms: validation.wall_time_ms,
     };
 
-    if validation.competence >= 0.95 {
+    if validation.competence >= EQUILIBRIUM_THRESHOLD {
         let strategy = Strategy::new(
             format!("{}_certified", key),
             format!("Optimized Rust for: {}", outcome.diagnosis),
@@ -222,6 +256,10 @@ pub struct SynthesisOutcome {
     pub compiled: bool,
     pub competence: f64,
     pub diagnostics: String,
+    /// HDC profile energy after thermodynamic minimization [0, 1].
+    pub energy: f64,
+    /// Validation wall-clock time in milliseconds.
+    pub velocity_ms: f64,
 }
 
 /// Run the wild workspace ingestion loop.

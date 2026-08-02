@@ -237,6 +237,10 @@ pub struct SynthesisResult {
     pub compiled: bool,
     pub diagnostics: String,
     pub competence: f64,
+    /// Wall-clock validation time in milliseconds.
+    pub wall_time_ms: f64,
+    /// Approximate memory footprint: source size in bytes.
+    pub footprint_bytes: usize,
 }
 
 /// Runs `cargo check` on a synthesized Rust snippet inside an isolated temp
@@ -263,11 +267,14 @@ impl RustValidator {
             compiled: false,
             diagnostics: format!("spawn_blocking failed: {}", e),
             competence: 0.0,
+            wall_time_ms: 0.0,
+            footprint_bytes: 0,
         });
         result
     }
 
     fn validate_blocking(key: &str, source: &str, max_retries: usize) -> SynthesisResult {
+        let start = std::time::Instant::now();
         let base = std::env::temp_dir().join(format!("firefly_rust_val_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
 
@@ -278,6 +285,8 @@ impl RustValidator {
                 compiled: false,
                 diagnostics: "failed to create temp dir".to_string(),
                 competence: 0.0,
+                wall_time_ms: 0.0,
+                footprint_bytes: source.len(),
             };
         };
 
@@ -342,12 +351,16 @@ tokio = { version = "1", features = ["full"] }
         let _ = std::fs::remove_dir_all(&base);
 
         let competence = if compiled { 1.0 } else { 0.0 };
+        let wall_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let footprint_bytes = source.len();
         SynthesisResult {
             key: key.to_string(),
             source: source.to_string(),
             compiled,
             diagnostics,
             competence,
+            wall_time_ms,
+            footprint_bytes,
         }
     }
 
