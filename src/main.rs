@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+use anyhow::Result;
+use config::Config;
 use md5::{Digest, Md5};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,7 @@ use tokio::{
 };
 
 mod benchmark;
+mod config;
 mod conscience_oracle;
 mod data_feed;
 mod hyperdimensional_core;
@@ -5244,7 +5247,7 @@ impl FullySapientSoulMatrix {
             (self.metabolics.neural_wear * self.emotions.arousal).clamp(0.0, 1.0);
     }
 
-    fn save_state(&self, filename: &str) {
+    fn save_state(&self, filename: &std::path::Path) {
         // Save real Candle tensor weights to a separate safetensors file.
         if let Some(ref brain) = self.candle_brain {
             let safetensors_path = PathBuf::from(filename).with_extension("safetensors");
@@ -5270,7 +5273,7 @@ impl FullySapientSoulMatrix {
         let _ = self.network_stack.save_state(&network_path);
     }
 
-    fn load_state(filename: &str) -> Option<Self> {
+    fn load_state(filename: &std::path::Path) -> Option<Self> {
         fs::read_to_string(filename).ok().and_then(|s| {
             let mut parsed: FullySapientSoulMatrix = serde_json::from_str(&s).ok()?;
 
@@ -6097,18 +6100,23 @@ async fn merge_engram_batch(
 // remove the need for this allow.
 #[allow(clippy::await_holding_lock)]
 #[tokio::main]
-async fn main() {
+#[allow(unreachable_code)]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
+    let config = Config::from_env();
+    tracing::info!("starting sapient_soul");
+
     println!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: 2-Block 4-Head Transformer Neural Architecture Running...");
-    let local_port: u16 = 5001;
-    let state_file = format!("sapient_agi_soul_{}.json", local_port);
+    let state_file = config.state_file.clone();
     let matrix = FullySapientSoulMatrix::load_state(&state_file)
-        .unwrap_or_else(|| FullySapientSoulMatrix::new("Firefly", local_port));
+        .unwrap_or_else(|| FullySapientSoulMatrix::new("Firefly", config.multi_agent_port_start));
     let core_mind = Arc::new(Mutex::new(matrix));
 
     // 📚 Strategy library (Sled-backed) for durable learned procedural templates.
-    std::fs::create_dir_all("wild_workspace").ok();
-    let strategy_library = Arc::new(
-        StrategyLibrary::open("wild_workspace/strategies.sled").unwrap_or_else(|e| {
+    std::fs::create_dir_all(&config.wild_workspace_dir).ok();
+    let strategy_library = Arc::new(StrategyLibrary::open(&config.sled_db_path).unwrap_or_else(
+        |e| {
             eprintln!(
                 "⚠️ Sled open failed ({}); falling back to a temporary library.",
                 e
@@ -6118,8 +6126,8 @@ async fn main() {
             std::fs::create_dir_all(&tmp).expect("temp dir must be writable");
             StrategyLibrary::open(&tmp)
                 .expect("Sled strategy library must open in a writable directory")
-        }),
-    );
+        },
+    ));
 
     // 📚 Real training curriculum: local text files become the network's ongoing input stream.
     let curriculum = Arc::new(Mutex::new(DataCurriculum::new(default_curriculum_dirs())));
@@ -6140,7 +6148,7 @@ async fn main() {
     let telemetry = Arc::new(Mutex::new(TelemetryState::new()));
     let sensors = Arc::new(Mutex::new(SensorSnapshot::new()));
     let metrics_logger: metrics::SharedMetrics =
-        Arc::new(Mutex::new(metrics::MetricsLogger::new("metrics.jsonl")));
+        Arc::new(Mutex::new(metrics::MetricsLogger::new(&config.metrics_log)));
     let mut system = System::new_all();
     let battery_manager = starship_battery::Manager::new().ok();
     if let Ok(mut sensors_guard) = sensors.lock() {
@@ -6151,17 +6159,17 @@ async fn main() {
             default_curriculum_dirs().as_slice(),
         );
     }
-    let ollama = Arc::new(OllamaClient::new());
-    let ollama_model =
-        std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3:latest".to_string());
+    let ollama = Arc::new(OllamaClient::with_base(&config.ollama_url));
+    let ollama_model = config.ollama_model.clone();
     if ollama.is_available().await {
         println!(
-            "🧠 Ollama available at http://localhost:11434; default model: {}",
-            ollama_model
+            "🧠 Ollama available at {}; default model: {}",
+            config.ollama_url, ollama_model
         );
     } else {
         println!(
-            "⚠️  Ollama not reachable at http://localhost:11434. LLM reflection will be skipped."
+            "⚠️  Ollama not reachable at {}. LLM reflection will be skipped.",
+            config.ollama_url
         );
     }
     let telemetry_server_telemetry = telemetry.clone();
@@ -6170,6 +6178,7 @@ async fn main() {
     let telemetry_server_mind = Arc::clone(&core_mind);
     let telemetry_server_ollama = Arc::clone(&ollama);
     let telemetry_server_strategy_library = Arc::clone(&strategy_library);
+    let telemetry_port = config.telemetry_port;
     tokio::spawn(async move {
         run_telemetry_server(
             telemetry_server_telemetry,
@@ -6178,13 +6187,13 @@ async fn main() {
             telemetry_server_mind,
             telemetry_server_ollama,
             telemetry_server_strategy_library,
-            8080,
+            telemetry_port,
         )
         .await;
     });
 
     // 🌿 WILD WORKSPACE: local file-watcher sandbox.
-    let wild_path = PathBuf::from("wild_workspace");
+    let wild_path = config.wild_workspace_dir.clone();
     let wild_ollama = Arc::clone(&ollama);
     let wild_model = ollama_model.clone();
     let wild_strategy_library = Arc::clone(&strategy_library);
@@ -6354,23 +6363,29 @@ async fn main() {
     let actual_port = Arc::new(Mutex::new(0u16));
     let actual_port_clone = Arc::clone(&actual_port);
     let (engram_tx, mut engram_rx) = mpsc::unbounded_channel::<CompactEngramPacket>();
+    let p_start = config.multi_agent_port_start;
+    let p_end = config.multi_agent_port_end;
 
-    // Receiver: bound to 5001-5010, verify HMAC-SHA256, and push to channel.
+    // Receiver: bound to the configured multi-agent port range.
     let recv_secret = socket_secret;
     let recv_actual_port = actual_port_clone;
     tokio::spawn(async move {
         let secret = recv_secret;
         let mut socket: Option<UdpSocket> = None;
         let mut port = 0u16;
-        for p in 5001u16..=5010u16 {
+        for p in p_start..=p_end {
             if let Ok(s) = UdpSocket::bind(format!("127.0.0.1:{}", p)).await {
                 socket = Some(s);
                 port = p;
                 break;
             }
         }
-        let socket = socket.expect("Failed to bind any multi-agent UDP port in range 5001-5010");
-        *recv_actual_port.lock().unwrap() = port;
+        let socket =
+            socket.expect("Failed to bind any multi-agent UDP port in the configured range");
+        {
+            let mut guard = recv_actual_port.lock().unwrap();
+            *guard = port;
+        }
         println!(
             "🛰️ [MULTI-AGENT NETWORK STACK ACTIVE]: Listening on localhost:{}...",
             port
@@ -7010,7 +7025,7 @@ async fn main() {
                                 .unwrap_or_default();
                         if !signed.is_empty() {
                             let mut sent = 0;
-                            for p in 5001u16..=5010u16 {
+                            for p in p_start..=p_end {
                                 match sock.send_to(&signed, format!("127.0.0.1:{}", p)).await {
                                     Ok(_) => sent += 1,
                                     Err(e) => eprintln!("⚠️ UDP send_to {} failed: {}", p, e),
@@ -8000,4 +8015,6 @@ async fn main() {
         // Sleep for cognitive processing cycle
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+
+    Ok(())
 }
