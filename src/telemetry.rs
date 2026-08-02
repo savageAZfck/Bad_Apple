@@ -802,6 +802,26 @@ Training output: {:?}",
     )
 }
 
+async fn identity_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match state.core_mind.lock() {
+        Ok(mind) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "narrative": mind.narrative_identity(),
+                "born_at": mind.born_at,
+                "journal_entries": mind.identity_journal.len(),
+                "last_journal_entry": mind.last_journal_entry,
+            })),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "could not read mind",
+            })),
+        ),
+    }
+}
+
 pub async fn start_telemetry_listener(port: u16) -> Result<TcpListener, Box<dyn std::error::Error>> {
     let fallback_base = port.saturating_add(1);
     for p in port..=port.saturating_add(15) {
@@ -841,6 +861,7 @@ pub async fn run_telemetry_server(
         .route("/skills/run", post(run_skill_handler))
         .route("/pursuits/add", post(add_pursuit_handler))
         .route("/transfer/evaluate", post(transfer_evaluate_handler))
+        .route("/identity", get(identity_handler))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 

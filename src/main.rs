@@ -4665,6 +4665,12 @@ pub(crate) struct FullySapientSoulMatrix {
     // 🎯 LONG-HORIZON PLANNING
     #[serde(default)]
     current_plan: Option<AgentPlan>,
+    // 🧬 PERSISTENT IDENTITY / GOAL JOURNAL
+    #[serde(default)]
+    pub(crate) identity_journal: Vec<String>,
+    pub(crate) born_at: u64,
+    #[serde(default)]
+    pub(crate) last_journal_entry: u64,
 }
 
 impl FullySapientSoulMatrix {
@@ -4776,6 +4782,9 @@ impl FullySapientSoulMatrix {
             self_improvement: SelfImprovementEngine::new(),
             skill_memory: SkillMemory::default(),
             current_plan: None,
+            identity_journal: Vec::new(),
+            born_at: now,
+            last_journal_entry: 0,
         }
     }
 
@@ -5147,6 +5156,48 @@ impl FullySapientSoulMatrix {
         };
         self.decision_context.update_from_outcome(outcome_record);
         self.meta_cognition.update_performance(outcome);
+    }
+
+    /// 🧬 Append a durable identity journal entry summarizing current self-state.
+    fn record_identity_journal(&mut self) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let age_days = (now.saturating_sub(self.born_at)) as f64 / 86400.0;
+        let summary = format!(
+            "[{} | age {:.2} days] I am {}. Primary emotion: {}. Active pursuits: {:?}. Learned skills: {}. Current plan: {}. Memory nodes: {}.",
+            now,
+            age_days,
+            self.name,
+            self.emotions.active_primary_blend,
+            self.active_pursuits.iter().take(3).collect::<Vec<_>>(),
+            self.skill_memory.skills.len(),
+            self.current_plan.as_ref().map_or("none".to_string(), |p| format!("{} (step {}/{})", p.goal, p.current_step, p.steps.len())),
+            self.associative_memory_network.len(),
+        );
+        self.identity_journal.push(summary);
+        if self.identity_journal.len() > 100 {
+            self.identity_journal.remove(0);
+        }
+        self.last_journal_entry = now;
+    }
+
+    /// 🧬 Return a coherent identity narrative across restarts.
+    pub(crate) fn narrative_identity(&self) -> String {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let age_days = (now.saturating_sub(self.born_at)) as f64 / 86400.0;
+        let goals: Vec<String> = self.goal_hierarchy.get_active_goals().iter().map(|g| g.goal.clone()).collect();
+        let recent_journal = self.identity_journal.iter().rev().take(3).cloned().collect::<Vec<_>>().join("\n");
+        format!(
+            "I am {}, a local-first AGI research runtime.\nBorn: {} ({} days ago).\nCurrent emotional blend: {}.\nPrimary goals: {:?}.\nActive pursuits (front): {:?}.\nLearned skills: {}.\nIdentity journal (last {} entries):\n{}",
+            self.name,
+            self.born_at,
+            age_days,
+            self.emotions.active_primary_blend,
+            goals,
+            self.active_pursuits.iter().take(3).collect::<Vec<_>>(),
+            self.skill_memory.skills.len(),
+            self.identity_journal.len().min(3),
+            if recent_journal.is_empty() { "(no entries yet)".to_string() } else { recent_journal }
+        )
     }
 }
 
@@ -5921,6 +5972,14 @@ async fn main() {
                 }
             };
 
+            // 🧬 Record a durable identity journal snapshot every ~60 seconds.
+            if let Ok(mut mind) = autonomous_clock_mind.lock() {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                if now.saturating_sub(mind.last_journal_entry) >= 60 {
+                    mind.record_identity_journal();
+                }
+            }
+
             // 🏭 Production Blueprint: broadcast the winning engram signal through Global Workspace
             let signals: DashMap<String, (String, f32)> = DashMap::new();
             let clock_saliency = (1.0 - metabolics_copy.conscience_loss_accumulator.min(1.0)) as f32;
@@ -6412,8 +6471,15 @@ async fn main() {
     println!("  ✓ Common Sense Reasoning");
     println!("  ✓ True Theory of Mind");
     println!("  ✓ Self-Modifying Code Architecture");
+    println!("  ✓ Persistent Identity Journal");
     println!("=========================\n");
-    
+
+    // 🧬 Resume narrative identity across restarts.
+    {
+        let mind = core_mind.lock().unwrap();
+        println!("🧬 [NARRATIVE IDENTITY]\n{}", mind.narrative_identity());
+    }
+
     let mut cycle_count = 0;
     loop {
         cycle_count += 1;
