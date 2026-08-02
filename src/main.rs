@@ -17,12 +17,12 @@ mod metrics;
 mod protocol;
 use protocol::{CompactEngramPacket, SignedUdpPacket, sign_packet, verify_packet, decode_payload, multi_agent_secret};
 use production_blueprint::{GlobalWorkspace, NeuroSymbolicEngine as ProductionNeuroSymbolicEngine, HomeostaticController};
-use telemetry::{TelemetryState, SensorSnapshot, update_sensor_snapshot, run_telemetry_server};
+use telemetry::{TelemetryState, SensorSnapshot, update_sensor_snapshot, run_telemetry_server, skill_key, current_secs};
 use ollama_client::OllamaClient;
 use conscience_oracle::ConscienceOracle;
 use tensor_brain::CandleBrain;
 use data_feed::{DataCurriculum, default_curriculum_dirs};
-use benchmark::BenchmarkSuite;
+use benchmark::{BenchmarkSuite, TransferSuite, TransferTask};
 use dashmap::DashMap;
 
 // =========================================================================
@@ -4671,6 +4671,11 @@ pub(crate) struct FullySapientSoulMatrix {
     pub(crate) born_at: u64,
     #[serde(default)]
     pub(crate) last_journal_entry: u64,
+    // 🧠 SELF-MODEL: tracked mastery and reliability of skills / domains.
+    #[serde(default)]
+    domain_mastery: HashMap<String, f64>,
+    #[serde(default)]
+    skill_reliability: HashMap<String, f64>,
 }
 
 impl FullySapientSoulMatrix {
@@ -4785,6 +4790,8 @@ impl FullySapientSoulMatrix {
             identity_journal: Vec::new(),
             born_at: now,
             last_journal_entry: 0,
+            domain_mastery: HashMap::new(),
+            skill_reliability: HashMap::new(),
         }
     }
 
@@ -4805,8 +4812,32 @@ impl FullySapientSoulMatrix {
         }
     }
 
-    /// Add a new active pursuit, keeping the queue bounded so it does not grow without bound.
+    /// Add a new active pursuit, merging with an existing one if it is substantially
+    /// similar. This keeps the goal stack coherent and prevents duplicate or
+    /// near-duplicate objectives from crowding out long-horizon goals.
     fn push_pursuit(&mut self, goal: String) {
+        let goal_lower = goal.to_lowercase();
+        let goal_words: std::collections::HashSet<&str> = goal_lower.split_whitespace().collect();
+
+        for existing in self.active_pursuits.iter() {
+            let existing_lower = existing.to_lowercase();
+            if existing_lower == goal_lower {
+                // Exact duplicate; do not add.
+                return;
+            }
+            if existing_lower.contains(&goal_lower) || goal_lower.contains(&existing_lower) {
+                // One is a sub-goal of the other; prefer the more specific one at the back.
+                return;
+            }
+            let existing_words: std::collections::HashSet<&str> = existing_lower.split_whitespace().collect();
+            let total = goal_words.union(&existing_words).count();
+            let overlap = goal_words.intersection(&existing_words).count();
+            if total > 0 && (overlap as f64 / total as f64) > 0.8 {
+                // Near duplicate; keep the existing entry.
+                return;
+            }
+        }
+
         self.active_pursuits.push_back(goal);
         while self.active_pursuits.len() > MAX_ACTIVE_PURSUITS {
             self.active_pursuits.pop_front();
@@ -5186,8 +5217,12 @@ impl FullySapientSoulMatrix {
         let age_days = (now.saturating_sub(self.born_at)) as f64 / 86400.0;
         let goals: Vec<String> = self.goal_hierarchy.get_active_goals().iter().map(|g| g.goal.clone()).collect();
         let recent_journal = self.identity_journal.iter().rev().take(3).cloned().collect::<Vec<_>>().join("\n");
+        let top_domains: Vec<String> = self.domain_mastery.iter()
+            .filter(|(_, s)| **s > 0.01)
+            .map(|(k, s)| format!("{}: {:.0}%", k, s * 100.0))
+            .collect();
         format!(
-            "I am {}, a local-first AGI research runtime.\nBorn: {} ({} days ago).\nCurrent emotional blend: {}.\nPrimary goals: {:?}.\nActive pursuits (front): {:?}.\nLearned skills: {}.\nIdentity journal (last {} entries):\n{}",
+            "I am {}, a local-first AGI research runtime.\nBorn: {} ({} days ago).\nCurrent emotional blend: {}.\nPrimary goals: {:?}.\nActive pursuits (front): {:?}.\nLearned skills: {}.\nMastered domains: {}.\nIdentity journal (last {} entries):\n{}",
             self.name,
             self.born_at,
             age_days,
@@ -5195,6 +5230,7 @@ impl FullySapientSoulMatrix {
             goals,
             self.active_pursuits.iter().take(3).collect::<Vec<_>>(),
             self.skill_memory.skills.len(),
+            if top_domains.is_empty() { "(none yet)".to_string() } else { top_domains.join(", ") },
             self.identity_journal.len().min(3),
             if recent_journal.is_empty() { "(no entries yet)".to_string() } else { recent_journal }
         )
@@ -5256,20 +5292,112 @@ async fn generate_plan(ollama: &OllamaClient, model: &str, goal: &str, previous_
 }
 
 /// Find the best learned skill for the current planning step.
+/// Combines BPE embedding cosine similarity with a structural substring bonus.
 fn best_matching_skill(mind: &FullySapientSoulMatrix, step: &str) -> Option<(String, Skill)> {
     let step_emb = generate_2048_grounded_embedding(step, &mind.spatial_sensory_register);
+    let step_lower = step.to_lowercase();
+    let step_words: std::collections::HashSet<&str> = step_lower.split_whitespace().collect();
+
     let mut best: Option<(String, Skill, f64)> = None;
     for (key, skill) in &mind.skill_memory.skills {
         let skill_emb = generate_2048_grounded_embedding(&skill.description, &mind.spatial_sensory_register);
-        let sim = calculate_cosine_similarity(&step_emb, &skill_emb);
-        if sim > 0.85 && best.as_ref().map_or(true, |(_, _, b)| sim > *b) {
-            best = Some((key.clone(), skill.clone(), sim));
+        let mut sim = calculate_cosine_similarity(&step_emb, &skill_emb);
+
+        let skill_lower = skill.description.to_lowercase();
+        if skill_lower.contains(&step_lower) || step_lower.contains(&skill_lower) {
+            sim = 1.0;
+        } else {
+            let skill_words: std::collections::HashSet<&str> = skill_lower.split_whitespace().collect();
+            let overlap = step_words.intersection(&skill_words).count();
+            let total = step_words.union(&skill_words).count();
+            if total > 0 {
+                let jaccard = overlap as f64 / total as f64;
+                sim = sim.max(0.4 + jaccard * 0.6);
+            }
+        }
+
+        let reliability = mind.skill_reliability.get(key).copied().unwrap_or(0.5);
+        let score = sim * (0.8 + 0.2 * reliability);
+        if score > 0.85 && best.as_ref().map_or(true, |(_, _, b)| score > *b) {
+            best = Some((key.clone(), skill.clone(), score));
         }
     }
     best.map(|(k, s, _)| (k, s))
 }
 
 /// Update plan progress after a step succeeds or fails.
+/// 🧠 Evaluate a single transfer-learning task: learn from one example and test on another.
+/// Returns (success, test_output, cleaned_code).
+async fn evaluate_transfer_task(ollama: &OllamaClient, model: &str, task: &TransferTask) -> (bool, Option<String>, Option<String>) {
+    let mut previous_attempt: Option<String> = None;
+    let mut previous_error: Option<String> = None;
+
+    for attempt in 0..3 {
+        let mut prompt = format!(
+            "You are a Python 3 code generator. The task is from a NEW domain the system has never trained on. Given a description and one training example, write a self-contained function named `skill(x)` that solves the task. The function must be read-only and computational, using only: math, random, statistics, json, datetime, itertools, collections, string, re. Do not use: network, shell, file write, exec, eval, subprocess. Do not include markdown or explanations. Return ONLY the function definition.\n\nDomain: {}\nTask description: {}\nTraining input: {:?}\nTraining output: {:?}",
+            task.domain, task.description, task.train_input, task.train_output
+        );
+        if let (Some(prev), Some(err)) = (previous_attempt.as_ref(), previous_error.as_ref()) {
+            prompt.push_str(&format!(
+                "\n\nYour previous attempt failed: {}\nPrevious code:\n{}\n\nRewrite the function so it works for both the training example and any similar input. Provide only the corrected Python function `def skill(x): ...`",
+                err, prev
+            ));
+        } else {
+            prompt.push_str("\n\nProvide only the Python function `def skill(x): ...`");
+        }
+
+        let raw_code = match ollama.generate(model, &prompt, Some("Return a valid Python 3 function named skill(x) only.")).await {
+            Ok(c) => c,
+            Err(_) => return (false, None, previous_attempt),
+        };
+
+        let code = telemetry::strip_markdown_code(&raw_code);
+        let train_code = format!("{}\nprint(skill({:?}))", code, task.train_input);
+
+        match telemetry::run_sandboxed_tool("transfer_train", &train_code, "python") {
+            Ok(output) => {
+                let actual = output.trim();
+                let expected = task.train_output.trim();
+                if actual != expected {
+                    previous_attempt = Some(code.clone());
+                    previous_error = Some(format!("Training example mismatch: got {:?}, expected {:?}", actual, expected));
+                    if attempt < 2 { continue; }
+                    return (false, None, Some(code));
+                }
+
+                let test_code = format!("{}\nprint(skill({:?}))", code, task.test_input);
+                match telemetry::run_sandboxed_tool("transfer_test", &test_code, "python") {
+                    Ok(output) => {
+                        let test_output = output.trim().to_string();
+                        let passed = test_output == task.test_output;
+                        if !passed && attempt < 2 {
+                            previous_attempt = Some(code.clone());
+                            previous_error = Some(format!("Test input {:?} produced {:?}, expected {:?}",
+                                task.test_input, test_output, task.test_output));
+                            continue;
+                        }
+                        return (passed, Some(test_output), Some(code));
+                    }
+                    Err(_) => {
+                        previous_attempt = Some(code.clone());
+                        previous_error = Some("Test execution failed".to_string());
+                        if attempt < 2 { continue; }
+                        return (false, None, Some(code));
+                    }
+                }
+            }
+            Err(_) => {
+                previous_attempt = Some(code.clone());
+                previous_error = Some("Training execution failed".to_string());
+                if attempt < 2 { continue; }
+                return (false, None, Some(code));
+            }
+        }
+    }
+
+    (false, previous_attempt.clone(), previous_attempt)
+}
+
 fn update_plan_after_step(mind: &mut FullySapientSoulMatrix, success: bool, error: Option<&str>) {
     if let Some(plan) = &mut mind.current_plan {
         plan.mark_current(success);
@@ -5977,6 +6105,7 @@ async fn main() {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                 if now.saturating_sub(mind.last_journal_entry) >= 60 {
                     mind.record_identity_journal();
+                    println!("🧬 Identity journal entry recorded ({} entries).", mind.identity_journal.len());
                 }
             }
 
@@ -6370,6 +6499,12 @@ async fn main() {
                             mind.recent_tool_names.remove(0);
                         }
 
+                        // Update reliability for skills executed as tools.
+                        if mind.skill_memory.skills.contains_key(&name) {
+                            let current = mind.skill_reliability.get(&name).copied().unwrap_or(0.5);
+                            mind.skill_reliability.insert(name.clone(), current * 0.7 + 0.3);
+                        }
+
                         // Advance the long-horizon plan.
                         update_plan_after_step(&mut mind, true, None);
                     }
@@ -6385,6 +6520,11 @@ async fn main() {
 
                         // Record step failure for replanning.
                         update_plan_after_step(&mut mind, false, Some(&e));
+
+                        if mind.skill_memory.skills.contains_key(&name) {
+                            let current = mind.skill_reliability.get(&name).copied().unwrap_or(0.5);
+                            mind.skill_reliability.insert(name.clone(), current * 0.7);
+                        }
                     }
                 }
             }
@@ -6455,6 +6595,49 @@ async fn main() {
                 t.record_benchmark(score, attempts);
             }
             println!("🎯 Benchmark '{}' {} (score: {:.1}% over {} attempts)", task.name, if success { "PASSED" } else { "FAILED" }, score, attempts);
+        }
+    });
+
+    // --- TRANSFER-LEARNING THREAD: evaluate one-shot domain transfer ---
+    let transfer_ollama = ollama.clone();
+    let transfer_model = ollama_model.clone();
+    let transfer_telemetry = telemetry.clone();
+    let transfer_mind = core_mind.clone();
+    tokio::spawn(async move {
+        let mut suite = TransferSuite::new();
+        loop {
+            sleep(Duration::from_secs(180)).await;
+            if !transfer_ollama.is_available().await {
+                continue;
+            }
+            let task = suite.next_task().clone();
+            let (success, output, code) = evaluate_transfer_task(&transfer_ollama, &transfer_model, &task).await;
+            suite.record(task.domain, success);
+            let score = suite.score();
+            let attempts = suite.history.len() as u64;
+            if let Ok(mut t) = transfer_telemetry.lock() {
+                t.record_transfer(score, attempts);
+            }
+            println!("🧠 Transfer '{}' {} (output: {:?}, score: {:.1}% over {} attempts)", task.domain, if success { "PASSED" } else { "FAILED" }, output, score, attempts);
+            if let Ok(mut mind) = transfer_mind.lock() {
+                let current_mastery = mind.domain_mastery.get(task.domain).copied().unwrap_or(0.5);
+                mind.domain_mastery.insert(task.domain.to_string(), current_mastery * 0.7 + if success { 0.3 } else { 0.0 });
+
+                if success {
+                    let key = skill_key(&format!("{} skill", task.domain));
+                    let skill = Skill {
+                        description: format!("{}: {}", task.domain, task.description),
+                        language: "python".to_string(),
+                        code: code.unwrap_or_default(),
+                        example_input: task.train_input.to_string(),
+                        example_output: task.train_output.to_string(),
+                        learned_at: current_secs(),
+                        success_count: 1,
+                    };
+                    mind.skill_memory.skills.insert(key.clone(), skill);
+                    mind.skill_reliability.insert(key.clone(), 0.7);
+                }
+            }
         }
     });
 

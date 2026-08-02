@@ -111,3 +111,99 @@ impl BenchmarkSuite {
         1000.0
     }
 }
+
+/// A transfer-learning task: learn a skill from one training example and
+/// generalize to a held-out test example in a new domain.
+#[derive(Clone)]
+pub struct TransferTask {
+    pub domain: &'static str,
+    pub description: &'static str,
+    pub train_input: &'static str,
+    pub train_output: &'static str,
+    pub test_input: &'static str,
+    pub test_output: &'static str,
+}
+
+/// Autonomous domain-transfer benchmark suite.
+pub struct TransferSuite {
+    pub tasks: Vec<TransferTask>,
+    pub history: Vec<(String, bool)>,
+    pub index: usize,
+}
+
+impl TransferSuite {
+    pub fn new() -> Self {
+        Self {
+            tasks: vec![
+                TransferTask {
+                    domain: "vowel counting",
+                    description: "Count the number of vowels in a lowercase English string.",
+                    train_input: "hello",
+                    train_output: "2",
+                    test_input: "firefly agi",
+                    test_output: "4",
+                },
+                TransferTask {
+                    domain: "caesar cipher shift 3",
+                    description: "Shift each letter forward by 3 in the alphabet (wrap around from z to a). Keep non-letters unchanged.",
+                    train_input: "abc",
+                    train_output: "def",
+                    test_input: "xyz",
+                    test_output: "abc",
+                },
+                TransferTask {
+                    domain: "sum of digits",
+                    description: "Sum all decimal digits in the input string, ignoring non-digit characters.",
+                    train_input: "a1b2c3",
+                    train_output: "6",
+                    test_input: "fire5fly8agi2",
+                    test_output: "15",
+                },
+                TransferTask {
+                    domain: "count words",
+                    description: "Count the number of whitespace-separated words in the input string.",
+                    train_input: "hello world",
+                    train_output: "2",
+                    test_input: "firefly agi research runtime",
+                    test_output: "4",
+                },
+                TransferTask {
+                    domain: "title case",
+                    description: "Convert the input string to title case: first letter of each word uppercase, the rest lowercase.",
+                    train_input: "hello world",
+                    train_output: "Hello World",
+                    test_input: "firefly agi research",
+                    test_output: "Firefly Agi Research",
+                },
+            ],
+            history: Vec::new(),
+            index: 0,
+        }
+    }
+
+    pub fn next_task(&mut self) -> &TransferTask {
+        let task = &self.tasks[self.index % self.tasks.len()];
+        self.index += 1;
+        task
+    }
+
+    pub fn record(&mut self, name: &str, success: bool) {
+        self.history.push((name.to_string(), success));
+        if self.history.len() > 1000 {
+            self.history.remove(0);
+        }
+    }
+
+    pub fn score(&self) -> f64 {
+        if self.history.is_empty() {
+            0.0
+        } else {
+            let successes = self.history.iter().filter(|(_, s)| *s).count();
+            (successes as f64 / self.history.len() as f64) * 100.0
+        }
+    }
+
+    pub fn history_summary(&self, n: usize) -> Vec<(String, bool)> {
+        self.history.iter().rev().take(n).cloned().collect()
+    }
+}

@@ -40,6 +40,8 @@ pub struct TelemetryState {
     pub tool_success_rate: f64,
     pub benchmark_score: f64,
     pub benchmark_attempts: u64,
+    pub transfer_score: f64,
+    pub transfer_attempts: u64,
     pub critic_score: f64,
 }
 
@@ -97,6 +99,11 @@ impl TelemetryState {
     pub fn record_benchmark(&mut self, score: f64, attempts: u64) {
         self.benchmark_score = score;
         self.benchmark_attempts = attempts;
+    }
+
+    pub fn record_transfer(&mut self, score: f64, attempts: u64) {
+        self.transfer_score = score;
+        self.transfer_attempts = attempts;
     }
 
     pub fn record_critic(&mut self, score: f64) {
@@ -456,13 +463,13 @@ struct SkillRunResponse {
     error: Option<String>,
 }
 
-fn skill_key(description: &str) -> String {
+pub fn skill_key(description: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(description.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-fn strip_markdown_code(raw: &str) -> String {
+pub fn strip_markdown_code(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
     let mut start = 0;
     let mut end = lines.len();
@@ -581,6 +588,8 @@ async fn run_skill_handler(
                         if let Some(s) = mind.skill_memory.skills.get_mut(&payload.skill_key) {
                             s.success_count += 1;
                         }
+                        let current = mind.skill_reliability.get(&payload.skill_key).copied().unwrap_or(0.5);
+                        mind.skill_reliability.insert(payload.skill_key.clone(), current * 0.7 + 0.3);
                     }
                     (
                         StatusCode::OK,
@@ -591,14 +600,20 @@ async fn run_skill_handler(
                         }),
                     )
                 }
-                Err(e) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(SkillRunResponse {
-                        status: "error".to_string(),
-                        output: None,
-                        error: Some(e),
-                    }),
-                ),
+                Err(e) => {
+                    if let Ok(mut mind) = state.core_mind.lock() {
+                        let current = mind.skill_reliability.get(&payload.skill_key).copied().unwrap_or(0.5);
+                        mind.skill_reliability.insert(payload.skill_key.clone(), current * 0.7);
+                    }
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(SkillRunResponse {
+                            status: "error".to_string(),
+                            output: None,
+                            error: Some(e),
+                        }),
+                    )
+                }
             }
         }
         None => (
