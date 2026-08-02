@@ -1,34 +1,37 @@
 # Firefly AGI Core
 
-**Private, early-access research codebase.**
+**Sovereign, local-first AGI research runtime.**
 
-Firefly is a local-first, self-training AGI research runtime built by Adam Clark. It combines a small native Transformer encoder with a local LLM oracle, an associative memory graph, multi-agent UDP exchange, and a telemetry/metrics dashboard. The system runs entirely on the host machine (no cloud required) and is designed for sovereign, private experimentation.
+Firefly is a self-contained, self-training cognitive OS written in Rust. It runs a 6,835-line async runtime with a native Transformer, a local LLM oracle, an associative memory graph, a Sled-backed strategy library, and a live telemetry server — all on your own hardware, with no cloud required.
 
-**THIS IS PRIVATE. DO NOT SHARE OR DISTRIBUTE.**
+This is private, early-access research code. **Do not share or distribute.**
 
 Contact: savagetism@icloud.com
 
-## What it is
+---
 
-A Rust binary (`sapient_soul`) that continuously:
+## What it does
 
-- Samples a training curriculum or external input.
-- Produces a 2048-D grounded embedding from text and real system sensors (CPU, RAM, battery, photons/audio proxies).
-- Runs a 256-dim, 4-block, 8-head Transformer encoder.
-- Trains three heads:
-  - `conscience_head`: 100-class cross-entropy classifier over a fixed token vocabulary.
-  - `goal_head`: 100-class goal/intention generator trained on active pursuits.
-  - `language_head`: 2048-D next-embedding predictor.
-- Trains a small neural world model from brain state → next input.
-- Generates and executes sandboxed Python tools through model-based planning, with generated code sanitized for common mistakes like `math.mean`.
-- Stores experiences in an associative memory graph with offline structural cosine clustering.
-- Persists full state (memory graph, tensor weights, file-defense, network stack) to disk on a background thread so the 6-second Transformer clock never stalls on I/O.
-- Broadcasts compact, signed engrams to other `sapient_soul` peers on localhost ports 5001–5010.
-- Serves telemetry, metrics, and a dashboard on `http://127.0.0.1:8080`.
+`sapient_soul` is a continuously running agent that:
+
+- **Senses the host**: CPU, RAM, battery, photons/audio/mass proxies.
+- **Encodes experience**: BPE tokenization + 2048-D grounded embeddings fused with real sensor anchors.
+- **Runs a native Transformer**: 256-dim, 4-block, 8-head Candle encoder with `conscience`, `goal`, and `language` heads, trained with AdamW.
+- **Thinks in a graph**: associative memory, causal world model, emotional homeostasis, and long-horizon planning.
+- **Learns skills from one example**: `/skills/learn` generates, validates, and stores sandboxed Python tools.
+- **Plans and replans**: decomposes active pursuits into multi-step plans, recalls skills and Sled strategies, and regenerates when steps fail.
+- **Transfers across domains**: 12-task autonomous curriculum evaluates one-shot generalization.
+- **Remembers who it is**: durable identity journal, persisted across restarts, steering tool selection and emotional state.
+- **Improves its own policy**: caches successful tool blueprints in Sled, tracks reliability, and prunes weak strategies automatically.
+- **Operates in a wild sandbox**: watches `wild_workspace/`, ingests new files, and synthesizes read-only Python cleaners without touching the network.
+- **Talks to itself on localhost**: signed UDP engrams to sibling agents on ports 5001–5010.
+- **Exposes everything on `http://127.0.0.1:8080`**.
+
+---
 
 ## Quick start
 
-Requires Rust, an Ollama-compatible local LLM on `127.0.0.1:11434` (optional but recommended), and a curriculum directory with `.txt` files.
+Requires Rust, an Ollama-compatible LLM at `127.0.0.1:11434`, and a `curriculum/` directory with `.txt` files.
 
 ```bash
 git clone <private repo>
@@ -37,55 +40,49 @@ cargo build --release
 ./target/release/sapient_soul
 ```
 
-The binary will start training immediately and open an HTTP server.
+The system starts training immediately, opens the telemetry server, and watches `wild_workspace/`.
+
+---
 
 ## HTTP endpoints
 
 | Endpoint | Description |
 |----------|-------------|
-| `/telemetry` | Live telemetry and sensor snapshot as JSON, including `state_save_duration_ms` for I/O monitoring. |
-| `/metrics` | Recent training metrics and summary as JSON. |
-| `/dashboard` | HTML dashboard with SVG sparklines and a recent-cycles table. |
-| `/tools/run` | Run a sandboxed Python or shell tool. |
+| `/telemetry` | Live telemetry, sensors, and state-save timing. |
+| `/metrics` | Training metrics and summary JSON. |
+| `/dashboard` | HTML dashboard with SVG sparklines. |
+| `/tools/run` | Run a sandboxed Python tool. |
+| `/skills/learn` | Learn a Python skill from one example. |
+| `/skills/run` | Execute a learned skill. |
+| `/pursuits/add` | Inject or merge a new active pursuit. |
+| `/transfer/evaluate` | Evaluate one-shot domain transfer. |
+| `/identity` | Return the persisted narrative identity and journal. |
 
-## Multi-agent localhost protocol
-
-Peers discover each other on UDP ports 5001–5010. Each engram is sent as a `CompactEngramPacket` (JSON) carrying the 100-D sender brain state but not the 2048-D embedding, wrapped in a `SignedUdpPacket` with HMAC-SHA256. The shared key is read from `MULTI_AGENT_SECRET` or derived from the local hostname.
-
-## State persistence & I/O
-
-The full agent state is serialized every tick to:
-
-- `sapient_agi_soul_5001.json` — memory graph, metabolics, emotions, pursuits, etc.
-- `sapient_agi_soul_5001.safetensors` — Candle Transformer weights.
-- `sapient_agi_soul_5001.weights` — learned weight persistence subnode.
-- `sapient_agi_soul_5001.defense` — file-defense state.
-- `sapient_agi_soul_5001.network` — multi-agent network state.
-
-Serialization and disk writes run in a `tokio::task::spawn_blocking` background thread, so the 6-second cognitive clock does not wait on the SSD. The exact save duration is exposed via `/telemetry` as `state_save_duration_ms`.
+---
 
 ## Architecture at a glance
 
-- `src/tensor_brain.rs` — Transformer, heads, training steps, AdamW optimizer.
-- `src/conscience_oracle.rs` — LLM oracle + semantic cosine fallback for labels.
+- `src/tensor_brain.rs` — Candle Transformer, BPE tokenizer, three heads, AdamW training.
+- `src/conscience_oracle.rs` — LLM oracle + semantic cosine fallback.
+- `src/strategy_library.rs` — Sled-backed durable cache for proven tool blueprints.
+- `src/wild_workspace.rs` — Async directory watcher and payload processor.
+- `src/benchmark.rs` — Transfer and puzzle benchmark suites.
+- `src/telemetry.rs` — HTTP server, sandboxed tool runner, skill learner, metrics.
+- `src/main.rs` — Cognitive loop, planning, identity, memory, multi-agent wiring.
 - `src/protocol.rs` — Signed UDP engram protocol.
 - `src/metrics.rs` — Metrics logger and HTML dashboard.
-- `src/telemetry.rs` — HTTP telemetry server and sandboxed tool runner.
-- `src/ollama_client.rs` — Ollama client and constrained generation.
-- `src/production_blueprint.rs` — Homeostatic learning-rate controller.
-- `src/benchmark.rs` — Evaluation harness and task runner.
-- `src/main.rs` — Main event loop, memory, agents, model-based planning, multi-agent wiring.
 
-## Training status (current run)
+---
 
-- Conscience cross-entropy: frequently 0.5–5, with occasional spikes on novel inputs.
-- Language head loss: down to ~0.17 and still falling.
-- Goal head loss: down to ~0.5 after initial drop from ~7.
-- Neural world-model loss: ~0.01.
-- UDP signed engrams broadcast successfully to 10 peer ports per tick.
-- State save offloaded to background thread; first save of ~400 MB state took ~9.4 s and is now reported as `state_save_duration_ms`.
-- Generated Python tools are sanitized so `math.mean`/`math.stdev`/etc. are rewritten to use the `statistics` module before execution.
+## Key design constraints
+
+- **No network access for tools**: sandboxed Python runs with a restricted module list.
+- **No source-code self-modification**: the agent improves its cached strategies and reliability model, not its own Rust source.
+- **Thread safety**: all Sled I/O and file watcher events are offloaded with `spawn_blocking`.
+- **State survives restarts**: memory graph, identity journal, learned skills, and Transformer weights are persisted on background threads.
+
+---
 
 ## License
 
-See `LICENSE.txt`. This is proprietary, confidential, and unlicensed for public distribution or commercial use without written permission from Adam Clark.
+See `LICENSE.txt`. Proprietary and confidential. No public distribution or commercial use without written permission from Adam Clark.
