@@ -4522,8 +4522,28 @@ struct HumanTemporalMetabolics {
     serotonin_level: f64, // Mood regulation neurotransmitter
 }
 
+/// A learned, reusable program skill.
+///
+/// Stored in the agent's long-term state and recalled by task similarity.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(crate) struct Skill {
+    description: String,
+    language: String,
+    code: String,
+    example_input: String,
+    example_output: String,
+    learned_at: u64,
+    success_count: u64,
+}
+
+/// In-memory + persistent skill library keyed by a compact task signature.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub(crate) struct SkillMemory {
+    skills: HashMap<String, Skill>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
-struct FullySapientSoulMatrix {
+pub(crate) struct FullySapientSoulMatrix {
     name: String,
     metabolics: HumanTemporalMetabolics,
     emotions: FluidEmotionalProfile,
@@ -4578,6 +4598,9 @@ struct FullySapientSoulMatrix {
     common_sense: CommonSenseKnowledgeBase,
     true_theory_of_mind: TheoryOfMindEngine,
     self_improvement: SelfImprovementEngine,
+    // 🧠 ONE-SHOT SKILL LEARNER
+    #[serde(default)]
+    skill_memory: SkillMemory,
 }
 
 impl FullySapientSoulMatrix {
@@ -4687,6 +4710,7 @@ impl FullySapientSoulMatrix {
             common_sense: CommonSenseKnowledgeBase::new(),
             true_theory_of_mind: TheoryOfMindEngine::new(),
             self_improvement: SelfImprovementEngine::new(),
+            skill_memory: SkillMemory::default(),
         }
     }
 
@@ -5151,7 +5175,7 @@ async fn main() {
     if let Ok(mut sensors_guard) = sensors.lock() {
         update_sensor_snapshot(&mut system, &battery_manager, &mut sensors_guard, default_curriculum_dirs().as_slice());
     }
-    let ollama = OllamaClient::new();
+    let ollama = Arc::new(OllamaClient::new());
     let ollama_model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3:latest".to_string());
     if ollama.is_available().await {
         println!("🧠 Ollama available at http://localhost:11434; default model: {}", ollama_model);
@@ -5161,8 +5185,10 @@ async fn main() {
     let telemetry_server_telemetry = telemetry.clone();
     let telemetry_server_sensors = sensors.clone();
     let telemetry_server_metrics = metrics_logger.clone();
+    let telemetry_server_mind = Arc::clone(&core_mind);
+    let telemetry_server_ollama = Arc::clone(&ollama);
     tokio::spawn(async move {
-        run_telemetry_server(telemetry_server_telemetry, telemetry_server_sensors, telemetry_server_metrics, 8080).await;
+        run_telemetry_server(telemetry_server_telemetry, telemetry_server_sensors, telemetry_server_metrics, telemetry_server_mind, telemetry_server_ollama, 8080).await;
     });
     {
         let reasoner = dual_process_reasoner.lock().unwrap();
@@ -5221,7 +5247,7 @@ async fn main() {
 
     // 🧠 LLM Conscience Oracle: a fast, local LLM that labels each experience
     // and distills its judgement into the trainable network.
-    let conscience_oracle = ConscienceOracle::new(ollama.clone(), &ollama_model, &conscience_tokens);
+    let conscience_oracle = ConscienceOracle::new((*ollama).clone(), &ollama_model, &conscience_tokens);
 
     // Shared multi-agent signing secret (overridable via MULTI_AGENT_SECRET env var).
     let multi_agent_secret = Arc::new(multi_agent_secret());

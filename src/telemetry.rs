@@ -10,6 +10,9 @@ use sysinfo::{System, Components, Disks, Networks};
 use chrono::Timelike;
 use tokio::net::TcpListener;
 use crate::metrics::MetricsLogger;
+use crate::{FullySapientSoulMatrix, Skill};
+use crate::ollama_client::OllamaClient;
+use md5::{Md5, Digest};
 
 pub fn current_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -307,6 +310,8 @@ struct AppState {
     telemetry: Arc<Mutex<TelemetryState>>,
     sensors: Arc<Mutex<SensorSnapshot>>,
     metrics: Arc<Mutex<MetricsLogger>>,
+    core_mind: Arc<Mutex<FullySapientSoulMatrix>>,
+    ollama: Arc<OllamaClient>,
 }
 
 async fn telemetry_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -422,6 +427,193 @@ async fn run_tool_handler(
     }
 }
 
+#[derive(Deserialize)]
+struct SkillLearnRequest {
+    description: String,
+    example_input: String,
+    example_output: String,
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SkillLearnResponse {
+    status: String,
+    skill_key: Option<String>,
+    code: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SkillRunRequest {
+    skill_key: String,
+    input: String,
+}
+
+#[derive(Serialize)]
+struct SkillRunResponse {
+    status: String,
+    output: Option<String>,
+    error: Option<String>,
+}
+
+fn skill_key(description: &str) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(description.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn strip_markdown_code(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("```") && trimmed.ends_with("```") {
+        let inner = &trimmed[3..trimmed.len() - 3];
+        let inner = inner.trim_start();
+        if inner.starts_with("python") {
+            inner[6..].trim().to_string()
+        } else {
+            inner.to_string()
+        }
+    } else {
+        raw.to_string()
+    }
+}
+
+async fn learn_skill_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<SkillLearnRequest>,
+) -> impl IntoResponse {
+    let model = payload.model.as_deref().unwrap_or("llama3:latest");
+
+    let prompt = format!(
+        "You are a Python 3 code generator. Given a task description and one example, write a self-contained function named `skill(x)` that solves the task. The function must be read-only and computational, using only: math, random, statistics, json, datetime, itertools, collections, string, re. Do not use: network, shell, file write, exec, eval, subprocess. Do not include markdown or explanations. Return ONLY the function definition.
+
+Task description: {}
+Example input: {:?}
+Example output: {:?}
+
+Provide only the Python function `def skill(x): ...`",
+        payload.description, payload.example_input, payload.example_output
+    );
+
+    let raw_code = match state.ollama.generate(model, &prompt, Some("Return a valid Python 3 function named skill(x) only.")).await {
+        Ok(c) => c,
+        Err(e) => return (
+            StatusCode::BAD_REQUEST,
+            Json(SkillLearnResponse {
+                status: "error".to_string(),
+                skill_key: None,
+                code: None,
+                error: Some(format!("LLM generation failed: {}", e)),
+            }),
+        ),
+    };
+
+    let code = strip_markdown_code(&raw_code);
+    let test_code = format!(
+        "{}\nprint(skill({:?}))",
+        code,
+        payload.example_input
+    );
+
+    match run_sandboxed_tool("skill_test", &test_code, "python") {
+        Ok(output) => {
+            let actual = output.trim();
+            let expected = payload.example_output.trim();
+            if actual == expected {
+                let key = skill_key(&payload.description);
+                let skill = Skill {
+                    description: payload.description,
+                    language: "python".to_string(),
+                    code: code.clone(),
+                    example_input: payload.example_input,
+                    example_output: payload.example_output,
+                    learned_at: current_secs(),
+                    success_count: 1,
+                };
+                if let Ok(mut mind) = state.core_mind.lock() {
+                    mind.skill_memory.skills.insert(key.clone(), skill);
+                }
+                (
+                    StatusCode::OK,
+                    Json(SkillLearnResponse {
+                        status: "ok".to_string(),
+                        skill_key: Some(key),
+                        code: Some(code),
+                        error: None,
+                    }),
+                )
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(SkillLearnResponse {
+                        status: "error".to_string(),
+                        skill_key: None,
+                        code: Some(code),
+                        error: Some(format!("Output mismatch: got {:?}, expected {:?}", actual, expected)),
+                    }),
+                )
+            }
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(SkillLearnResponse {
+                status: "error".to_string(),
+                skill_key: None,
+                code: Some(code),
+                error: Some(format!("Execution failed: {}", e)),
+            }),
+        ),
+    }
+}
+
+async fn run_skill_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<SkillRunRequest>,
+) -> impl IntoResponse {
+    let skill = match state.core_mind.lock() {
+        Ok(mind) => mind.skill_memory.skills.get(&payload.skill_key).cloned(),
+        Err(_) => None,
+    };
+
+    match skill {
+        Some(skill) => {
+            let code = format!("{}\nprint(skill({:?}))", skill.code, payload.input);
+            match run_sandboxed_tool(&payload.skill_key, &code, "python") {
+                Ok(output) => {
+                    if let Ok(mut mind) = state.core_mind.lock() {
+                        if let Some(s) = mind.skill_memory.skills.get_mut(&payload.skill_key) {
+                            s.success_count += 1;
+                        }
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(SkillRunResponse {
+                            status: "ok".to_string(),
+                            output: Some(output.trim().to_string()),
+                            error: None,
+                        }),
+                    )
+                }
+                Err(e) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(SkillRunResponse {
+                        status: "error".to_string(),
+                        output: None,
+                        error: Some(e),
+                    }),
+                ),
+            }
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(SkillRunResponse {
+                status: "error".to_string(),
+                output: None,
+                error: Some(format!("Skill {} not found", payload.skill_key)),
+            }),
+        ),
+    }
+}
+
 pub async fn start_telemetry_listener(port: u16) -> Result<TcpListener, Box<dyn std::error::Error>> {
     let fallback_base = port.saturating_add(1);
     for p in port..=port.saturating_add(15) {
@@ -447,14 +639,18 @@ pub async fn run_telemetry_server(
     telemetry: Arc<Mutex<TelemetryState>>,
     sensors: Arc<Mutex<SensorSnapshot>>,
     metrics: Arc<Mutex<MetricsLogger>>,
+    core_mind: Arc<Mutex<FullySapientSoulMatrix>>,
+    ollama: Arc<OllamaClient>,
     port: u16,
 ) {
-    let state = AppState { telemetry, sensors, metrics };
+    let state = AppState { telemetry, sensors, metrics, core_mind, ollama };
     let app = Router::new()
         .route("/telemetry", get(telemetry_handler))
         .route("/metrics", get(metrics_json_handler))
         .route("/dashboard", get(metrics_dashboard_handler))
         .route("/tools/run", post(run_tool_handler))
+        .route("/skills/learn", post(learn_skill_handler))
+        .route("/skills/run", post(run_skill_handler))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
