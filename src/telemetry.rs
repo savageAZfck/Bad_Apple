@@ -463,18 +463,16 @@ fn skill_key(description: &str) -> String {
 }
 
 fn strip_markdown_code(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.starts_with("```") && trimmed.ends_with("```") {
-        let inner = &trimmed[3..trimmed.len() - 3];
-        let inner = inner.trim_start();
-        if inner.starts_with("python") {
-            inner[6..].trim().to_string()
-        } else {
-            inner.to_string()
-        }
-    } else {
-        raw.to_string()
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut start = 0;
+    let mut end = lines.len();
+    while start < end && lines[start].trim().starts_with("```") {
+        start += 1;
     }
+    while end > start && lines[end - 1].trim().starts_with("```") {
+        end -= 1;
+    }
+    lines[start..end].join("\n").trim().to_string()
 }
 
 async fn learn_skill_handler(
@@ -651,6 +649,159 @@ async fn add_pursuit_handler(
     }
 }
 
+#[derive(Deserialize)]
+struct TransferEvaluateRequest {
+    domain: String,
+    description: String,
+    train_input: String,
+    train_output: String,
+    test_input: String,
+    expected_test_output: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TransferEvaluateResponse {
+    status: String,
+    output: Option<String>,
+    passed: Option<bool>,
+    code: Option<String>,
+    error: Option<String>,
+}
+
+async fn transfer_evaluate_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<TransferEvaluateRequest>,
+) -> impl IntoResponse {
+    let model = payload.model.as_deref().unwrap_or("llama3:latest");
+    let mut previous_attempt: Option<String> = None;
+    let mut previous_error: Option<String> = None;
+
+    for attempt in 0..3 {
+        let mut prompt = format!(
+            "You are a Python 3 code generator. The task is from a NEW domain the system has never trained on: {}. Given a description and one training example, write a self-contained function named `skill(x)` that solves the task. The function must be read-only and computational, using only: math, random, statistics, json, datetime, itertools, collections, string, re. Do not use: network, shell, file write, exec, eval, subprocess. Do not include markdown or explanations. Return ONLY the function definition.
+
+Domain: {}
+Task description: {}
+Training input: {:?}
+Training output: {:?}",
+            payload.domain, payload.domain, payload.description, payload.train_input, payload.train_output
+        );
+        if let (Some(prev), Some(err)) = (previous_attempt.as_ref(), previous_error.as_ref()) {
+            prompt.push_str(&format!(
+                "\n\nYour previous attempt failed: {}\nPrevious code:\n{}\n\nRewrite the function so it works for both the training example and any similar input. Provide only the corrected Python function `def skill(x): ...`",
+                err, prev
+            ));
+        } else {
+            prompt.push_str("\n\nProvide only the Python function `def skill(x): ...`");
+        }
+
+        let raw_code = match state.ollama.generate(model, &prompt, Some("Return a valid Python 3 function named skill(x) only.")).await {
+            Ok(c) => c,
+            Err(e) => return (
+                StatusCode::BAD_REQUEST,
+                Json(TransferEvaluateResponse {
+                    status: "error".to_string(),
+                    output: None,
+                    passed: None,
+                    code: None,
+                    error: Some(format!("LLM generation failed: {}", e)),
+                }),
+            ),
+        };
+
+        let code = strip_markdown_code(&raw_code);
+        let train_code = format!("{}\nprint(skill({:?}))", code, payload.train_input);
+
+        match run_sandboxed_tool("transfer_train", &train_code, "python") {
+            Ok(output) => {
+                let actual = output.trim();
+                let expected = payload.train_output.trim();
+                if actual != expected {
+                    previous_attempt = Some(code.clone());
+                    previous_error = Some(format!("Training example mismatch: got {:?}, expected {:?}", actual, expected));
+                    if attempt < 2 { continue; }
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(TransferEvaluateResponse {
+                            status: "error".to_string(),
+                            output: None,
+                            passed: Some(false),
+                            code: Some(code),
+                            error: previous_error,
+                        }),
+                    );
+                }
+
+                let test_code = format!("{}\nprint(skill({:?}))", code, payload.test_input);
+                match run_sandboxed_tool("transfer_test", &test_code, "python") {
+                    Ok(output) => {
+                        let test_output = output.trim().to_string();
+                        let passed = payload.expected_test_output.as_ref().map(|expected| test_output == expected.trim());
+                        if passed == Some(false) && attempt < 2 {
+                            previous_attempt = Some(code.clone());
+                            previous_error = Some(format!("Test input {:?} produced {:?}, expected {:?}",
+                                payload.test_input, test_output, payload.expected_test_output.as_ref().unwrap()));
+                            continue;
+                        }
+                        return (
+                            StatusCode::OK,
+                            Json(TransferEvaluateResponse {
+                                status: "ok".to_string(),
+                                output: Some(test_output),
+                                passed,
+                                code: Some(code),
+                                error: None,
+                            }),
+                        );
+                    }
+                    Err(e) => {
+                        previous_attempt = Some(code.clone());
+                        previous_error = Some(format!("Test execution failed: {}", e));
+                        if attempt < 2 { continue; }
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(TransferEvaluateResponse {
+                                status: "error".to_string(),
+                                output: None,
+                                passed: Some(false),
+                                code: Some(code),
+                                error: previous_error,
+                            }),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                previous_attempt = Some(code.clone());
+                previous_error = Some(format!("Training execution failed: {}", e));
+                if attempt < 2 { continue; }
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(TransferEvaluateResponse {
+                        status: "error".to_string(),
+                        output: None,
+                        passed: Some(false),
+                        code: Some(code),
+                        error: previous_error,
+                    }),
+                );
+            }
+        }
+    }
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(TransferEvaluateResponse {
+            status: "error".to_string(),
+            output: None,
+            passed: Some(false),
+            code: previous_attempt,
+            error: Some("Exhausted transfer attempts".to_string()),
+        }),
+    )
+}
+
 pub async fn start_telemetry_listener(port: u16) -> Result<TcpListener, Box<dyn std::error::Error>> {
     let fallback_base = port.saturating_add(1);
     for p in port..=port.saturating_add(15) {
@@ -689,6 +840,7 @@ pub async fn run_telemetry_server(
         .route("/skills/learn", post(learn_skill_handler))
         .route("/skills/run", post(run_skill_handler))
         .route("/pursuits/add", post(add_pursuit_handler))
+        .route("/transfer/evaluate", post(transfer_evaluate_handler))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
