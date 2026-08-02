@@ -4542,6 +4542,67 @@ pub(crate) struct SkillMemory {
     skills: HashMap<String, Skill>,
 }
 
+/// Status of a single plan step.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub(crate) enum AgentStepStatus {
+    Pending,
+    InProgress,
+    Succeeded,
+    Failed,
+}
+
+/// A concrete sub-goal produced by the planner.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(crate) struct AgentPlanStep {
+    description: String,
+    status: AgentStepStatus,
+}
+
+/// A multi-step plan with replanning metadata.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(crate) struct AgentPlan {
+    goal: String,
+    steps: Vec<AgentPlanStep>,
+    current_step: usize,
+    failed_attempts: u32,
+    last_failure: Option<String>,
+}
+
+impl AgentPlan {
+    fn new(goal: &str, steps: Vec<String>) -> Self {
+        Self {
+            goal: goal.to_string(),
+            steps: steps.into_iter().map(|s| AgentPlanStep { description: s, status: AgentStepStatus::Pending }).collect(),
+            current_step: 0,
+            failed_attempts: 0,
+            last_failure: None,
+        }
+    }
+
+    fn current_step_description(&self) -> Option<&str> {
+        self.steps.get(self.current_step).map(|s| s.description.as_str())
+    }
+
+    fn mark_current(&mut self, success: bool) {
+        if let Some(step) = self.steps.get_mut(self.current_step) {
+            step.status = if success { AgentStepStatus::Succeeded } else { AgentStepStatus::Failed };
+        }
+        if success {
+            self.current_step += 1;
+        } else {
+            self.failed_attempts += 1;
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.current_step >= self.steps.len()
+    }
+
+    fn needs_replan(&self) -> bool {
+        self.failed_attempts >= 2 || self.is_complete()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct FullySapientSoulMatrix {
     name: String,
@@ -4601,6 +4662,9 @@ pub(crate) struct FullySapientSoulMatrix {
     // 🧠 ONE-SHOT SKILL LEARNER
     #[serde(default)]
     skill_memory: SkillMemory,
+    // 🎯 LONG-HORIZON PLANNING
+    #[serde(default)]
+    current_plan: Option<AgentPlan>,
 }
 
 impl FullySapientSoulMatrix {
@@ -4711,6 +4775,7 @@ impl FullySapientSoulMatrix {
             true_theory_of_mind: TheoryOfMindEngine::new(),
             self_improvement: SelfImprovementEngine::new(),
             skill_memory: SkillMemory::default(),
+            current_plan: None,
         }
     }
 
@@ -5082,6 +5147,91 @@ impl FullySapientSoulMatrix {
         };
         self.decision_context.update_from_outcome(outcome_record);
         self.meta_cognition.update_performance(outcome);
+    }
+}
+
+// =========================================================================
+// 🎯 LONG-HORIZON PLANNING + SKILL RECALL
+// =========================================================================
+
+/// Generate a `Plan` from a high-level goal using the local LLM.
+/// Optionally includes a note about a previous failure to avoid the same mistake.
+async fn generate_plan(ollama: &OllamaClient, model: &str, goal: &str, previous_failure: Option<&str>) -> Option<AgentPlan> {
+    let system = "You are a planner. Return ONLY a numbered list of at most 4 short, concrete sub-steps. No explanations, no markdown, no JSON.";
+    let failure_note = previous_failure.map_or(String::new(), |f| format!("\nA previous plan failed at a step because: {}. Generate a simpler, different plan.", f));
+    let prompt = format!(
+        "Break the following goal into at most 4 concrete sub-steps.\n\nGoal: {}{}\n\nReturn a numbered list, one step per line. Example:\n1. load data\n2. filter rows\n3. compute summary",
+        goal, failure_note
+    );
+    let raw = match ollama.generate(model, &prompt, Some(system)).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("⚠️ Plan generation LLM call failed: {}", e);
+            return None;
+        }
+    };
+
+    let steps: Vec<String> = raw
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            // Strip leading markdown list markers or numbers.
+            let after_marker = if line.starts_with("```") || line.starts_with("---") {
+                return None;
+            } else if let Some(pos) = line.find(". ") {
+                &line[pos + 2..]
+            } else if let Some(pos) = line.find(' ') {
+                let first = &line[..pos];
+                if first.parse::<u32>().is_ok() || first.starts_with('-') {
+                    &line[pos + 1..]
+                } else {
+                    line
+                }
+            } else {
+                line
+            };
+            let cleaned = after_marker.trim_matches(|c: char| c == '"' || c == '\'' || c == '*' || c == '-').trim();
+            if cleaned.is_empty() { None } else { Some(cleaned.to_string()) }
+        })
+        .take(5)
+        .collect();
+
+    if steps.is_empty() {
+        eprintln!("⚠️ Plan generation produced no usable steps from:\n{}", raw);
+        return None;
+    }
+    Some(AgentPlan::new(goal, steps))
+}
+
+/// Find the best learned skill for the current planning step.
+fn best_matching_skill(mind: &FullySapientSoulMatrix, step: &str) -> Option<(String, Skill)> {
+    let step_emb = generate_2048_grounded_embedding(step, &mind.spatial_sensory_register);
+    let mut best: Option<(String, Skill, f64)> = None;
+    for (key, skill) in &mind.skill_memory.skills {
+        let skill_emb = generate_2048_grounded_embedding(&skill.description, &mind.spatial_sensory_register);
+        let sim = calculate_cosine_similarity(&step_emb, &skill_emb);
+        if sim > 0.85 && best.as_ref().map_or(true, |(_, _, b)| sim > *b) {
+            best = Some((key.clone(), skill.clone(), sim));
+        }
+    }
+    best.map(|(k, s, _)| (k, s))
+}
+
+/// Update plan progress after a step succeeds or fails.
+fn update_plan_after_step(mind: &mut FullySapientSoulMatrix, success: bool, error: Option<&str>) {
+    if let Some(plan) = &mut mind.current_plan {
+        plan.mark_current(success);
+        if !success {
+            plan.last_failure = error.map(|e| e.to_string());
+            println!("⚠️ Step failed: {:?}", plan.last_failure);
+        }
+        if plan.is_complete() {
+            println!("✅ Plan complete for '{}'", plan.goal);
+            mind.current_plan = None;
+        } else if plan.needs_replan() {
+            println!("🔄 Plan failed; will replan on the next tick.");
+        }
     }
 }
 
@@ -5939,22 +6089,50 @@ async fn main() {
                 continue;
             }
 
-            let (goal, emotional_state, memory_count, sensor_summary) = {
-                let mind = match agent_mind.lock() {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                let goal = mind.active_pursuits.front().cloned().unwrap_or_else(|| "Learn and improve".to_string());
-                let emotional_state = mind.emotions.active_primary_blend.clone();
-                let memory_count = mind.associative_memory_network.len();
-                let sensor_summary = if let Ok(s) = agent_sensors.lock() {
-                    format!("{:.1}% CPU, {:.1}% RAM, {:.0}% battery, photons={:.2}, audio={:.2}, mass={:.2}",
-                        s.cpu_usage_percent, s.memory_pressure_percent, s.battery_percent,
-                        s.photons, s.audio, s.mass)
-                } else {
-                    "sensors unavailable".to_string()
-                };
-                (goal, emotional_state, memory_count, sensor_summary)
+            let high_level_goal = match agent_mind.lock() {
+                Ok(mind) => mind.active_pursuits.front().cloned().unwrap_or_else(|| "Learn and improve".to_string()),
+                Err(_) => continue,
+            };
+
+            // 🎯 Long-horizon planning: ensure the active pursuit is decomposed into steps.
+            // We hold the lock only briefly and never across an await.
+            let (needs_replan, last_failure) = match agent_mind.lock() {
+                Ok(mind) => {
+                    let needs = match &mind.current_plan {
+                        None => true,
+                        Some(p) => p.needs_replan() || p.goal != high_level_goal,
+                    };
+                    let failure = mind.current_plan.as_ref().and_then(|p| p.last_failure.clone());
+                    (needs, failure)
+                }
+                Err(_) => continue,
+            };
+
+            if needs_replan {
+                if let Some(plan) = generate_plan(&agent_ollama, &agent_model, &high_level_goal, last_failure.as_deref()).await {
+                    println!("🎯 Generated plan for '{}': {:?}", plan.goal, plan.steps.iter().map(|s| &s.description).collect::<Vec<_>>());
+                    if let Ok(mut mind) = agent_mind.lock() {
+                        mind.current_plan = Some(plan);
+                    }
+                }
+            }
+
+            let (goal, emotional_state, memory_count, sensor_summary) = match agent_mind.lock() {
+                Ok(mind) => {
+                    let step = mind.current_plan.as_ref().and_then(|p| p.current_step_description()).map(|s| s.to_string());
+                    let goal = step.unwrap_or_else(|| high_level_goal.clone());
+                    let emotional_state = mind.emotions.active_primary_blend.clone();
+                    let memory_count = mind.associative_memory_network.len();
+                    let sensor_summary = if let Ok(s) = agent_sensors.lock() {
+                        format!("{:.1}% CPU, {:.1}% RAM, {:.0}% battery, photons={:.2}, audio={:.2}, mass={:.2}",
+                            s.cpu_usage_percent, s.memory_pressure_percent, s.battery_percent,
+                            s.photons, s.audio, s.mass)
+                    } else {
+                        "sensors unavailable".to_string()
+                    };
+                    (goal, emotional_state, memory_count, sensor_summary)
+                }
+                Err(_) => continue,
             };
 
             // Snapshot sensors before the tool runs so the world model can learn action effects.
@@ -5973,6 +6151,20 @@ async fn main() {
             before_sensors.insert("execution_time_ms".into(), 0.0);
             before_sensors.insert("output_length".into(), 0.0);
 
+            // 🔮 Long-horizon planning + skill recall: if a learned skill matches the
+            // current plan step, use it directly; otherwise generate a fresh tool.
+            let mut best_candidate: Option<(String, String, f64, HashMap<String, f64>)> = None;
+            if let Ok(mind) = agent_mind.lock() {
+                if let Some((skill_key, skill)) = best_matching_skill(&mind, &goal) {
+                    let runner = format!("{}\nprint(skill({:?}))", skill.code, high_level_goal);
+                    let predicted = mind.world_model.predict_action_effects(&skill_key, &before_sensors);
+                    let recent = mind.recent_tool_names.clone();
+                    let utility = compute_predicted_utility(&goal, &skill_key, &recent, &predicted);
+                    println!("🔧 Recalled skill '{}' for plan step '{}' (utility {:.3})", skill_key, goal, utility);
+                    best_candidate = Some((skill_key, runner, utility, predicted));
+                }
+            }
+
             // 🔮 Model-based planning: generate up to 3 candidate tools,
             // predict each one's effects, and execute the highest-utility one.
             let prompt_template = format!(
@@ -5980,7 +6172,6 @@ async fn main() {
                 goal, emotional_state, memory_count, sensor_summary
             );
 
-            let mut best_candidate: Option<(String, String, f64, HashMap<String, f64>)> = None;
             for attempt in 0..3 {
                 let prompt = format!("{}\n(Attempt {})", prompt_template, attempt + 1);
                 let tool_json: serde_json::Value = match agent_ollama.generate_structured(&agent_model, &prompt, None).await {
@@ -6119,6 +6310,9 @@ async fn main() {
                         if mind.recent_tool_names.len() > 5 {
                             mind.recent_tool_names.remove(0);
                         }
+
+                        // Advance the long-horizon plan.
+                        update_plan_after_step(&mut mind, true, None);
                     }
                 }
                 Err(e) => {
@@ -6129,6 +6323,9 @@ async fn main() {
                     if let Ok(mut mind) = agent_mind.lock() {
                         mind.self_improvement.evaluate_performance(&format!("agent_tool_{}", name), 0.0);
                         mind.self_improvement.apply_modification(format!("agent_tool_{}", name), "failed".to_string());
+
+                        // Record step failure for replanning.
+                        update_plan_after_step(&mut mind, false, Some(&e));
                     }
                 }
             }

@@ -614,6 +614,43 @@ async fn run_skill_handler(
     }
 }
 
+#[derive(Deserialize)]
+struct AddPursuitRequest {
+    pursuit: String,
+}
+
+#[derive(Serialize)]
+struct AddPursuitResponse {
+    status: String,
+    active_pursuits: Vec<String>,
+}
+
+async fn add_pursuit_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<AddPursuitRequest>,
+) -> impl IntoResponse {
+    match state.core_mind.lock() {
+        Ok(mut mind) => {
+            mind.active_pursuits.push_front(payload.pursuit.clone());
+            let pursuits: Vec<String> = mind.active_pursuits.iter().cloned().collect();
+            (
+                StatusCode::OK,
+                Json(AddPursuitResponse {
+                    status: "ok".to_string(),
+                    active_pursuits: pursuits,
+                }),
+            )
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AddPursuitResponse {
+                status: "error".to_string(),
+                active_pursuits: Vec::new(),
+            }),
+        ),
+    }
+}
+
 pub async fn start_telemetry_listener(port: u16) -> Result<TcpListener, Box<dyn std::error::Error>> {
     let fallback_base = port.saturating_add(1);
     for p in port..=port.saturating_add(15) {
@@ -651,6 +688,7 @@ pub async fn run_telemetry_server(
         .route("/tools/run", post(run_tool_handler))
         .route("/skills/learn", post(learn_skill_handler))
         .route("/skills/run", post(run_skill_handler))
+        .route("/pursuits/add", post(add_pursuit_handler))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
