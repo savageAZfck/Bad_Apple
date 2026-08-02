@@ -18,6 +18,7 @@ use tokio::{
 mod benchmark;
 mod conscience_oracle;
 mod data_feed;
+mod hyperdimensional_core;
 mod metrics;
 mod ollama_client;
 mod production_blueprint;
@@ -33,6 +34,7 @@ use data_feed::{default_curriculum_dirs, DataCurriculum};
 use ollama_client::OllamaClient;
 use production_blueprint::{
     GlobalWorkspace, HomeostaticController, NeuroSymbolicEngine as ProductionNeuroSymbolicEngine,
+    ThermalState,
 };
 use protocol::{
     decode_payload, multi_agent_secret, sign_packet, verify_packet, CompactEngramPacket,
@@ -44,6 +46,7 @@ use telemetry::{
     TelemetryState,
 };
 use tensor_brain::CandleBrain;
+
 use wild_workspace::{run_wild_loop, start_watcher};
 
 // =========================================================================
@@ -6102,10 +6105,18 @@ async fn main() {
     let wild_path = PathBuf::from("wild_workspace");
     let wild_ollama = Arc::clone(&ollama);
     let wild_model = ollama_model.clone();
+    let wild_strategy_library = Arc::clone(&strategy_library);
     tokio::spawn(async move {
         match start_watcher(&wild_path) {
             Ok(rx) => {
-                run_wild_loop(rx, wild_ollama, wild_model, wild_path).await;
+                run_wild_loop(
+                    rx,
+                    wild_ollama,
+                    wild_model,
+                    wild_path,
+                    wild_strategy_library,
+                )
+                .await;
             }
             Err(e) => eprintln!("🌿 [WILD] Could not start watcher: {}", e),
         }
@@ -6394,6 +6405,17 @@ async fn main() {
                         sensors_guard.mass,
                         sensors_guard.gravity,
                     ];
+
+                    // 🌡 Thermodynamic metacognitive governor: hardware stress becomes loss.
+                    let thermal = ThermalState {
+                        cpu_usage: (sensors_guard.cpu_usage_percent / 100.0) as f32,
+                        memory_pressure: (sensors_guard.memory_pressure_percent / 100.0) as f32,
+                        battery_health: (sensors_guard.battery_percent / 100.0) as f32,
+                        cpu_temp: (sensors_guard.cpu_temperature_celsius / 100.0) as f32,
+                    };
+                    if let Ok(mut controller) = hc.lock() {
+                        controller.update_thermodynamics(&thermal);
+                    }
                 }
                 if let Ok(mut telemetry_guard) = clock_telemetry.lock() {
                     telemetry_guard.cycle_count += 1;

@@ -3,6 +3,9 @@
 //! The suite generates math / logic / code puzzles, lets the agent produce a
 //! Python solution, and records the success rate over time.
 
+use crate::strategy_library::{DialecticalEngine, Strategy, StrategyLibrary};
+use tokio::task::spawn_blocking;
+
 #[derive(Clone)]
 pub struct BenchmarkTask {
     pub name: &'static str,
@@ -177,5 +180,200 @@ impl TransferSuite {
 
     pub fn history_summary(&self, n: usize) -> Vec<(String, bool)> {
         self.history.iter().rev().take(n).cloned().collect()
+    }
+
+    /// Current domain-transfer mastery in [0, 1].
+    pub fn mastery(&self) -> f64 {
+        if self.history.is_empty() {
+            return 0.0;
+        }
+        let successes = self.history.iter().filter(|(_, s)| *s).count();
+        successes as f64 / self.history.len() as f64
+    }
+
+    /// If mastery for a task falls below `threshold`, run a dialectical
+    /// synthesis to produce a repaired internal strategy.
+    pub async fn dialectical_repair_if_needed(
+        &self,
+        library: &StrategyLibrary,
+        task: &TransferTask,
+        succeeded: bool,
+        error: &str,
+    ) -> Option<String> {
+        if succeeded || self.mastery() >= 0.85 {
+            return None;
+        }
+        let key = format!("transfer_{}", task.domain.replace(' ', "_"));
+        let engine = DialecticalEngine::new();
+        // Build a thesis from the task description and antithesis from the error.
+        let dummy = Strategy::new(
+            key.clone(),
+            task.description.to_string(),
+            "python".to_string(),
+            String::new(),
+        );
+        let thesis = engine.thesis(&dummy, task.test_output);
+        let antithesis = engine.antithesis(error);
+        let _contradiction = engine.contradiction_strength(&thesis, &antithesis);
+        let repaired = engine.synthesize(&dummy, error);
+        let new_key = format!("{}_synth_{}", key, engine.next_id());
+        let mut repaired = repaired;
+        repaired.key = new_key.clone();
+        repaired.problem = format!("{} [domain: {}]", repaired.problem, task.domain);
+        library.put(&repaired).await.ok()?;
+        Some(new_key)
+    }
+}
+
+// =========================================================================
+// Closed-Loop Rust Compilation Validation
+// =========================================================================
+
+/// Result of validating a synthesized Rust utility.
+#[derive(Clone, Debug)]
+pub struct SynthesisResult {
+    pub key: String,
+    pub source: String,
+    pub compiled: bool,
+    pub diagnostics: String,
+    pub competence: f64,
+}
+
+/// Runs `cargo check` on a synthesized Rust snippet inside an isolated temp
+/// Cargo workspace. Up to `max_retries` formatting/typo fixes are attempted
+/// by running `cargo fmt` before each check.
+pub struct RustValidator;
+
+impl RustValidator {
+    /// Check a Rust source string. Returns `SynthesisResult` with competence
+    /// 1.0 on success, 0.0 on failure. The heavy compilation is offloaded to
+    /// `spawn_blocking` to keep the Tokio runtime responsive.
+    pub async fn validate(key: &str, source: &str, max_retries: usize) -> SynthesisResult {
+        let key = key.to_string();
+        let source = source.to_string();
+        let result = spawn_blocking({
+            let key = key.clone();
+            let source = source.clone();
+            move || Self::validate_blocking(&key, &source, max_retries)
+        })
+        .await
+        .unwrap_or_else(|e| SynthesisResult {
+            key,
+            source,
+            compiled: false,
+            diagnostics: format!("spawn_blocking failed: {}", e),
+            competence: 0.0,
+        });
+        result
+    }
+
+    fn validate_blocking(key: &str, source: &str, max_retries: usize) -> SynthesisResult {
+        let base = std::env::temp_dir().join(format!("firefly_rust_val_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let Ok(()) = std::fs::create_dir_all(base.join("src")) else {
+            return SynthesisResult {
+                key: key.to_string(),
+                source: source.to_string(),
+                compiled: false,
+                diagnostics: "failed to create temp dir".to_string(),
+                competence: 0.0,
+            };
+        };
+
+        let manifest = r#"[package]
+name = "firefly_synthesized"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+"#;
+
+        let mut diagnostics = String::new();
+        let mut compiled = false;
+
+        for attempt in 0..=max_retries {
+            let current = if attempt == 0 {
+                source.to_string()
+            } else {
+                // Retry attempt: try to run rustfmt on the source first.
+                match Self::format_source(source) {
+                    Ok(fmt) => fmt,
+                    Err(e) => {
+                        diagnostics.push_str(&format!("fmt attempt {} failed: {}\n", attempt, e));
+                        continue;
+                    }
+                }
+            };
+
+            if let Err(e) = std::fs::write(base.join("Cargo.toml"), manifest) {
+                diagnostics.push_str(&format!("write Cargo.toml failed: {}\n", e));
+                continue;
+            }
+            if let Err(e) = std::fs::write(base.join("src/main.rs"), &current) {
+                diagnostics.push_str(&format!("write main.rs failed: {}\n", e));
+                continue;
+            }
+
+            let output = std::process::Command::new("cargo")
+                .arg("check")
+                .current_dir(&base)
+                .arg("--quiet")
+                .arg("--offline")
+                .output();
+
+            match output {
+                Ok(out) => {
+                    if out.status.success() {
+                        compiled = true;
+                        diagnostics = String::from_utf8_lossy(&out.stderr).to_string();
+                        break;
+                    } else {
+                        diagnostics = String::from_utf8_lossy(&out.stderr).to_string();
+                    }
+                }
+                Err(e) => {
+                    diagnostics.push_str(&format!("cargo check spawn failed: {}\n", e));
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+
+        let competence = if compiled { 1.0 } else { 0.0 };
+        SynthesisResult {
+            key: key.to_string(),
+            source: source.to_string(),
+            compiled,
+            diagnostics,
+            competence,
+        }
+    }
+
+    /// Best-effort format a Rust source snippet using `rustfmt`. Returns the
+    /// original source if rustfmt is unavailable.
+    fn format_source(source: &str) -> Result<String, String> {
+        let mut child = std::process::Command::new("rustfmt")
+            .arg("--emit=stdout")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin
+                .write_all(source.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).to_string())
+        }
     }
 }

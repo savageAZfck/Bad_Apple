@@ -117,18 +117,110 @@ impl NeuroSymbolicEngine {
 pub const TARGET_STABILITY: f32 = 2.5;
 pub const MAXIMUM_META_RATE: f32 = 0.001000;
 
+/// Snapshot of hardware stress used by the thermodynamic governor.
+/// All values are normalized to [0, 1] where higher means more stress.
+#[derive(Clone, Debug, Default)]
+pub struct ThermalState {
+    pub cpu_usage: f32,
+    pub memory_pressure: f32,
+    pub battery_health: f32,
+    pub cpu_temp: f32,
+}
+
+/// Thermodynamic metacognitive governor.
+///
+/// Treats physical hardware stress as a primary loss signal. When the machine
+/// is hot, memory-pressured, or on degraded battery, the governor suppresses
+/// dense floating-point computation and shifts toward sparse, low-power
+/// execution.
+pub struct ThermodynamicGovernor {
+    /// 0..1 stress level, where 1.0 is the most constrained.
+    pub stress: f32,
+    /// Target sparsity for weight execution (0.0 = dense, 1.0 = maximally sparse).
+    pub target_sparsity: f32,
+    /// Whether to throttle the cognitive tick rate.
+    pub throttle: bool,
+}
+
+impl ThermodynamicGovernor {
+    pub fn new() -> Self {
+        Self {
+            stress: 0.0,
+            target_sparsity: 0.0,
+            throttle: false,
+        }
+    }
+
+    /// Update stress from a `ThermalState` snapshot. The formula is a
+    /// weighted sum that emphasizes thermal and battery degradation.
+    pub fn update(&mut self, state: &ThermalState) {
+        self.stress = (state.cpu_usage * 0.25
+            + state.memory_pressure * 0.25
+            + (1.0 - state.battery_health) * 0.35
+            + state.cpu_temp * 0.15)
+            .clamp(0.0, 1.0);
+
+        // As stress rises, shift toward sparse execution and throttling.
+        self.target_sparsity = self.stress.clamp(0.0, 0.9);
+        self.throttle = self.stress > 0.7;
+    }
+
+    /// Apply a sparse mask to a vector in place. Keeps the top
+    /// `(1 - target_sparsity)` activations by magnitude and zeroes the rest.
+    pub fn sparsify(&self, vector: &mut [f32]) {
+        if self.target_sparsity <= 0.0 || vector.is_empty() {
+            return;
+        }
+
+        // Build a small index/magnitude vector and find the keep threshold.
+        let mut indexed: Vec<(usize, f32)> = vector
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| (i, x.abs()))
+            .collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let keep_ratio = (1.0 - self.target_sparsity).clamp(0.0, 1.0);
+        let keep_count = ((vector.len() as f32) * keep_ratio).ceil() as usize;
+        let mut keep = vec![false; vector.len()];
+        for (idx, _) in indexed.iter().take(keep_count) {
+            keep[*idx] = true;
+        }
+
+        for (i, v) in vector.iter_mut().enumerate() {
+            if !keep[i] {
+                *v = 0.0;
+            }
+        }
+    }
+
+    /// Scale a learning rate inversely with stress.
+    pub fn throttle_learning_rate(&self, base_lr: f32) -> f32 {
+        base_lr * (1.0 - self.stress * 0.8).clamp(0.0001, 1.0)
+    }
+}
+
+impl Default for ThermodynamicGovernor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct HomeostaticController {
     pub active_learning_rate: f32,
+    pub governor: ThermodynamicGovernor,
 }
 
 impl HomeostaticController {
     pub fn new() -> Self {
         Self {
             active_learning_rate: 0.000500,
+            governor: ThermodynamicGovernor::new(),
         }
     }
 
-    /// Minimizes prediction errors by adjusting system learning rates based on internal entropy metrics
+    /// Minimizes prediction errors by adjusting system learning rates based on
+    /// internal entropy metrics and hardware thermodynamics.
     pub fn execute_active_inference_loop(&mut self, empirical_loss: f32) -> f32 {
         let prediction_error = empirical_loss - TARGET_STABILITY;
 
@@ -139,6 +231,15 @@ impl HomeostaticController {
         }
 
         self.active_learning_rate = self.active_learning_rate.clamp(0.0001, MAXIMUM_META_RATE);
+        // Thermodynamic throttle: reduce learning when the machine is stressed.
+        self.active_learning_rate = self
+            .governor
+            .throttle_learning_rate(self.active_learning_rate);
         self.active_learning_rate
+    }
+
+    /// Feed hardware stress into the thermodynamic governor.
+    pub fn update_thermodynamics(&mut self, state: &ThermalState) {
+        self.governor.update(state);
     }
 }

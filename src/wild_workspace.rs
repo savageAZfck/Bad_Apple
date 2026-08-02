@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::benchmark::RustValidator;
+use crate::hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder};
 use crate::is_safe_agent_code;
 use crate::ollama_client::OllamaClient;
+use crate::strategy_library::{RustSynthesizer, Strategy, StrategyLibrary};
 use crate::telemetry::run_sandboxed_tool;
 use tokio::task::spawn_blocking;
 use tokio::time::{sleep, timeout};
@@ -23,7 +26,7 @@ const MAX_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LLM_TIMEOUT: Duration = Duration::from_secs(60);
 const WATCH_POLL_IDLE: Duration = Duration::from_secs(60);
 const ALLOWED_EXTENSIONS: &[&str] = &[
-    "txt", "csv", "json", "log", "md", "xml", "yaml", "yml", "tsv",
+    "txt", "csv", "json", "log", "md", "xml", "yaml", "yml", "tsv", "py",
 ];
 
 /// Start the wild-workspace watcher. Returns the async receiver.
@@ -160,29 +163,134 @@ pub async fn process_wild_payload(
     Ok((name, output))
 }
 
+/// Process an open-source script through the HDC profile → Rust synthesis →
+/// cargo check validation pipeline. If validation passes the 0.95 threshold,
+/// cache the generated Rust source as a Sled-backed strategy.
+pub async fn process_script(
+    source: &str,
+    strategy_library: &StrategyLibrary,
+) -> Result<SynthesisOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    let source = source.to_string();
+    let strategy_library = strategy_library.clone();
+
+    // Offload encoding and synthesis to spawn_blocking (HDC + pattern matching).
+    let (rust_source, profile) = spawn_blocking({
+        let source = source.clone();
+        move || {
+            let mut encoder = ScriptEncoder::new();
+            let profile = encoder.encode(&source);
+            let (diagnosis, _severity) = OverheadAnalyzer::analyze(&profile);
+            let mut synthesizer = RustSynthesizer::new();
+            let rust = synthesizer.synthesize(&profile);
+            (rust, (profile, diagnosis))
+        }
+    })
+    .await
+    .map_err(|e| format!("script processing task failed: {}", e))?;
+
+    let key = format!("rust_synth_{}", std::process::id());
+    let validation = RustValidator::validate(&key, &rust_source, 2).await;
+
+    let outcome = SynthesisOutcome {
+        source,
+        rust_source,
+        diagnosis: profile.1,
+        compiled: validation.competence >= 0.95,
+        competence: validation.competence,
+        diagnostics: validation.diagnostics.clone(),
+    };
+
+    if validation.competence >= 0.95 {
+        let strategy = Strategy::new(
+            format!("{}_certified", key),
+            format!("Optimized Rust for: {}", outcome.diagnosis),
+            "rust".to_string(),
+            validation.source,
+        );
+        strategy_library.put(&strategy).await?;
+    }
+
+    Ok(outcome)
+}
+
+/// Outcome of the script-optimization harness.
+#[derive(Clone, Debug)]
+pub struct SynthesisOutcome {
+    pub source: String,
+    pub rust_source: String,
+    pub diagnosis: String,
+    pub compiled: bool,
+    pub competence: f64,
+    pub diagnostics: String,
+}
+
 /// Run the wild workspace ingestion loop.
 pub async fn run_wild_loop(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
     ollama: Arc<OllamaClient>,
     model: String,
     watch_path: PathBuf,
+    strategy_library: Arc<StrategyLibrary>,
 ) {
     loop {
         match timeout(Duration::from_secs(60), rx.recv()).await {
             Ok(Some(event)) => {
                 for path in event.paths {
                     if is_allowed_file(&path, &watch_path) {
-                        match process_wild_payload(&ollama, &model, &path).await {
-                            Ok((name, output)) => {
-                                println!(
-                                    "🌿 [WILD] Processed {} with '{}': {}",
-                                    path.display(),
-                                    name,
-                                    output.chars().take(120).collect::<String>()
-                                );
+                        // Route scripts (.py / .txt) through the optimization harness.
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        let is_script = ext == "py" || ext == "txt";
+
+                        if is_script {
+                            match read_limited_text(&path) {
+                                Ok(source) => {
+                                    match process_script(&source, &strategy_library).await {
+                                        Ok(outcome) => {
+                                            println!(
+                                                "🦀 [WILD SYNTH] {}: compiled={} competence={:.2}",
+                                                path.display(),
+                                                outcome.compiled,
+                                                outcome.competence
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "🦀 [WILD SYNTH] {} failed: {}",
+                                                path.display(),
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "🦀 [WILD SYNTH] {} read failed: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("🌿 [WILD] Failed to process {}: {}", path.display(), e);
+                        } else {
+                            match process_wild_payload(&ollama, &model, &path).await {
+                                Ok((name, output)) => {
+                                    println!(
+                                        "🌿 [WILD] Processed {} with '{}': {}",
+                                        path.display(),
+                                        name,
+                                        output.chars().take(120).collect::<String>()
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "🌿 [WILD] Failed to process {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
                             }
                         }
                     }

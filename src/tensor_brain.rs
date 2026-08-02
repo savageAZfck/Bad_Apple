@@ -459,6 +459,17 @@ impl BpeTokenizer {
         embeddings
     }
 
+    fn tokenize_to_ids(&self, text: &str) -> Vec<u32> {
+        let encoding = match self.tokenizer.encode(text, false) {
+            Ok(enc) => enc,
+            Err(e) => {
+                eprintln!("⚠️ BPE tokenize failed ({}); returning empty.", e);
+                return Vec::new();
+            }
+        };
+        encoding.get_ids().to_vec()
+    }
+
     fn encode_to_2048(&self, text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
         const SEQ_LEN: usize = 32;
         const TOKEN_DIM: usize = 64;
@@ -506,6 +517,164 @@ impl BpeTokenizer {
 pub fn text_to_grounded_embedding(text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
     let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train("tokenizer.json"));
     bpe.encode_to_2048(text, spatial_axes)
+}
+
+/// Tokenize a string into BPE token IDs, returning the raw token sequence.
+/// Used by higher-level modules (e.g., HDC script profiling).
+pub fn tokenize_text(text: &str) -> Vec<u32> {
+    let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train("tokenizer.json"));
+    bpe.tokenize_to_ids(text)
+}
+
+// =========================================================================
+// Continuous-Time Neural ODE / Liquid State Machine foundation
+// =========================================================================
+
+/// Liquid State Machine (LSM) with leaky continuous-time reservoir dynamics.
+///
+/// State evolves as `dx/dt = -leak * x + tanh(W_in * u + W_rec * x + b)`.
+/// We use fixed-size, pre-allocated vectors and in-place Euler updates to keep
+/// per-step allocations near zero.
+pub struct LiquidStateMachine {
+    state: Vec<f64>,
+    bias: Vec<f64>,
+    input_weights: Vec<Vec<f64>>,
+    recurrent_weights: Vec<Vec<f64>>,
+    reservoir_size: usize,
+    input_dim: usize,
+    leak_rate: f64,
+    dt: f64,
+    rng: StdRng,
+}
+
+impl LiquidStateMachine {
+    /// Build a new LSM. Weights are sampled uniformly in `[-scale, scale]`.
+    pub fn new(input_dim: usize, reservoir_size: usize, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let scale_in = 0.3;
+        let scale_rec = 0.1;
+
+        let mut input_weights = vec![Vec::with_capacity(input_dim); reservoir_size];
+        for row in input_weights.iter_mut() {
+            for _ in 0..input_dim {
+                row.push(rng.gen_range(-scale_in..scale_in));
+            }
+        }
+
+        let mut recurrent_weights = vec![Vec::with_capacity(reservoir_size); reservoir_size];
+        for row in recurrent_weights.iter_mut() {
+            for _ in 0..reservoir_size {
+                row.push(rng.gen_range(-scale_rec..scale_rec));
+            }
+        }
+
+        let mut bias = Vec::with_capacity(reservoir_size);
+        for _ in 0..reservoir_size {
+            bias.push(rng.gen_range(-0.1..0.1));
+        }
+
+        Self {
+            state: vec![0.0; reservoir_size],
+            bias,
+            input_weights,
+            recurrent_weights,
+            reservoir_size,
+            input_dim,
+            leak_rate: 0.9,
+            dt: 0.01,
+            rng,
+        }
+    }
+
+    /// One continuous-time Euler step of duration `dt`. Uses a pre-allocated
+    /// scratch buffer to avoid inner allocations.
+    pub fn step(&mut self, input: &[f64], scratch: &mut [f64]) {
+        assert_eq!(input.len(), self.input_dim);
+        assert_eq!(scratch.len(), self.reservoir_size);
+
+        for (i, scratch_i) in scratch.iter_mut().enumerate().take(self.reservoir_size) {
+            let mut drive = self.bias[i];
+            for (j, &x) in input.iter().enumerate() {
+                drive += self.input_weights[i][j] * x;
+            }
+            for (j, &s) in self.state.iter().enumerate() {
+                drive += self.recurrent_weights[i][j] * s;
+            }
+            *scratch_i = drive.tanh();
+        }
+
+        for (i, s) in self.state.iter_mut().enumerate().take(self.reservoir_size) {
+            *s = *s + self.dt * (-self.leak_rate * *s + scratch[i]);
+        }
+    }
+
+    /// Run `n` integration steps for a given input.
+    pub fn integrate(&mut self, input: &[f64], n: usize, scratch: &mut [f64]) {
+        for _ in 0..n {
+            self.step(input, scratch);
+        }
+    }
+
+    /// Read a copy of the current state. The caller can use it for readout.
+    pub fn state(&self) -> &[f64] {
+        &self.state
+    }
+}
+
+/// Continuous-time brain that combines the LSM reservoir with a linear
+/// readout layer. Pre-allocates all scratch memory.
+pub struct ContinuousBrain {
+    lsm: LiquidStateMachine,
+    readout: Vec<Vec<f64>>,
+    output_dim: usize,
+    scratch: Vec<f64>,
+    output: Vec<f64>,
+}
+
+impl ContinuousBrain {
+    pub fn new(input_dim: usize, reservoir_size: usize, output_dim: usize, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed.wrapping_add(1));
+        let mut readout = vec![Vec::with_capacity(reservoir_size); output_dim];
+        for row in readout.iter_mut() {
+            for _ in 0..reservoir_size {
+                row.push(rng.gen_range(-0.1..0.1));
+            }
+        }
+
+        Self {
+            lsm: LiquidStateMachine::new(input_dim, reservoir_size, seed),
+            readout,
+            output_dim,
+            scratch: vec![0.0; reservoir_size],
+            output: vec![0.0; output_dim],
+        }
+    }
+
+    /// Advance the continuous state by `dt` per step for `n_steps` and produce
+    /// an `output_dim` readout. All memory is pre-allocated.
+    pub fn forward(&mut self, input: &[f64], n_steps: usize) -> &[f64] {
+        self.lsm.integrate(input, n_steps, &mut self.scratch);
+        let state = self.lsm.state();
+        for (i, out) in self.output.iter_mut().enumerate() {
+            *out = 0.0;
+            for (j, &row_j) in self.readout[i].iter().enumerate() {
+                *out += row_j * state[j];
+            }
+        }
+        &self.output
+    }
+
+    /// Hebbian-like plasticity update on the readout: if `target` is provided,
+    /// nudge readout weights by `eta * (target - out) * state`.
+    pub fn adapt(&mut self, target: &[f64], eta: f64) {
+        let state = self.lsm.state();
+        for (i, row) in self.readout.iter_mut().enumerate() {
+            let error = target.get(i).copied().unwrap_or(0.0) - self.output[i];
+            for (j, w) in row.iter_mut().enumerate() {
+                *w += eta * error * state[j];
+            }
+        }
+    }
 }
 
 #[cfg(test)]
