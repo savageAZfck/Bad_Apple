@@ -22,6 +22,7 @@ starship-battery = "0.10"
 chrono = "0.4"
 candle-core = { version = "0.10.2", features = ["metal", "accelerate"] }
 candle-nn = { version = "0.10.2", features = ["metal"] }
+tokenizers = "0.15"
 hmac = "0.13.0"
 sha2 = "0.11.0"
 base64 = "0.23.0"

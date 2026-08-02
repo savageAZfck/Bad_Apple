@@ -1,6 +1,17 @@
 use std::fmt;
+use std::path::Path;
+use std::sync::OnceLock;
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{linear, layer_norm, ops as nn_ops, loss as nn_loss, AdamW, Linear, LayerNorm, Module, Optimizer, VarBuilder, VarMap};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+use tokenizers::{AddedToken, Tokenizer};
+use tokenizers::decoders::DecoderWrapper;
+use tokenizers::models::bpe::{BPE, BpeTrainerBuilder};
+use tokenizers::normalizers::NormalizerWrapper;
+use tokenizers::pre_tokenizers::{whitespace::WhitespaceSplit, PreTokenizerWrapper};
+use tokenizers::processors::PostProcessorWrapper;
+use tokenizers::tokenizer::TokenizerImpl;
 
 /// Dimensionality of the Transformer hidden / brain state.
 pub const BRAIN_DIM: usize = 256;
@@ -331,5 +342,139 @@ impl CandleBrain {
 
     pub fn load_weights<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
         self.varmap.load(path)
+    }
+}
+
+// =========================================================================
+// 🗣️ BPE TOKENIZER-BASED GROUNDED EMBEDDING
+// =========================================================================
+
+/// Global BPE tokenizer loaded once from `tokenizer.json`.
+///
+/// The tokenizer maps raw text to real vocabulary token IDs.  A deterministic
+/// 64-dimensional embedding table is generated from a fixed seed so the 32-token
+/// sequence fed into the Transformer is semantically stable across runs.
+static BPE_TOKENIZER: OnceLock<BpeTokenizer> = OnceLock::new();
+
+struct BpeTokenizer {
+    tokenizer: Tokenizer,
+    /// vocab_size x 64 deterministic token embeddings.
+    embeddings: Vec<Vec<f64>>,
+}
+
+impl BpeTokenizer {
+    /// Load `tokenizer.json` if it exists and is valid; otherwise train a
+    /// lightweight BPE model on the curriculum and save it to the same path.
+    fn load_or_train<P: AsRef<Path>>(path: P) -> Self {
+        match Tokenizer::from_file(&path) {
+            Ok(tokenizer) => return Self::from_tokenizer(tokenizer),
+            Err(e) => eprintln!("⚠️ Could not load {:?}: {}. Training a fresh BPE tokenizer from curriculum...", path.as_ref(), e),
+        }
+
+        let mut trainer = BpeTrainerBuilder::new()
+            .vocab_size(128)
+            .min_frequency(3)
+            .show_progress(false)
+            .limit_alphabet(256)
+            .special_tokens(vec![
+                AddedToken::from(String::from("<pad>"), true),
+                AddedToken::from(String::from("<unk>"), true),
+                AddedToken::from(String::from("<s>"), true),
+                AddedToken::from(String::from("</s>"), true),
+            ])
+            .build();
+
+        let mut tokenizer: TokenizerImpl<BPE, NormalizerWrapper, PreTokenizerWrapper, PostProcessorWrapper, DecoderWrapper> =
+            TokenizerImpl::new(BPE::default());
+        tokenizer.with_pre_tokenizer(WhitespaceSplit);
+
+        let files = vec!["curriculum/curriculum.txt".to_string()];
+        tokenizer
+            .train_from_files(&mut trainer, files)
+            .expect("Failed to train BPE tokenizer from curriculum files");
+
+        tokenizer
+            .save(&path, false)
+            .expect("Failed to save tokenizer.json");
+
+        // Type-erase the concrete BPE implementation into the standard `Tokenizer` wrapper.
+        Self::from_tokenizer(tokenizer.into())
+    }
+
+    fn from_tokenizer(tokenizer: Tokenizer) -> Self {
+        let vocab_size = tokenizer.get_vocab_size(true);
+        let embeddings = Self::build_embeddings(vocab_size);
+        Self { tokenizer, embeddings }
+    }
+
+    fn build_embeddings(vocab_size: usize) -> Vec<Vec<f64>> {
+        let mut rng = StdRng::seed_from_u64(0xF1A_F1E_F1A_F1E);
+        let mut embeddings = Vec::with_capacity(vocab_size);
+        for _ in 0..vocab_size {
+            let mut row = Vec::with_capacity(64);
+            for _ in 0..64 {
+                row.push(rng.gen::<f64>() * 2.0 - 1.0);
+            }
+            embeddings.push(row);
+        }
+        embeddings
+    }
+
+    fn encode_to_2048(&self, text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
+        const SEQ_LEN: usize = 32;
+        const TOKEN_DIM: usize = 64;
+
+        let encoding = self.tokenizer.encode(text, false)
+            .unwrap_or_else(|e| {
+                eprintln!("⚠️ BPE encode failed ({}); using empty encoding.", e);
+                // Return a zero-length encoding from an empty string.
+                self.tokenizer.encode("", false).expect("tokenizer must encode empty string")
+            });
+
+        let ids = encoding.get_ids();
+        let mut vec = vec![0.0; SEQ_LEN * TOKEN_DIM];
+
+        for (row, &id) in ids.iter().take(SEQ_LEN).enumerate() {
+            let idx = (id as usize).min(self.embeddings.len().saturating_sub(1));
+            let emb = &self.embeddings[idx];
+            for (col, &val) in emb.iter().take(TOKEN_DIM).enumerate() {
+                vec[row * TOKEN_DIM + col] = val;
+            }
+        }
+
+        // Blend the 4-D physical/sensory anchors into the first channel of
+        // rows 0, 8, 16, and 24 (indices 0, 512, 1024, 1536).
+        for i in 0..4 {
+            let slot = i * 8 * TOKEN_DIM;
+            vec[slot] += spatial_axes[i] * 5.0;
+        }
+
+        let magnitude: f64 = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if magnitude > 0.0 {
+            for v in vec.iter_mut() { *v /= magnitude; }
+        }
+
+        vec
+    }
+}
+
+/// Convert raw text into the 2048-dimensional grounded embedding expected by
+/// `CandleBrain`.  The text is tokenized with the local BPE tokenizer, mapped
+/// into a 32 x 64 token matrix, and then fused with the four physical anchors.
+pub fn text_to_grounded_embedding(text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
+    let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train("tokenizer.json"));
+    bpe.encode_to_2048(text, spatial_axes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bpe_embedding_is_2048_and_normalised() {
+        let embedding = text_to_grounded_embedding("hello world", &[0.5, 0.4, 0.3, 0.2]);
+        assert_eq!(embedding.len(), 2048);
+        let magnitude = embedding.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!((magnitude - 1.0).abs() < 1e-9);
     }
 }

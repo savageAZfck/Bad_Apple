@@ -3622,31 +3622,9 @@ impl NativeSelfAttentionCore {
 // 📐 2048-DIMENSIONAL MULTIMODAL PHYSICAL EMBEDDING (True Grounding)
 // =========================================================================
 pub fn generate_2048_grounded_embedding(text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
-    let mut vec = vec![0.0; 2048]; // Expanded to a hyper-dense 2048-Dimensional Latent Matrix Workspace
-    let lower = text.to_lowercase();
-    let bytes = lower.as_bytes();
-    // Encode character bigrams to capture local sequential structure.
-    if bytes.len() >= 2 {
-        for i in 0..bytes.len() - 1 {
-            let slot = ((bytes[i] as usize).wrapping_mul(31)
-                        .wrapping_add(bytes[i + 1] as usize)
-                        .wrapping_add(i)) % 2048;
-            vec[slot] += 1.0;
-        }
-    } else {
-        for i in 0..bytes.len() {
-            let slot = (bytes[i] as usize + i) % 2048;
-            vec[slot] += 1.0;
-        }
-    }
-    for i in 0..4 {
-        vec[i * 512] += spatial_axes[i] * 5.0;
-    }
-    let magnitude: f64 = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if magnitude > 0.0 {
-        for val in vec.iter_mut() { *val /= magnitude; }
-    }
-    vec
+    // 🗣️ Real BPE tokenizer substrate: token IDs → 32 x 64 token matrix
+    // fused with the [Photons, Audio, Mass, Gravity] sensory anchors.
+    tensor_brain::text_to_grounded_embedding(text, spatial_axes)
 }
 
 const MAX_MEMORY_NODES: usize = 500;
