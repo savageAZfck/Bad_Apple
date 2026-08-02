@@ -297,6 +297,8 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+sha2 = "0.11"
 "#;
 
         let mut diagnostics = String::new();

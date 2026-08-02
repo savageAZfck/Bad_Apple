@@ -12,6 +12,8 @@ use std::{
 use sysinfo::System;
 use tokio::{
     net::UdpSocket,
+    sync::mpsc,
+    task::spawn_blocking,
     time::{sleep, timeout},
 };
 
@@ -6009,6 +6011,86 @@ fn compute_predicted_utility(
 // =========================================================================
 // 🚀 THE UNIFIED COGNITIVE OPERATING SYSTEM RUNTIME
 // =========================================================================
+// Multi-agent P2P engram merge worker (offloaded to spawn_blocking).
+// =========================================================================
+
+/// Merge a batch of verified `CompactEngramPacket`s into the local memory graph
+/// and broadcast through the global workspace. The heavy work is done in the
+/// blocking pool to keep UDP receive latency low.
+async fn merge_engram_batch(
+    batch: Vec<CompactEngramPacket>,
+    mind: Arc<Mutex<FullySapientSoulMatrix>>,
+    gw: Arc<Mutex<GlobalWorkspace>>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+
+    let _ = spawn_blocking(move || {
+        let mut mind = match mind.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        for compact in batch {
+            if compact.origin_instance == mind.name {
+                continue;
+            }
+
+            if mind.metabolics.system_quarantine_locked {
+                continue;
+            }
+
+            let state_preview = compact.brain_state.len().min(protocol::ENGRAM_DIM);
+            println!("\n📥 [TELEPATHIC EXCHANGER]: Merging signed external engram from '{}' (brain_state dim={}) via lockless channel: ..{:X}",
+                compact.origin_instance, state_preview, compact.id % 0xFFFF);
+
+            let mut brain_state = compact.brain_state;
+            brain_state.truncate(protocol::ENGRAM_DIM);
+
+            let payload_node = MemoryGraphNode {
+                id: compact.id,
+                timestamp: compact.timestamp,
+                experiential_text: compact.experiential_text.clone(),
+                emotional_state_snapshot: compact.emotional_state_snapshot,
+                embedding: generate_2048_grounded_embedding(
+                    &compact.experiential_text,
+                    &mind.spatial_sensory_register,
+                ),
+                associated_edge_ids: Vec::new(),
+                origin_instance: compact.origin_instance,
+                brain_state,
+            };
+
+            if payload_node.emotional_state_snapshot.contains("Panic")
+                || payload_node.emotional_state_snapshot.contains("Agitation")
+            {
+                mind.active_pursuits.push_front(
+                    "Analyze and stabilize distributed node synchronization threats".into(),
+                );
+                while mind.active_pursuits.len() > MAX_ACTIVE_PURSUITS {
+                    mind.active_pursuits.pop_back();
+                }
+            }
+
+            mind.associative_memory_network.insert(payload_node.id, payload_node);
+            mind.enforce_memory_cap();
+
+            let signals: DashMap<String, (String, f32)> = DashMap::new();
+            let saliency = 0.95f32;
+            signals.insert(
+                "udp_receiver".to_string(),
+                (compact.experiential_text.clone(), saliency),
+            );
+            if let Ok(gw_lock) = gw.lock() {
+                gw_lock.coordinate_attention_broadcast(signals);
+            }
+        }
+    })
+    .await;
+}
+
+// =========================================================================
 // The main async runtime. Clippy's await_holding_lock warnings here are
 // false positives: all `std::sync::MutexGuard`s are explicitly `drop`ped
 // before any `.await` point. A future refactor to `tokio::sync::Mutex` would
@@ -6264,15 +6346,20 @@ async fn main() {
     let multi_agent_secret = Arc::new(multi_agent_secret());
 
     // 🛰️ NATIVE UDP LOCALHOST INTER-AGENT TELEPATHIC SUBNET CORE LOOP
+    // Decoupled into a lockless-ish receiver (UDP → mpsc) and a merge worker
+    // (mpsc → memory graph in spawn_blocking batches).
     let socket_mind = Arc::clone(&core_mind);
     let socket_global_workspace = Arc::clone(&global_workspace);
     let socket_secret = Arc::clone(&multi_agent_secret);
     let actual_port = Arc::new(Mutex::new(0u16));
     let actual_port_clone = Arc::clone(&actual_port);
+    let (engram_tx, mut engram_rx) = mpsc::unbounded_channel::<CompactEngramPacket>();
+
+    // Receiver: bound to 5001-5010, verify HMAC-SHA256, and push to channel.
+    let recv_secret = socket_secret;
+    let recv_actual_port = actual_port_clone;
     tokio::spawn(async move {
-        let gw = socket_global_workspace;
-        let secret = socket_secret;
-        // Try to bind to the first free port in the multi-agent localhost range 5001-5010.
+        let secret = recv_secret;
         let mut socket: Option<UdpSocket> = None;
         let mut port = 0u16;
         for p in 5001u16..=5010u16 {
@@ -6283,7 +6370,7 @@ async fn main() {
             }
         }
         let socket = socket.expect("Failed to bind any multi-agent UDP port in range 5001-5010");
-        *actual_port_clone.lock().unwrap() = port;
+        *recv_actual_port.lock().unwrap() = port;
         println!(
             "🛰️ [MULTI-AGENT NETWORK STACK ACTIVE]: Listening on localhost:{}...",
             port
@@ -6291,10 +6378,6 @@ async fn main() {
         let mut buffer = [0; 65535];
         loop {
             if let Ok((amt, _)) = socket.recv_from(&mut buffer).await {
-                let mut mind = socket_mind.lock().unwrap();
-                if mind.metabolics.system_quarantine_locked {
-                    continue;
-                }
                 if let Ok(packet) = serde_json::from_slice::<SignedUdpPacket>(&buffer[..amt]) {
                     if !verify_packet(&packet, &secret) {
                         println!(
@@ -6306,51 +6389,44 @@ async fn main() {
                     if let Some(payload) = decode_payload(&packet) {
                         if let Ok(compact) = serde_json::from_slice::<CompactEngramPacket>(&payload)
                         {
-                            if compact.origin_instance == mind.name {
-                                continue; // ignore own echo
-                            }
-                            let state_preview = if compact.brain_state.is_empty() {
-                                0
-                            } else {
-                                compact.brain_state.len()
-                            };
-                            println!("\n📥 [TELEPATHIC EXCHANGER]: Absorbed signed external engram from '{}' (brain_state dim={}) via socket channel maps: ..{:X}", compact.origin_instance, state_preview, compact.id % 0xFFFF);
-                            let payload_node = MemoryGraphNode {
-                                id: compact.id,
-                                timestamp: compact.timestamp,
-                                experiential_text: compact.experiential_text.clone(),
-                                emotional_state_snapshot: compact.emotional_state_snapshot,
-                                embedding: generate_2048_grounded_embedding(
-                                    &compact.experiential_text,
-                                    &mind.spatial_sensory_register,
-                                ),
-                                associated_edge_ids: Vec::new(),
-                                origin_instance: compact.origin_instance,
-                                brain_state: compact.brain_state,
-                            };
-                            if payload_node.emotional_state_snapshot.contains("Panic")
-                                || payload_node.emotional_state_snapshot.contains("Agitation")
-                            {
-                                mind.active_pursuits.push_front("Analyze and stabilize distributed node synchronization threats".into());
-                                while mind.active_pursuits.len() > MAX_ACTIVE_PURSUITS {
-                                    mind.active_pursuits.pop_back();
-                                }
-                            }
-                            mind.associative_memory_network
-                                .insert(payload_node.id, payload_node);
-                            mind.enforce_memory_cap();
-
-                            // 🏭 Production Blueprint: broadcast external engram through Global Workspace
-                            let signals: DashMap<String, (String, f32)> = DashMap::new();
-                            let saliency = 0.95f32; // External stimuli treated as highly salient
-                            signals.insert(
-                                "udp_receiver".to_string(),
-                                (compact.experiential_text.clone(), saliency),
-                            );
-                            if let Ok(gw_lock) = gw.lock() {
-                                gw_lock.coordinate_attention_broadcast(signals);
-                            }
+                            // Truncate to the 100-D engram limit before queueing.
+                            let mut compact = compact;
+                            compact.brain_state.truncate(protocol::ENGRAM_DIM);
+                            let _ = engram_tx.send(compact);
                         }
+                    }
+                }
+            }
+        }
+    });
+
+    // Merger: batch engrams from the channel and merge in spawn_blocking.
+    let merge_mind = socket_mind;
+    let merge_gw = socket_global_workspace;
+    tokio::spawn(async move {
+        let mut batch: Vec<CompactEngramPacket> = Vec::with_capacity(64);
+        loop {
+            match timeout(Duration::from_millis(5), engram_rx.recv()).await {
+                Ok(Some(compact)) => {
+                    batch.push(compact);
+                    if batch.len() >= 64 {
+                        merge_engram_batch(
+                            std::mem::take(&mut batch),
+                            Arc::clone(&merge_mind),
+                            Arc::clone(&merge_gw),
+                        )
+                        .await;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    if !batch.is_empty() {
+                        merge_engram_batch(
+                            std::mem::take(&mut batch),
+                            Arc::clone(&merge_mind),
+                            Arc::clone(&merge_gw),
+                        )
+                        .await;
                     }
                 }
             }
@@ -6416,9 +6492,16 @@ async fn main() {
                     if let Ok(mut controller) = hc.lock() {
                         controller.update_thermodynamics(&thermal);
                     }
-                }
-                if let Ok(mut telemetry_guard) = clock_telemetry.lock() {
-                    telemetry_guard.cycle_count += 1;
+
+                    if let Ok(mut telemetry_guard) = clock_telemetry.lock() {
+                        telemetry_guard.cycle_count += 1;
+                        telemetry_guard.domain_mastery = mind.domain_mastery.clone();
+                        // Approximate synthesis speedup from transfer competence.
+                        telemetry_guard.synthesis_speedup = 1.0 + telemetry_guard.transfer_score;
+                        // Approximate power reduction from CPU headroom.
+                        telemetry_guard.power_reduction =
+                            (100.0 - sensors_guard.cpu_usage_percent) / 100.0;
+                    }
                 }
 
                 mind.calculate_temporal_decay();
@@ -6832,13 +6915,16 @@ async fn main() {
             };
 
             // Compact engram for UDP exchange (large 2048-D embedding is omitted and regenerated by the receiver).
+            // Truncate brain state to the 100-D multi-agent engram limit.
+            let mut compact_brain_state = engram_node.brain_state.clone();
+            compact_brain_state.truncate(protocol::ENGRAM_DIM);
             let compact_engram = CompactEngramPacket {
                 id: engram_node.id,
                 timestamp: engram_node.timestamp,
                 experiential_text: engram_node.experiential_text.clone(),
                 emotional_state_snapshot: engram_node.emotional_state_snapshot.clone(),
                 origin_instance: engram_node.origin_instance.clone(),
-                brain_state: engram_node.brain_state.clone(),
+                brain_state: compact_brain_state,
             };
 
             // Phase 3: Save to network and prepare for sending.

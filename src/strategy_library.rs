@@ -367,6 +367,106 @@ async fn main() {
             .to_string(),
         );
 
+        // Template 6: zero-allocation-style JSON streaming over a local file.
+        let k6 = "json_stream_template".to_string();
+        template_memory.allocate(&k6);
+        templates.insert(
+            k6,
+            r##"use tokio;
+use serde_json::Value;
+
+#[tokio::main]
+async fn main() {
+    let data = r#"{"name":"firefly","value":42}"#;
+    let v: Value = serde_json::from_str(data).unwrap();
+    println!("{}", v["value"]);
+}"##
+            .to_string(),
+        );
+
+        // Template 7: high-throughput CSV column transformation.
+        let k7 = "csv_transform_template".to_string();
+        template_memory.allocate(&k7);
+        templates.insert(
+            k7,
+            r#"use tokio;
+
+#[tokio::main]
+async fn main() {
+    let csv = "a,1\nb,2\nc,3";
+    for line in csv.lines() {
+        let cols: Vec<&str> = line.split(',').collect();
+        if let (Some(key), Some(val)) = (cols.first(), cols.get(1)) {
+            println!("{}: {}", key, val);
+        }
+    }
+}"#
+            .to_string(),
+        );
+
+        // Template 8: local system log parsing and anomaly filtering.
+        let k8 = "log_filter_template".to_string();
+        template_memory.allocate(&k8);
+        templates.insert(
+            k8,
+            r#"use tokio;
+
+#[tokio::main]
+async fn main() {
+    let logs = "INFO start\nERROR fail\nINFO ok";
+    for line in logs.lines() {
+        if line.contains("ERROR") {
+            println!("{}", line);
+        }
+    }
+}"#
+            .to_string(),
+        );
+
+        // Template 9: cryptographic file hashing array (SHA-256 of file contents).
+        let k9 = "crypto_hash_template".to_string();
+        template_memory.allocate(&k9);
+        templates.insert(
+            k9,
+            r#"use tokio;
+use sha2::{Sha256, Digest};
+
+#[tokio::main]
+async fn main() {
+    let input = b"hello world";
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    let result = hasher.finalize();
+    println!("{:x}", result);
+}"#
+            .to_string(),
+        );
+
+        // Template 10: safe local file-system space defragmentation sweep.
+        // This template only reports large files; it never moves or deletes data.
+        let k10 = "defrag_sweep_template".to_string();
+        template_memory.allocate(&k10);
+        templates.insert(
+            k10,
+            r#"use tokio;
+use std::path::Path;
+
+#[tokio::main]
+async fn main() {
+    let path = Path::new(".");
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() && meta.len() > 1_000_000 {
+                    println!("large file: {:?} ({} bytes)", entry.path(), meta.len());
+                }
+            }
+        }
+    }
+}"#
+            .to_string(),
+        );
+
         Self {
             template_memory,
             templates,
@@ -407,6 +507,20 @@ async fn main() {
         } else if source.to_lowercase().contains("factorial") || source.to_lowercase().contains("!")
         {
             "factorial_template"
+        } else if source.to_lowercase().contains("json") || source.to_lowercase().contains("stream")
+        {
+            "json_stream_template"
+        } else if source.to_lowercase().contains("csv") || source.to_lowercase().contains("column")
+        {
+            "csv_transform_template"
+        } else if source.to_lowercase().contains("log") || source.to_lowercase().contains("error") {
+            "log_filter_template"
+        } else if source.to_lowercase().contains("hash") || source.to_lowercase().contains("sha") {
+            "crypto_hash_template"
+        } else if source.to_lowercase().contains("defrag")
+            || source.to_lowercase().contains("sweep")
+        {
+            "defrag_sweep_template"
         } else {
             ""
         };

@@ -54,6 +54,9 @@ pub struct TelemetryState {
     pub transfer_score: f64,
     pub transfer_attempts: u64,
     pub critic_score: f64,
+    pub domain_mastery: std::collections::HashMap<String, f64>,
+    pub synthesis_speedup: f64,
+    pub power_reduction: f64,
 }
 
 impl TelemetryState {
@@ -364,6 +367,122 @@ async fn metrics_json_handler(State(state): State<AppState>) -> impl IntoRespons
 async fn metrics_dashboard_handler(State(state): State<AppState>) -> impl IntoResponse {
     let html = state.metrics.lock().unwrap().dashboard_html();
     Html(html)
+}
+
+async fn live_dashboard_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let telemetry = state.telemetry.lock().unwrap().clone();
+    let sensors = state.sensors.lock().unwrap().clone();
+    Html(live_dashboard_html(&telemetry, &sensors))
+}
+
+/// Render the live Domain Competence Matrix and Thermodynamic Acceleration Panel
+/// as a single HTML page with embedded SVGs. Updates are driven by the 6-second
+/// clock loop in `main.rs`.
+fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> String {
+    let competence_bars: Vec<String> = telemetry
+        .domain_mastery
+        .iter()
+        .enumerate()
+        .map(|(i, (domain, &mastery))| {
+            let pct = (mastery * 100.0).clamp(0.0, 100.0);
+            let y = 40 + i * 28;
+            format!(
+                r##"<g transform="translate(20, {})">
+                   <text x="0" y="15" fill="#d0d0e0" font-size="12">{}</text>
+                   <rect x="180" y="5" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+                   <rect x="180" y="5" width="{:.2}" height="12" fill="#7df" rx="2">
+                       <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+                   </rect>
+                   <text x="490" y="15" fill="#8af" font-size="12">{:.1}%</text>
+                 </g>"##,
+                y,
+                html_escape(domain),
+                pct * 3.0,
+                pct * 3.0,
+                pct
+            )
+        })
+        .collect();
+
+    let competence_svg = if competence_bars.is_empty() {
+        r##"<svg viewBox="0 0 600 80"><text x="20" y="40" fill="#d0d0e0" font-size="14">No domain mastery data yet</text></svg>"##.to_string()
+    } else {
+        let h = 80 + telemetry.domain_mastery.len() * 28;
+        format!(
+            r##"<svg viewBox="0 0 600 {}" class="panel-svg">{}</svg>"##,
+            h,
+            competence_bars.join("\n")
+        )
+    };
+
+    let speedup = (telemetry.synthesis_speedup * 100.0).clamp(0.0, 300.0);
+    let power_pct = (telemetry.power_reduction * 100.0).clamp(0.0, 100.0);
+    let cpu = sensors.cpu_usage_percent.clamp(0.0, 100.0);
+    let mem = sensors.memory_pressure_percent.clamp(0.0, 100.0);
+
+    let thermodynamic_svg = format!(
+        r##"<svg viewBox="0 0 600 200" class="panel-svg">
+           <text x="20" y="30" fill="#7df" font-size="16">Synthesis Speedup: {:.2}x</text>
+           <rect x="20" y="45" width="500" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="20" y="45" width="{:.2}" height="12" fill="#7f7" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="95" fill="#7df" font-size="16">Power Reduction: {:.1}%</text>
+           <rect x="20" y="110" width="500" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="20" y="110" width="{:.2}" height="12" fill="#f7d" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="160" fill="#8af" font-size="14">CPU: {:.1}%  |  Memory: {:.1}%</text>
+         </svg>"##,
+        telemetry.synthesis_speedup,
+        speedup * 1.67,
+        speedup * 1.67,
+        power_pct,
+        power_pct * 5.0,
+        power_pct * 5.0,
+        cpu,
+        mem
+    );
+
+    format!(
+        r##"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Sapient Soul Live Efficiency Dashboard</title>
+<meta http-equiv="refresh" content="6" />
+<style>
+  body {{ font-family: monospace; background: #0b0b0f; color: #d0d0e0; padding: 20px; }}
+  h1 {{ color: #7df; }}
+  h2 {{ color: #8af; }}
+  .panel {{ background: #15151a; border: 1px solid #334; padding: 15px; margin: 15px 0; border-radius: 6px; }}
+  .panel-svg {{ width: 100%; }}
+</style>
+</head>
+<body>
+<h1>Live Efficiency Dashboard</h1>
+<div class="panel">
+  <h2>Domain Competence Matrix</h2>
+  {}
+</div>
+<div class="panel">
+  <h2>Thermodynamic Acceleration Panel</h2>
+  {}
+</div>
+<p><a href="/" style="color:#8af">Metrics</a> | <a href="/telemetry" style="color:#8af">Telemetry JSON</a></p>
+</body>
+</html>"##,
+        competence_svg, thermodynamic_svg
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[derive(Deserialize)]
@@ -967,6 +1086,7 @@ pub async fn run_telemetry_server(
         .route("/telemetry", get(telemetry_handler))
         .route("/metrics", get(metrics_json_handler))
         .route("/dashboard", get(metrics_dashboard_handler))
+        .route("/live", get(live_dashboard_handler))
         .route("/tools/run", post(run_tool_handler))
         .route("/skills/learn", post(learn_skill_handler))
         .route("/skills/run", post(run_skill_handler))
