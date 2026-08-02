@@ -29,6 +29,7 @@ pub struct TelemetryState {
     pub loss_history: Vec<f64>,
     pub memory_node_count: usize,
     pub active_goal_count: usize,
+    pub state_save_duration_ms: u64,
     pub last_llm_latency_ms: f64,
     pub llm_tokens_per_second: f64,
     pub tool_executions: u64,
@@ -84,6 +85,10 @@ impl TelemetryState {
             self.tool_successes += 1;
         }
         self.tool_success_rate = self.tool_successes as f64 / self.tool_executions as f64;
+    }
+
+    pub fn record_state_save(&mut self, ms: u64) {
+        self.state_save_duration_ms = ms;
     }
 
     pub fn record_benchmark(&mut self, score: f64, attempts: u64) {
@@ -351,11 +356,20 @@ pub fn run_sandboxed_tool(name: &str, code: &str, language: &str) -> Result<Stri
     let ext = if language == "python" { "py" } else { "sh" };
     let filename = tools_dir.join(format!("{}_{}.{}", name, current_secs(), ext));
 
-    // For Python, inject a safe standard-library header so generated tools can use common modules.
+    // For Python, inject a safe standard-library header and patch common
+    // LLM mistakes (e.g., math.mean() does not exist; use statistics).
     let code = if language == "python" {
+        let mut fixed = code.to_string();
+        for name in [
+            "mean", "stdev", "pstdev", "variance", "pvariance",
+            "mode", "median", "harmonic_mean", "geometric_mean",
+        ] {
+            fixed = fixed.replace(&format!("math.{}(", name), &format!("statistics.{}(", name));
+            fixed = fixed.replace(&format!("from math import {}", name), &format!("from statistics import {}", name));
+        }
         format!(
             "import json, math, random, statistics, datetime, itertools, collections, string, re\n{}\n",
-            code
+            fixed
         )
     } else {
         code.to_string()

@@ -5724,7 +5724,12 @@ async fn main() {
                 brain_state: engram_node.brain_state.clone(),
             };
 
-            // Phase 3: Save to network and prepare for sending (mutex held, no async)
+            // Phase 3: Save to network and prepare for sending.
+            // State serialization is offloaded to a blocking thread so the 6-second
+            // Transformer clock never waits on SSD I/O.
+            let save_mind = Arc::clone(&autonomous_clock_mind);
+            let save_state_file = state_file_copy.clone();
+            let save_telemetry = clock_telemetry.clone();
             let should_send = match autonomous_clock_mind.lock() {
                 Ok(mut mind_write) => {
                     // 🆕 Update weight persistence
@@ -5736,7 +5741,24 @@ async fn main() {
                     if let Ok(mut telemetry_guard) = clock_telemetry.lock() {
                         telemetry_guard.memory_node_count = mind_write.associative_memory_network.len();
                     }
-                    mind_write.save_state(&state_file_copy);
+
+                    // Offload the full state save (weights + JSON + defense + network) to a
+                    // dedicated blocking thread and record the exact duration.
+                    let _ = tokio::spawn(async move {
+                        let duration_ms = tokio::task::spawn_blocking(move || {
+                            let start = std::time::Instant::now();
+                            if let Ok(mind) = save_mind.lock() {
+                                mind.save_state(&save_state_file);
+                            }
+                            start.elapsed().as_millis() as u64
+                        })
+                        .await
+                        .unwrap_or(0);
+                        if let Ok(mut t) = save_telemetry.lock() {
+                            t.record_state_save(duration_ms);
+                        }
+                    });
+
                     should_send
                 }
                 Err(e) => {
@@ -5950,7 +5972,7 @@ async fn main() {
             // 🔮 Model-based planning: generate up to 3 candidate tools,
             // predict each one's effects, and execute the highest-utility one.
             let prompt_template = format!(
-                "You are an autonomous agent with this active goal: '{}'\nEmotional state: {}\nMemory count: {}\nSensor summary: {}\n\nReturn ONLY a valid JSON object with exactly these fields: 'name' (short snake_case identifier), 'language' (must be the string 'python'), and 'code' (a short, self-contained Python 3 script that prints a useful result).\n\nSafety rules for the code:\n- It must be read-only or computational.\n- No file deletion, network, shell access, or writing to files.\n- Do not use: rm, dd, mkfs, sudo, su, wget, curl, ssh, scp, subprocess, os.system, exec, eval, compile, __import__, open, write, delete, destroy, socket, requests, urllib.\n- Allowed imports: math, random, statistics, json, datetime, itertools, collections, string, re.\n- The script must not index into a scalar value. If you have a 2-D list, treat inner elements as scalars, not as lists to iterate over.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math; data=[1,2,3,4,5]; print(math.sqrt(sum((x-sum(data)/len(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
+                "You are an autonomous agent with this active goal: '{}'\nEmotional state: {}\nMemory count: {}\nSensor summary: {}\n\nReturn ONLY a valid JSON object with exactly these fields: 'name' (short snake_case identifier), 'language' (must be the string 'python'), and 'code' (a short, self-contained Python 3 script that prints a useful result).\n\nSafety rules for the code:\n- It must be read-only or computational.\n- No file deletion, network, shell access, or writing to files.\n- Do not use: rm, dd, mkfs, sudo, su, wget, curl, ssh, scp, subprocess, os.system, exec, eval, compile, __import__, open, write, delete, destroy, socket, requests, urllib.\n- Allowed imports: math, random, statistics, json, datetime, itertools, collections, string, re.\n- For mean, stdev, variance, pstdev, pvariance, mode, median, harmonic_mean, and geometric_mean, use the `statistics` module (e.g. `statistics.mean(data)`).\n- Do NOT use `math.mean(...)`, `math.stdev(...)`, `math.variance(...)`, `math.pstdev(...)`, `math.pvariance(...)`, `math.mode(...)`, `math.median(...)`, `math.harmonic_mean(...)`, or `math.geometric_mean(...)` — these functions do not exist in the `math` module.\n- The script must not index into a scalar value. If you have a 2-D list, treat inner elements as scalars, not as lists to iterate over.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math, statistics; data=[1,2,3,4,5]; print(math.sqrt(sum((x-statistics.mean(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
                 goal, emotional_state, memory_count, sensor_summary
             );
 
