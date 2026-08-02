@@ -1,22 +1,32 @@
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use std::process::Command;
-use std::path::PathBuf;
-use std::fs;
-use std::net::{TcpStream, SocketAddr};
-use serde::{Serialize, Deserialize};
-use axum::{Router, routing::{get, post}, Json, extract::State, http::StatusCode, response::IntoResponse, response::Html};
-use sysinfo::{System, Components, Disks, Networks};
-use chrono::Timelike;
-use tokio::net::TcpListener;
 use crate::metrics::MetricsLogger;
-use crate::{FullySapientSoulMatrix, Skill};
 use crate::ollama_client::OllamaClient;
 use crate::strategy_library::StrategyLibrary;
-use md5::{Md5, Digest};
+use crate::{FullySapientSoulMatrix, Skill};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::Html,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use chrono::Timelike;
+use md5::{Digest, Md5};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use sysinfo::{Components, Disks, Networks, System};
+use tokio::net::TcpListener;
 
 pub fn current_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -184,7 +194,7 @@ fn is_host_reachable(addr: &str, port: u16) -> bool {
     let socket_addr = if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
         std::net::SocketAddr::from((ip, port))
     } else {
-        std::net::SocketAddr::from(([127,0,0,1], port))
+        std::net::SocketAddr::from(([127, 0, 0, 1], port))
     };
     TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500)).is_ok()
 }
@@ -196,7 +206,7 @@ pub fn update_sensor_snapshot(
     curriculum_dirs: &[PathBuf],
 ) {
     snapshot.refresh_counter = snapshot.refresh_counter.wrapping_add(1);
-    let slow_refresh = snapshot.refresh_counter % 5 == 0;
+    let slow_refresh = snapshot.refresh_counter.is_multiple_of(5);
 
     system.refresh_cpu();
     system.refresh_memory();
@@ -214,7 +224,11 @@ pub fn update_sensor_snapshot(
     };
 
     snapshot.cpu_core_count = system.cpus().len();
-    snapshot.process_count = if slow_refresh { system.processes().len() } else { snapshot.process_count };
+    snapshot.process_count = if slow_refresh {
+        system.processes().len()
+    } else {
+        snapshot.process_count
+    };
 
     if slow_refresh {
         // Disk usage
@@ -252,14 +266,18 @@ pub fn update_sensor_snapshot(
         // Top CPU process
         let mut top_cpu = 0.0f32;
         let mut top_name = String::new();
-        for (_pid, process) in system.processes() {
+        for process in system.processes().values() {
             let cpu = process.cpu_usage();
             if cpu > top_cpu {
                 top_cpu = cpu;
                 top_name = process.name().to_string();
             }
         }
-        snapshot.top_process_name = if top_name.is_empty() { "none".into() } else { top_name };
+        snapshot.top_process_name = if top_name.is_empty() {
+            "none".into()
+        } else {
+            top_name
+        };
         snapshot.top_process_cpu_percent = top_cpu as f64;
 
         // CPU temperature
@@ -291,7 +309,10 @@ pub fn update_sensor_snapshot(
     if let Some(ref manager) = battery_manager {
         if let Ok(mut batteries) = manager.batteries() {
             if let Some(Ok(bat)) = batteries.next() {
-                snapshot.battery_percent = (bat.state_of_charge().get::<starship_battery::units::ratio::percent>()) as f64;
+                snapshot.battery_percent = (bat
+                    .state_of_charge()
+                    .get::<starship_battery::units::ratio::percent>())
+                    as f64;
                 snapshot.battery_charging = matches!(
                     bat.state(),
                     starship_battery::State::Charging | starship_battery::State::Full
@@ -302,7 +323,7 @@ pub fn update_sensor_snapshot(
 
     // Environmental proxies grounded in real system state
     let hour = chrono::Local::now().hour() as f64;
-    snapshot.photons = if hour >= 6.0 && hour <= 18.0 {
+    snapshot.photons = if (6.0..=18.0).contains(&hour) {
         // Noon peak = 1.0, dawn/dusk = 0.0
         ((hour - 6.0) / 12.0 * std::f64::consts::PI).sin().max(0.0)
     } else {
@@ -375,11 +396,21 @@ pub fn run_sandboxed_tool(name: &str, code: &str, language: &str) -> Result<Stri
     let code = if language == "python" {
         let mut fixed = code.to_string();
         for name in [
-            "mean", "stdev", "pstdev", "variance", "pvariance",
-            "mode", "median", "harmonic_mean", "geometric_mean",
+            "mean",
+            "stdev",
+            "pstdev",
+            "variance",
+            "pvariance",
+            "mode",
+            "median",
+            "harmonic_mean",
+            "geometric_mean",
         ] {
             fixed = fixed.replace(&format!("math.{}(", name), &format!("statistics.{}(", name));
-            fixed = fixed.replace(&format!("from math import {}", name), &format!("from statistics import {}", name));
+            fixed = fixed.replace(
+                &format!("from math import {}", name),
+                &format!("from statistics import {}", name),
+            );
         }
         format!(
             "import json, math, random, statistics, datetime, itertools, collections, string, re\n{}\n",
@@ -501,25 +532,31 @@ Provide only the Python function `def skill(x): ...`",
         payload.description, payload.example_input, payload.example_output
     );
 
-    let raw_code = match state.ollama.generate(model, &prompt, Some("Return a valid Python 3 function named skill(x) only.")).await {
+    let raw_code = match state
+        .ollama
+        .generate(
+            model,
+            &prompt,
+            Some("Return a valid Python 3 function named skill(x) only."),
+        )
+        .await
+    {
         Ok(c) => c,
-        Err(e) => return (
-            StatusCode::BAD_REQUEST,
-            Json(SkillLearnResponse {
-                status: "error".to_string(),
-                skill_key: None,
-                code: None,
-                error: Some(format!("LLM generation failed: {}", e)),
-            }),
-        ),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SkillLearnResponse {
+                    status: "error".to_string(),
+                    skill_key: None,
+                    code: None,
+                    error: Some(format!("LLM generation failed: {}", e)),
+                }),
+            )
+        }
     };
 
     let code = strip_markdown_code(&raw_code);
-    let test_code = format!(
-        "{}\nprint(skill({:?}))",
-        code,
-        payload.example_input
-    );
+    let test_code = format!("{}\nprint(skill({:?}))", code, payload.example_input);
 
     match run_sandboxed_tool("skill_test", &test_code, "python") {
         Ok(output) => {
@@ -555,7 +592,10 @@ Provide only the Python function `def skill(x): ...`",
                         status: "error".to_string(),
                         skill_key: None,
                         code: Some(code),
-                        error: Some(format!("Output mismatch: got {:?}, expected {:?}", actual, expected)),
+                        error: Some(format!(
+                            "Output mismatch: got {:?}, expected {:?}",
+                            actual, expected
+                        )),
                     }),
                 )
             }
@@ -590,8 +630,13 @@ async fn run_skill_handler(
                         if let Some(s) = mind.skill_memory.skills.get_mut(&payload.skill_key) {
                             s.success_count += 1;
                         }
-                        let current = mind.skill_reliability.get(&payload.skill_key).copied().unwrap_or(0.5);
-                        mind.skill_reliability.insert(payload.skill_key.clone(), current * 0.7 + 0.3);
+                        let current = mind
+                            .skill_reliability
+                            .get(&payload.skill_key)
+                            .copied()
+                            .unwrap_or(0.5);
+                        mind.skill_reliability
+                            .insert(payload.skill_key.clone(), current * 0.7 + 0.3);
                     }
                     (
                         StatusCode::OK,
@@ -604,8 +649,13 @@ async fn run_skill_handler(
                 }
                 Err(e) => {
                     if let Ok(mut mind) = state.core_mind.lock() {
-                        let current = mind.skill_reliability.get(&payload.skill_key).copied().unwrap_or(0.5);
-                        mind.skill_reliability.insert(payload.skill_key.clone(), current * 0.7);
+                        let current = mind
+                            .skill_reliability
+                            .get(&payload.skill_key)
+                            .copied()
+                            .unwrap_or(0.5);
+                        mind.skill_reliability
+                            .insert(payload.skill_key.clone(), current * 0.7);
                     }
                     (
                         StatusCode::BAD_REQUEST,
@@ -713,18 +763,28 @@ Training output: {:?}",
             prompt.push_str("\n\nProvide only the Python function `def skill(x): ...`");
         }
 
-        let raw_code = match state.ollama.generate(model, &prompt, Some("Return a valid Python 3 function named skill(x) only.")).await {
+        let raw_code = match state
+            .ollama
+            .generate(
+                model,
+                &prompt,
+                Some("Return a valid Python 3 function named skill(x) only."),
+            )
+            .await
+        {
             Ok(c) => c,
-            Err(e) => return (
-                StatusCode::BAD_REQUEST,
-                Json(TransferEvaluateResponse {
-                    status: "error".to_string(),
-                    output: None,
-                    passed: None,
-                    code: None,
-                    error: Some(format!("LLM generation failed: {}", e)),
-                }),
-            ),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(TransferEvaluateResponse {
+                        status: "error".to_string(),
+                        output: None,
+                        passed: None,
+                        code: None,
+                        error: Some(format!("LLM generation failed: {}", e)),
+                    }),
+                )
+            }
         };
 
         let code = strip_markdown_code(&raw_code);
@@ -736,8 +796,13 @@ Training output: {:?}",
                 let expected = payload.train_output.trim();
                 if actual != expected {
                     previous_attempt = Some(code.clone());
-                    previous_error = Some(format!("Training example mismatch: got {:?}, expected {:?}", actual, expected));
-                    if attempt < 2 { continue; }
+                    previous_error = Some(format!(
+                        "Training example mismatch: got {:?}, expected {:?}",
+                        actual, expected
+                    ));
+                    if attempt < 2 {
+                        continue;
+                    }
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(TransferEvaluateResponse {
@@ -754,11 +819,18 @@ Training output: {:?}",
                 match run_sandboxed_tool("transfer_test", &test_code, "python") {
                     Ok(output) => {
                         let test_output = output.trim().to_string();
-                        let passed = payload.expected_test_output.as_ref().map(|expected| test_output == expected.trim());
+                        let passed = payload
+                            .expected_test_output
+                            .as_ref()
+                            .map(|expected| test_output == expected.trim());
                         if passed == Some(false) && attempt < 2 {
                             previous_attempt = Some(code.clone());
-                            previous_error = Some(format!("Test input {:?} produced {:?}, expected {:?}",
-                                payload.test_input, test_output, payload.expected_test_output.as_ref().unwrap()));
+                            previous_error = Some(format!(
+                                "Test input {:?} produced {:?}, expected {:?}",
+                                payload.test_input,
+                                test_output,
+                                payload.expected_test_output.as_ref().unwrap()
+                            ));
                             continue;
                         }
                         return (
@@ -775,7 +847,9 @@ Training output: {:?}",
                     Err(e) => {
                         previous_attempt = Some(code.clone());
                         previous_error = Some(format!("Test execution failed: {}", e));
-                        if attempt < 2 { continue; }
+                        if attempt < 2 {
+                            continue;
+                        }
                         return (
                             StatusCode::BAD_REQUEST,
                             Json(TransferEvaluateResponse {
@@ -792,7 +866,9 @@ Training output: {:?}",
             Err(e) => {
                 previous_attempt = Some(code.clone());
                 previous_error = Some(format!("Training execution failed: {}", e));
-                if attempt < 2 { continue; }
+                if attempt < 2 {
+                    continue;
+                }
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(TransferEvaluateResponse {
@@ -839,7 +915,9 @@ async fn identity_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-pub async fn start_telemetry_listener(port: u16) -> Result<TcpListener, Box<dyn std::error::Error>> {
+pub async fn start_telemetry_listener(
+    port: u16,
+) -> Result<TcpListener, Box<dyn std::error::Error>> {
     let fallback_base = port.saturating_add(1);
     for p in port..=port.saturating_add(15) {
         let addr = SocketAddr::from(([127, 0, 0, 1], p));
@@ -850,14 +928,22 @@ pub async fn start_telemetry_listener(port: u16) -> Result<TcpListener, Box<dyn 
                 } else if p == fallback_base {
                     println!("⚠️ [PORT COLLISION]: Port {} active. Diverting stream to http://{}/telemetry", port, addr);
                 } else {
-                    println!("⚠️ [PORT COLLISION]: Diverting stream to http://{}/telemetry", addr);
+                    println!(
+                        "⚠️ [PORT COLLISION]: Diverting stream to http://{}/telemetry",
+                        addr
+                    );
                 }
                 return Ok(listener);
             }
             Err(_) => continue,
         }
     }
-    Err(format!("All telemetry ports in range {}..{} are in use", port, port + 15).into())
+    Err(format!(
+        "All telemetry ports in range {}..{} are in use",
+        port,
+        port + 15
+    )
+    .into())
 }
 
 pub async fn run_telemetry_server(
@@ -869,7 +955,14 @@ pub async fn run_telemetry_server(
     strategy_library: Arc<StrategyLibrary>,
     port: u16,
 ) {
-    let state = AppState { telemetry, sensors, metrics, core_mind, ollama, strategy_library };
+    let state = AppState {
+        telemetry,
+        sensors,
+        metrics,
+        core_mind,
+        ollama,
+        strategy_library,
+    };
     let app = Router::new()
         .route("/telemetry", get(telemetry_handler))
         .route("/metrics", get(metrics_json_handler))
@@ -886,12 +979,18 @@ pub async fn run_telemetry_server(
     let listener = match start_telemetry_listener(port).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("⚠️ Telemetry server bind failed: {}. Continuing without HTTP telemetry.", e);
+            eprintln!(
+                "⚠️ Telemetry server bind failed: {}. Continuing without HTTP telemetry.",
+                e
+            );
             return;
         }
     };
 
     let chosen_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-    println!("   POST http://127.0.0.1:{}/tools/run  {{\"name\",\"code\",\"language\"}}", chosen_port);
+    println!(
+        "   POST http://127.0.0.1:{}/tools/run  {{\"name\",\"code\",\"language\"}}",
+        chosen_port
+    );
     axum::serve(listener, app).await.unwrap();
 }

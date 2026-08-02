@@ -1,7 +1,7 @@
 #![allow(dead_code, unused_variables)]
-use std::sync::Arc;
-use ndarray::Array1;
 use dashmap::DashMap;
+use ndarray::Array1;
+use std::sync::Arc;
 
 /// System Parameters for Optimal Cognitive Resonance
 pub const HYPER_DIMENSIONS: usize = 10_000;
@@ -30,12 +30,17 @@ impl GlobalWorkspace {
 
     /// Evaluates distributed incoming signals and broadcasts the highest priority state
     pub fn coordinate_attention_broadcast(&self, signals: DashMap<String, (String, f32)>) {
-        if let Some(winning_entry) = signals.iter()
-            .max_by(|a, b| a.value().1.partial_cmp(&b.value().1).unwrap_or(std::cmp::Ordering::Equal))
-        {
+        if let Some(winning_entry) = signals.iter().max_by(|a, b| {
+            a.value()
+                .1
+                .partial_cmp(&b.value().1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             let (payload, saliency) = winning_entry.value();
 
-            if *saliency < ATTENTION_THRESHOLD { return; }
+            if *saliency < ATTENTION_THRESHOLD {
+                return;
+            }
 
             for agent in self.sub_agent_channels.iter() {
                 let callback = Arc::clone(agent.value());
@@ -55,7 +60,11 @@ impl GlobalWorkspace {
         for (k, v) in modalities {
             scalar_modalities.insert(k, v);
         }
-        let node = EngramNode { id: id.clone(), space_vector: vector, scalar_modalities };
+        let node = EngramNode {
+            id: id.clone(),
+            space_vector: vector,
+            scalar_modalities,
+        };
         self.memory_graph.insert(id, node);
     }
 }
@@ -69,11 +78,14 @@ pub struct NeuroSymbolicEngine {
 
 impl NeuroSymbolicEngine {
     pub fn new() -> Self {
-        Self { rule_register: DashMap::new() }
+        Self {
+            rule_register: DashMap::new(),
+        }
     }
 
     pub fn add_rule(&self, premise: &str, conclusion: &str) {
-        self.rule_register.insert(premise.to_string(), conclusion.to_string());
+        self.rule_register
+            .insert(premise.to_string(), conclusion.to_string());
     }
 
     /// Processes high-dimensional matrix insights and subjects them to exact analytical verifications
@@ -83,7 +95,8 @@ impl NeuroSymbolicEngine {
         learning_rate_modifier: f32,
     ) -> Vec<String> {
         let mut proven_deductions = Vec::new();
-        let calibrated_learning_rate = COGNITIVE_VELOCITY * learning_rate_modifier * COGNITIVE_AROUSAL;
+        let calibrated_learning_rate =
+            COGNITIVE_VELOCITY * learning_rate_modifier * COGNITIVE_AROUSAL;
 
         for rule in self.rule_register.iter() {
             let premise = rule.key();
@@ -101,7 +114,7 @@ impl NeuroSymbolicEngine {
     }
 }
 
-pub const TARGET_STABILITY: f32 = 2.500000;
+pub const TARGET_STABILITY: f32 = 2.5;
 pub const MAXIMUM_META_RATE: f32 = 0.001000;
 
 pub struct HomeostaticController {
@@ -110,7 +123,9 @@ pub struct HomeostaticController {
 
 impl HomeostaticController {
     pub fn new() -> Self {
-        Self { active_learning_rate: 0.000500 }
+        Self {
+            active_learning_rate: 0.000500,
+        }
     }
 
     /// Minimizes prediction errors by adjusting system learning rates based on internal entropy metrics

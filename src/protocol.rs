@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
-use hmac::{Hmac, Mac, KeyInit};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use base64::{Engine, engine::general_purpose::STANDARD};
 use sysinfo::System;
 
 /// Compact engram payload for UDP exchange: excludes the large 2048-D embedding,

@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use std::fs;
 use rand::seq::SliceRandom;
+use std::fs;
+use std::path::PathBuf;
 
 /// A simple local-text curriculum feeder.
 ///
@@ -40,7 +40,19 @@ impl DataCurriculum {
                         .and_then(|e| e.to_str())
                         .map(|e| {
                             let e = e.to_lowercase();
-                            matches!(e.as_str(), "txt" | "md" | "rs" | "py" | "json" | "toml" | "csv" | "log" | "html" | "xml")
+                            matches!(
+                                e.as_str(),
+                                "txt"
+                                    | "md"
+                                    | "rs"
+                                    | "py"
+                                    | "json"
+                                    | "toml"
+                                    | "csv"
+                                    | "log"
+                                    | "html"
+                                    | "xml"
+                            )
                         })
                         .unwrap_or(false);
                     if !is_text {
@@ -55,14 +67,15 @@ impl DataCurriculum {
         }
         if self.corpus.is_empty() {
             self.corpus.push(
-                "The firefly soul observes the world through sensors and learns from every cycle.".to_string(),
+                "The firefly soul observes the world through sensors and learns from every cycle."
+                    .to_string(),
             );
         }
     }
 
     fn split_snippets(text: &str) -> Vec<String> {
         let mut snippets = Vec::new();
-        for raw in text.split(|c: char| c == '.' || c == '?' || c == '!' || c == '\n') {
+        for raw in text.split(['.', '?', '!', '\n']) {
             let s = raw.trim().replace(|c: char| c.is_control(), " ");
             if s.len() > 20 && s.len() < 1200 {
                 snippets.push(s);
@@ -108,7 +121,11 @@ pub fn default_curriculum_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
         dirs.push(PathBuf::from(&home).join("firefly-agi").join("curriculum"));
-        dirs.push(PathBuf::from(&home).join("Documents").join("firefly-curriculum"));
+        dirs.push(
+            PathBuf::from(&home)
+                .join("Documents")
+                .join("firefly-curriculum"),
+        );
     }
     dirs.push(PathBuf::from("curriculum"));
     dirs

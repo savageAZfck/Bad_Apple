@@ -1,17 +1,20 @@
+use candle_core::{DType, Device, Result, Tensor, D};
+use candle_nn::{
+    layer_norm, linear, loss as nn_loss, ops as nn_ops, AdamW, LayerNorm, Linear, Module,
+    Optimizer, VarBuilder, VarMap,
+};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::fmt;
 use std::path::Path;
 use std::sync::OnceLock;
-use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::{linear, layer_norm, ops as nn_ops, loss as nn_loss, AdamW, Linear, LayerNorm, Module, Optimizer, VarBuilder, VarMap};
-use rand::{Rng, SeedableRng};
-use rand::rngs::StdRng;
-use tokenizers::{AddedToken, Tokenizer};
 use tokenizers::decoders::DecoderWrapper;
-use tokenizers::models::bpe::{BPE, BpeTrainerBuilder};
+use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::normalizers::NormalizerWrapper;
 use tokenizers::pre_tokenizers::{whitespace::WhitespaceSplit, PreTokenizerWrapper};
 use tokenizers::processors::PostProcessorWrapper;
 use tokenizers::tokenizer::TokenizerImpl;
+use tokenizers::{AddedToken, Tokenizer};
 
 /// Dimensionality of the Transformer hidden / brain state.
 pub const BRAIN_DIM: usize = 256;
@@ -93,13 +96,22 @@ impl TransformerBlock {
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
 
-        let q = q.reshape((1, _s, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
-        let k = k.reshape((1, _s, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
-        let v = v.reshape((1, _s, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+        let q = q
+            .reshape((1, _s, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let k = k
+            .reshape((1, _s, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let v = v
+            .reshape((1, _s, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
 
         let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
         let scale = (self.head_dim as f32).sqrt();
-        let scale_t = Tensor::new(&[scale], &q.device())?.reshape((1, 1, 1, 1))?;
+        let scale_t = Tensor::new(&[scale], q.device())?.reshape((1, 1, 1, 1))?;
         let scores = q.matmul(&k_t)?.broadcast_div(&scale_t)?;
         let attn = nn_ops::softmax(&scores, D::Minus1)?;
         let out = attn.matmul(&v)?;
@@ -257,9 +269,20 @@ impl CandleBrain {
     /// Run a full forward pass and return the top class with its probability.
     pub fn classify_top(&self, input: &[f64]) -> Result<(usize, f64)> {
         let logits = self.classify(input)?;
-        let logits_t = Tensor::new(logits.iter().map(|v| *v as f32).collect::<Vec<_>>().as_slice(), &self.device)?;
+        let logits_t = Tensor::new(
+            logits
+                .iter()
+                .map(|v| *v as f32)
+                .collect::<Vec<_>>()
+                .as_slice(),
+            &self.device,
+        )?;
         let probs = nn_ops::softmax(&logits_t, D::Minus1)?.to_vec1::<f32>()?;
-        let (idx, &p) = probs.iter().enumerate().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap();
+        let (idx, &p) = probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap();
         Ok((idx, p as f64))
     }
 
@@ -298,7 +321,11 @@ impl CandleBrain {
         let logits_vec = logits.to_vec1::<f32>()?;
         let logits_t = Tensor::new(logits_vec.as_slice(), &self.device)?;
         let probs = nn_ops::softmax(&logits_t, D::Minus1)?.to_vec1::<f32>()?;
-        let (idx, &p) = probs.iter().enumerate().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).unwrap();
+        let (idx, &p) = probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap();
         Ok((idx, p as f64))
     }
 
@@ -368,7 +395,11 @@ impl BpeTokenizer {
     fn load_or_train<P: AsRef<Path>>(path: P) -> Self {
         match Tokenizer::from_file(&path) {
             Ok(tokenizer) => return Self::from_tokenizer(tokenizer),
-            Err(e) => eprintln!("⚠️ Could not load {:?}: {}. Training a fresh BPE tokenizer from curriculum...", path.as_ref(), e),
+            Err(e) => eprintln!(
+                "⚠️ Could not load {:?}: {}. Training a fresh BPE tokenizer from curriculum...",
+                path.as_ref(),
+                e
+            ),
         }
 
         let mut trainer = BpeTrainerBuilder::new()
@@ -384,8 +415,13 @@ impl BpeTokenizer {
             ])
             .build();
 
-        let mut tokenizer: TokenizerImpl<BPE, NormalizerWrapper, PreTokenizerWrapper, PostProcessorWrapper, DecoderWrapper> =
-            TokenizerImpl::new(BPE::default());
+        let mut tokenizer: TokenizerImpl<
+            BPE,
+            NormalizerWrapper,
+            PreTokenizerWrapper,
+            PostProcessorWrapper,
+            DecoderWrapper,
+        > = TokenizerImpl::new(BPE::default());
         tokenizer.with_pre_tokenizer(WhitespaceSplit);
 
         let files = vec!["curriculum/curriculum.txt".to_string()];
@@ -404,7 +440,10 @@ impl BpeTokenizer {
     fn from_tokenizer(tokenizer: Tokenizer) -> Self {
         let vocab_size = tokenizer.get_vocab_size(true);
         let embeddings = Self::build_embeddings(vocab_size);
-        Self { tokenizer, embeddings }
+        Self {
+            tokenizer,
+            embeddings,
+        }
     }
 
     fn build_embeddings(vocab_size: usize) -> Vec<Vec<f64>> {
@@ -424,12 +463,13 @@ impl BpeTokenizer {
         const SEQ_LEN: usize = 32;
         const TOKEN_DIM: usize = 64;
 
-        let encoding = self.tokenizer.encode(text, false)
-            .unwrap_or_else(|e| {
-                eprintln!("⚠️ BPE encode failed ({}); using empty encoding.", e);
-                // Return a zero-length encoding from an empty string.
-                self.tokenizer.encode("", false).expect("tokenizer must encode empty string")
-            });
+        let encoding = self.tokenizer.encode(text, false).unwrap_or_else(|e| {
+            eprintln!("⚠️ BPE encode failed ({}); using empty encoding.", e);
+            // Return a zero-length encoding from an empty string.
+            self.tokenizer
+                .encode("", false)
+                .expect("tokenizer must encode empty string")
+        });
 
         let ids = encoding.get_ids();
         let mut vec = vec![0.0; SEQ_LEN * TOKEN_DIM];
@@ -444,14 +484,16 @@ impl BpeTokenizer {
 
         // Blend the 4-D physical/sensory anchors into the first channel of
         // rows 0, 8, 16, and 24 (indices 0, 512, 1024, 1536).
-        for i in 0..4 {
+        for (i, &axis) in spatial_axes.iter().enumerate().take(4) {
             let slot = i * 8 * TOKEN_DIM;
-            vec[slot] += spatial_axes[i] * 5.0;
+            vec[slot] += axis * 5.0;
         }
 
         let magnitude: f64 = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
         if magnitude > 0.0 {
-            for v in vec.iter_mut() { *v /= magnitude; }
+            for v in vec.iter_mut() {
+                *v /= magnitude;
+            }
         }
 
         vec

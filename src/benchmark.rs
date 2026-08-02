@@ -85,7 +85,7 @@ impl BenchmarkSuite {
 
     /// Check whether the produced output matches the expected answer.
     pub fn validate(&self, expected: &str, output: &str, tolerance: Option<f64>) -> bool {
-        let tokens: Vec<&str> = output.trim().split_whitespace().collect();
+        let tokens: Vec<&str> = output.split_whitespace().collect();
         let expected = expected.trim();
 
         if let (Ok(b), Some(tol)) = (expected.parse::<f64>(), tolerance) {

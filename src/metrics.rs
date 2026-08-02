@@ -1,8 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use serde::{Deserialize, Serialize};
 
 /// A single training / runtime metric snapshot.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -71,7 +71,11 @@ impl MetricsLogger {
                         .and_then(|l| serde_json::from_str::<MetricsEntry>(&l).ok())
                 })
                 .collect();
-            entries.sort_by(|a, b| b.cycle.cmp(&a.cycle).then_with(|| b.timestamp.cmp(&a.timestamp)));
+            entries.sort_by(|a, b| {
+                b.cycle
+                    .cmp(&a.cycle)
+                    .then_with(|| b.timestamp.cmp(&a.timestamp))
+            });
             entries.into_iter().take(n).collect()
         } else {
             Vec::new()
@@ -97,10 +101,18 @@ impl MetricsLogger {
             avg_language_loss: avg(|e| e.language_loss),
             last_language_loss: entries[0].language_loss,
             avg_goal_loss: entries.iter().filter_map(|e| e.goal_loss).sum::<f64>()
-                / entries.iter().filter(|e| e.goal_loss.is_some()).count().max(1) as f64,
+                / entries
+                    .iter()
+                    .filter(|e| e.goal_loss.is_some())
+                    .count()
+                    .max(1) as f64,
             avg_learning_rate: avg(|e| e.learning_rate),
             avg_critic_score: avg(|e| e.critic_score),
-            local_agreement_rate: entries.iter().filter(|e| e.local_conscience_agreement).count() as f64 / count,
+            local_agreement_rate: entries
+                .iter()
+                .filter(|e| e.local_conscience_agreement)
+                .count() as f64
+                / count,
         }
     }
 
@@ -114,7 +126,9 @@ impl MetricsLogger {
             let values: Vec<f64> = data.iter().map(f).collect();
             let (min, max) = values
                 .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(*v), hi.max(*v))
+                });
             let range = (max - min).max(1e-6);
             let w = 800.0 / (values.len().max(1) as f64);
             let points: Vec<String> = values

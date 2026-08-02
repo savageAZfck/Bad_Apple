@@ -29,3 +29,6 @@ sapient_agi_soul_5001.*
 
 # Manual state backups
 /state-backup-*/
+
+# Wild workspace runtime data
+/wild_workspace

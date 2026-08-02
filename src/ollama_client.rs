@@ -1,4 +1,3 @@
-use reqwest;
 use serde::Serialize;
 use serde_json::json;
 
@@ -27,7 +26,12 @@ impl OllamaClient {
 
     pub async fn list_models(&self) -> Result<Vec<String>, String> {
         let url = format!("{}/api/tags", self.base_url);
-        let response = self.client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         if !response.status().is_success() {
             return Err(format!("Ollama list models failed: {}", response.status()));
         }
@@ -37,14 +41,25 @@ impl OllamaClient {
             .and_then(|m| m.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                    .filter_map(|m| {
+                        m.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect()
             })
             .unwrap_or_default();
         Ok(models)
     }
 
-    pub async fn generate_constrained(&self, model: &str, prompt: &str, system: Option<&str>, max_tokens: i32, temperature: f32) -> Result<String, String> {
+    pub async fn generate_constrained(
+        &self,
+        model: &str,
+        prompt: &str,
+        system: Option<&str>,
+        max_tokens: i32,
+        temperature: f32,
+    ) -> Result<String, String> {
         let url = format!("{}/api/generate", self.base_url);
         let mut body = json!({
             "model": model,
@@ -59,14 +74,18 @@ impl OllamaClient {
         if let Some(sys) = system {
             body["system"] = json!(sys);
         }
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&body)
             .send()
             .await
             .map_err(|e| format!("Ollama constrained generate request failed: {}", e))?;
         if !response.status().is_success() {
-            return Err(format!("Ollama constrained generate returned {}", response.status()));
+            return Err(format!(
+                "Ollama constrained generate returned {}",
+                response.status()
+            ));
         }
         let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
         data.get("response")
@@ -75,7 +94,12 @@ impl OllamaClient {
             .ok_or_else(|| "Ollama response missing 'response' field".to_string())
     }
 
-    pub async fn generate(&self, model: &str, prompt: &str, system: Option<&str>) -> Result<String, String> {
+    pub async fn generate(
+        &self,
+        model: &str,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> Result<String, String> {
         let url = format!("{}/api/generate", self.base_url);
         let mut body = json!({
             "model": model,
@@ -90,7 +114,8 @@ impl OllamaClient {
         if let Some(sys) = system {
             body["system"] = json!(sys);
         }
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&body)
             .send()
@@ -106,7 +131,12 @@ impl OllamaClient {
             .ok_or_else(|| "Ollama response missing 'response' field".to_string())
     }
 
-    pub async fn generate_structured(&self, model: &str, prompt: &str, system: Option<&str>) -> Result<serde_json::Value, String> {
+    pub async fn generate_structured(
+        &self,
+        model: &str,
+        prompt: &str,
+        system: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         let url = format!("{}/api/generate", self.base_url);
         let json_system = "You must output only valid JSON. Do not add markdown, explanations, or any text outside the JSON object.";
         let mut body = json!({
@@ -124,21 +154,31 @@ impl OllamaClient {
         if let Some(sys) = system {
             body["system"] = json!(format!("{} {}", json_system, sys));
         }
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&body)
             .send()
             .await
             .map_err(|e| format!("Ollama structured generate request failed: {}", e))?;
         if !response.status().is_success() {
-            return Err(format!("Ollama structured generate returned {}", response.status()));
+            return Err(format!(
+                "Ollama structured generate returned {}",
+                response.status()
+            ));
         }
         let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-        let text = data.get("response")
+        let text = data
+            .get("response")
             .and_then(|r| r.as_str())
             .map(|s| s.trim().to_string())
             .ok_or_else(|| "Ollama response missing 'response' field".to_string())?;
-        serde_json::from_str(&text).map_err(|e| format!("Failed to parse Ollama output as JSON: {}\nRaw: {}", e, text))
+        serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "Failed to parse Ollama output as JSON: {}\nRaw: {}",
+                e, text
+            )
+        })
     }
 
     pub async fn is_available(&self) -> bool {
