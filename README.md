@@ -81,6 +81,16 @@ The system starts training immediately, opens the telemetry server, and watches 
 - **Thread safety**: all Sled I/O and file watcher events are offloaded with `spawn_blocking`.
 - **State survives restarts**: memory graph, identity journal, learned skills, and Transformer weights are persisted on background threads.
 
+## Honest caveats
+
+This is a research runtime and a scaffold, not a finished product.
+
+- It is **not enterprise-grade line-rate infrastructure**.
+- It is **not a real AGI** or a sentient system.
+- The HDC-based code synthesizer is a **pattern-matching template engine**, not a full compiler from hypervectors.
+- The multi-agent UDP fabric uses `tokio::sync::mpsc` batching, not true lock-free ring buffers.
+- Latency, throughput, and thermodynamic numbers are approximations or derived from telemetry, not lab-benchmarked.
+
 ---
 
 ## License

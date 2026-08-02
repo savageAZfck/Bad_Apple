@@ -367,7 +367,7 @@ async fn main() {
             .to_string(),
         );
 
-        // Template 6: zero-allocation-style JSON streaming over a local file.
+        // Template 6: streaming JSON parsing over a local string.
         let k6 = "json_stream_template".to_string();
         template_memory.allocate(&k6);
         templates.insert(
