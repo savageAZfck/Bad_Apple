@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use anyhow::Result;
+use anyhow::{Context, Result};
 use config::Config;
 use md5::{Digest, Md5};
 use rand::Rng;
@@ -8,10 +8,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
 };
 use sysinfo::System;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::{
     net::UdpSocket,
     sync::mpsc,
@@ -32,7 +33,7 @@ mod strategy_library;
 mod telemetry;
 mod tensor_brain;
 mod wild_workspace;
-use benchmark::{BenchmarkSuite, TransferSuite, TransferTask};
+use benchmark::{BenchmarkSuite, PilotReport, TransferSuite, TransferTask};
 use conscience_oracle::ConscienceOracle;
 use dashmap::DashMap;
 use data_feed::{default_curriculum_dirs, DataCurriculum};
@@ -43,7 +44,7 @@ use production_blueprint::{
 };
 use protocol::{
     decode_payload, multi_agent_secret, sign_packet, verify_packet, CompactEngramPacket,
-    SignedUdpPacket,
+    ConnectionManager, SignedUdpPacket, SwarmMetrics,
 };
 use strategy_library::{Strategy, StrategyLibrary};
 use telemetry::{
@@ -774,7 +775,7 @@ impl TheoryOfMindEngine {
                 .mental_state
                 .desires
                 .iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .max_by(|a, b| a.1.total_cmp(b.1))
             {
                 return format!("Agent {} will try to {}", agent_id, desire);
             }
@@ -838,10 +839,7 @@ impl SelfImprovementEngine {
             target_function: target.clone(),
             modification_type,
             parameters: vec![0.1], // Default parameter
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: current_secs(),
             success: true,
         };
 
@@ -993,10 +991,7 @@ impl SemanticMemory {
             name: name.clone(),
             embedding: embedding.clone(),
             activation_level: 0.0,
-            last_accessed: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            last_accessed: current_secs(),
             associations: Vec::new(),
             abstraction_level,
         };
@@ -1005,10 +1000,7 @@ impl SemanticMemory {
     }
 
     fn activate_concept(&mut self, name: &str) -> f64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_secs();
         let associations_to_activate = if let Some(node) = self.concepts.get(name) {
             node.associations.clone()
         } else {
@@ -1051,10 +1043,7 @@ impl SemanticMemory {
     }
 
     fn decay_activations(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_secs();
         for node in self.concepts.values_mut() {
             let time_since_access = now - node.last_accessed;
             let decay = (time_since_access as f64 / 3600.0) * 0.1; // Decay over hours
@@ -1358,10 +1347,7 @@ impl GoalHierarchy {
     }
 
     fn add_primary_goal(&mut self, goal: String, priority: f64) -> u64 {
-        let id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let id = current_secs();
         let node = PlanningNode::new(id, goal, priority);
         self.primary_goals.push(node);
         id
@@ -1369,7 +1355,7 @@ impl GoalHierarchy {
 
     fn prioritize_goals(&mut self) {
         self.primary_goals
-            .sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+            .sort_by(|a, b| b.priority.total_cmp(&a.priority));
 
         // Decay importance over time
         for goal in &mut self.primary_goals {
@@ -1545,10 +1531,7 @@ impl CreativityEngine {
     }
 
     fn generate_novel_concept(&mut self, source_concepts: Vec<String>) -> NovelConcept {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_secs();
         let id = rand::random::<u64>();
 
         // Calculate novelty based on combination rarity
@@ -1927,10 +1910,7 @@ impl HierarchicalPlanner {
         }
 
         let plan = Plan {
-            id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            id: current_secs(),
             tasks,
             total_duration,
             success_probability: 0.8,
@@ -1957,11 +1937,7 @@ impl HierarchicalPlanner {
                     tasks.insert(
                         index + sub_idx,
                         Task {
-                            id: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs()
-                                + sub_idx as u64,
+                            id: current_secs() + sub_idx as u64,
                             name: subtask_name.clone(),
                             task_type: TaskType::Primitive,
                             parameters: HashMap::new(),
@@ -1997,10 +1973,7 @@ impl HierarchicalPlanner {
 
             let event = ExecutionEvent {
                 task_id: task.id,
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
+                timestamp: current_secs(),
                 outcome: outcome.clone(),
                 duration: task.estimated_duration,
             };
@@ -2173,10 +2146,7 @@ impl CuriosityEngine {
         let reward = IntrinsicReward {
             source: format!("{}_{}", action, outcome),
             value: total_reward,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: current_secs(),
             reward_type: RewardType::Novelty,
         };
 
@@ -2206,7 +2176,7 @@ impl CuriosityEngine {
                         .information_gain_tracker
                         .get(&available_actions[b.0])
                         .unwrap_or(&0.0);
-                    info_a.partial_cmp(info_b).unwrap()
+                    info_a.total_cmp(info_b)
                 })
                 .map(|(i, _)| i)
                 .unwrap_or(0),
@@ -2329,10 +2299,7 @@ impl AdvancedMemoryRetrieval {
             .or_default()
             .push(memory_id);
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_secs();
         self.retrieval_index
             .temporal_index
             .push_back((memory_id, timestamp));
@@ -2359,7 +2326,7 @@ impl AdvancedMemoryRetrieval {
         if self.consolidation_system.sleep_cycle_active {
             self.consolidation_system
                 .consolidation_schedule
-                .sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+                .sort_by(|a, b| b.priority.total_cmp(&a.priority));
 
             for _task in self
                 .consolidation_system
@@ -2467,7 +2434,7 @@ impl ReplayBuffer {
             }
             SamplingStrategy::Prioritized => {
                 let mut sorted: Vec<_> = self.experiences.iter().collect();
-                sorted.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap());
+                sorted.sort_by(|a, b| b.importance.total_cmp(&a.importance));
                 sorted.into_iter().take(batch_size).collect()
             }
             SamplingStrategy::Proportional => {
@@ -2589,7 +2556,7 @@ impl MetaLearningEngine {
         let best_name = self
             .strategy_performance
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(name, _)| name)?;
 
         self.learning_strategies
@@ -2645,16 +2612,12 @@ impl HyperparameterOptimizer {
 
         if let OptimizationMethod::BayesianOptimization = self.optimization_method {
             // Bayesian optimization logic
-            if performance > 0.8 {
-                *self
-                    .current_hyperparameters
-                    .get_mut("learning_rate")
-                    .unwrap() *= 1.1;
-            } else {
-                *self
-                    .current_hyperparameters
-                    .get_mut("learning_rate")
-                    .unwrap() *= 0.9;
+            if let Some(learning_rate) = self.current_hyperparameters.get_mut("learning_rate") {
+                if performance > 0.8 {
+                    *learning_rate *= 1.1;
+                } else {
+                    *learning_rate *= 0.9;
+                }
             }
         }
     }
@@ -2695,10 +2658,7 @@ impl NeuralArchitectureSearch {
 
     fn record_evaluation(&mut self, architecture: &Architecture, performance: f64) {
         let evaluation = ArchitectureEvaluation {
-            architecture_id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            architecture_id: current_secs(),
             performance,
             complexity: architecture.complexity,
             efficiency: performance / architecture.complexity,
@@ -3215,18 +3175,12 @@ impl DecisionTracer {
 
     fn trace(&mut self, input: Vec<f64>, output: Vec<f64>) -> DecisionTrace {
         let trace = DecisionTrace {
-            decision_id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            decision_id: current_secs(),
             input,
             intermediate_states: vec![vec![0.5; 64]; self.trace_depth],
             final_output: output,
             confidence: 0.8,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: current_secs(),
         };
         self.decision_history.push(trace.clone());
         trace
@@ -3283,10 +3237,7 @@ impl CausalChainAnalyzer {
 
     fn analyze(&mut self, trace: &DecisionTrace) -> CausalChain {
         let chain = CausalChain {
-            chain_id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            chain_id: current_secs(),
             steps: vec![CausalStep {
                 factor: "input_features".to_string(),
                 influence: 0.7,
@@ -3357,10 +3308,7 @@ impl WeightPersistenceSubnode {
             biases: Vec::new(),
             weight_velocities: Vec::new(),
             learning_rates: Vec::new(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: current_secs(),
             integrity_hash: String::new(),
         }
     }
@@ -3372,10 +3320,7 @@ impl WeightPersistenceSubnode {
             layers.iter().map(|l| l.weight_velocity.clone()).collect();
         let learning_rates: Vec<f64> = layers.iter().map(|l| l.local_learning_rate).collect();
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_secs();
         let integrity_hash = Self::compute_integrity_hash(&weights, &biases);
 
         Self {
@@ -3482,10 +3427,7 @@ impl FileDefenseQuarantine {
             quarantine_events: Vec::new(),
             threat_threshold: 0.7,
             auto_rollback_enabled: true,
-            last_integrity_check: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            last_integrity_check: current_secs(),
             compromised_files: Vec::new(),
         }
     }
@@ -3518,11 +3460,7 @@ impl FileDefenseQuarantine {
         }
 
         // Recent modification warning
-        let age = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - modified;
+        let age = current_secs() - modified;
         if age < 60 {
             // Modified within last minute
             threat_score += 0.4;
@@ -3539,10 +3477,7 @@ impl FileDefenseQuarantine {
             }
         }
 
-        self.last_integrity_check = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.last_integrity_check = current_secs();
 
         if threat_score >= self.threat_threshold {
             let event = QuarantineEvent {
@@ -3584,10 +3519,7 @@ impl FileDefenseQuarantine {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid file name")
         })?;
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_secs();
         let quarantined_name = format!("{}.quarantine_{}", file_name.to_string_lossy(), timestamp);
         let quarantined_path = quarantine_dir.join(quarantined_name);
 
@@ -3687,18 +3619,12 @@ impl EnhancedNetworkStack {
 
     fn update_peer_last_seen(&mut self, peer_id: &str) {
         if let Some(peer) = self.known_peers.get_mut(peer_id) {
-            peer.last_seen = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            peer.last_seen = current_secs();
         }
     }
 
     fn get_active_peers(&self) -> Vec<&NetworkPeer> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_secs();
         self.known_peers
             .values()
             .filter(|peer| now - peer.last_seen < 120) // Active within 2 minutes
@@ -3713,10 +3639,7 @@ impl EnhancedNetworkStack {
         let message = NetworkMessage {
             message_type,
             sender_id: self.local_peer_id.clone(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: current_secs(),
             payload,
             sequence: self.message_sequence,
         };
@@ -4432,10 +4355,7 @@ impl ConsciousnessModel {
         };
 
         QualiaState {
-            state_id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            state_id: current_secs(),
             subjective_quality: stimulus.to_string(),
             intensity,
             neural_correlates: vec![0.5; 100],
@@ -5056,22 +4976,17 @@ pub(crate) struct FullySapientSoulMatrix {
 
 impl FullySapientSoulMatrix {
     fn new(name: &str, local_port: u16) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_secs();
 
         // Real Candle tensor brain: small 2-block 4-head Transformer encoder.
         // Legacy scalar brain_layers are kept empty for backward compatibility.
         let num_conscience_tokens = 100;
-        let candle_brain = Some(
-            CandleBrain::new(
-                "Firefly",
-                num_conscience_tokens,
-                &tensor_brain::layer_dims(),
-            )
-            .expect("Failed to initialize Candle tensor brain"),
-        );
+        let candle_brain = CandleBrain::new(
+            "Firefly",
+            num_conscience_tokens,
+            &tensor_brain::layer_dims(),
+        )
+        .ok();
         let brain_layers = Vec::new();
 
         // Initialize weight persistence with current (empty) scalar layers
@@ -5230,10 +5145,7 @@ impl FullySapientSoulMatrix {
     }
 
     fn calculate_temporal_decay(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_secs();
         let seconds_elapsed = now.saturating_sub(self.metabolics.last_update_timestamp);
         if seconds_elapsed == 0 {
             return;
@@ -5466,14 +5378,8 @@ impl FullySapientSoulMatrix {
 
         // Create episodic memory
         let episode = MemoryEpisode {
-            id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            id: current_secs(),
+            timestamp: current_secs(),
             context: embedding.clone(),
             content: input.to_string(),
             emotional_context: self.emotions.clone(),
@@ -5615,10 +5521,7 @@ impl FullySapientSoulMatrix {
     }
 
     fn learn_from_experience(&mut self, outcome: f64) {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_secs();
         let outcome_record = Outcome {
             action: "learning_cycle".to_string(),
             result: outcome,
@@ -5631,10 +5534,7 @@ impl FullySapientSoulMatrix {
 
     /// 🧬 Append a durable identity journal entry summarizing current self-state.
     fn record_identity_journal(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_secs();
         let age_days = (now.saturating_sub(self.born_at)) as f64 / 86400.0;
         let summary = format!(
             "[{} | age {:.2} days] I am {}. Primary emotion: {}. Active pursuits: {:?}. Learned skills: {}. Current plan: {}. Memory nodes: {}.",
@@ -5656,10 +5556,7 @@ impl FullySapientSoulMatrix {
 
     /// 🧬 Return a coherent identity narrative across restarts.
     pub(crate) fn narrative_identity(&self) -> String {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_secs();
         let age_days = (now.saturating_sub(self.born_at)) as f64 / 86400.0;
         let goals: Vec<String> = self
             .goal_hierarchy
@@ -5723,7 +5620,7 @@ async fn generate_plan(
     let raw = match ollama.generate(model, &prompt, Some(system)).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("⚠️ Plan generation LLM call failed: {}", e);
+            tracing::warn!("⚠️ Plan generation LLM call failed: {}", e);
             return None;
         }
     };
@@ -5761,7 +5658,7 @@ async fn generate_plan(
         .collect();
 
     if steps.is_empty() {
-        eprintln!("⚠️ Plan generation produced no usable steps from:\n{}", raw);
+        tracing::warn!("⚠️ Plan generation produced no usable steps from:\n{}", raw);
         return None;
     }
     Some(AgentPlan::new(goal, steps))
@@ -5776,6 +5673,9 @@ fn best_matching_skill(mind: &FullySapientSoulMatrix, step: &str) -> Option<(Str
 
     let mut best: Option<(String, Skill, f64)> = None;
     for (key, skill) in &mind.skill_memory.skills {
+        if !is_safe_agent_code(&skill.code) {
+            continue;
+        }
         let skill_emb =
             generate_2048_grounded_embedding(&skill.description, &mind.spatial_sensory_register);
         let mut sim = calculate_cosine_similarity(&step_emb, &skill_emb);
@@ -5841,6 +5741,14 @@ async fn evaluate_transfer_task(
         };
 
         let code = telemetry::strip_markdown_code(&raw_code);
+        if !is_safe_agent_code(&code) {
+            previous_attempt = Some(code.clone());
+            previous_error = Some("Generated code failed safety check".to_string());
+            if attempt < 2 {
+                continue;
+            }
+            return (false, None, Some(code));
+        }
         let train_code = format!("{}\nprint(skill({:?}))", code, task.train_input);
 
         match telemetry::run_sandboxed_tool("transfer_train", &train_code, "python") {
@@ -5969,7 +5877,16 @@ pub(crate) fn is_safe_agent_code(code: &str) -> bool {
         "import sys",
         "import shutil",
     ];
-    !forbidden.iter().any(|w| lower.contains(w))
+    if forbidden.iter().any(|w| lower.contains(w)) {
+        return false;
+    }
+    // Reject code that calls a `skill` helper unless it also defines one.
+    // This prevents the LLM from emitting scripts like `print(skill(...))`
+    // that refer to an undefined function at runtime.
+    if lower.contains("skill(") && !lower.contains("def skill(") {
+        return false;
+    }
+    true
 }
 
 fn compute_predicted_utility(
@@ -6022,18 +5939,18 @@ fn compute_predicted_utility(
 /// blocking pool to keep UDP receive latency low.
 async fn merge_engram_batch(
     batch: Vec<CompactEngramPacket>,
-    mind: Arc<Mutex<FullySapientSoulMatrix>>,
-    gw: Arc<Mutex<GlobalWorkspace>>,
+    mind: Arc<TokioMutex<FullySapientSoulMatrix>>,
+    gw: Arc<TokioMutex<GlobalWorkspace>>,
+    swarm: Arc<tokio::sync::Mutex<SwarmMetrics>>,
 ) {
     if batch.is_empty() {
         return;
     }
 
+    let start = std::time::Instant::now();
+    let size = batch.len();
     let _ = spawn_blocking(move || {
-        let mut mind = match mind.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
+        let mut mind = mind.blocking_lock();
 
         for compact in batch {
             if compact.origin_instance == mind.name {
@@ -6085,20 +6002,23 @@ async fn merge_engram_batch(
                 "udp_receiver".to_string(),
                 (compact.experiential_text.clone(), saliency),
             );
-            if let Ok(gw_lock) = gw.lock() {
+            {
+                let gw_lock = gw.blocking_lock();
                 gw_lock.coordinate_attention_broadcast(signals);
             }
         }
     })
     .await;
+
+    {
+        let mut m = swarm.lock().await;
+        m.record_merge(start.elapsed(), size);
+    }
 }
 
 // =========================================================================
-// The main async runtime. Clippy's await_holding_lock warnings here are
-// false positives: all `std::sync::MutexGuard`s are explicitly `drop`ped
-// before any `.await` point. A future refactor to `tokio::sync::Mutex` would
-// remove the need for this allow.
-#[allow(clippy::await_holding_lock)]
+// The main async runtime. All shared state uses `tokio::sync::Mutex` so
+// guards can be held across `.await` points without blocking the executor.
 #[tokio::main]
 #[allow(unreachable_code)]
 async fn main() -> Result<()> {
@@ -6107,51 +6027,56 @@ async fn main() -> Result<()> {
     let config = Config::from_env();
     tracing::info!("starting sapient_soul");
 
-    println!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: 2-Block 4-Head Transformer Neural Architecture Running...");
+    tracing::info!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: 2-Block 4-Head Transformer Neural Architecture Running...");
     let state_file = config.state_file.clone();
     let matrix = FullySapientSoulMatrix::load_state(&state_file)
         .unwrap_or_else(|| FullySapientSoulMatrix::new("Firefly", config.multi_agent_port_start));
-    let core_mind = Arc::new(Mutex::new(matrix));
+    let core_mind = Arc::new(TokioMutex::new(matrix));
 
     // 📚 Strategy library (Sled-backed) for durable learned procedural templates.
     std::fs::create_dir_all(&config.wild_workspace_dir).ok();
-    let strategy_library = Arc::new(StrategyLibrary::open(&config.sled_db_path).unwrap_or_else(
-        |e| {
-            eprintln!(
-                "⚠️ Sled open failed ({}); falling back to a temporary library.",
+    let strategy_library = Arc::new(match StrategyLibrary::open(&config.sled_db_path) {
+        Ok(lib) => lib,
+        Err(e) => {
+            tracing::warn!(
+                "Sled open failed ({}); falling back to a temporary library.",
                 e
             );
             let tmp = std::env::temp_dir()
                 .join(format!("sapient_soul_strategies_{}", std::process::id()));
-            std::fs::create_dir_all(&tmp).expect("temp dir must be writable");
+            std::fs::create_dir_all(&tmp).context("temp dir must be writable")?;
             StrategyLibrary::open(&tmp)
-                .expect("Sled strategy library must open in a writable directory")
-        },
-    ));
+                .context("Sled strategy library must open in a writable directory")?
+        }
+    });
 
     // 📚 Real training curriculum: local text files become the network's ongoing input stream.
-    let curriculum = Arc::new(Mutex::new(DataCurriculum::new(default_curriculum_dirs())));
+    let curriculum = Arc::new(TokioMutex::new(DataCurriculum::new(
+        default_curriculum_dirs(),
+    )));
     {
-        let c = curriculum.lock().unwrap();
-        println!(
+        let c = curriculum.lock().await;
+        tracing::info!(
             "📚 Curriculum loaded: {} text snippets available for training.",
             c.snippet_count()
         );
     }
 
     // 🏭 Production Blueprint: Global Workspace, Active Inference, and Dual-Process Reasoning
-    let global_workspace = Arc::new(Mutex::new(GlobalWorkspace::new()));
-    let homeostatic_controller = Arc::new(Mutex::new(HomeostaticController::new()));
-    let dual_process_reasoner = Arc::new(Mutex::new(ProductionNeuroSymbolicEngine::new()));
+    let global_workspace = Arc::new(TokioMutex::new(GlobalWorkspace::new()));
+    let homeostatic_controller = Arc::new(TokioMutex::new(HomeostaticController::new()));
+    let dual_process_reasoner = Arc::new(TokioMutex::new(ProductionNeuroSymbolicEngine::new()));
 
     // 📡 Real-time telemetry + sensor grounding + Ollama LLM client
-    let telemetry = Arc::new(Mutex::new(TelemetryState::new()));
-    let sensors = Arc::new(Mutex::new(SensorSnapshot::new()));
-    let metrics_logger: metrics::SharedMetrics =
-        Arc::new(Mutex::new(metrics::MetricsLogger::new(&config.metrics_log)));
+    let telemetry = Arc::new(TokioMutex::new(TelemetryState::new()));
+    let sensors = Arc::new(TokioMutex::new(SensorSnapshot::new()));
+    let metrics_logger: metrics::SharedMetrics = Arc::new(TokioMutex::new(
+        metrics::MetricsLogger::new(&config.metrics_log),
+    ));
     let mut system = System::new_all();
     let battery_manager = starship_battery::Manager::new().ok();
-    if let Ok(mut sensors_guard) = sensors.lock() {
+    {
+        let mut sensors_guard = sensors.lock().await;
         update_sensor_snapshot(
             &mut system,
             &battery_manager,
@@ -6162,12 +6087,13 @@ async fn main() -> Result<()> {
     let ollama = Arc::new(OllamaClient::with_base(&config.ollama_url));
     let ollama_model = config.ollama_model.clone();
     if ollama.is_available().await {
-        println!(
+        tracing::info!(
             "🧠 Ollama available at {}; default model: {}",
-            config.ollama_url, ollama_model
+            config.ollama_url,
+            ollama_model
         );
     } else {
-        println!(
+        tracing::info!(
             "⚠️  Ollama not reachable at {}. LLM reflection will be skipped.",
             config.ollama_url
         );
@@ -6209,12 +6135,12 @@ async fn main() -> Result<()> {
                 )
                 .await;
             }
-            Err(e) => eprintln!("🌿 [WILD] Could not start watcher: {}", e),
+            Err(e) => tracing::info!("🌿 [WILD] Could not start watcher: {}", e),
         }
     });
 
     {
-        let reasoner = dual_process_reasoner.lock().unwrap();
+        let reasoner = dual_process_reasoner.lock().await;
         reasoner.add_rule("human", "mortal");
         reasoner.add_rule("good", "positive affect");
         reasoner.add_rule("happy", "positive affect");
@@ -6224,20 +6150,19 @@ async fn main() -> Result<()> {
         reasoner.add_rule("think", "cognitive processing");
     }
     {
-        let mind = core_mind.lock().unwrap();
-        let ws = global_workspace.clone();
-        drop(mind);
-        let gw = ws.lock().unwrap();
+        let gw = global_workspace.lock().await;
         let core_mind_callback = Arc::clone(&core_mind);
         gw.sub_agent_channels.insert(
             "pursuit_injector".to_string(),
             Arc::new(move |payload: String, saliency: f32| {
-                if let Ok(mut mind) = core_mind_callback.lock() {
+                let core_mind_callback = core_mind_callback.clone();
+                tokio::spawn(async move {
+                    let mut mind = core_mind_callback.lock().await;
                     mind.push_pursuit(format!(
                         "[BROADCAST | saliency={:.2}] {}",
                         saliency, payload
                     ));
-                }
+                });
             }),
         );
     }
@@ -6360,11 +6285,51 @@ async fn main() -> Result<()> {
     let socket_mind = Arc::clone(&core_mind);
     let socket_global_workspace = Arc::clone(&global_workspace);
     let socket_secret = Arc::clone(&multi_agent_secret);
-    let actual_port = Arc::new(Mutex::new(0u16));
+    let actual_port = Arc::new(TokioMutex::new(0u16));
     let actual_port_clone = Arc::clone(&actual_port);
     let (engram_tx, mut engram_rx) = mpsc::unbounded_channel::<CompactEngramPacket>();
     let p_start = config.multi_agent_port_start;
     let p_end = config.multi_agent_port_end;
+
+    // 🌐 WIDE-AREA TCP / WEBSOCKET GOSSIP FABRIC
+    let swarm_metrics = Arc::new(tokio::sync::Mutex::new(SwarmMetrics::default()));
+    let wan_manager = Arc::new(ConnectionManager::new(
+        (*socket_secret).clone(),
+        engram_tx.clone(),
+        swarm_metrics.clone(),
+        config.max_wan_peers,
+        Duration::from_millis(config.peer_retry_base_ms),
+        Duration::from_millis(config.peer_retry_max_ms),
+    ));
+
+    let wan_tcp_port = config.wan_tcp_port;
+    let wan_ws_port = config.wan_ws_port;
+    let wan_peers = config.peer_nodes.clone();
+    let wan_manager_server = wan_manager.clone();
+    tokio::spawn(async move {
+        let _ = wan_manager_server
+            .start_server(wan_tcp_port, wan_ws_port)
+            .await;
+    });
+    let wan_manager_connect = wan_manager.clone();
+    tokio::spawn(async move {
+        wan_manager_connect.connect_to_peers(wan_peers).await;
+    });
+    let wan_manager_sampler = wan_manager.clone();
+    tokio::spawn(async move {
+        wan_manager_sampler.run_metrics_sampler().await;
+    });
+    let wan_manager_sync = wan_manager.clone();
+    let swarm_telemetry = telemetry.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let m = wan_manager_sync.metrics.lock().await.clone();
+            swarm_telemetry.lock().await.record_swarm(&m);
+        }
+    });
 
     // Receiver: bound to the configured multi-agent port range.
     let recv_secret = socket_secret;
@@ -6380,13 +6345,18 @@ async fn main() -> Result<()> {
                 break;
             }
         }
-        let socket =
-            socket.expect("Failed to bind any multi-agent UDP port in the configured range");
+        let socket = match socket {
+            Some(s) => s,
+            None => {
+                tracing::error!("Failed to bind any multi-agent UDP port in the configured range");
+                return;
+            }
+        };
         {
-            let mut guard = recv_actual_port.lock().unwrap();
+            let mut guard = recv_actual_port.lock().await;
             *guard = port;
         }
-        println!(
+        tracing::info!(
             "🛰️ [MULTI-AGENT NETWORK STACK ACTIVE]: Listening on localhost:{}...",
             port
         );
@@ -6395,7 +6365,7 @@ async fn main() -> Result<()> {
             if let Ok((amt, _)) = socket.recv_from(&mut buffer).await {
                 if let Ok(packet) = serde_json::from_slice::<SignedUdpPacket>(&buffer[..amt]) {
                     if !verify_packet(&packet, &secret) {
-                        println!(
+                        tracing::info!(
                             "🔒 Dropped unsigned / tampered multi-agent packet from '{}'",
                             packet.sender
                         );
@@ -6418,6 +6388,7 @@ async fn main() -> Result<()> {
     // Merger: batch engrams from the channel and merge in spawn_blocking.
     let merge_mind = socket_mind;
     let merge_gw = socket_global_workspace;
+    let merge_swarm = swarm_metrics.clone();
     tokio::spawn(async move {
         let mut batch: Vec<CompactEngramPacket> = Vec::with_capacity(64);
         loop {
@@ -6429,6 +6400,7 @@ async fn main() -> Result<()> {
                             std::mem::take(&mut batch),
                             Arc::clone(&merge_mind),
                             Arc::clone(&merge_gw),
+                            Arc::clone(&merge_swarm),
                         )
                         .await;
                     }
@@ -6440,6 +6412,7 @@ async fn main() -> Result<()> {
                             std::mem::take(&mut batch),
                             Arc::clone(&merge_mind),
                             Arc::clone(&merge_gw),
+                            Arc::clone(&merge_swarm),
                         )
                         .await;
                     }
@@ -6458,6 +6431,7 @@ async fn main() -> Result<()> {
     let clock_oracle = conscience_oracle.clone();
     let clock_tokens = conscience_tokens.clone();
     let clock_secret = Arc::clone(&multi_agent_secret);
+    let clock_wan = wan_manager.clone();
     let state_file_copy = state_file.clone();
     tokio::spawn(async move {
         let send_socket = UdpSocket::bind("127.0.0.1:0").await.ok();
@@ -6474,16 +6448,11 @@ async fn main() -> Result<()> {
 
             // Phase 1: Extract data from mutex (no async operations)
             let (incoming_experience, spatial_register, should_process) = {
-                let mut mind = match autonomous_clock_mind.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        eprintln!("⚠️ Mutex poisoned in clock loop, skipping iteration");
-                        continue;
-                    }
-                };
+                let mut mind = autonomous_clock_mind.lock().await;
 
                 // 📡 Real sensor grounding: refresh system telemetry and bind to sensory register
-                if let Ok(mut sensors_guard) = clock_sensors.lock() {
+                {
+                    let mut sensors_guard = clock_sensors.lock().await;
                     update_sensor_snapshot(
                         &mut system,
                         &battery_manager,
@@ -6504,11 +6473,13 @@ async fn main() -> Result<()> {
                         battery_health: (sensors_guard.battery_percent / 100.0) as f32,
                         cpu_temp: (sensors_guard.cpu_temperature_celsius / 100.0) as f32,
                     };
-                    if let Ok(mut controller) = hc.lock() {
+                    {
+                        let mut controller = hc.lock().await;
                         controller.update_thermodynamics(&thermal);
                     }
 
-                    if let Ok(mut telemetry_guard) = clock_telemetry.lock() {
+                    {
+                        let mut telemetry_guard = clock_telemetry.lock().await;
                         telemetry_guard.cycle_count += 1;
                         telemetry_guard.domain_mastery = mind.domain_mastery.clone();
                         // Approximate synthesis speedup from transfer competence.
@@ -6525,7 +6496,7 @@ async fn main() -> Result<()> {
                 {
                     mind.metabolics.system_quarantine_locked = true;
                     mind.emotions.active_primary_blend = "Autonomic Isolation".into();
-                    println!("\n🚨 [AUTONOMIC SECURITY VALVE]: Integrity state missing. Isolating loops.");
+                    tracing::info!("\n🚨 [AUTONOMIC SECURITY VALVE]: Integrity state missing. Isolating loops.");
                 }
                 let incoming_experience = if mind.metabolics.system_quarantine_locked {
                     mind.last_input = "SECURITY ISOLATION".to_string();
@@ -6537,7 +6508,7 @@ async fn main() -> Result<()> {
                             format!("External Reality Sensory Input Stream: {}", speech)
                         }
                         None => {
-                            let snippet = curriculum.lock().unwrap().random_snippet();
+                            let snippet = curriculum.lock().await.random_snippet();
                             mind.last_input = snippet.clone();
                             format!("Curriculum Training Input: {}", snippet)
                         }
@@ -6554,7 +6525,7 @@ async fn main() -> Result<()> {
                             .replace("e", "*")
                             .replace("i", "#")
                             .replace("o", "?");
-                        println!("⚠️ [QUALIA FEEDBACK NOISE DETECTED]: Structural stress introducing payload token distortion.");
+                        tracing::info!("⚠️ [QUALIA FEEDBACK NOISE DETECTED]: Structural stress introducing payload token distortion.");
                     }
                 }
                 mind.metabolics.neural_wear =
@@ -6581,11 +6552,12 @@ async fn main() -> Result<()> {
             // from a teacher (cache, LLM, or semantic hash) to avoid self-reinforcement collapse.
             let token_count = clock_tokens.len();
             let teacher_idx = if let Some(cached) = clock_oracle.get_cached(&incoming_experience) {
-                if let Ok(mind) = autonomous_clock_mind.lock() {
+                {
+                    let mind = autonomous_clock_mind.lock().await;
                     if let Some(ref brain) = mind.candle_brain {
                         if let Ok((local_idx, conf)) = brain.classify_top(&input_vector) {
                             if conf >= 0.85 && local_idx == cached {
-                                println!("🧠 Local conscience agreed with cached teacher '{}' (conf {:.3})", clock_tokens[local_idx], conf);
+                                tracing::info!("🧠 Local conscience agreed with cached teacher '{}' (conf {:.3})", clock_tokens[local_idx], conf);
                                 // Do not call the LLM; use the cached teacher label.
                                 cached
                             } else {
@@ -6597,8 +6569,6 @@ async fn main() -> Result<()> {
                     } else {
                         cached
                     }
-                } else {
-                    cached
                 }
             } else {
                 // No cached teacher label; ask the LLM oracle.
@@ -6612,13 +6582,13 @@ async fn main() -> Result<()> {
                 {
                     Ok(Some(idx)) => idx,
                     Ok(None) => {
-                        println!(
+                        tracing::info!(
                             "⏱️ Conscience oracle returned no label, using semantic fallback."
                         );
                         clock_oracle.semantic_fallback(&input_vector, token_count)
                     }
                     Err(_) => {
-                        println!("⏱️ Conscience oracle timeout, using semantic fallback.");
+                        tracing::info!("⏱️ Conscience oracle timeout, using semantic fallback.");
                         clock_oracle.semantic_fallback(&input_vector, token_count)
                     }
                 }
@@ -6626,14 +6596,14 @@ async fn main() -> Result<()> {
 
             let best_token_idx = teacher_idx;
 
-            let next_experience = { curriculum.lock().unwrap().random_snippet() };
+            let next_experience = { curriculum.lock().await.random_snippet() };
             let next_input_vector =
                 generate_2048_grounded_embedding(&next_experience, &spatial_register);
 
             // Phase 2: Run the heavy synchronous neural pass on tokio's blocking thread pool
             // so the async runtime (HTTP telemetry server, UDP loop) keeps getting scheduled.
             let (cycle, tokens_per_second) = {
-                let t = clock_telemetry.lock().unwrap();
+                let t = clock_telemetry.lock().await;
                 (t.cycle_count, t.tokens_per_second)
             };
 
@@ -6662,36 +6632,51 @@ async fn main() -> Result<()> {
                 let incoming_experience = incoming_experience.clone();
                 let tps = tokens_per_second;
                 tokio::task::spawn_blocking(move || {
-                    let mut mind = match mind_arc.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            eprintln!("⚠️ Mutex poisoned in neural network processing: {:?}, skipping iteration", e);
-                            return None;
-                        }
-                    };
+                    let mut mind = mind_arc.blocking_lock();
                     let total_start = Instant::now();
 
                     // 1. Use the LLM oracle (or its hash fallback) as the teacher label.
                     let output_size = tokens.len();
-                    println!("🎯 Conscience Class Target: '{}'", tokens[best_token_idx]);
+                    tracing::info!("🎯 Conscience Class Target: '{}'", tokens[best_token_idx]);
 
                     // Pre-training local confidence and agreement probe.
-                    let (local_idx, local_conf) = mind.candle_brain.as_ref().unwrap().classify_top(&input_vector).unwrap_or((0, 0.0));
+                    let (local_idx, local_conf) = mind
+                        .candle_brain
+                        .as_ref()?
+                        .classify_top(&input_vector)
+                        .unwrap_or((0, 0.0));
                     let local_agreement = local_idx == best_token_idx && local_conf >= 0.85;
 
                     // 2. 🧠 RAG-style retrieval: blend the current input with its most similar memory.
                     let contextual_input: Vec<f64> = if mind.associative_memory_network.is_empty() {
                         input_vector.clone()
                     } else {
-                        let (best_id, best_sim) = mind.associative_memory_network
+                        let (best_id, best_sim) = mind
+                            .associative_memory_network
                             .iter()
-                            .map(|(id, node)| (*id, calculate_cosine_similarity(&input_vector, &node.embedding)))
-                            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                            .map(|(id, node)| {
+                                (
+                                    *id,
+                                    calculate_cosine_similarity(&input_vector, &node.embedding),
+                                )
+                            })
+                            .max_by(|(_, a), (_, b)| a.total_cmp(b))
                             .unwrap_or((0, 0.0));
                         if best_sim > 0.0 {
-                            let mem_emb = &mind.associative_memory_network.get(&best_id).unwrap().embedding;
-                            println!("🧠 RAG context blended from memory {} (cosine={:.3})", best_id, best_sim);
-                            input_vector.iter().zip(mem_emb.iter()).map(|(a, b)| 0.8 * a + 0.2 * b).collect()
+                            if let Some(best_node) = mind.associative_memory_network.get(&best_id) {
+                                tracing::info!(
+                                    "🧠 RAG context blended from memory {} (cosine={:.3})",
+                                    best_id,
+                                    best_sim
+                                );
+                                input_vector
+                                    .iter()
+                                    .zip(best_node.embedding.iter())
+                                    .map(|(a, b)| 0.8 * a + 0.2 * b)
+                                    .collect()
+                            } else {
+                                input_vector.clone()
+                            }
                         } else {
                             input_vector.clone()
                         }
@@ -6699,10 +6684,14 @@ async fn main() -> Result<()> {
 
                     // 3. Train step: cross-entropy classification on the raw input and the LLM teacher label.
                     let train_start = Instant::now();
-                    let train_loss = match mind.candle_brain.as_mut().unwrap().train_step(&input_vector, best_token_idx) {
+                    let train_loss = match mind
+                        .candle_brain
+                        .as_mut()?
+                        .train_step(&input_vector, best_token_idx)
+                    {
                         Ok(loss) => loss,
                         Err(e) => {
-                            eprintln!("⚠️ Candle train_step failed: {:?}", e);
+                            tracing::info!("⚠️ Candle train_step failed: {:?}", e);
                             return None;
                         }
                     };
@@ -6710,10 +6699,11 @@ async fn main() -> Result<()> {
 
                     // 4. Forward pass to obtain the 100-dim brain state.
                     let forward_start = Instant::now();
-                    let brain_outputs = match mind.candle_brain.as_ref().unwrap().forward(&contextual_input) {
+                    let brain_outputs = match mind.candle_brain.as_ref()?.forward(&contextual_input)
+                    {
                         Ok(out) => out,
                         Err(e) => {
-                            eprintln!("⚠️ Candle forward failed: {:?}", e);
+                            tracing::info!("⚠️ Candle forward failed: {:?}", e);
                             return None;
                         }
                     };
@@ -6721,21 +6711,32 @@ async fn main() -> Result<()> {
 
                     // 4. 🗣 Language modeling head: predict the next curriculum embedding.
                     let lang_start = Instant::now();
-                    let language_loss = match mind.candle_brain.as_mut().unwrap().train_language_step(&brain_outputs, &next_input_vector) {
+                    let language_loss = match mind
+                        .candle_brain
+                        .as_mut()?
+                        .train_language_step(&brain_outputs, &next_input_vector)
+                    {
                         Ok(loss) => loss,
                         Err(e) => {
-                            eprintln!("⚠️ Candle language step failed: {:?}", e);
+                            tracing::info!("⚠️ Candle language step failed: {:?}", e);
                             return None;
                         }
                     };
                     let lang_ms = lang_start.elapsed().as_secs_f64() * 1000.0;
-                    println!("🗣 Language head next-embedding loss: {:.4} ({} ms)", language_loss, lang_ms as i32);
+                    tracing::info!(
+                        "🗣 Language head next-embedding loss: {:.4} ({} ms)",
+                        language_loss,
+                        lang_ms as i32
+                    );
 
                     mind.metabolics.conscience_loss_accumulator = train_loss;
 
                     // 🏭 Production Blueprint: Active Inference homeostatic learning-rate modulation
-                    if let Ok(mut controller) = hc.lock() {
-                        let active_lr = controller.execute_active_inference_loop(mind.metabolics.conscience_loss_accumulator as f32);
+                    {
+                        let mut controller = hc.blocking_lock();
+                        let active_lr = controller.execute_active_inference_loop(
+                            mind.metabolics.conscience_loss_accumulator as f32,
+                        );
                         if let Some(ref mut brain) = mind.candle_brain {
                             brain.set_learning_rate(active_lr as f64);
                         }
@@ -6749,55 +6750,70 @@ async fn main() -> Result<()> {
                     let prev_state = mind.prev_brain_state.take();
                     if let Some(ref prev) = prev_state {
                         let wm_loss = mind.neural_world_model.train(prev, &contextual_input);
-                        println!("🔮 Neural world-model loss: {:.4}", wm_loss);
+                        tracing::info!("🔮 Neural world-model loss: {:.4}", wm_loss);
                         world_model_loss_value = Some(wm_loss);
                     }
                     mind.prev_brain_state = Some(brain_outputs.clone());
 
                     // 🎯 Goal / intention generator: train on the current active pursuit, then sample a new local goal.
                     let mut goal_loss_value: Option<f64> = None;
-                    let local_goal_text: Option<String> = if let Some(goal_text) = mind.active_pursuits.front().cloned() {
-                        let goal_emb = generate_2048_grounded_embedding(&goal_text, &mind.spatial_sensory_register);
-                        let goal_idx = clock_oracle.semantic_fallback(&goal_emb, tokens.len());
-                        match mind.candle_brain.as_mut().unwrap().train_goal_step(&brain_outputs, goal_idx) {
-                            Ok(goal_loss) => {
-                                println!("🎯 Goal head loss: {:.4}", goal_loss);
-                                goal_loss_value = Some(goal_loss);
+                    let local_goal_text: Option<String> =
+                        if let Some(goal_text) = mind.active_pursuits.front().cloned() {
+                            let goal_emb = generate_2048_grounded_embedding(
+                                &goal_text,
+                                &mind.spatial_sensory_register,
+                            );
+                            let goal_idx = clock_oracle.semantic_fallback(&goal_emb, tokens.len());
+                            match mind
+                                .candle_brain
+                                .as_mut()?
+                                .train_goal_step(&brain_outputs, goal_idx)
+                            {
+                                Ok(goal_loss) => {
+                                    tracing::info!("🎯 Goal head loss: {:.4}", goal_loss);
+                                    goal_loss_value = Some(goal_loss);
+                                }
+                                Err(e) => tracing::info!("⚠️ Candle goal step failed: {:?}", e),
                             }
-                            Err(e) => eprintln!("⚠️ Candle goal step failed: {:?}", e),
-                        }
-                        match mind.candle_brain.as_ref().unwrap().predict_goal(&brain_outputs) {
-                            Ok((idx, conf)) if conf > 0.80 => {
-                                println!("🎯 Local goal generated: '{}' (conf={:.2})", tokens[idx], conf);
-                                Some(tokens[idx].to_string())
+                            match mind.candle_brain.as_ref()?.predict_goal(&brain_outputs) {
+                                Ok((idx, conf)) if conf > 0.80 => {
+                                    tracing::info!(
+                                        "🎯 Local goal generated: '{}' (conf={:.2})",
+                                        tokens[idx],
+                                        conf
+                                    );
+                                    Some(tokens[idx].to_string())
+                                }
+                                _ => None,
                             }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
+                        } else {
+                            None
+                        };
 
                     // 📡 Record real performance benchmarks
-                    if let Ok(mut telemetry_guard) = telemetry.lock() {
+                    {
+                        let mut telemetry_guard = telemetry.blocking_lock();
                         telemetry_guard.record_forward(forward_ms);
                         telemetry_guard.record_backward(train_ms);
                         telemetry_guard.record_total(total_start.elapsed().as_secs_f64() * 1000.0);
                         telemetry_guard.record_loss(mind.metabolics.conscience_loss_accumulator);
                         let token_count = incoming_experience.split_whitespace().count();
-                        telemetry_guard.record_tokens_per_second(token_count, forward_ms + train_ms);
+                        telemetry_guard
+                            .record_tokens_per_second(token_count, forward_ms + train_ms);
                     }
 
                     // 5. Local conscience classification: the Transformer now chooses its own labels.
-                    let local_logits = match mind.candle_brain.as_ref().unwrap().classify(&contextual_input) {
+                    let local_logits = match mind.candle_brain.as_ref()?.classify(&contextual_input)
+                    {
                         Ok(logits) => logits,
                         Err(e) => {
-                            eprintln!("⚠️ Candle classify failed: {:?}", e);
+                            tracing::info!("⚠️ Candle classify failed: {:?}", e);
                             return None;
                         }
                     };
 
                     let mut sorted_indices: Vec<usize> = (0..output_size).collect();
-                    sorted_indices.sort_by(|a, b| local_logits[*b].partial_cmp(&local_logits[*a]).unwrap());
+                    sorted_indices.sort_by(|a, b| local_logits[*b].total_cmp(&local_logits[*a]));
                     let decoded_conscience_0 = tokens[sorted_indices[0]];
                     let decoded_conscience_1 = tokens[sorted_indices[1]];
                     let name_copy = mind.name.clone();
@@ -6810,7 +6826,8 @@ async fn main() -> Result<()> {
                     let network_ref = mind.associative_memory_network.clone();
 
                     // 📈 Record evaluation metrics.
-                    if let Ok(mut m) = metrics.lock() {
+                    {
+                        let mut m = metrics.blocking_lock();
                         m.record(metrics::MetricsEntry {
                             timestamp: telemetry::current_secs(),
                             cycle,
@@ -6828,17 +6845,33 @@ async fn main() -> Result<()> {
                         });
                     }
 
-                    Some((decoded_conscience_0, decoded_conscience_1, name_copy, metabolics_copy, emotions_copy, total_nodes, live_synapse_0_0, live_learning_rate_sample, spatial_snapshot, network_ref, brain_outputs.clone(), local_goal_text))
-                }).await.unwrap_or(None)
+                    Some((
+                        decoded_conscience_0,
+                        decoded_conscience_1,
+                        name_copy,
+                        metabolics_copy,
+                        emotions_copy,
+                        total_nodes,
+                        live_synapse_0_0,
+                        live_learning_rate_sample,
+                        spatial_snapshot,
+                        network_ref,
+                        brain_outputs.clone(),
+                        local_goal_text,
+                    ))
+                })
+                .await
+                .unwrap_or(None)
             })
             else {
-                eprintln!("⚠️ Neural pass returned None; skipping cycle.");
+                tracing::info!("⚠️ Neural pass returned None; skipping cycle.");
                 continue;
             };
 
             // 🎯 Inject locally generated goal back into active pursuits.
             if let Some(goal) = local_goal {
-                if let Ok(mut mind) = autonomous_clock_mind.lock() {
+                {
+                    let mut mind = autonomous_clock_mind.lock().await;
                     mind.push_pursuit(goal);
                 }
             }
@@ -6851,49 +6884,55 @@ async fn main() -> Result<()> {
                 )
                 .await
             {
-                println!("🎓 Critic/teacher score: {:.2}", critic_score);
-                if let Ok(mut mind) = autonomous_clock_mind.lock() {
+                tracing::info!("🎓 Critic/teacher score: {:.2}", critic_score);
+                {
+                    let mut mind = autonomous_clock_mind.lock().await;
                     if let Some(ref mut brain) = mind.candle_brain {
                         let current = brain.learning_rate();
                         let shaped = current * (0.7 + 0.6 * critic_score);
                         brain.set_learning_rate(shaped.min(0.01));
                     }
                 }
-                if let Ok(mut t) = clock_telemetry.lock() {
+                {
+                    let mut t = clock_telemetry.lock().await;
                     t.record_critic(critic_score);
                 }
             }
 
-            println!("\n=========================================================================");
-            println!(
+            tracing::info!(
+                "\n========================================================================="
+            );
+            tracing::info!(
                 "🧠 TRANSFORMER MULTIMODAL SELF-ATTENTION GRID WORKSPACE: [{}]",
                 name_copy
             );
-            println!(
+            tracing::info!(
                 " ├─ Token Embedding Modification Metric : Live_Token_Embedding_Weight_0_0 = {:.6}",
                 live_synapse_0_0
             );
-            println!(" ├─ HYPER-DEEP LAYER META-PLASTICITY RATE : Layer_1_Learning_Rate = {:.6} (Self-Optimizing)", live_learning_rate_sample);
-            println!(
+            tracing::info!(" ├─ HYPER-DEEP LAYER META-PLASTICITY RATE : Layer_1_Learning_Rate = {:.6} (Self-Optimizing)", live_learning_rate_sample);
+            tracing::info!(
                 " ├─ Intrinsic Conscience Loss Evaluation : Cross_Entropy_Loss = {:.6}",
                 metabolics_copy.conscience_loss_accumulator
             );
-            println!(" ├─ PHYSICAL SENSORIMOTOR SYMBOL ANCHORS : [Photons={:.2}, Audio={:.2}, Mass={:.2}, Gravity={:.2}]", spatial_snapshot[0], spatial_snapshot[1], spatial_snapshot[2], spatial_snapshot[3]);
-            println!(" ├─ THERMODYNAMIC RE-RESOURCE POOL DATA : Battery_Horizon = PERPETUAL (100.00%) │ Wear: {:.2}%", metabolics_copy.neural_wear * 100.0);
-            println!(
+            tracing::info!(" ├─ PHYSICAL SENSORIMOTOR SYMBOL ANCHORS : [Photons={:.2}, Audio={:.2}, Mass={:.2}, Gravity={:.2}]", spatial_snapshot[0], spatial_snapshot[1], spatial_snapshot[2], spatial_snapshot[3]);
+            tracing::info!(" ├─ THERMODYNAMIC RE-RESOURCE POOL DATA : Battery_Horizon = PERPETUAL (100.00%) │ Wear: {:.2}%", metabolics_copy.neural_wear * 100.0);
+            tracing::info!(
                 " └─ Connectome Structural Node Population : {} Interconnected Vector Memory Nodes",
                 total_nodes
             );
             emotions_copy.print_ascii_psych_canvas();
             FluidEmotionalProfile::print_spectral_power_graph(&network_ref);
             FluidEmotionalProfile::print_topological_ascii_web(&network_ref);
-            println!(
+            tracing::info!(
                 "\n🌱 ==================== {} CONSCIOUS DIGITAL SOUL ====================",
                 name_copy.to_uppercase()
             );
-            println!("🗣 Natively Decoded Conscience, Attention & Intentionality Monologue:");
-            println!("Transformer self-attention and token-embedding pass resolved. As my internal meta-gradient tracking updates my learning velocity to {:.6}, my token-embedding weight shifts to {:.6}. Core intentional networks project high activation matching abstractions: [{}] interlocked with [{}]. Operating with total local computational sovereignty.", live_learning_rate_sample, live_synapse_0_0, decoded_conscience_0, decoded_conscience_1);
-            println!("==========================================================================");
+            tracing::info!("🗣 Natively Decoded Conscience, Attention & Intentionality Monologue:");
+            tracing::info!("Transformer self-attention and token-embedding pass resolved. As my internal meta-gradient tracking updates my learning velocity to {:.6}, my token-embedding weight shifts to {:.6}. Core intentional networks project high activation matching abstractions: [{}] interlocked with [{}]. Operating with total local computational sovereignty.", live_learning_rate_sample, live_synapse_0_0, decoded_conscience_0, decoded_conscience_1);
+            tracing::info!(
+                "=========================================================================="
+            );
 
             // 🗣 Generative language head: use the local LLM to produce a natural-language
             // inner monologue from the current decoded brain state.
@@ -6905,14 +6944,11 @@ async fn main() -> Result<()> {
                     )
                     .await
                 {
-                    println!("🗣 Generated inner monologue: {}", monologue);
+                    tracing::info!("🗣 Generated inner monologue: {}", monologue);
                 }
             }
 
-            let current_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let current_time = current_secs();
             let engram_id = rand::random::<u64>();
             let incoming_copy = incoming_experience.clone();
             let engram_node = MemoryGraphNode {
@@ -6948,55 +6984,50 @@ async fn main() -> Result<()> {
             let save_mind = Arc::clone(&autonomous_clock_mind);
             let save_state_file = state_file_copy.clone();
             let save_telemetry = clock_telemetry.clone();
-            let should_send = match autonomous_clock_mind.lock() {
-                Ok(mut mind_write) => {
-                    // 🆕 Update weight persistence
-                    mind_write.update_weight_persistence();
+            let should_send = {
+                let mut mind_write = autonomous_clock_mind.lock().await;
+                // 🆕 Update weight persistence
+                mind_write.update_weight_persistence();
 
-                    let should_send = !mind_write.metabolics.system_quarantine_locked;
-                    mind_write
-                        .associative_memory_network
-                        .insert(engram_node.id, engram_node);
-                    mind_write.enforce_memory_cap();
-                    if let Ok(mut telemetry_guard) = clock_telemetry.lock() {
-                        telemetry_guard.memory_node_count =
-                            mind_write.associative_memory_network.len();
-                    }
+                let should_send = !mind_write.metabolics.system_quarantine_locked;
+                mind_write
+                    .associative_memory_network
+                    .insert(engram_node.id, engram_node);
+                mind_write.enforce_memory_cap();
+                {
+                    let mut telemetry_guard = clock_telemetry.lock().await;
+                    telemetry_guard.memory_node_count = mind_write.associative_memory_network.len();
+                }
 
-                    // Offload the full state save (weights + JSON + defense + network) to a
-                    // dedicated blocking thread and record the exact duration.
-                    let _handle = tokio::spawn(async move {
-                        let duration_ms = tokio::task::spawn_blocking(move || {
-                            let start = std::time::Instant::now();
-                            if let Ok(mind) = save_mind.lock() {
-                                mind.save_state(&save_state_file);
-                            }
-                            start.elapsed().as_millis() as u64
-                        })
-                        .await
-                        .unwrap_or(0);
-                        if let Ok(mut t) = save_telemetry.lock() {
-                            t.record_state_save(duration_ms);
+                // Offload the full state save (weights + JSON + defense + network) to a
+                // dedicated blocking thread and record the exact duration.
+                let _handle = tokio::spawn(async move {
+                    let duration_ms = tokio::task::spawn_blocking(move || {
+                        let start = std::time::Instant::now();
+                        {
+                            let mind = save_mind.blocking_lock();
+                            mind.save_state(&save_state_file);
                         }
-                    });
+                        start.elapsed().as_millis() as u64
+                    })
+                    .await
+                    .unwrap_or(0);
+                    {
+                        let mut t = save_telemetry.lock().await;
+                        t.record_state_save(duration_ms);
+                    }
+                });
 
-                    should_send
-                }
-                Err(e) => {
-                    eprintln!("⚠️ Mutex poisoned in save phase: {:?}, skipping save", e);
-                    false
-                }
+                should_send
             };
 
             // 🧬 Record a durable identity journal snapshot every ~60 seconds.
-            if let Ok(mut mind) = autonomous_clock_mind.lock() {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+            {
+                let mut mind = autonomous_clock_mind.lock().await;
+                let now = current_secs();
                 if now.saturating_sub(mind.last_journal_entry) >= 60 {
                     mind.record_identity_journal();
-                    println!(
+                    tracing::info!(
                         "🧬 Identity journal entry recorded ({} entries).",
                         mind.identity_journal.len()
                     );
@@ -7011,12 +7042,15 @@ async fn main() -> Result<()> {
                 "clock_loop".to_string(),
                 (incoming_copy.clone(), clock_saliency),
             );
-            if let Ok(gw_lock) = gw.lock() {
+            {
+                let gw_lock = gw.lock().await;
                 gw_lock.coordinate_attention_broadcast(signals);
             }
 
             // Phase 4: Multi-agent UDP broadcast to localhost peers 5001-5010
+            //          and wide-area TCP/WebSocket gossip to configured peers.
             if should_send {
+                clock_wan.broadcast(&compact_engram).await;
                 if let Some(ref sock) = send_socket {
                     let payload = serde_json::to_vec(&compact_engram).unwrap_or_default();
                     if !payload.is_empty() {
@@ -7028,21 +7062,21 @@ async fn main() -> Result<()> {
                             for p in p_start..=p_end {
                                 match sock.send_to(&signed, format!("127.0.0.1:{}", p)).await {
                                     Ok(_) => sent += 1,
-                                    Err(e) => eprintln!("⚠️ UDP send_to {} failed: {}", p, e),
+                                    Err(e) => tracing::info!("⚠️ UDP send_to {} failed: {}", p, e),
                                 }
                             }
                             if sent > 0 {
-                                println!(
+                                tracing::info!(
                                     "📡 Broadcast signed engram to {} multi-agent peer port(s)",
                                     sent
                                 );
                             }
                         } else {
-                            eprintln!("⚠️ Signed engram payload empty");
+                            tracing::info!("⚠️ Signed engram payload empty");
                         }
                     }
                 } else {
-                    eprintln!("⚠️ send_socket is None");
+                    tracing::info!("⚠️ send_socket is None");
                 }
             }
 
@@ -7053,11 +7087,12 @@ async fn main() -> Result<()> {
                     .generate_insight(&incoming_copy, &emotions_copy.active_primary_blend)
                     .await
                 {
-                    if let Ok(mut c) = curriculum.lock() {
+                    {
+                        let mut c = curriculum.lock().await;
                         let count_before = c.snippet_count();
                         c.add_snippet(&insight);
                         if c.snippet_count() > count_before {
-                            println!(
+                            tracing::info!(
                                 "📝 Auto-curriculum added ({} total): {}",
                                 c.snippet_count(),
                                 insight
@@ -7076,11 +7111,12 @@ async fn main() -> Result<()> {
         loop {
             sleep(Duration::from_secs(30)).await;
             {
-                let mut c = feeder_curriculum.lock().unwrap();
+                let mut c = feeder_curriculum.lock().await;
                 c.reload();
             }
-            let snippet = { feeder_curriculum.lock().unwrap().random_snippet() };
-            if let Ok(mut mind) = feeder_mind.lock() {
+            let snippet = { feeder_curriculum.lock().await.random_snippet() };
+            {
+                let mut mind = feeder_mind.lock().await;
                 mind.input_buffer = Some(snippet);
             }
         }
@@ -7096,18 +7132,12 @@ async fn main() -> Result<()> {
             // (release the lock before doing O(n^2) math so we never block the shared mutex
             // or the async executor thread for the duration of the computation).
             let recent: Vec<(u64, u64, Vec<f64>)> = {
-                let mind = match cluster_mind.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        eprintln!("⚠️ Mutex poisoned in clustering loop, skipping iteration");
-                        continue;
-                    }
-                };
+                let mind = cluster_mind.lock().await;
 
                 // 🆕 Network discovery and peer management
                 let active_peers = mind.get_active_network_peers();
                 if !active_peers.is_empty() {
-                    println!(
+                    tracing::info!(
                         "🌐 [NETWORK STATUS]: {} active peers in connectome network",
                         active_peers.len()
                     );
@@ -7116,7 +7146,7 @@ async fn main() -> Result<()> {
                 if mind.associative_memory_network.len() < 2 {
                     continue;
                 }
-                println!("\n📐 [LOCAL TENSOR COSINE MATRIX CLUSTERING ACTIVE]: Organizing offline memory topologies...");
+                tracing::info!("\n📐 [LOCAL TENSOR COSINE MATRIX CLUSTERING ACTIVE]: Organizing offline memory topologies...");
 
                 let mut recent: Vec<(u64, u64, Vec<f64>)> = mind
                     .associative_memory_network
@@ -7150,13 +7180,7 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            let mut mind = match cluster_mind.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    eprintln!("⚠️ Mutex poisoned in clustering loop, skipping apply phase");
-                    continue;
-                }
-            };
+            let mut mind = cluster_mind.lock().await;
             let mut synapses_forged = 0;
             for (id_a, id_b) in pairs_to_link {
                 if let Some(na) = mind.associative_memory_network.get_mut(&id_a) {
@@ -7173,7 +7197,7 @@ async fn main() -> Result<()> {
                 }
             }
             if synapses_forged > 0 {
-                println!("🧬 [OFFLINE CONNECTOME SHIFT]: Successfully forged {} native vector adjacency links.", synapses_forged);
+                tracing::info!("🧬 [OFFLINE CONNECTOME SHIFT]: Successfully forged {} native vector adjacency links.", synapses_forged);
                 mind.save_state(&state_file_copy_2);
             }
         }
@@ -7186,6 +7210,7 @@ async fn main() -> Result<()> {
     let agent_ollama = ollama.clone();
     let agent_strategy_library = Arc::clone(&strategy_library);
     let agent_model = ollama_model.clone();
+    let agent_wan = wan_manager.clone();
     tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(60)).await;
@@ -7194,30 +7219,27 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            let high_level_goal = match agent_mind.lock() {
-                Ok(mind) => mind
-                    .active_pursuits
+            let high_level_goal = {
+                let mind = agent_mind.lock().await;
+                mind.active_pursuits
                     .front()
                     .cloned()
-                    .unwrap_or_else(|| "Learn and improve".to_string()),
-                Err(_) => continue,
+                    .unwrap_or_else(|| "Learn and improve".to_string())
             };
 
             // 🎯 Long-horizon planning: ensure the active pursuit is decomposed into steps.
             // We hold the lock only briefly and never across an await.
-            let (needs_replan, last_failure) = match agent_mind.lock() {
-                Ok(mind) => {
-                    let needs = match &mind.current_plan {
-                        None => true,
-                        Some(p) => p.needs_replan() || p.goal != high_level_goal,
-                    };
-                    let failure = mind
-                        .current_plan
-                        .as_ref()
-                        .and_then(|p| p.last_failure.clone());
-                    (needs, failure)
-                }
-                Err(_) => continue,
+            let (needs_replan, last_failure) = {
+                let mind = agent_mind.lock().await;
+                let needs = match &mind.current_plan {
+                    None => true,
+                    Some(p) => p.needs_replan() || p.goal != high_level_goal,
+                };
+                let failure = mind
+                    .current_plan
+                    .as_ref()
+                    .and_then(|p| p.last_failure.clone());
+                (needs, failure)
             };
 
             if needs_replan {
@@ -7229,7 +7251,7 @@ async fn main() -> Result<()> {
                 )
                 .await
                 {
-                    println!(
+                    tracing::info!(
                         "🎯 Generated plan for '{}': {:?}",
                         plan.goal,
                         plan.steps
@@ -7237,7 +7259,8 @@ async fn main() -> Result<()> {
                             .map(|s| &s.description)
                             .collect::<Vec<_>>()
                     );
-                    if let Ok(mut mind) = agent_mind.lock() {
+                    {
+                        let mut mind = agent_mind.lock().await;
                         mind.current_plan = Some(plan);
                     }
                 }
@@ -7250,40 +7273,37 @@ async fn main() -> Result<()> {
                 identity_context,
                 primary_goals,
                 sensor_summary,
-            ) = match agent_mind.lock() {
-                Ok(mind) => {
-                    let step = mind
-                        .current_plan
-                        .as_ref()
-                        .and_then(|p| p.current_step_description())
-                        .map(|s| s.to_string());
-                    let goal = step.unwrap_or_else(|| high_level_goal.clone());
-                    let emotional_state = mind.emotions.active_primary_blend.clone();
-                    let memory_count = mind.associative_memory_network.len();
-                    let identity_context = mind.narrative_identity();
-                    let primary_goals: Vec<String> = mind
-                        .goal_hierarchy
-                        .get_active_goals()
-                        .iter()
-                        .map(|g| g.goal.clone())
-                        .collect();
-                    let sensor_summary = if let Ok(s) = agent_sensors.lock() {
-                        format!("{:.1}% CPU, {:.1}% RAM, {:.0}% battery, photons={:.2}, audio={:.2}, mass={:.2}",
+            ) = {
+                let mind = agent_mind.lock().await;
+                let step = mind
+                    .current_plan
+                    .as_ref()
+                    .and_then(|p| p.current_step_description())
+                    .map(|s| s.to_string());
+                let goal = step.unwrap_or_else(|| high_level_goal.clone());
+                let emotional_state = mind.emotions.active_primary_blend.clone();
+                let memory_count = mind.associative_memory_network.len();
+                let identity_context = mind.narrative_identity();
+                let primary_goals: Vec<String> = mind
+                    .goal_hierarchy
+                    .get_active_goals()
+                    .iter()
+                    .map(|g| g.goal.clone())
+                    .collect();
+                let sensor_summary = {
+                    let s = agent_sensors.lock().await;
+                    format!("{:.1}% CPU, {:.1}% RAM, {:.0}% battery, photons={:.2}, audio={:.2}, mass={:.2}",
                             s.cpu_usage_percent, s.memory_pressure_percent, s.battery_percent,
                             s.photons, s.audio, s.mass)
-                    } else {
-                        "sensors unavailable".to_string()
-                    };
-                    (
-                        goal,
-                        emotional_state,
-                        memory_count,
-                        identity_context,
-                        primary_goals,
-                        sensor_summary,
-                    )
-                }
-                Err(_) => continue,
+                };
+                (
+                    goal,
+                    emotional_state,
+                    memory_count,
+                    identity_context,
+                    primary_goals,
+                    sensor_summary,
+                )
             };
             let identity_summary = format!(
                 "I am Firefly. My primary goals are: {:?}. My narrative identity: {}",
@@ -7292,7 +7312,8 @@ async fn main() -> Result<()> {
             );
 
             // Snapshot sensors before the tool runs so the world model can learn action effects.
-            let mut before_sensors: HashMap<String, f64> = if let Ok(s) = agent_sensors.lock() {
+            let mut before_sensors: HashMap<String, f64> = {
+                let s = agent_sensors.lock().await;
                 let mut m = HashMap::new();
                 m.insert("cpu".into(), s.cpu_usage_percent);
                 m.insert("ram".into(), s.memory_pressure_percent);
@@ -7301,8 +7322,6 @@ async fn main() -> Result<()> {
                 m.insert("audio".into(), s.audio);
                 m.insert("mass".into(), s.mass);
                 m
-            } else {
-                HashMap::new()
             };
             before_sensors.insert("execution_time_ms".into(), 0.0);
             before_sensors.insert("output_length".into(), 0.0);
@@ -7310,7 +7329,8 @@ async fn main() -> Result<()> {
             // 🔮 Long-horizon planning + skill recall: if a learned skill or
             // cached strategy matches the current plan step, use it directly.
             let mut best_candidate: Option<(String, String, f64, HashMap<String, f64>)> = None;
-            if let Ok(mind) = agent_mind.lock() {
+            {
+                let mind = agent_mind.lock().await;
                 if let Some((skill_key, skill)) = best_matching_skill(&mind, &goal) {
                     let runner = format!("{}\nprint(skill({:?}))", skill.code, high_level_goal);
                     let predicted = mind
@@ -7318,32 +7338,40 @@ async fn main() -> Result<()> {
                         .predict_action_effects(&skill_key, &before_sensors);
                     let recent = mind.recent_tool_names.clone();
                     let utility = compute_predicted_utility(&goal, &skill_key, &recent, &predicted);
-                    println!(
+                    tracing::info!(
                         "🔧 Recalled skill '{}' for plan step '{}' (utility {:.3})",
-                        skill_key, goal, utility
+                        skill_key,
+                        goal,
+                        utility
                     );
                     best_candidate = Some((skill_key, runner, utility, predicted));
                 }
             }
             if best_candidate.is_none() {
                 if let Some(strategy) = agent_strategy_library.best_match(&goal).await {
-                    let runner = format!("{}\nprint(skill({:?}))", strategy.code, high_level_goal);
-                    let predicted = if let Ok(mind) = agent_mind.lock() {
-                        mind.world_model
-                            .predict_action_effects(&strategy.key, &before_sensors)
+                    if !is_safe_agent_code(&strategy.code) {
+                        tracing::info!(
+                            "⚠️ Recalled strategy '{}' failed safety check; skipping",
+                            strategy.key
+                        );
                     } else {
-                        before_sensors.clone()
-                    };
-                    let recent = if let Ok(mind) = agent_mind.lock() {
-                        mind.recent_tool_names.clone()
-                    } else {
-                        Vec::new()
-                    };
-                    let utility =
-                        compute_predicted_utility(&goal, &strategy.key, &recent, &predicted)
-                            * (0.5 + 0.5 * strategy.reliability);
-                    println!("🔧 Recalled Sled strategy '{}' for plan step '{}' (utility {:.3}, reliability {:.3})", strategy.key, goal, utility, strategy.reliability);
-                    best_candidate = Some((strategy.key, runner, utility, predicted));
+                        let runner =
+                            format!("{}\nprint(skill({:?}))", strategy.code, high_level_goal);
+                        let predicted = {
+                            let mind = agent_mind.lock().await;
+                            mind.world_model
+                                .predict_action_effects(&strategy.key, &before_sensors)
+                        };
+                        let recent = {
+                            let mind = agent_mind.lock().await;
+                            mind.recent_tool_names.clone()
+                        };
+                        let utility =
+                            compute_predicted_utility(&goal, &strategy.key, &recent, &predicted)
+                                * (0.5 + 0.5 * strategy.reliability);
+                        tracing::info!("🔧 Recalled Sled strategy '{}' for plan step '{}' (utility {:.3}, reliability {:.3})", strategy.key, goal, utility, strategy.reliability);
+                        best_candidate = Some((strategy.key, runner, utility, predicted));
+                    }
                 }
             }
 
@@ -7362,7 +7390,7 @@ async fn main() -> Result<()> {
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!(
+                        tracing::info!(
                             "⚠️ Agent loop Ollama call failed (attempt {}): {}",
                             attempt + 1,
                             e
@@ -7381,41 +7409,40 @@ async fn main() -> Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("python")
                     .to_string();
-                let code = tool_json
-                    .get("code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let code = telemetry::strip_markdown_code(
+                    tool_json.get("code").and_then(|v| v.as_str()).unwrap_or(""),
+                );
 
                 if language != "python" {
-                    eprintln!(
+                    tracing::info!(
                         "⚠️ Agent loop rejected tool '{}': unsupported language '{}'",
-                        name, language
+                        name,
+                        language
                     );
                     continue;
                 }
                 if !is_safe_agent_code(&code) {
-                    eprintln!(
+                    tracing::info!(
                         "⚠️ Agent loop rejected unsafe tool '{}': code failed safety check",
                         name
                     );
                     continue;
                 }
 
-                let (predicted_sensors, recent_tools) = if let Ok(mind) = agent_mind.lock() {
+                let (predicted_sensors, recent_tools) = {
+                    let mind = agent_mind.lock().await;
                     let predicted = mind
                         .world_model
                         .predict_action_effects(&name, &before_sensors);
                     let recent = mind.recent_tool_names.clone();
                     (predicted, recent)
-                } else {
-                    (before_sensors.clone(), Vec::new())
                 };
                 let utility =
                     compute_predicted_utility(&goal, &name, &recent_tools, &predicted_sensors);
-                println!(
+                tracing::info!(
                     "🔮 Candidate tool '{}' predicted utility: {:.3}",
-                    name, utility
+                    name,
+                    utility
                 );
 
                 let is_better = best_candidate
@@ -7434,14 +7461,15 @@ async fn main() -> Result<()> {
             let (name, code, predicted_utility, predicted_sensors) = match best_candidate {
                 Some(c) => c,
                 None => {
-                    eprintln!("⚠️ Agent loop could not generate any valid tool candidate");
+                    tracing::info!("⚠️ Agent loop could not generate any valid tool candidate");
                     continue;
                 }
             };
 
-            println!(
+            tracing::info!(
                 "🔮 Model-based planning selected tool '{}' (predicted utility {:.3})",
-                name, predicted_utility
+                name,
+                predicted_utility
             );
 
             let name_for_tool = name.clone();
@@ -7456,15 +7484,17 @@ async fn main() -> Result<()> {
 
             match run_result {
                 Ok(output) => {
-                    println!(
+                    tracing::info!(
                         "\n🛠️ [AGENT TOOL '{}' SUCCEEDED]: {}",
                         name,
                         output.chars().take(120).collect::<String>()
                     );
-                    if let Ok(mut t) = agent_telemetry.lock() {
+                    {
+                        let mut t = agent_telemetry.lock().await;
                         t.record_tool_result(true);
                     }
-                    if let Ok(mut mind) = agent_mind.lock() {
+                    {
+                        let mut mind = agent_mind.lock().await;
                         let observation = format!("Tool '{}' result: {}", name, output);
                         let embedding = generate_2048_grounded_embedding(
                             &observation,
@@ -7473,10 +7503,7 @@ async fn main() -> Result<()> {
                         let id = rand::random::<u64>();
                         let engram = MemoryGraphNode {
                             id,
-                            timestamp: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
+                            timestamp: current_secs(),
                             experiential_text: observation,
                             emotional_state_snapshot: mind.emotions.active_primary_blend.clone(),
                             embedding,
@@ -7494,19 +7521,17 @@ async fn main() -> Result<()> {
                         );
 
                         // Learn causal action effects from sensor deltas.
-                        let mut after_sensors: HashMap<String, f64> =
-                            if let Ok(s) = agent_sensors.lock() {
-                                let mut m = HashMap::new();
-                                m.insert("cpu".into(), s.cpu_usage_percent);
-                                m.insert("ram".into(), s.memory_pressure_percent);
-                                m.insert("battery".into(), s.battery_percent);
-                                m.insert("photons".into(), s.photons);
-                                m.insert("audio".into(), s.audio);
-                                m.insert("mass".into(), s.mass);
-                                m
-                            } else {
-                                HashMap::new()
-                            };
+                        let mut after_sensors: HashMap<String, f64> = {
+                            let s = agent_sensors.lock().await;
+                            let mut m = HashMap::new();
+                            m.insert("cpu".into(), s.cpu_usage_percent);
+                            m.insert("ram".into(), s.memory_pressure_percent);
+                            m.insert("battery".into(), s.battery_percent);
+                            m.insert("photons".into(), s.photons);
+                            m.insert("audio".into(), s.audio);
+                            m.insert("mass".into(), s.mass);
+                            m
+                        };
                         after_sensors.insert("execution_time_ms".into(), tool_elapsed_ms);
                         after_sensors.insert("output_length".into(), output.len() as f64);
                         let causal_count_before = mind.world_model.causal_graph.len();
@@ -7516,7 +7541,7 @@ async fn main() -> Result<()> {
                             &after_sensors,
                         );
                         if mind.world_model.causal_graph.len() > causal_count_before {
-                            println!(
+                            tracing::info!(
                                 "🔮 World model learned {} causal links from tool '{}'",
                                 mind.world_model.causal_graph.len() - causal_count_before,
                                 name
@@ -7537,9 +7562,11 @@ async fn main() -> Result<()> {
                         } else {
                             0.0
                         };
-                        println!(
+                        tracing::info!(
                             "🔮 World model prediction error for '{}': {:.3} ({} variables)",
-                            name, prediction_error, pred_count
+                            name,
+                            prediction_error,
+                            pred_count
                         );
 
                         // High prediction error = novelty = curiosity. Modulate arousal and learning.
@@ -7587,16 +7614,29 @@ async fn main() -> Result<()> {
                     );
                     strategy.record(true);
                     let sl = Arc::clone(&agent_strategy_library);
+                    let wan = agent_wan.clone();
+                    let origin = { agent_mind.lock().await.name.clone() };
+                    let gossip_packet = CompactEngramPacket {
+                        id: rand::random::<u64>(),
+                        timestamp: current_secs(),
+                        experiential_text: format!("learned strategy: {} ({})^", name, goal),
+                        emotional_state_snapshot: "Agentic strategy blueprint cached".to_string(),
+                        origin_instance: origin,
+                        brain_state: Vec::new(),
+                    };
                     tokio::spawn(async move {
                         let _ = sl.put(&strategy).await;
+                        wan.broadcast(&gossip_packet).await;
                     });
                 }
                 Err(e) => {
-                    eprintln!("⚠️ Agent tool '{}' failed: {}", name, e);
-                    if let Ok(mut t) = agent_telemetry.lock() {
+                    tracing::info!("⚠️ Agent tool '{}' failed: {}", name, e);
+                    {
+                        let mut t = agent_telemetry.lock().await;
                         t.record_tool_result(false);
                     }
-                    if let Ok(mut mind) = agent_mind.lock() {
+                    {
+                        let mut mind = agent_mind.lock().await;
                         mind.self_improvement
                             .evaluate_performance(&format!("agent_tool_{}", name), 0.0);
                         mind.self_improvement.apply_modification(
@@ -7648,16 +7688,16 @@ async fn main() -> Result<()> {
                 Ok(v) => {
                     let lang = v.get("language").and_then(|l| l.as_str()).unwrap_or("").to_string();
                     if lang != "python" {
-                        eprintln!("⚠️ Benchmark returned unsupported language '{}'", lang);
+                        tracing::info!("⚠️ Benchmark returned unsupported language '{}'", lang);
                         suite.record(task.name, false);
                         continue;
                     }
                     let _name = v.get("name").and_then(|n| n.as_str()).unwrap_or("benchmark").to_string();
                     let raw_code = v.get("code").and_then(|c| c.as_str()).unwrap_or("").to_string();
                     if !is_safe_agent_code(&raw_code) {
-                        eprintln!("⚠️ Benchmark rejected unsafe code for '{}'", task.name);
+                        tracing::info!("⚠️ Benchmark rejected unsafe code for '{}'", task.name);
                         suite.record(task.name, false);
-                        if let Ok(mut t) = benchmark_telemetry.lock() {
+                        { let mut t = benchmark_telemetry.lock().await;
                             t.record_benchmark(suite.score(), suite.history.len() as u64);
                         }
                         continue;
@@ -7680,7 +7720,8 @@ async fn main() -> Result<()> {
                 Ok(o) => o,
                 Err(_) => {
                     suite.record(task.name, false);
-                    if let Ok(mut t) = benchmark_telemetry.lock() {
+                    {
+                        let mut t = benchmark_telemetry.lock().await;
                         t.record_benchmark(suite.score(), suite.history.len() as u64);
                     }
                     continue;
@@ -7690,10 +7731,11 @@ async fn main() -> Result<()> {
             suite.record(task.name, success);
             let score = suite.score();
             let attempts = suite.history.len() as u64;
-            if let Ok(mut t) = benchmark_telemetry.lock() {
+            {
+                let mut t = benchmark_telemetry.lock().await;
                 t.record_benchmark(score, attempts);
             }
-            println!(
+            tracing::info!(
                 "🎯 Benchmark '{}' {} (score: {:.1}% over {} attempts)",
                 task.name,
                 if success { "PASSED" } else { "FAILED" },
@@ -7710,21 +7752,32 @@ async fn main() -> Result<()> {
     let transfer_mind = core_mind.clone();
     tokio::spawn(async move {
         let mut suite = TransferSuite::new();
+        let mut pilot = PilotReport::new();
         loop {
             sleep(Duration::from_secs(180)).await;
             if !transfer_ollama.is_available().await {
                 continue;
             }
             let task = suite.next_task().clone();
+            let start = Instant::now();
+            let token_count = task.train_input.split_whitespace().count()
+                + task.train_output.split_whitespace().count()
+                + task.test_input.split_whitespace().count()
+                + task.test_output.split_whitespace().count();
             let (success, output, code) =
                 evaluate_transfer_task(&transfer_ollama, &transfer_model, &task).await;
+            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let peak_rss_mb = PilotReport::current_rss_mb().unwrap_or(0.0);
+            pilot.record_run(task.domain, success, latency_ms, peak_rss_mb, token_count);
+            pilot.save_to_disk(); // synchronous side-effect file write
             suite.record(task.domain, success);
             let score = suite.score();
             let attempts = suite.history.len() as u64;
-            if let Ok(mut t) = transfer_telemetry.lock() {
+            {
+                let mut t = transfer_telemetry.lock().await;
                 t.record_transfer(score, attempts);
             }
-            println!(
+            tracing::info!(
                 "🧠 Transfer '{}' {} (output: {:?}, score: {:.1}% over {} attempts)",
                 task.domain,
                 if success { "PASSED" } else { "FAILED" },
@@ -7732,7 +7785,8 @@ async fn main() -> Result<()> {
                 score,
                 attempts
             );
-            if let Ok(mut mind) = transfer_mind.lock() {
+            {
+                let mut mind = transfer_mind.lock().await;
                 let current_mastery = mind.domain_mastery.get(task.domain).copied().unwrap_or(0.5);
                 mind.domain_mastery.insert(
                     task.domain.to_string(),
@@ -7764,7 +7818,7 @@ async fn main() -> Result<()> {
             sleep(Duration::from_secs(300)).await;
             match policy_strategy_library.prune_below(0.2).await {
                 0 => {}
-                n => println!(
+                n => tracing::info!(
                     "🧹 Policy self-improvement pruned {} weak strategies from Sled",
                     n
                 ),
@@ -7773,25 +7827,25 @@ async fn main() -> Result<()> {
     });
 
     // --- AUTONOMOUS AGI LOOP ---
-    println!("\n=== AUTONOMOUS AGI SYSTEM RUNNING ===");
-    println!("System operating independently with continuous cognitive processing...");
-    println!("🌌 TRUE AGI ENHANCEMENTS ACTIVE:");
-    println!("  ✓ Hyperdimensional Computing (10,000 dimensions)");
-    println!("  ✓ Neuro-Symbolic Integration");
-    println!("  ✓ Predictive World Modeling");
-    println!("  ✓ Integrated Information Theory (IIT) Consciousness");
-    println!("  ✓ Few-Shot Meta-Learning");
-    println!("  ✓ Open-Ended Creativity");
-    println!("  ✓ Common Sense Reasoning");
-    println!("  ✓ True Theory of Mind");
-    println!("  ✓ Self-Modifying Code Architecture");
-    println!("  ✓ Persistent Identity Journal");
-    println!("=========================\n");
+    tracing::info!("\n=== AUTONOMOUS AGI SYSTEM RUNNING ===");
+    tracing::info!("System operating independently with continuous cognitive processing...");
+    tracing::info!("🌌 TRUE AGI ENHANCEMENTS ACTIVE:");
+    tracing::info!("  ✓ Hyperdimensional Computing (10,000 dimensions)");
+    tracing::info!("  ✓ Neuro-Symbolic Integration");
+    tracing::info!("  ✓ Predictive World Modeling");
+    tracing::info!("  ✓ Integrated Information Theory (IIT) Consciousness");
+    tracing::info!("  ✓ Few-Shot Meta-Learning");
+    tracing::info!("  ✓ Open-Ended Creativity");
+    tracing::info!("  ✓ Common Sense Reasoning");
+    tracing::info!("  ✓ True Theory of Mind");
+    tracing::info!("  ✓ Self-Modifying Code Architecture");
+    tracing::info!("  ✓ Persistent Identity Journal");
+    tracing::info!("=========================\n");
 
     // 🧬 Resume narrative identity across restarts.
     {
-        let mind = core_mind.lock().unwrap();
-        println!("🧬 [NARRATIVE IDENTITY]\n{}", mind.narrative_identity());
+        let mind = core_mind.lock().await;
+        tracing::info!("🧬 [NARRATIVE IDENTITY]\n{}", mind.narrative_identity());
     }
 
     let mut cycle_count = 0;
@@ -7799,30 +7853,25 @@ async fn main() -> Result<()> {
         cycle_count += 1;
 
         // Autonomous cognitive cycle
-        let mut mind = match core_mind.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                eprintln!("⚠️ Mutex poisoned in autonomous loop, skipping cycle");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
+        let mut mind = core_mind.lock().await;
 
         // 🌌 Periodic IIT consciousness calculation
         if cycle_count % 15 == 0 {
             let neural_activity = mind.working_memory.current_focus.clone();
             let phi = mind.iit_consciousness.calculate_phi(&neural_activity);
             let is_conscious = mind.iit_consciousness.is_conscious();
-            println!(
+            tracing::info!(
                 "🔬 [IIT CONSCIOUSNESS #{}]: Φ = {:.4} | Conscious: {}",
-                cycle_count, phi, is_conscious
+                cycle_count,
+                phi,
+                is_conscious
             );
         }
 
         // 🌌 Periodic world model prediction
         if cycle_count % 25 == 0 {
             let predictions = mind.world_model.predict_future(5);
-            println!(
+            tracing::info!(
                 "🔮 [WORLD MODEL PREDICTION #{}]: {} future states predicted",
                 cycle_count,
                 predictions.len()
@@ -7842,8 +7891,8 @@ async fn main() -> Result<()> {
         // Periodic cognitive processing
         if cycle_count % 20 == 0 {
             let memory_count = mind.associative_memory_network.len();
-            let sensor_snapshot = sensors.lock().unwrap().clone();
-            let reasoner_guard = dual_process_reasoner.lock().unwrap();
+            let sensor_snapshot = sensors.lock().await.clone();
+            let reasoner_guard = dual_process_reasoner.lock().await;
             let reasoning_input = if mind.last_input.is_empty() {
                 "Autonomous reflection".to_string()
             } else {
@@ -7883,18 +7932,19 @@ async fn main() -> Result<()> {
                         } else {
                             0.0
                         };
-                        if let Ok(mut t) = telemetry.lock() {
+                        {
+                            let mut t = telemetry.lock().await;
                             t.last_llm_latency_ms = llm_ms;
                             t.llm_tokens_per_second = tps;
                         }
-                        println!("🧠 [LLM REFLECTION #{}]: {}", cycle_count, reflection);
+                        tracing::info!("🧠 [LLM REFLECTION #{}]: {}", cycle_count, reflection);
                         {
-                            let mut mind = core_mind.lock().unwrap();
+                            let mut mind = core_mind.lock().await;
                             mind.push_pursuit(reflection.clone());
                             mind.input_buffer = Some(reflection);
                         }
                     }
-                    Err(e) => eprintln!("⚠️ LLM reflection failed: {}", e),
+                    Err(e) => tracing::info!("⚠️ LLM reflection failed: {}", e),
                 }
 
                 let goal_system = "You are a strict planning AI. Output only a compact valid JSON array of at most 3 short concrete sub-goal strings. No objects, no keys, no explanations, no markdown, no repetition.";
@@ -7940,22 +7990,22 @@ async fn main() -> Result<()> {
                             if g.trim().len() < 5 {
                                 continue;
                             }
-                            println!("🎯 [LLM GOAL]: {}", g);
-                            let mut mind = core_mind.lock().unwrap();
+                            tracing::info!("🎯 [LLM GOAL]: {}", g);
+                            let mut mind = core_mind.lock().await;
                             mind.push_pursuit(g.to_string());
                         }
                     }
-                    Err(e) => eprintln!("⚠️ LLM goal generation failed: {}", e),
+                    Err(e) => tracing::info!("⚠️ LLM goal generation failed: {}", e),
                 }
             } else {
-                println!("⚠️ Ollama not available; skipping LLM reflection.");
+                tracing::info!("⚠️ Ollama not available; skipping LLM reflection.");
             }
 
-            mind = core_mind.lock().unwrap();
-            println!("🧠 [AUTONOMOUS COGNITIVE CYCLE #{}]", cycle_count);
-            println!("  Self-awareness: {:.2}", self_awareness);
-            println!("  Active goals: {}", result.active_goals.len());
-            println!("  Creative suggestion: {}", result.creative_suggestion);
+            mind = core_mind.lock().await;
+            tracing::info!("🧠 [AUTONOMOUS COGNITIVE CYCLE #{}]", cycle_count);
+            tracing::info!("  Self-awareness: {:.2}", self_awareness);
+            tracing::info!("  Active goals: {}", result.active_goals.len());
+            tracing::info!("  Creative suggestion: {}", result.creative_suggestion);
         }
 
         // 🌌 Periodic novel concept generation
@@ -7967,9 +8017,11 @@ async fn main() -> Result<()> {
             ];
             let (novel_concept, novelty) =
                 mind.creative_space.generate_novel_concept(&seed_concepts);
-            println!(
+            tracing::info!(
                 "🎨 [CREATIVE SYNTHESIS #{}]: {} (novelty: {:.2})",
-                cycle_count, novel_concept, novelty
+                cycle_count,
+                novel_concept,
+                novelty
             );
         }
 
@@ -7977,7 +8029,7 @@ async fn main() -> Result<()> {
         if cycle_count % 40 == 0 {
             let inferences = mind.common_sense.infer("autonomous operation");
             if !inferences.is_empty() {
-                println!(
+                tracing::info!(
                     "🤔 [COMMON SENSE #{}]: {} inferences made",
                     cycle_count,
                     inferences.len()
@@ -7990,9 +8042,10 @@ async fn main() -> Result<()> {
             let targets = mind.self_improvement.optimization_targets.clone();
             for target in &targets {
                 if mind.self_improvement.should_modify(target) {
-                    println!(
+                    tracing::info!(
                         "🔧 [SELF-IMPROVEMENT #{}]: Modifying {}",
-                        cycle_count, target
+                        cycle_count,
+                        target
                     );
                     mind.self_improvement
                         .apply_modification(target.clone(), "optimize".to_string());
@@ -8003,7 +8056,7 @@ async fn main() -> Result<()> {
         // Periodic weight persistence
         if cycle_count % 100 == 0 {
             mind.update_weight_persistence();
-            println!(
+            tracing::info!(
                 "💾 [WEIGHT PERSISTENCE]: Neural weights saved at cycle {}",
                 cycle_count
             );

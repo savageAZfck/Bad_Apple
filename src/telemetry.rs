@@ -1,5 +1,6 @@
 use crate::metrics::MetricsLogger;
 use crate::ollama_client::OllamaClient;
+use crate::protocol::SwarmMetrics;
 use crate::strategy_library::StrategyLibrary;
 use crate::{FullySapientSoulMatrix, Skill};
 use axum::{
@@ -17,15 +18,16 @@ use std::fs;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::{Components, Disks, Networks, System};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 pub fn current_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or(Duration::ZERO)
         .as_secs()
 }
 
@@ -57,6 +59,7 @@ pub struct TelemetryState {
     pub domain_mastery: std::collections::HashMap<String, f64>,
     pub synthesis_speedup: f64,
     pub power_reduction: f64,
+    pub swarm_metrics: SwarmMetrics,
 }
 
 impl TelemetryState {
@@ -122,6 +125,10 @@ impl TelemetryState {
 
     pub fn record_critic(&mut self, score: f64) {
         self.critic_score = score;
+    }
+
+    pub fn record_swarm(&mut self, swarm: &SwarmMetrics) {
+        self.swarm_metrics = swarm.clone();
     }
 }
 
@@ -348,8 +355,8 @@ struct AppState {
 }
 
 async fn telemetry_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let telemetry = state.telemetry.lock().unwrap().clone();
-    let sensors = state.sensors.lock().unwrap().clone();
+    let telemetry = state.telemetry.lock().await.clone();
+    let sensors = state.sensors.lock().await.clone();
     Json(serde_json::json!({
         "telemetry": telemetry,
         "sensors": sensors,
@@ -357,7 +364,7 @@ async fn telemetry_handler(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn metrics_json_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let metrics = state.metrics.lock().unwrap();
+    let metrics = state.metrics.lock().await;
     Json(serde_json::json!({
         "summary": metrics.summary(100),
         "recent": metrics.recent(100),
@@ -365,13 +372,13 @@ async fn metrics_json_handler(State(state): State<AppState>) -> impl IntoRespons
 }
 
 async fn metrics_dashboard_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let html = state.metrics.lock().unwrap().dashboard_html();
+    let html = state.metrics.lock().await.dashboard_html();
     Html(html)
 }
 
 async fn live_dashboard_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let telemetry = state.telemetry.lock().unwrap().clone();
-    let sensors = state.sensors.lock().unwrap().clone();
+    let telemetry = state.telemetry.lock().await.clone();
+    let sensors = state.sensors.lock().await.clone();
     Html(live_dashboard_html(&telemetry, &sensors))
 }
 
@@ -446,6 +453,64 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
         mem
     );
 
+    let swarm = &telemetry.swarm_metrics;
+    let peer_pct = (swarm.peer_count as f64 / 64.0 * 100.0).clamp(0.0, 100.0);
+    let in_bar = swarm.kbps_in.clamp(0.0, 1000.0);
+    let out_bar = swarm.kbps_out.clamp(0.0, 1000.0);
+    let merge_us = swarm.last_merge_latency_us.clamp(0, 10_000) as f64;
+    let receive_us = swarm.last_engram_receive_latency_us.clamp(0, 10_000) as f64;
+    let swarm_svg = format!(
+        r##"<svg viewBox="0 0 600 220" class="panel-svg">
+           <text x="20" y="25" fill="#7df" font-size="16">Wide-Area Network Swarm Grid</text>
+
+           <text x="20" y="55" fill="#d0d0e0" font-size="13">Active Peer Nodes: {}</text>
+           <rect x="180" y="43" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="43" width="{:.2}" height="12" fill="#7df" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="90" fill="#d0d0e0" font-size="13">Inbound Throughput: {:.2} KB/s</text>
+           <rect x="180" y="78" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="78" width="{:.2}" height="12" fill="#7f7" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="125" fill="#d0d0e0" font-size="13">Outbound Throughput: {:.2} KB/s</text>
+           <rect x="180" y="113" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="113" width="{:.2}" height="12" fill="#f7d" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="160" fill="#d0d0e0" font-size="13">Merge Latency: {} us (batch {})</text>
+           <rect x="180" y="148" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="148" width="{:.2}" height="12" fill="#8af" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="195" fill="#d0d0e0" font-size="13">Receive Latency: {} us</text>
+           <rect x="180" y="183" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="183" width="{:.2}" height="12" fill="#aaf" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+         </svg>"##,
+        swarm.peer_count,
+        peer_pct * 3.0,
+        peer_pct * 3.0,
+        swarm.kbps_in,
+        in_bar * 0.3,
+        in_bar * 0.3,
+        swarm.kbps_out,
+        out_bar * 0.3,
+        out_bar * 0.3,
+        swarm.last_merge_latency_us,
+        swarm.last_merge_batch_size,
+        merge_us * 0.03,
+        merge_us * 0.03,
+        swarm.last_engram_receive_latency_us,
+        receive_us * 0.03,
+        receive_us * 0.03
+    );
+
     format!(
         r##"<!DOCTYPE html>
 <html>
@@ -471,10 +536,14 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
   <h2>Thermodynamic Acceleration Panel</h2>
   {}
 </div>
+<div class="panel">
+  <h2>Wide-Area Network Swarm Grid Panel</h2>
+  {}
+</div>
 <p><a href="/" style="color:#8af">Metrics</a> | <a href="/telemetry" style="color:#8af">Telemetry JSON</a></p>
 </body>
 </html>"##,
-        competence_svg, thermodynamic_svg
+        competence_svg, thermodynamic_svg, swarm_svg
     )
 }
 
@@ -562,9 +631,21 @@ async fn run_tool_handler(
     State(state): State<AppState>,
     Json(payload): Json<ToolRunRequest>,
 ) -> impl IntoResponse {
+    if payload.language == "python" && !crate::is_safe_agent_code(&payload.code) {
+        state.telemetry.lock().await.record_tool_result(false);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ToolRunResponse {
+                status: "error".to_string(),
+                output: None,
+                error: Some("Tool code failed safety check".to_string()),
+            }),
+        );
+    }
+
     let result = run_sandboxed_tool(&payload.name, &payload.code, &payload.language);
     let success = result.is_ok();
-    state.telemetry.lock().unwrap().record_tool_result(success);
+    state.telemetry.lock().await.record_tool_result(success);
 
     match result {
         Ok(output) => (
@@ -675,6 +756,17 @@ Provide only the Python function `def skill(x): ...`",
     };
 
     let code = strip_markdown_code(&raw_code);
+    if !crate::is_safe_agent_code(&code) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(SkillLearnResponse {
+                status: "error".to_string(),
+                skill_key: None,
+                code: Some(code),
+                error: Some("Generated code failed safety check".to_string()),
+            }),
+        );
+    }
     let test_code = format!("{}\nprint(skill({:?}))", code, payload.example_input);
 
     match run_sandboxed_tool("skill_test", &test_code, "python") {
@@ -692,7 +784,8 @@ Provide only the Python function `def skill(x): ...`",
                     learned_at: current_secs(),
                     success_count: 1,
                 };
-                if let Ok(mut mind) = state.core_mind.lock() {
+                {
+                    let mut mind = state.core_mind.lock().await;
                     mind.skill_memory.skills.insert(key.clone(), skill);
                 }
                 (
@@ -735,17 +828,28 @@ async fn run_skill_handler(
     State(state): State<AppState>,
     Json(payload): Json<SkillRunRequest>,
 ) -> impl IntoResponse {
-    let skill = match state.core_mind.lock() {
-        Ok(mind) => mind.skill_memory.skills.get(&payload.skill_key).cloned(),
-        Err(_) => None,
+    let skill = {
+        let mind = state.core_mind.lock().await;
+        mind.skill_memory.skills.get(&payload.skill_key).cloned()
     };
 
     match skill {
         Some(skill) => {
+            if !crate::is_safe_agent_code(&skill.code) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(SkillRunResponse {
+                        status: "error".to_string(),
+                        output: None,
+                        error: Some("Stored skill code failed safety check".to_string()),
+                    }),
+                );
+            }
             let code = format!("{}\nprint(skill({:?}))", skill.code, payload.input);
             match run_sandboxed_tool(&payload.skill_key, &code, "python") {
                 Ok(output) => {
-                    if let Ok(mut mind) = state.core_mind.lock() {
+                    {
+                        let mut mind = state.core_mind.lock().await;
                         if let Some(s) = mind.skill_memory.skills.get_mut(&payload.skill_key) {
                             s.success_count += 1;
                         }
@@ -767,7 +871,8 @@ async fn run_skill_handler(
                     )
                 }
                 Err(e) => {
-                    if let Ok(mut mind) = state.core_mind.lock() {
+                    {
+                        let mut mind = state.core_mind.lock().await;
                         let current = mind
                             .skill_reliability
                             .get(&payload.skill_key)
@@ -813,26 +918,16 @@ async fn add_pursuit_handler(
     State(state): State<AppState>,
     Json(payload): Json<AddPursuitRequest>,
 ) -> impl IntoResponse {
-    match state.core_mind.lock() {
-        Ok(mut mind) => {
-            mind.active_pursuits.push_front(payload.pursuit.clone());
-            let pursuits: Vec<String> = mind.active_pursuits.iter().cloned().collect();
-            (
-                StatusCode::OK,
-                Json(AddPursuitResponse {
-                    status: "ok".to_string(),
-                    active_pursuits: pursuits,
-                }),
-            )
-        }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(AddPursuitResponse {
-                status: "error".to_string(),
-                active_pursuits: Vec::new(),
-            }),
-        ),
-    }
+    let mut mind = state.core_mind.lock().await;
+    mind.active_pursuits.push_front(payload.pursuit.clone());
+    let pursuits: Vec<String> = mind.active_pursuits.iter().cloned().collect();
+    (
+        StatusCode::OK,
+        Json(AddPursuitResponse {
+            status: "ok".to_string(),
+            active_pursuits: pursuits,
+        }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -907,6 +1002,23 @@ Training output: {:?}",
         };
 
         let code = strip_markdown_code(&raw_code);
+        if !crate::is_safe_agent_code(&code) {
+            previous_attempt = Some(code.clone());
+            previous_error = Some("Generated code failed safety check".to_string());
+            if attempt < 2 {
+                continue;
+            }
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TransferEvaluateResponse {
+                    status: "error".to_string(),
+                    output: None,
+                    passed: Some(false),
+                    code: Some(code),
+                    error: previous_error,
+                }),
+            );
+        }
         let train_code = format!("{}\nprint(skill({:?}))", code, payload.train_input);
 
         match run_sandboxed_tool("transfer_train", &train_code, "python") {
@@ -948,7 +1060,10 @@ Training output: {:?}",
                                 "Test input {:?} produced {:?}, expected {:?}",
                                 payload.test_input,
                                 test_output,
-                                payload.expected_test_output.as_ref().unwrap()
+                                payload
+                                    .expected_test_output
+                                    .as_deref()
+                                    .unwrap_or("(no expected output)")
                             ));
                             continue;
                         }
@@ -1015,23 +1130,16 @@ Training output: {:?}",
 }
 
 async fn identity_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match state.core_mind.lock() {
-        Ok(mind) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "narrative": mind.narrative_identity(),
-                "born_at": mind.born_at,
-                "journal_entries": mind.identity_journal.len(),
-                "last_journal_entry": mind.last_journal_entry,
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": "could not read mind",
-            })),
-        ),
-    }
+    let mind = state.core_mind.lock().await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "narrative": mind.narrative_identity(),
+            "born_at": mind.born_at,
+            "journal_entries": mind.identity_journal.len(),
+            "last_journal_entry": mind.last_journal_entry,
+        })),
+    )
 }
 
 pub async fn start_telemetry_listener(
@@ -1043,11 +1151,11 @@ pub async fn start_telemetry_listener(
         match TcpListener::bind(addr).await {
             Ok(listener) => {
                 if p == port {
-                    println!("🛰️ [TELEMETRY ENGINE]: Online at http://{}/telemetry", addr);
+                    tracing::info!("🛰️ [TELEMETRY ENGINE]: Online at http://{}/telemetry", addr);
                 } else if p == fallback_base {
-                    println!("⚠️ [PORT COLLISION]: Port {} active. Diverting stream to http://{}/telemetry", port, addr);
+                    tracing::warn!("⚠️ [PORT COLLISION]: Port {} active. Diverting stream to http://{}/telemetry", port, addr);
                 } else {
-                    println!(
+                    tracing::warn!(
                         "⚠️ [PORT COLLISION]: Diverting stream to http://{}/telemetry",
                         addr
                     );
@@ -1099,7 +1207,7 @@ pub async fn run_telemetry_server(
     let listener = match start_telemetry_listener(port).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!(
+            tracing::error!(
                 "⚠️ Telemetry server bind failed: {}. Continuing without HTTP telemetry.",
                 e
             );
@@ -1108,9 +1216,27 @@ pub async fn run_telemetry_server(
     };
 
     let chosen_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-    println!(
+    tracing::info!(
         "   POST http://127.0.0.1:{}/tools/run  {{\"name\",\"code\",\"language\"}}",
         chosen_port
     );
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("telemetry server ended: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_secs;
+
+    #[test]
+    fn current_secs_is_monotonic_and_reasonable() {
+        let a = current_secs();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = current_secs();
+        assert!(b >= a, "current_secs must be monotonic");
+        // Unix epoch was 1970; the value should be well past that and not in the far future.
+        assert!(a > 1_000_000_000, "timestamp should be after year 2001");
+        assert!(a < 3_000_000_000, "timestamp should be before year 2063");
+    }
 }

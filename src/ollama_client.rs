@@ -60,9 +60,10 @@ impl OllamaClient {
         max_tokens: i32,
         temperature: f32,
     ) -> Result<String, String> {
+        let model = self.resolve_model(model).await?;
         let url = format!("{}/api/generate", self.base_url);
         let mut body = json!({
-            "model": model,
+            "model": &model,
             "prompt": prompt,
             "stream": false,
             "options": {
@@ -100,9 +101,10 @@ impl OllamaClient {
         prompt: &str,
         system: Option<&str>,
     ) -> Result<String, String> {
+        let model = self.resolve_model(model).await?;
         let url = format!("{}/api/generate", self.base_url);
         let mut body = json!({
-            "model": model,
+            "model": &model,
             "prompt": prompt,
             "stream": false,
             "options": {
@@ -137,10 +139,11 @@ impl OllamaClient {
         prompt: &str,
         system: Option<&str>,
     ) -> Result<serde_json::Value, String> {
+        let model = self.resolve_model(model).await?;
         let url = format!("{}/api/generate", self.base_url);
         let json_system = "You must output only valid JSON. Do not add markdown, explanations, or any text outside the JSON object.";
         let mut body = json!({
-            "model": model,
+            "model": &model,
             "prompt": prompt,
             "stream": false,
             "format": "json",
@@ -182,7 +185,50 @@ impl OllamaClient {
     }
 
     pub async fn is_available(&self) -> bool {
-        self.list_models().await.is_ok()
+        self.list_models()
+            .await
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Resolve a requested model to an actually-installed local model.
+    ///
+    /// If `preferred` is present in `ollama list`, it is used verbatim. Otherwise,
+    /// a small preference list of common general-purpose models is tried, and the
+    /// first match is returned. If none match, the first available local model is
+    /// used as a last resort.
+    pub async fn resolve_model(&self, preferred: &str) -> Result<String, String> {
+        let available = self.list_models().await?;
+        if available.is_empty() {
+            return Err("Ollama has no local models".to_string());
+        }
+
+        fn base_name(s: &str) -> &str {
+            s.split(':').next().unwrap_or(s)
+        }
+
+        if let Some(m) = available
+            .iter()
+            .find(|m| m.as_str() == preferred || base_name(m) == preferred)
+        {
+            return Ok(m.clone());
+        }
+
+        const PREFERRED: &[&str] = &[
+            "llama3", "llama3.1", "llama3.2", "mistral", "mixtral", "phi3", "gemma2", "gemma",
+        ];
+        for candidate in PREFERRED {
+            if let Some(m) = available.iter().find(|m| {
+                base_name(m).starts_with(candidate) && base_name(m).len() >= candidate.len()
+            }) {
+                return Ok(m.clone());
+            }
+        }
+
+        available
+            .first()
+            .cloned()
+            .ok_or_else(|| "Ollama has no local models".to_string())
     }
 }
 

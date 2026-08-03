@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// A single training / runtime metric snapshot.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]

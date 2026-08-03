@@ -1,6 +1,7 @@
 # Build artifacts
 /target
 /target-clean
+/target-release
 
 # Cargo lock is intentionally committed for this binary
 # Cargo.lock
@@ -32,3 +33,10 @@ sapient_agi_soul_5001.*
 
 # Wild workspace runtime data
 /wild_workspace
+!/wild_workspace/demo_scripts/
+!/wild_workspace/demo_scripts/*.txt
+
+# Runtime databases and reports
+/strategy_db/
+/PILOT_EVALUATION_METRICS.md
+/firefly_core.h

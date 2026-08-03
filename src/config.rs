@@ -1,12 +1,14 @@
 //! Runtime configuration for the sapient_soul agent.
 //!
 //! Values are loaded from environment variables (prefixed with `FIREFLY_`) and
-//! fall back to sensible defaults for local development.
+//! fall back to sensible defaults for local development. A JSON config file
+//! pointed at by `FIREFLY_CONFIG_FILE` is overlaid on top of those defaults.
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Central runtime configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// Telemetry/dashboard HTTP port.
     pub telemetry_port: u16,
@@ -40,11 +42,30 @@ pub struct Config {
     pub engram_timeout_ms: u64,
     /// Shared multi-agent signing secret (optional; default derived from hostname).
     pub multi_agent_secret: Option<String>,
+    /// Wide-area peer node addresses in `host:port` form.
+    pub peer_nodes: Vec<String>,
+    /// Optional path to a JSON file with extra config (overlays env defaults).
+    pub config_file: Option<PathBuf>,
+    /// TCP port to listen on for wide-area peer connections.
+    pub wan_tcp_port: u16,
+    /// WebSocket port to listen on for wide-area peer connections.
+    pub wan_ws_port: u16,
+    /// Maximum number of wide-area peer connections.
+    pub max_wan_peers: usize,
+    /// Base retry delay in milliseconds for peer reconnection (exponential backoff).
+    pub peer_retry_base_ms: u64,
+    /// Maximum retry delay in milliseconds for peer reconnection.
+    pub peer_retry_max_ms: u64,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        Self {
+        let config_file = std::env::var("FIREFLY_CONFIG_FILE")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
+
+        let mut cfg = Self {
             telemetry_port: env_u16("FIREFLY_TELEMETRY_PORT", 8080),
             multi_agent_port_start: env_u16("FIREFLY_MULTI_AGENT_PORT_START", 5001),
             multi_agent_port_end: env_u16("FIREFLY_MULTI_AGENT_PORT_END", 5010),
@@ -61,7 +82,27 @@ impl Config {
             max_engram_batch: env_usize("FIREFLY_MAX_ENGRAM_BATCH", 64),
             engram_timeout_ms: env_u64("FIREFLY_ENGRAM_TIMEOUT_MS", 5),
             multi_agent_secret: std::env::var("FIREFLY_MULTI_AGENT_SECRET").ok(),
+            peer_nodes: parse_peer_list(&env_or("FIREFLY_PEERS", "")),
+            config_file,
+            wan_tcp_port: env_u16("FIREFLY_WAN_TCP_PORT", 6001),
+            wan_ws_port: env_u16("FIREFLY_WAN_WS_PORT", 6002),
+            max_wan_peers: env_usize("FIREFLY_MAX_WAN_PEERS", 64),
+            peer_retry_base_ms: env_u64("FIREFLY_PEER_RETRY_BASE_MS", 250),
+            peer_retry_max_ms: env_u64("FIREFLY_PEER_RETRY_MAX_MS", 30_000),
+        };
+
+        // Overlay an active JSON configuration file if one is provided.
+        if let Some(path) = &cfg.config_file {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(overlay) = serde_json::from_str::<Config>(&text) {
+                    // Overlay all non-default fields from the file. The env already won for
+                    // values explicitly set; the file acts as a stable structured override.
+                    merge_config(&mut cfg, overlay);
+                }
+            }
         }
+
+        cfg
     }
 }
 
@@ -95,4 +136,80 @@ fn env_path(key: &str, default: &str) -> PathBuf {
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(default))
+}
+
+fn parse_peer_list(s: &str) -> Vec<String> {
+    s.split([',', ';', '\n', '\r'])
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+fn merge_config(base: &mut Config, overlay: Config) {
+    if overlay.telemetry_port != 0 {
+        base.telemetry_port = overlay.telemetry_port;
+    }
+    if overlay.multi_agent_port_start != 0 {
+        base.multi_agent_port_start = overlay.multi_agent_port_start;
+    }
+    if overlay.multi_agent_port_end != 0 {
+        base.multi_agent_port_end = overlay.multi_agent_port_end;
+    }
+    if !overlay.ollama_url.is_empty() {
+        base.ollama_url = overlay.ollama_url;
+    }
+    if !overlay.ollama_model.is_empty() {
+        base.ollama_model = overlay.ollama_model;
+    }
+    if !overlay.state_file.as_os_str().is_empty() {
+        base.state_file = overlay.state_file;
+    }
+    if !overlay.curriculum_dir.as_os_str().is_empty() {
+        base.curriculum_dir = overlay.curriculum_dir;
+    }
+    if !overlay.wild_workspace_dir.as_os_str().is_empty() {
+        base.wild_workspace_dir = overlay.wild_workspace_dir;
+    }
+    if !overlay.sled_db_path.as_os_str().is_empty() {
+        base.sled_db_path = overlay.sled_db_path;
+    }
+    if !overlay.metrics_log.as_os_str().is_empty() {
+        base.metrics_log = overlay.metrics_log;
+    }
+    if !overlay.skills_dir.as_os_str().is_empty() {
+        base.skills_dir = overlay.skills_dir;
+    }
+    if !overlay.tools_dir.as_os_str().is_empty() {
+        base.tools_dir = overlay.tools_dir;
+    }
+    if overlay.clock_interval_secs != 0 {
+        base.clock_interval_secs = overlay.clock_interval_secs;
+    }
+    if overlay.max_engram_batch != 0 {
+        base.max_engram_batch = overlay.max_engram_batch;
+    }
+    if overlay.engram_timeout_ms != 0 {
+        base.engram_timeout_ms = overlay.engram_timeout_ms;
+    }
+    if overlay.multi_agent_secret.is_some() {
+        base.multi_agent_secret = overlay.multi_agent_secret;
+    }
+    if !overlay.peer_nodes.is_empty() {
+        base.peer_nodes = overlay.peer_nodes;
+    }
+    if overlay.wan_tcp_port != 0 {
+        base.wan_tcp_port = overlay.wan_tcp_port;
+    }
+    if overlay.wan_ws_port != 0 {
+        base.wan_ws_port = overlay.wan_ws_port;
+    }
+    if overlay.max_wan_peers != 0 {
+        base.max_wan_peers = overlay.max_wan_peers;
+    }
+    if overlay.peer_retry_base_ms != 0 {
+        base.peer_retry_base_ms = overlay.peer_retry_base_ms;
+    }
+    if overlay.peer_retry_max_ms != 0 {
+        base.peer_retry_max_ms = overlay.peer_retry_max_ms;
+    }
 }

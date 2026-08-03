@@ -1,5 +1,174 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+#![allow(dead_code, clippy::new_without_default)]
+
+//! Public C-compatible library interface for the `sapient_soul` runtime.
+//!
+//! This is an **Evaluation Kit** scaffold. It exposes a small, thread-safe FFI
+//! surface so macOS native code (Swift / C++ / Objective-C) can initialize the
+//! engine, submit a stream of bytes, and read back a coarse mastery index.
+//!
+//! Safety: every function that accepts raw pointers is `unsafe extern "C"`. The
+//! caller is responsible for passing only valid pointers obtained from
+//! `firefly_init` and for calling `firefly_free` to release the context.
+
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::sync::Mutex;
+
+pub mod config;
+pub mod hyperdimensional_core;
+pub mod protocol;
+pub mod strategy_library;
+pub mod tensor_brain;
+
+use config::Config;
+use hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
+
+/// Opaque handle to an initialized Firefly evaluation context.
+///
+/// The internals are intentionally hidden from C. Only the pointer is exposed;
+/// the Rust side owns and synchronizes the state with a `std::sync::Mutex`.
+#[repr(C)]
+pub struct FireflyContext {
+    _private: *mut c_void,
+}
+
+unsafe impl Send for FireflyContext {}
+unsafe impl Sync for FireflyContext {}
+
+struct FireflyState {
+    #[allow(dead_code)]
+    config: Config,
+    mastery_index: f32,
+}
+
+impl FireflyState {
+    fn new(config: Config) -> Self {
+        Self {
+            config,
+            mastery_index: 0.5,
+        }
+    }
+}
+
+/// Initialize a Firefly evaluation context.
+///
+/// `config_path` may be a null pointer, in which case configuration is loaded
+/// from `FIREFLY_*` environment variables. The returned pointer must be freed
+/// with `firefly_free`.
+///
+/// # Safety
+///
+/// The caller must ensure `config_path` is either null or a valid,
+/// null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_init(config_path: *const c_char) -> *mut FireflyContext {
+    let config = if config_path.is_null() {
+        Config::from_env()
+    } else {
+        let cstr = match CStr::from_ptr(config_path).to_str() {
+            Ok(s) if !s.is_empty() => Config::from_env(),
+            _ => Config::from_env(),
+        };
+        cstr
+    };
+
+    let state = FireflyState::new(config);
+    let boxed = Box::new(Mutex::new(state));
+    let ctx = Box::new(FireflyContext {
+        _private: Box::into_raw(boxed) as *mut c_void,
+    });
+    Box::into_raw(ctx)
+}
+
+/// Process a raw byte stream and return a null-terminated diagnostic string.
+///
+/// The input is interpreted as UTF-8. It is encoded into the 10,000-D HDC
+/// substrate, thermodynamically minimized, and analyzed for overhead patterns.
+/// The returned `*mut c_char` is a freshly allocated C string that the caller
+/// must free with `libc::free` (or a matching deallocator).
+///
+/// # Safety
+///
+/// `context` must be a valid pointer returned by `firefly_init` and not yet
+/// freed. `input_buffer` must point to at least `length` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_process_stream(
+    context: *mut FireflyContext,
+    input_buffer: *const u8,
+    length: usize,
+) -> *mut c_char {
+    if context.is_null() || input_buffer.is_null() {
+        return firefly_cstring("null pointer");
+    }
+
+    let bytes = std::slice::from_raw_parts(input_buffer, length);
+    let text = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return firefly_cstring("invalid utf-8"),
+    };
+
+    let (profile, diagnosis) = {
+        let mut encoder = ScriptEncoder::new();
+        let mut profile = encoder.encode(text);
+        ThermodynamicMinimizer::reduce_entropy(&mut profile);
+        let (diagnosis, _) = OverheadAnalyzer::analyze(&profile);
+        (profile, diagnosis)
+    };
+
+    // Update a coarse mastery index based on how clean the profile is.
+    {
+        let ctx = &*context;
+        let state = &*(ctx._private as *const Mutex<FireflyState>);
+        if let Ok(mut guard) = state.lock() {
+            guard.mastery_index = (1.0 - profile.overhead_score) as f32;
+        }
+    }
+
+    let summary = format!(
+        "diagnosis: {}; overhead: {:.3}",
+        diagnosis, profile.overhead_score
+    );
+    firefly_cstring(&summary)
+}
+
+/// Return the current coarse mastery index for this context, clamped to [0, 1].
+///
+/// # Safety
+///
+/// `context` must be a valid pointer returned by `firefly_init` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_get_mastery_index(context: *mut FireflyContext) -> f32 {
+    if context.is_null() {
+        return 0.0;
+    }
+    let ctx = &*context;
+    let state = &*(ctx._private as *const Mutex<FireflyState>);
+    state
+        .lock()
+        .map(|g| g.mastery_index.clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
+/// Release a context previously allocated by `firefly_init`.
+///
+/// After this call the pointer is invalid and must not be used again.
+///
+/// # Safety
+///
+/// `context` must be a valid pointer returned by `firefly_init` and not yet
+/// freed. After this call, the pointer must not be used again.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_free(context: *mut FireflyContext) {
+    if context.is_null() {
+        return;
+    }
+    let ctx = Box::from_raw(context);
+    let state = Box::from_raw(ctx._private as *mut Mutex<FireflyState>);
+    drop(state);
+    drop(ctx);
+}
+
+fn firefly_cstring(s: &str) -> *mut c_char {
+    CString::new(s).unwrap_or_default().into_raw()
 }
 
 #[cfg(test)]
@@ -7,8 +176,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ffi_roundtrip() {
+        let ctx = unsafe { firefly_init(std::ptr::null()) };
+        assert!(!ctx.is_null());
+
+        let input = b"print hello world sum total";
+        let out = unsafe { firefly_process_stream(ctx, input.as_ptr(), input.len()) };
+        assert!(!out.is_null());
+        let _ = unsafe { CStr::from_ptr(out) };
+
+        let idx = unsafe { firefly_get_mastery_index(ctx) };
+        assert!((0.0..=1.0).contains(&idx));
+
+        unsafe { firefly_free(ctx) };
+    }
+
+    #[test]
     fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+        assert_eq!(2 + 2, 4);
     }
 }
