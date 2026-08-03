@@ -5673,7 +5673,7 @@ fn best_matching_skill(mind: &FullySapientSoulMatrix, step: &str) -> Option<(Str
 
     let mut best: Option<(String, Skill, f64)> = None;
     for (key, skill) in &mind.skill_memory.skills {
-        if !is_safe_agent_code(&skill.code) {
+        if !is_safe_agent_code(&skill.code) || !skill.code.to_lowercase().contains("def skill(") {
             continue;
         }
         let skill_emb =
@@ -5741,9 +5741,10 @@ async fn evaluate_transfer_task(
         };
 
         let code = telemetry::strip_markdown_code(&raw_code);
-        if !is_safe_agent_code(&code) {
+        if !is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
             previous_attempt = Some(code.clone());
-            previous_error = Some("Generated code failed safety check".to_string());
+            previous_error =
+                Some("Generated code must define a `def skill(x)` function".to_string());
             if attempt < 2 {
                 continue;
             }
@@ -7349,7 +7350,9 @@ async fn main() -> Result<()> {
             }
             if best_candidate.is_none() {
                 if let Some(strategy) = agent_strategy_library.best_match(&goal).await {
-                    if !is_safe_agent_code(&strategy.code) {
+                    if !is_safe_agent_code(&strategy.code)
+                        || !strategy.code.to_lowercase().contains("def skill(")
+                    {
                         tracing::info!(
                             "⚠️ Recalled strategy '{}' failed safety check; skipping",
                             strategy.key
@@ -7378,7 +7381,8 @@ async fn main() -> Result<()> {
             // 🔮 Model-based planning: generate up to 3 candidate tools,
             // predict each one's effects, and execute the highest-utility one.
             let prompt_template = format!(
-                "You are an autonomous agent with this active goal: '{}'\nEmotional state: {}\nMemory count: {}\nSensor summary: {}\n{}\n\nWhen selecting an action, explicitly prefer tools and strategies that advance my primary goals and are consistent with my historical identity.\n\nReturn ONLY a valid JSON object with exactly these fields: 'name' (short snake_case identifier), 'language' (must be the string 'python'), and 'code' (a short, self-contained Python 3 script that prints a useful result).\n\nSafety rules for the code:\n- It must be read-only or computational.\n- No file deletion, network, shell access, or writing to files.\n- Do not use: rm, dd, mkfs, sudo, su, wget, curl, ssh, scp, subprocess, os.system, exec, eval, compile, __import__, open, write, delete, destroy, socket, requests, urllib.\n- Allowed imports: math, random, statistics, json, datetime, itertools, collections, string, re.\n- For mean, stdev, variance, pstdev, pvariance, mode, median, harmonic_mean, and geometric_mean, use the `statistics` module (e.g. `statistics.mean(data)`).\n- Do NOT use `math.mean(...)`, `math.stdev(...)`, `math.variance(...)`, `math.pstdev(...)`, `math.pvariance(...)`, `math.mode(...)`, `math.median(...)`, `math.harmonic_mean(...)`, or `math.geometric_mean(...)` — these functions do not exist in the `math` module.\n- The script must not index into a scalar value. If you have a 2-D list, treat inner elements as scalars, not as lists to iterate over.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math, statistics; data=[1,2,3,4,5]; print(math.sqrt(sum((x-statistics.mean(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
+                "You are an autonomous agent with this active goal: '{}'\nEmotional state: {}\nMemory count: {}\nSensor summary: {}\n{}\n\nWhen selecting an action, explicitly prefer tools and strategies that advance my primary goals and are consistent with my historical identity.\n\nReturn ONLY a valid JSON object with exactly these fields: 'name' (short snake_case identifier), 'language' (must be the string 'python'), and 'code' (a short, self-contained Python 3 script that prints a useful result).\n\nSafety rules for the code:\n- It must be read-only or computational.\n- No file deletion, network, shell access, or writing to files.\n- Do not use: rm, dd, mkfs, sudo, su, wget, curl, ssh, scp, subprocess, os.system, exec, eval, compile, __import__, open, write, delete, destroy, socket, requests, urllib.\n- Allowed imports: math, random, statistics, json, datetime, itertools, collections, string, re.\n- For mean, stdev, variance, pstdev, pvariance, mode, median, harmonic_mean, and geometric_mean, use the `statistics` module (e.g. `statistics.mean(data)`).\n- Do NOT use `math.mean(...)`, `math.stdev(...)`, `math.variance(...)`, `math.pstdev(...)`, `math.pvariance(...)`, `math.mode(...)`, `math.median(...)`, `math.harmonic_mean(...)`, or `math.geometric_mean(...)` — these functions do not exist in the `math` module.\n- The script must not index into a scalar value. If you have a 2-D list, treat inner elements as scalars, not as lists to iterate over.
+- Do NOT define or call a function named `skill`. The script must be a complete, top-level program that prints a useful result directly, not a function named `skill`.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math, statistics; data=[1,2,3,4,5]; print(math.sqrt(sum((x-statistics.mean(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
                 goal, emotional_state, memory_count, sensor_summary, identity_summary
             );
 

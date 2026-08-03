@@ -136,8 +136,8 @@ pub async fn process_wild_payload(
         .unwrap_or("")
         .to_string();
 
-    if !is_safe_agent_code(&code) {
-        return Err("generated tool failed safety check".into());
+    if !is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
+        return Err("generated tool must define a `def skill(x)` function".into());
     }
 
     let runner = format!(

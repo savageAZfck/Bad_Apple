@@ -756,14 +756,14 @@ Provide only the Python function `def skill(x): ...`",
     };
 
     let code = strip_markdown_code(&raw_code);
-    if !crate::is_safe_agent_code(&code) {
+    if !crate::is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
         return (
             StatusCode::BAD_REQUEST,
             Json(SkillLearnResponse {
                 status: "error".to_string(),
                 skill_key: None,
                 code: Some(code),
-                error: Some("Generated code failed safety check".to_string()),
+                error: Some("Generated code must define a `def skill(x)` function".to_string()),
             }),
         );
     }
@@ -835,7 +835,9 @@ async fn run_skill_handler(
 
     match skill {
         Some(skill) => {
-            if !crate::is_safe_agent_code(&skill.code) {
+            if !crate::is_safe_agent_code(&skill.code)
+                || !skill.code.to_lowercase().contains("def skill(")
+            {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(SkillRunResponse {
@@ -1002,9 +1004,10 @@ Training output: {:?}",
         };
 
         let code = strip_markdown_code(&raw_code);
-        if !crate::is_safe_agent_code(&code) {
+        if !crate::is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
             previous_attempt = Some(code.clone());
-            previous_error = Some("Generated code failed safety check".to_string());
+            previous_error =
+                Some("Generated code must define a `def skill(x)` function".to_string());
             if attempt < 2 {
                 continue;
             }
