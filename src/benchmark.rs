@@ -541,7 +541,9 @@ impl Default for PilotReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{CompactEngramPacket, ConnectionManager, SwarmMetrics, ENGRAM_DIM};
+    use crate::protocol::{
+        CompactEngramPacket, ConnectionManager, LockFreeRing, SwarmMetrics, ENGRAM_DIM,
+    };
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
     use tokio::time::{sleep, timeout};
@@ -550,11 +552,12 @@ mod tests {
     async fn wan_tcp_load_and_pilot_report() {
         const N: usize = 25;
 
-        let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
-        let server_metrics = std::sync::Arc::new(tokio::sync::Mutex::new(SwarmMetrics::default()));
+        let server_ring = std::sync::Arc::new(LockFreeRing::<CompactEngramPacket>::new(256));
+        let server_rx = server_ring.clone();
+        let server_metrics = std::sync::Arc::new(std::sync::Mutex::new(SwarmMetrics::default()));
         let server_cm = ConnectionManager::new(
             b"bench-secret".to_vec(),
-            server_tx,
+            server_ring,
             server_metrics,
             4,
             Duration::from_millis(10),
@@ -563,11 +566,11 @@ mod tests {
         let (tcp_addr, _ws_addr) = server_cm.start_server(0, 0).await;
         let tcp_addr = tcp_addr.expect("server should bind");
 
-        let (client_tx, _client_rx) = tokio::sync::mpsc::unbounded_channel();
-        let client_metrics = std::sync::Arc::new(tokio::sync::Mutex::new(SwarmMetrics::default()));
+        let client_ring = std::sync::Arc::new(LockFreeRing::<CompactEngramPacket>::new(256));
+        let client_metrics = std::sync::Arc::new(std::sync::Mutex::new(SwarmMetrics::default()));
         let client_cm = ConnectionManager::new(
             b"bench-secret".to_vec(),
-            client_tx,
+            client_ring,
             client_metrics,
             4,
             Duration::from_millis(10),
@@ -600,10 +603,10 @@ mod tests {
 
         let mut received = 0;
         while received < N {
-            let packet = timeout(Duration::from_secs(5), server_rx.recv())
+            let packet = timeout(Duration::from_secs(5), server_rx.pop_async())
                 .await
                 .expect("timeout waiting for packet")
-                .expect("server channel closed");
+                .expect("server ring closed");
             assert!(
                 pending.remove(&packet.id),
                 "unexpected packet id {}",

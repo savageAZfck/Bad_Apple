@@ -1,17 +1,19 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use crossbeam_queue::ArrayQueue;
+use crossbeam_utils::CachePadded;
+use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use sysinfo::System;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::Notify;
 use tokio::time::sleep;
 use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message, WebSocketStream};
 
@@ -49,6 +51,85 @@ pub struct SignedUdpPacket {
 
 /// Transport-agnostic alias for the signed envelope.
 pub type SignedPacket = SignedUdpPacket;
+
+/// Fixed-size, cache-aligned, lock-free MPMC ring buffer for wide-area
+/// ingestion hot paths. Uses `crossbeam_queue::ArrayQueue` for the lock-free
+/// slots and `tokio::sync::Notify` for async wake-up.
+pub struct LockFreeRing<T: Send> {
+    queue: ArrayQueue<T>,
+    closed: CachePadded<AtomicBool>,
+    dropped: CachePadded<AtomicU64>,
+    notify: Notify,
+}
+
+impl<T: Send> LockFreeRing<T> {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            queue: ArrayQueue::new(cap),
+            closed: CachePadded::new(AtomicBool::new(false)),
+            dropped: CachePadded::new(AtomicU64::new(0)),
+            notify: Notify::new(),
+        }
+    }
+
+    /// Push an item. If the ring is full or closed, the item is dropped and
+    /// the internal drop counter is incremented.
+    pub fn push(&self, value: T) {
+        if self.closed.load(Ordering::Acquire) || self.queue.push(value).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.notify.notify_one();
+        }
+    }
+
+    /// Try to pop an item without blocking.
+    pub fn pop(&self) -> Option<T> {
+        self.queue.pop()
+    }
+
+    /// Wait for an item, or return `None` once the ring is closed and empty.
+    pub async fn pop_async(&self) -> Option<T> {
+        loop {
+            if let Some(value) = self.queue.pop() {
+                return Some(value);
+            }
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    /// Close the ring. Subsequent pushes are dropped, and any waiting pop
+    /// returns `None` once drained.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.queue.capacity()
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+unsafe impl<T: Send> Send for LockFreeRing<T> {}
+unsafe impl<T: Send> Sync for LockFreeRing<T> {}
 
 /// Resolve a shared multi-agent signing secret.
 /// Prefer the `MULTI_AGENT_SECRET` environment variable; otherwise derive a
@@ -157,7 +238,7 @@ pub struct PeerHandle {
     pub id: PeerId,
     pub transport: PeerTransport,
     pub addr: String,
-    pub outbound: mpsc::UnboundedSender<Vec<u8>>,
+    pub outbound: Arc<LockFreeRing<Vec<u8>>>,
     pub bytes_in: Arc<AtomicU64>,
     pub bytes_out: Arc<AtomicU64>,
     pub connected_at: Instant,
@@ -168,7 +249,7 @@ impl PeerHandle {
         id: PeerId,
         transport: PeerTransport,
         addr: String,
-        outbound: mpsc::UnboundedSender<Vec<u8>>,
+        outbound: Arc<LockFreeRing<Vec<u8>>>,
     ) -> Self {
         Self {
             id,
@@ -184,43 +265,42 @@ impl PeerHandle {
 
 /// Persistent, non-blocking TCP/WebSocket connection manager for wide-area engram gossip.
 ///
-/// * Maintains up to `MAX_WAN_PEERS` concurrent peer handles protected by a
-///   `tokio::sync::RwLock`.
+/// * Maintains up to `MAX_WAN_PEERS` concurrent peer handles in a `DashMap`.
 /// * Outbound connections use an exponential backoff retry state machine.
 /// * Incoming connections are accepted on dedicated TCP and WebSocket ports.
-/// * Verified engrams are forwarded to the supplied `incoming` MPSC channel.
+/// * Verified engrams are forwarded to the lock-free `incoming` ring buffer.
 #[derive(Clone)]
 pub struct ConnectionManager {
     secret: Arc<Vec<u8>>,
-    peers: Arc<RwLock<HashMap<PeerId, PeerHandle>>>,
-    incoming: mpsc::UnboundedSender<CompactEngramPacket>,
-    pub metrics: Arc<tokio::sync::Mutex<SwarmMetrics>>,
+    peers: Arc<DashMap<PeerId, PeerHandle>>,
+    incoming: Arc<LockFreeRing<CompactEngramPacket>>,
+    pub metrics: Arc<Mutex<SwarmMetrics>>,
     max_peers: usize,
     retry_base: Duration,
     retry_max: Duration,
-    listen_addr_tcp: Arc<tokio::sync::Mutex<Option<SocketAddr>>>,
-    listen_addr_ws: Arc<tokio::sync::Mutex<Option<SocketAddr>>>,
+    listen_addr_tcp: Arc<Mutex<Option<SocketAddr>>>,
+    listen_addr_ws: Arc<Mutex<Option<SocketAddr>>>,
 }
 
 impl ConnectionManager {
     pub fn new(
         secret: Vec<u8>,
-        incoming: mpsc::UnboundedSender<CompactEngramPacket>,
-        metrics: Arc<tokio::sync::Mutex<SwarmMetrics>>,
+        incoming: Arc<LockFreeRing<CompactEngramPacket>>,
+        metrics: Arc<Mutex<SwarmMetrics>>,
         max_peers: usize,
         retry_base: Duration,
         retry_max: Duration,
     ) -> Self {
         Self {
             secret: Arc::new(secret),
-            peers: Arc::new(RwLock::new(HashMap::with_capacity(max_peers))),
+            peers: Arc::new(DashMap::with_capacity(max_peers)),
             incoming,
             metrics,
             max_peers,
             retry_base,
             retry_max,
-            listen_addr_tcp: Arc::new(tokio::sync::Mutex::new(None)),
-            listen_addr_ws: Arc::new(tokio::sync::Mutex::new(None)),
+            listen_addr_tcp: Arc::new(Mutex::new(None)),
+            listen_addr_ws: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -258,29 +338,27 @@ impl ConnectionManager {
             Err(_) => return,
         };
 
-        let peers = self.peers.read().await;
-        for (_id, handle) in peers.iter() {
-            if handle.outbound.send(frame.clone()).is_err() {
-                continue;
-            }
+        let handles: Vec<PeerHandle> = self.peers.iter().map(|r| r.clone()).collect();
+        for handle in handles {
+            handle.outbound.push(frame.clone());
             handle
                 .bytes_out
                 .fetch_add(frame.len() as u64, Ordering::Relaxed);
         }
-        drop(peers);
 
-        let mut m = self.metrics.lock().await;
-        m.bytes_out_total += frame.len() as u64;
+        if let Ok(mut m) = self.metrics.lock() {
+            m.bytes_out_total += frame.len() as u64;
+        }
     }
 
     /// Number of currently connected peers.
-    pub async fn peer_count(&self) -> usize {
-        self.peers.read().await.len()
+    pub fn peer_count(&self) -> usize {
+        self.peers.len()
     }
 
     /// Active peer handles for telemetry/diagnostics.
-    pub async fn active_peers(&self) -> Vec<PeerHandle> {
-        self.peers.read().await.values().cloned().collect()
+    pub fn active_peers(&self) -> Vec<PeerHandle> {
+        self.peers.iter().map(|r| r.clone()).collect()
     }
 
     /// Background sampler that recomputes throughput from peer byte counters.
@@ -289,9 +367,10 @@ impl ConnectionManager {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let mut m = self.metrics.lock().await;
-            m.peer_count = self.peers.read().await.len();
-            m.sample();
+            if let Ok(mut m) = self.metrics.lock() {
+                m.peer_count = self.peers.len();
+                m.sample();
+            }
         }
     }
 
@@ -302,8 +381,7 @@ impl ConnectionManager {
         let addr = listener
             .local_addr()
             .map_err(|e| format!("WAN TCP listener local_addr failed: {}", e))?;
-        {
-            let mut guard = self.listen_addr_tcp.lock().await;
+        if let Ok(mut guard) = self.listen_addr_tcp.lock() {
             *guard = Some(addr);
         }
 
@@ -333,8 +411,7 @@ impl ConnectionManager {
         let addr = listener
             .local_addr()
             .map_err(|e| format!("WAN WebSocket listener local_addr failed: {}", e))?;
-        {
-            let mut guard = self.listen_addr_ws.lock().await;
+        if let Ok(mut guard) = self.listen_addr_ws.lock() {
             *guard = Some(addr);
         }
 
@@ -368,7 +445,7 @@ impl ConnectionManager {
     async fn connect_with_retry(&self, peer: String) {
         let mut attempt: u32 = 0;
         loop {
-            if self.peers.read().await.len() >= self.max_peers {
+            if self.peers.len() >= self.max_peers {
                 sleep(self.retry_max).await;
                 continue;
             }
@@ -417,7 +494,7 @@ impl ConnectionManager {
 
     async fn handle_tcp_stream(&self, stream: TcpStream, peer_addr: SocketAddr) {
         let (mut reader, mut writer) = stream.into_split();
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let outbound = Arc::new(LockFreeRing::<Vec<u8>>::new(256));
         let peer_id = format!("tcp:{}", peer_addr);
 
         if self
@@ -425,7 +502,7 @@ impl ConnectionManager {
                 peer_id.clone(),
                 PeerTransport::Tcp,
                 peer_addr.to_string(),
-                outbound_tx,
+                outbound.clone(),
             )
             .await
             .is_none()
@@ -457,7 +534,7 @@ impl ConnectionManager {
         let cm = self.clone();
         let peer_id_write = peer_id.clone();
         let write_task = tokio::spawn(async move {
-            while let Some(frame) = outbound_rx.recv().await {
+            while let Some(frame) = outbound.pop_async().await {
                 let len = frame.len() as u32;
                 if len == 0 {
                     continue;
@@ -470,7 +547,7 @@ impl ConnectionManager {
                 if writer.flush().await.is_err() {
                     break;
                 }
-                if let Some(handle) = cm.peers.read().await.get(&peer_id_write) {
+                if let Some(handle) = cm.peers.get(&peer_id_write) {
                     handle
                         .bytes_out
                         .fetch_add(header.len() as u64, Ordering::Relaxed);
@@ -487,7 +564,7 @@ impl ConnectionManager {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let outbound = Arc::new(LockFreeRing::<Vec<u8>>::new(256));
         let peer_id = format!("ws:{}", peer_display);
 
         if self
@@ -495,7 +572,7 @@ impl ConnectionManager {
                 peer_id.clone(),
                 PeerTransport::WebSocket,
                 peer_display,
-                outbound_tx,
+                outbound.clone(),
             )
             .await
             .is_none()
@@ -527,11 +604,11 @@ impl ConnectionManager {
         let cm = self.clone();
         let peer_id_write = peer_id.clone();
         let write_task = tokio::spawn(async move {
-            while let Some(frame) = outbound_rx.recv().await {
+            while let Some(frame) = outbound.pop_async().await {
                 if ws_sink.send(Message::Binary(frame.clone())).await.is_err() {
                     break;
                 }
-                if let Some(handle) = cm.peers.read().await.get(&peer_id_write) {
+                if let Some(handle) = cm.peers.get(&peer_id_write) {
                     handle
                         .bytes_out
                         .fetch_add(frame.len() as u64, Ordering::Relaxed);
@@ -564,20 +641,15 @@ impl ConnectionManager {
         };
         compact.brain_state.truncate(ENGRAM_DIM);
 
-        if self.incoming.send(compact).is_err() {
-            return;
-        }
+        self.incoming.push(compact);
 
         let frame_len = frame.len();
-        {
-            if let Some(handle) = self.peers.read().await.get(peer_id) {
-                handle
-                    .bytes_in
-                    .fetch_add(frame_len as u64, Ordering::Relaxed);
-            }
+        if let Some(handle) = self.peers.get(peer_id) {
+            handle
+                .bytes_in
+                .fetch_add(frame_len as u64, Ordering::Relaxed);
         }
-        {
-            let mut m = self.metrics.lock().await;
+        if let Ok(mut m) = self.metrics.lock() {
             m.bytes_in_total += frame_len as u64;
             m.record_receive(start.elapsed());
         }
@@ -588,33 +660,32 @@ impl ConnectionManager {
         peer_id: PeerId,
         transport: PeerTransport,
         addr: String,
-        outbound: mpsc::UnboundedSender<Vec<u8>>,
+        outbound: Arc<LockFreeRing<Vec<u8>>>,
     ) -> Option<PeerHandle> {
-        let mut peers = self.peers.write().await;
-        if peers.len() >= self.max_peers {
+        if self.peers.len() >= self.max_peers {
             return None;
         }
-        if peers.contains_key(&peer_id) {
+        if self.peers.contains_key(&peer_id) {
             return None;
         }
         let handle = PeerHandle::new(peer_id.clone(), transport, addr, outbound);
-        peers.insert(peer_id.clone(), handle.clone());
+        self.peers.insert(peer_id.clone(), handle.clone());
         tracing::info!(
             "🌐 [WAN PEER CONNECTED]: {} ({}); total peers {}",
             peer_id,
             handle.transport_label(),
-            peers.len()
+            self.peers.len()
         );
         Some(handle)
     }
 
     async fn unregister(&self, peer_id: &PeerId) {
-        let mut peers = self.peers.write().await;
-        if peers.remove(peer_id).is_some() {
+        if let Some((_, handle)) = self.peers.remove(peer_id) {
+            handle.outbound.close();
             tracing::info!(
                 "🌐 [WAN PEER DISCONNECTED]: {}; total peers {}",
                 peer_id,
-                peers.len()
+                self.peers.len()
             );
         }
     }
@@ -692,11 +763,11 @@ mod tests {
 
     #[tokio::test]
     async fn wan_tcp_roundtrip() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let metrics = Arc::new(tokio::sync::Mutex::new(SwarmMetrics::default()));
+        let ring = Arc::new(LockFreeRing::<CompactEngramPacket>::new(64));
+        let metrics = Arc::new(Mutex::new(SwarmMetrics::default()));
         let cm = ConnectionManager::new(
             b"test-secret".to_vec(),
-            tx,
+            ring.clone(),
             metrics,
             4,
             Duration::from_millis(10),
@@ -722,10 +793,10 @@ mod tests {
         };
         cm.broadcast(&packet).await;
 
-        let received = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        let received = tokio::time::timeout(Duration::from_secs(5), ring.pop_async()).await;
         let received = received
             .expect("timeout waiting for engram")
-            .expect("channel closed");
+            .expect("ring closed");
         assert_eq!(received.id, packet.id);
         assert_eq!(received.experiential_text, packet.experiential_text);
     }

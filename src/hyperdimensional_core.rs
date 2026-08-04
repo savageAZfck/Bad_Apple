@@ -44,25 +44,40 @@ impl Hypervector {
     /// bipolar clipping. Requires an external scratch buffer to avoid
     /// per-call allocation.
     pub fn bundle(vectors: &[&Hypervector], scratch: &mut [i32]) -> Self {
-        assert_eq!(scratch.len(), HD_DIM);
-        scratch.fill(0);
-        for v in vectors {
-            for (i, &x) in v.values.iter().enumerate() {
-                scratch[i] += x as i32;
+        #[cfg(target_arch = "aarch64")]
+        {
+            aarch64::bundle(vectors, scratch);
+            let mut values = vec![0_i8; HD_DIM];
+            aarch64::clip(scratch, &mut values);
+            Self { values }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            assert_eq!(scratch.len(), HD_DIM);
+            scratch.fill(0);
+            for v in vectors {
+                for (i, &x) in v.values.iter().enumerate() {
+                    scratch[i] += x as i32;
+                }
             }
+            let mut values = Vec::with_capacity(HD_DIM);
+            for &acc in scratch.iter() {
+                values.push(if acc > 0 { 1 } else { -1 });
+            }
+            Self { values }
         }
-        let mut values = Vec::with_capacity(HD_DIM);
-        for &acc in scratch.iter() {
-            values.push(if acc > 0 { 1 } else { -1 });
-        }
-        Self { values }
     }
 
     /// Bind two vectors via element-wise multiplication (bipolar binding).
     pub fn bind(&self, other: &Hypervector) -> Self {
-        let mut values = Vec::with_capacity(HD_DIM);
-        for (&a, &b) in self.values.iter().zip(other.values.iter()) {
-            values.push(a * b);
+        let mut values = vec![0_i8; HD_DIM];
+        #[cfg(target_arch = "aarch64")]
+        aarch64::bind(&self.values, &other.values, &mut values);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            for (i, (&a, &b)) in self.values.iter().zip(other.values.iter()).enumerate() {
+                values[i] = a * b;
+            }
         }
         Self { values }
     }
@@ -89,20 +104,169 @@ impl Hypervector {
     /// Hamming-like distance for bipolar vectors: count of positions that
     /// differ. Returns a value in `[0, HD_DIM]`.
     pub fn hamming_distance(&self, other: &Hypervector) -> usize {
-        self.values
-            .iter()
-            .zip(other.values.iter())
-            .filter(|(&a, &b)| a != b)
-            .count()
+        #[cfg(target_arch = "aarch64")]
+        return aarch64::hamming_distance(&self.values, &other.values);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.values
+                .iter()
+                .zip(other.values.iter())
+                .filter(|(&a, &b)| a != b)
+                .count()
+        }
     }
 
     /// Cosine-analog similarity for bipolar vectors: dot product.
     pub fn dot(&self, other: &Hypervector) -> i32 {
-        self.values
-            .iter()
-            .zip(other.values.iter())
-            .map(|(&a, &b)| a as i32 * b as i32)
-            .sum()
+        #[cfg(target_arch = "aarch64")]
+        return aarch64::dot(&self.values, &other.values);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.values
+                .iter()
+                .zip(other.values.iter())
+                .map(|(&a, &b)| a as i32 * b as i32)
+                .sum()
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod aarch64 {
+    use core::arch::aarch64::*;
+
+    use super::HD_DIM;
+
+    fn main_len() -> usize {
+        (HD_DIM / 16) * 16
+    }
+
+    pub fn bind(a: &[i8], b: &[i8], out: &mut [i8]) {
+        assert_eq!(a.len(), HD_DIM);
+        assert_eq!(b.len(), HD_DIM);
+        assert_eq!(out.len(), HD_DIM);
+        let main = main_len();
+        unsafe {
+            for i in (0..main).step_by(16) {
+                let va = vld1q_s8(a.as_ptr().add(i));
+                let vb = vld1q_s8(b.as_ptr().add(i));
+                let prod = vmulq_s8(va, vb);
+                vst1q_s8(out.as_mut_ptr().add(i), prod);
+            }
+        }
+        for i in main..HD_DIM {
+            out[i] = a[i] * b[i];
+        }
+    }
+
+    pub fn hamming_distance(a: &[i8], b: &[i8]) -> usize {
+        let main = main_len();
+        let mut count: usize = 0;
+        unsafe {
+            for i in (0..main).step_by(16) {
+                let va = vld1q_s8(a.as_ptr().add(i));
+                let vb = vld1q_s8(b.as_ptr().add(i));
+                let eq = vceqq_s8(va, vb);
+                let diff = vmvnq_u8(eq);
+                let ones = vshrq_n_u8(diff, 7);
+                count += vaddvq_u8(ones) as usize;
+            }
+        }
+        for i in main..HD_DIM {
+            if a[i] != b[i] {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn dot(a: &[i8], b: &[i8]) -> i32 {
+        let main = main_len();
+        unsafe {
+            let mut acc_low: int16x8_t = vdupq_n_s16(0);
+            let mut acc_high: int16x8_t = vdupq_n_s16(0);
+            for i in (0..main).step_by(16) {
+                let va = vld1q_s8(a.as_ptr().add(i));
+                let vb = vld1q_s8(b.as_ptr().add(i));
+                acc_low = vmlal_s8(acc_low, vget_low_s8(va), vget_low_s8(vb));
+                acc_high = vmlal_s8(acc_high, vget_high_s8(va), vget_high_s8(vb));
+            }
+            let low = vmovl_s16(vget_low_s16(acc_low));
+            let high = vmovl_s16(vget_high_s16(acc_low));
+            let low_h = vmovl_s16(vget_low_s16(acc_high));
+            let high_h = vmovl_s16(vget_high_s16(acc_high));
+            let total = vaddq_s32(vaddq_s32(low, high), vaddq_s32(low_h, high_h));
+            let mut sum = vaddvq_s32(total) as i32;
+            for i in main..HD_DIM {
+                sum += (a[i] as i32) * (b[i] as i32);
+            }
+            sum
+        }
+    }
+
+    pub fn bundle(vectors: &[&super::Hypervector], scratch: &mut [i32]) {
+        assert_eq!(scratch.len(), HD_DIM);
+        scratch.fill(0);
+        let main = main_len();
+        unsafe {
+            for v in vectors {
+                let src = v.values.as_ptr();
+                for i in (0..main).step_by(16) {
+                    let va = vld1q_s8(src.add(i));
+                    let low16 = vmovl_s8(vget_low_s8(va));
+                    let high16 = vmovl_s8(vget_high_s8(va));
+                    let ptr = scratch.as_mut_ptr().add(i);
+                    let mut acc0 = vld1q_s32(ptr);
+                    let mut acc1 = vld1q_s32(ptr.add(4));
+                    let mut acc2 = vld1q_s32(ptr.add(8));
+                    let mut acc3 = vld1q_s32(ptr.add(12));
+                    acc0 = vaddw_s16(acc0, vget_low_s16(low16));
+                    acc1 = vaddw_s16(acc1, vget_high_s16(low16));
+                    acc2 = vaddw_s16(acc2, vget_low_s16(high16));
+                    acc3 = vaddw_s16(acc3, vget_high_s16(high16));
+                    vst1q_s32(ptr, acc0);
+                    vst1q_s32(ptr.add(4), acc1);
+                    vst1q_s32(ptr.add(8), acc2);
+                    vst1q_s32(ptr.add(12), acc3);
+                }
+                for (slot, &x) in scratch[main..].iter_mut().zip(&v.values[main..]) {
+                    *slot += x as i32;
+                }
+            }
+        }
+    }
+
+    pub fn clip(scratch: &[i32], out: &mut [i8]) {
+        assert_eq!(scratch.len(), HD_DIM);
+        assert_eq!(out.len(), HD_DIM);
+        let main = main_len();
+        unsafe {
+            let ones = vdupq_n_s32(1);
+            for i in (0..main).step_by(16) {
+                let ptr = scratch.as_ptr().add(i);
+                let mut a0 = vld1q_s32(ptr);
+                let mut a1 = vld1q_s32(ptr.add(4));
+                let mut a2 = vld1q_s32(ptr.add(8));
+                let mut a3 = vld1q_s32(ptr.add(12));
+                a0 = vorrq_s32(vshrq_n_s32(a0, 31), ones);
+                a1 = vorrq_s32(vshrq_n_s32(a1, 31), ones);
+                a2 = vorrq_s32(vshrq_n_s32(a2, 31), ones);
+                a3 = vorrq_s32(vshrq_n_s32(a3, 31), ones);
+                let n0 = vqmovn_s32(a0);
+                let n1 = vqmovn_s32(a1);
+                let n2 = vqmovn_s32(a2);
+                let n3 = vqmovn_s32(a3);
+                let lo16 = vcombine_s16(n0, n1);
+                let hi16 = vcombine_s16(n2, n3);
+                let lo8 = vqmovn_s16(lo16);
+                let hi8 = vqmovn_s16(hi16);
+                let bytes = vcombine_s8(lo8, hi8);
+                vst1q_s8(out.as_mut_ptr().add(i), bytes);
+            }
+        }
+        for i in main..HD_DIM {
+            out[i] = if scratch[i] > 0 { 1 } else { -1 };
+        }
     }
 }
 

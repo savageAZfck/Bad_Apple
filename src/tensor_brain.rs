@@ -173,6 +173,11 @@ impl CandleBrain {
     /// Tries Metal, falls back to CPU.  All internal weights are `F32`.
     pub fn new(name: &str, num_classes: usize, _layer_dims: &[(usize, usize)]) -> Result<Self> {
         let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        if matches!(device, Device::Metal(_)) {
+            tracing::info!("[CandleBrain '{}' initialized on Apple Metal GPU]", name);
+        } else {
+            tracing::info!("[CandleBrain '{}' initialized on CPU]", name);
+        }
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 

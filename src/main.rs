@@ -15,7 +15,6 @@ use sysinfo::System;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::{
     net::UdpSocket,
-    sync::mpsc,
     task::spawn_blocking,
     time::{sleep, timeout},
 };
@@ -44,7 +43,7 @@ use production_blueprint::{
 };
 use protocol::{
     decode_payload, multi_agent_secret, sign_packet, verify_packet, CompactEngramPacket,
-    ConnectionManager, SignedUdpPacket, SwarmMetrics,
+    ConnectionManager, LockFreeRing, SignedUdpPacket, SwarmMetrics,
 };
 use strategy_library::{Strategy, StrategyLibrary};
 use telemetry::{
@@ -5942,7 +5941,7 @@ async fn merge_engram_batch(
     batch: Vec<CompactEngramPacket>,
     mind: Arc<TokioMutex<FullySapientSoulMatrix>>,
     gw: Arc<TokioMutex<GlobalWorkspace>>,
-    swarm: Arc<tokio::sync::Mutex<SwarmMetrics>>,
+    swarm: Arc<std::sync::Mutex<SwarmMetrics>>,
 ) {
     if batch.is_empty() {
         return;
@@ -6011,8 +6010,7 @@ async fn merge_engram_batch(
     })
     .await;
 
-    {
-        let mut m = swarm.lock().await;
+    if let Ok(mut m) = swarm.lock() {
         m.record_merge(start.elapsed(), size);
     }
 }
@@ -6288,15 +6286,16 @@ async fn main() -> Result<()> {
     let socket_secret = Arc::clone(&multi_agent_secret);
     let actual_port = Arc::new(TokioMutex::new(0u16));
     let actual_port_clone = Arc::clone(&actual_port);
-    let (engram_tx, mut engram_rx) = mpsc::unbounded_channel::<CompactEngramPacket>();
+    let engram_ring = Arc::new(LockFreeRing::<CompactEngramPacket>::new(1024));
+    let engram_ring_udp = engram_ring.clone();
     let p_start = config.multi_agent_port_start;
     let p_end = config.multi_agent_port_end;
 
     // 🌐 WIDE-AREA TCP / WEBSOCKET GOSSIP FABRIC
-    let swarm_metrics = Arc::new(tokio::sync::Mutex::new(SwarmMetrics::default()));
+    let swarm_metrics = Arc::new(std::sync::Mutex::new(SwarmMetrics::default()));
     let wan_manager = Arc::new(ConnectionManager::new(
         (*socket_secret).clone(),
-        engram_tx.clone(),
+        engram_ring.clone(),
         swarm_metrics.clone(),
         config.max_wan_peers,
         Duration::from_millis(config.peer_retry_base_ms),
@@ -6327,8 +6326,12 @@ async fn main() -> Result<()> {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let m = wan_manager_sync.metrics.lock().await.clone();
-            swarm_telemetry.lock().await.record_swarm(&m);
+            let snapshot = wan_manager_sync
+                .metrics
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default();
+            swarm_telemetry.lock().await.record_swarm(&snapshot);
         }
     });
 
@@ -6378,7 +6381,7 @@ async fn main() -> Result<()> {
                             // Truncate to the 100-D engram limit before queueing.
                             let mut compact = compact;
                             compact.brain_state.truncate(protocol::ENGRAM_DIM);
-                            let _ = engram_tx.send(compact);
+                            engram_ring_udp.push(compact);
                         }
                     }
                 }
@@ -6386,16 +6389,23 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Merger: batch engrams from the channel and merge in spawn_blocking.
+    // Merger: batch engrams from the lock-free ring and merge in spawn_blocking.
     let merge_mind = socket_mind;
     let merge_gw = socket_global_workspace;
     let merge_swarm = swarm_metrics.clone();
     tokio::spawn(async move {
         let mut batch: Vec<CompactEngramPacket> = Vec::with_capacity(64);
         loop {
-            match timeout(Duration::from_millis(5), engram_rx.recv()).await {
+            match tokio::time::timeout(Duration::from_millis(5), engram_ring.pop_async()).await {
                 Ok(Some(compact)) => {
                     batch.push(compact);
+                    while batch.len() < 64 {
+                        if let Some(c) = engram_ring.pop() {
+                            batch.push(c);
+                        } else {
+                            break;
+                        }
+                    }
                     if batch.len() >= 64 {
                         merge_engram_batch(
                             std::mem::take(&mut batch),
