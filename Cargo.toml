@@ -26,7 +26,6 @@ dashmap = "6.0"
 sysinfo = "0.30"
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
-reqwest = { version = "0.12", features = ["json"] }
 starship-battery = "0.10"
 chrono = "0.4"
 candle-core = { version = "0.10.2", features = ["metal", "accelerate"] }

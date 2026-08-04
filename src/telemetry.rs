@@ -60,6 +60,10 @@ pub struct TelemetryState {
     pub apple_intelligence_calls: u64,
     pub apple_intelligence_fails: u64,
     pub apple_intelligence_available: bool,
+    pub memory_used_bytes: u64,
+    pub memory_drift_bytes_per_sec: f64,
+    pub memory_leak_score: f64,
+    pub memory_sample_count: u64,
     pub domain_mastery: std::collections::HashMap<String, f64>,
     pub synthesis_speedup: f64,
     pub power_reduction: f64,
@@ -142,6 +146,19 @@ impl TelemetryState {
         self.apple_intelligence_calls = calls;
         self.apple_intelligence_fails = fails;
         self.apple_intelligence_available = available;
+    }
+
+    pub fn record_memory_drift(
+        &mut self,
+        used_bytes: u64,
+        drift: f64,
+        leak_score: f64,
+        samples: u64,
+    ) {
+        self.memory_used_bytes = used_bytes;
+        self.memory_drift_bytes_per_sec = drift;
+        self.memory_leak_score = leak_score;
+        self.memory_sample_count = samples;
     }
 
     pub fn record_swarm(&mut self, swarm: &SwarmMetrics) {
@@ -558,6 +575,32 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
         telemetry.apple_intelligence_fails
     );
 
+    let used_mb = (telemetry.memory_used_bytes as f64) / (1024.0 * 1024.0);
+    let drift = telemetry.memory_drift_bytes_per_sec;
+    let drift_kb_s = drift / 1024.0;
+    let leak_bar = (telemetry.memory_leak_score * 300.0).clamp(0.0, 300.0);
+    let memory_svg = format!(
+        r##"<svg viewBox="0 0 600 180" class="panel-svg">
+           <text x="20" y="25" fill="#7df" font-size="16">Memory Leak Profiler</text>
+
+           <text x="20" y="60" fill="#d0d0e0" font-size="13">Heap: {:.1} MB</text>
+
+           <text x="20" y="100" fill="#d0d0e0" font-size="13">Drift: {:.2} KB/s (leak score {:.2})</text>
+           <rect x="180" y="88" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="88" width="{:.2}" height="12" fill="#f7d" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="140" fill="#d0d0e0" font-size="13">Samples: {}</text>
+         </svg>"##,
+        used_mb,
+        drift_kb_s,
+        telemetry.memory_leak_score,
+        leak_bar,
+        leak_bar,
+        telemetry.memory_sample_count
+    );
+
     format!(
         r##"<!DOCTYPE html>
 <html>
@@ -591,10 +634,14 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
   <h2>Apple Intelligence Bridge Panel</h2>
   {}
 </div>
+<div class="panel">
+  <h2>Memory Leak Profiler Panel</h2>
+  {}
+</div>
 <p><a href="/" style="color:#8af">Metrics</a> | <a href="/telemetry" style="color:#8af">Telemetry JSON</a></p>
 </body>
 </html>"##,
-        competence_svg, thermodynamic_svg, swarm_svg, ai_svg
+        competence_svg, thermodynamic_svg, swarm_svg, ai_svg, memory_svg
     )
 }
 

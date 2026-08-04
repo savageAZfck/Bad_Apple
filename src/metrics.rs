@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -242,6 +243,94 @@ pub struct MetricsSummary {
     pub avg_learning_rate: f64,
     pub avg_critic_score: f64,
     pub local_agreement_rate: f64,
+}
+
+/// Result of a single memory-drift sample.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryDrift {
+    /// Absolute bytes in use at this sample.
+    pub used_bytes: u64,
+    /// Estimated bytes leaked per second, positive = growth.
+    pub drift_bytes_per_sec: f64,
+    /// Normalized 0..1 leak score, where 1.0 means a 1 MB/s sustained growth.
+    pub leak_score: f64,
+}
+
+/// Background memory-leak profiling substrate.
+///
+/// Samples are pushed at a fixed interval (typically 5s).  A moving window
+/// regression gives a live drift estimate without keeping the whole process
+/// history.  Positive drift suggests a leak; negative drift suggests cleanup.
+#[derive(Clone, Debug)]
+pub struct MemoryProfiler {
+    samples: VecDeque<(u64, u64)>,
+    max_window: usize,
+    /// Bytes used at the previous sample.
+    pub last_used_bytes: u64,
+}
+
+impl MemoryProfiler {
+    pub fn new(max_window: usize) -> Self {
+        Self {
+            samples: VecDeque::with_capacity(max_window),
+            max_window: max_window.max(2),
+            last_used_bytes: 0,
+        }
+    }
+
+    /// Record a new memory-usage sample and return the computed drift.
+    pub fn record(&mut self, used_bytes: u64, now_secs: u64) -> MemoryDrift {
+        self.last_used_bytes = used_bytes;
+
+        // Keep a bounded window so the drift is a recent moving average.
+        if self.samples.len() >= self.max_window {
+            self.samples.pop_front();
+        }
+        self.samples.push_back((now_secs, used_bytes));
+
+        let drift = if self.samples.len() >= 2 {
+            let first = self.samples.front().copied().unwrap();
+            let last = self.samples.back().copied().unwrap();
+            let dt = last.0.saturating_sub(first.0) as f64;
+            if dt > 0.0 {
+                (last.1 as f64 - first.1 as f64) / dt
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        // Score: 1.0 = 1 MB/sec sustained growth.  Clamp at 1.0; negative is 0.
+        let score = (drift / 1_000_000.0).clamp(-1.0, 1.0);
+        let leak_score = if score > 0.0 { score } else { 0.0 };
+
+        MemoryDrift {
+            used_bytes,
+            drift_bytes_per_sec: drift,
+            leak_score,
+        }
+    }
+
+    /// Slope over the current window in bytes/second.
+    pub fn drift_bytes_per_sec(&self) -> f64 {
+        if self.samples.len() < 2 {
+            return 0.0;
+        }
+        let first = self.samples.front().copied().unwrap();
+        let last = self.samples.back().copied().unwrap();
+        let dt = last.0.saturating_sub(first.0) as f64;
+        if dt > 0.0 {
+            (last.1 as f64 - first.1 as f64) / dt
+        } else {
+            0.0
+        }
+    }
+
+    /// Current sample count in the moving window.
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
 }
 
 /// Helper type for thread-safe shared metrics.

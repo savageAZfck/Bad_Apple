@@ -44,6 +44,7 @@ struct FireflyState {
     #[allow(dead_code)]
     config: Config,
     mastery_index: f32,
+    active_pursuits: Vec<String>,
 }
 
 impl FireflyState {
@@ -51,6 +52,7 @@ impl FireflyState {
         Self {
             config,
             mastery_index: 0.5,
+            active_pursuits: Vec::new(),
         }
     }
 }
@@ -175,6 +177,107 @@ pub unsafe extern "C" fn firefly_free(context: *mut FireflyContext) {
 
 fn firefly_cstring(s: &str) -> *mut c_char {
     CString::new(s).unwrap_or_default().into_raw()
+}
+
+/// Return the last measured Apple Intelligence call latency for this process,
+/// in microseconds.  This reads the shared atomic counter maintained by the
+/// Apple Intelligence bridge; it is safe to call from any thread.
+#[no_mangle]
+pub extern "C" fn firefly_get_apple_latency_us() -> u64 {
+    apple_intelligence::last_latency_us()
+}
+
+/// Return the active pursuits for a context as a JSON array C string.
+/// The caller must free the returned pointer with `firefly_free_string`.
+///
+/// # Safety
+///
+/// `context` must be a valid pointer returned by `firefly_init` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_get_active_pursuits(context: *mut FireflyContext) -> *mut c_char {
+    if context.is_null() {
+        return firefly_cstring("[]");
+    }
+    let ctx = &*context;
+    let state = &*(ctx._private as *const Mutex<FireflyState>);
+    match state.lock() {
+        Ok(guard) => {
+            let json =
+                serde_json::to_string(&guard.active_pursuits).unwrap_or_else(|_| "[]".to_string());
+            firefly_cstring(&json)
+        }
+        Err(_) => firefly_cstring("[]"),
+    }
+}
+
+/// Push a new active pursuit string onto a context.
+///
+/// # Safety
+///
+/// `context` must be a valid pointer returned by `firefly_init` and not yet freed.
+/// `text` must be a valid, null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_push_pursuit(
+    context: *mut FireflyContext,
+    text: *const c_char,
+) -> bool {
+    if context.is_null() || text.is_null() {
+        return false;
+    }
+    let text = match CStr::from_ptr(text).to_str() {
+        Ok(s) if !s.is_empty() => s.to_string(),
+        _ => return false,
+    };
+    let ctx = &*context;
+    let state = &*(ctx._private as *const Mutex<FireflyState>);
+    match state.lock() {
+        Ok(mut guard) => {
+            guard.active_pursuits.push(text);
+            // Keep a bounded, recent window so the menu bar stays responsive.
+            if guard.active_pursuits.len() > 64 {
+                guard.active_pursuits.remove(0);
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Free a C string previously returned by the library.
+///
+/// # Safety
+///
+/// `s` must be a pointer previously returned by a Firefly FFI function that
+/// returns ownership of a C string, and it must not have been freed before.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_free_string(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    let _ = CString::from_raw(s);
+}
+
+/// Run a prompt through the registered Apple Intelligence callback and return
+/// the response as a C string.  This is a blocking, synchronous call so the
+/// menu-bar app can drive it from the main thread without starting a Tokio
+/// runtime.  The caller must free the returned pointer with `firefly_free_string`.
+///
+/// # Safety
+///
+/// `prompt` must be a valid, null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_generate_text(prompt: *const c_char) -> *mut c_char {
+    if prompt.is_null() {
+        return firefly_cstring("null prompt");
+    }
+    let text = match CStr::from_ptr(prompt).to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return firefly_cstring("invalid prompt"),
+    };
+    match apple_intelligence::call_sync(text) {
+        Some(resp) => firefly_cstring(&resp),
+        None => firefly_cstring("Apple Intelligence not available"),
+    }
 }
 
 #[cfg(test)]

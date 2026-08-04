@@ -37,6 +37,7 @@ use benchmark::{BenchmarkSuite, PilotReport, TransferSuite, TransferTask};
 use conscience_oracle::ConscienceOracle;
 use dashmap::DashMap;
 use data_feed::{default_curriculum_dirs, DataCurriculum};
+use metrics::MemoryProfiler;
 use ollama_client::OllamaClient;
 use production_blueprint::{
     GlobalWorkspace, HomeostaticController, NeuroSymbolicEngine as ProductionNeuroSymbolicEngine,
@@ -6088,19 +6089,15 @@ async fn main() -> Result<()> {
             default_curriculum_dirs().as_slice(),
         );
     }
-    let ollama = Arc::new(OllamaClient::with_base(&config.ollama_url));
+    let ollama = Arc::new(OllamaClient::new());
     let ollama_model = config.ollama_model.clone();
     if ollama.is_available().await {
         tracing::info!(
-            "🧠 Oracle backend available at {}; default model: {}",
-            config.ollama_url,
+            "🧠 Oracle backend available; default model: {}",
             ollama_model
         );
     } else {
-        tracing::info!(
-            "⚠️  Ollama not reachable at {}. LLM reflection will be skipped.",
-            config.ollama_url
-        );
+        tracing::info!("⚠️  Apple Intelligence bridge not loaded. LLM reflection will be skipped.");
     }
     let telemetry_server_telemetry = telemetry.clone();
     let telemetry_server_sensors = sensors.clone();
@@ -6342,6 +6339,32 @@ async fn main() -> Result<()> {
                 apple_intelligence::call_count(),
                 apple_intelligence::fail_count(),
                 apple_intelligence::is_available(),
+            );
+        }
+    });
+
+    // 🧠 Background memory-leak profiling: sample heap every 5 seconds and
+    // compute a moving-average drift score for the live dashboard.
+    let memory_telemetry = telemetry.clone();
+    let memory_sensors = sensors.clone();
+    tokio::spawn(async move {
+        let mut profiler = MemoryProfiler::new(60);
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let used = {
+                let s = memory_sensors.lock().await;
+                s.memory_used_bytes
+            };
+            let now = current_secs();
+            let drift = profiler.record(used, now);
+            let mut t = memory_telemetry.lock().await;
+            t.record_memory_drift(
+                drift.used_bytes,
+                drift.drift_bytes_per_sec,
+                drift.leak_score,
+                profiler.sample_count() as u64,
             );
         }
     });

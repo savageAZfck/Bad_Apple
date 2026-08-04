@@ -16,9 +16,7 @@ pub struct Config {
     pub multi_agent_port_start: u16,
     /// Last port in the multi-agent UDP range.
     pub multi_agent_port_end: u16,
-    /// Local Ollama base URL.
-    pub ollama_url: String,
-    /// Ollama model used by the conscience oracle.
+    /// Apple Intelligence / oracle model identifier (legacy field, kept for config compatibility).
     pub ollama_model: String,
     /// Path to the persistent agent state file.
     pub state_file: PathBuf,
@@ -69,8 +67,7 @@ impl Config {
             telemetry_port: env_u16("FIREFLY_TELEMETRY_PORT", 8080),
             multi_agent_port_start: env_u16("FIREFLY_MULTI_AGENT_PORT_START", 5001),
             multi_agent_port_end: env_u16("FIREFLY_MULTI_AGENT_PORT_END", 5010),
-            ollama_url: env_or("FIREFLY_OLLAMA_URL", "http://127.0.0.1:11434"),
-            ollama_model: env_or("FIREFLY_OLLAMA_MODEL", "mistral-nemo"),
+            ollama_model: env_or("FIREFLY_OLLAMA_MODEL", "apple-intelligence"),
             state_file: env_path("FIREFLY_STATE_FILE", "state.json"),
             curriculum_dir: env_path("FIREFLY_CURRICULUM_DIR", "curriculum"),
             wild_workspace_dir: env_path("FIREFLY_WILD_WORKSPACE_DIR", "wild_workspace"),
@@ -154,9 +151,6 @@ fn merge_config(base: &mut Config, overlay: Config) {
     }
     if overlay.multi_agent_port_end != 0 {
         base.multi_agent_port_end = overlay.multi_agent_port_end;
-    }
-    if !overlay.ollama_url.is_empty() {
-        base.ollama_url = overlay.ollama_url;
     }
     if !overlay.ollama_model.is_empty() {
         base.ollama_model = overlay.ollama_model;
