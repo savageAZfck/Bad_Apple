@@ -6092,7 +6092,7 @@ async fn main() -> Result<()> {
     let ollama_model = config.ollama_model.clone();
     if ollama.is_available().await {
         tracing::info!(
-            "🧠 Ollama available at {}; default model: {}",
+            "🧠 Oracle backend available at {}; default model: {}",
             config.ollama_url,
             ollama_model
         );

@@ -90,14 +90,30 @@ pub fn try_load_bridge() -> Result<(), String> {
 
     type InitFn = extern "C" fn();
 
-    let paths = [
-        "libFireflySiriBridge.dylib",
-        "./libFireflySiriBridge.dylib",
-        "target/release/libFireflySiriBridge.dylib",
-        "target/debug/libFireflySiriBridge.dylib",
+    let mut paths: Vec<String> = vec![
+        "libFireflySiriBridge.dylib".to_string(),
+        "./libFireflySiriBridge.dylib".to_string(),
+        "target/release/libFireflySiriBridge.dylib".to_string(),
+        "target/debug/libFireflySiriBridge.dylib".to_string(),
     ];
 
-    for path in paths {
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        paths.push(format!("{}/release/libFireflySiriBridge.dylib", target_dir));
+        paths.push(format!("{}/debug/libFireflySiriBridge.dylib", target_dir));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(d) = dir.to_str() {
+                paths.push(format!("{}/libFireflySiriBridge.dylib", d));
+            }
+            if let Some(d) = dir.parent().and_then(|p| p.to_str()) {
+                paths.push(format!("{}/libFireflySiriBridge.dylib", d));
+            }
+        }
+    }
+
+    for path in &paths {
         let lib = match unsafe { Library::new(path) } {
             Ok(l) => l,
             Err(_) => continue,
