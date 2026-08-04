@@ -56,6 +56,10 @@ pub struct TelemetryState {
     pub transfer_score: f64,
     pub transfer_attempts: u64,
     pub critic_score: f64,
+    pub apple_intelligence_latency_us: u64,
+    pub apple_intelligence_calls: u64,
+    pub apple_intelligence_fails: u64,
+    pub apple_intelligence_available: bool,
     pub domain_mastery: std::collections::HashMap<String, f64>,
     pub synthesis_speedup: f64,
     pub power_reduction: f64,
@@ -125,6 +129,19 @@ impl TelemetryState {
 
     pub fn record_critic(&mut self, score: f64) {
         self.critic_score = score;
+    }
+
+    pub fn record_apple_intelligence(
+        &mut self,
+        latency_us: u64,
+        calls: u64,
+        fails: u64,
+        available: bool,
+    ) {
+        self.apple_intelligence_latency_us = latency_us;
+        self.apple_intelligence_calls = calls;
+        self.apple_intelligence_fails = fails;
+        self.apple_intelligence_available = available;
     }
 
     pub fn record_swarm(&mut self, swarm: &SwarmMetrics) {
@@ -511,6 +528,36 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
         receive_us * 0.03
     );
 
+    let ai_us = telemetry.apple_intelligence_latency_us.clamp(0, 10_000_000) as f64;
+    let ai_ms = ai_us / 1000.0;
+    let ai_bar = (ai_us / 100.0).clamp(0.0, 500.0);
+    let ai_status = if telemetry.apple_intelligence_available {
+        "ONLINE"
+    } else {
+        "OFFLINE"
+    };
+    let ai_svg = format!(
+        r##"<svg viewBox="0 0 600 180" class="panel-svg">
+           <text x="20" y="25" fill="#7df" font-size="16">Apple Intelligence Bridge</text>
+
+           <text x="20" y="60" fill="#d0d0e0" font-size="13">Status: {}</text>
+
+           <text x="20" y="100" fill="#d0d0e0" font-size="13">Last Latency: {:.2} ms</text>
+           <rect x="180" y="88" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="88" width="{:.2}" height="12" fill="#7f7" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="140" fill="#d0d0e0" font-size="13">Calls: {} | Fails: {}</text>
+         </svg>"##,
+        ai_status,
+        ai_ms,
+        ai_bar,
+        ai_bar,
+        telemetry.apple_intelligence_calls,
+        telemetry.apple_intelligence_fails
+    );
+
     format!(
         r##"<!DOCTYPE html>
 <html>
@@ -540,10 +587,14 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
   <h2>Wide-Area Network Swarm Grid Panel</h2>
   {}
 </div>
+<div class="panel">
+  <h2>Apple Intelligence Bridge Panel</h2>
+  {}
+</div>
 <p><a href="/" style="color:#8af">Metrics</a> | <a href="/telemetry" style="color:#8af">Telemetry JSON</a></p>
 </body>
 </html>"##,
-        competence_svg, thermodynamic_svg, swarm_svg
+        competence_svg, thermodynamic_svg, swarm_svg, ai_svg
     )
 }
 

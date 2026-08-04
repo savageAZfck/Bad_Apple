@@ -2999,6 +2999,8 @@ dependencies = [
  "dashmap",
  "futures-util",
  "hmac",
+ "libc",
+ "libloading",
  "md-5",
  "ndarray",
  "notify",

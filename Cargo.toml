@@ -44,6 +44,8 @@ tokio-tungstenite = { version = "0.23.1", default-features = false, features = [
 futures-util = "0.3.33"
 crossbeam-queue = "0.3.12"
 crossbeam-utils = "0.8.21"
+libloading = "0.8.6"
+libc = "0.2"
 
 [build-dependencies]
 cbindgen = "0.26"

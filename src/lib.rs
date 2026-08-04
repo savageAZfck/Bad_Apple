@@ -13,11 +13,17 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
 
+pub mod apple_intelligence;
 pub mod config;
 pub mod hyperdimensional_core;
 pub mod protocol;
 pub mod strategy_library;
 pub mod tensor_brain;
+
+pub use apple_intelligence::{
+    call as apple_intelligence_call, call_sync as apple_intelligence_call_sync,
+    is_available as apple_intelligence_is_available, register_apple_intelligence_oracle,
+};
 
 use config::Config;
 use hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};

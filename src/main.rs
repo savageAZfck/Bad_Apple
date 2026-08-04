@@ -19,6 +19,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
+mod apple_intelligence;
 mod benchmark;
 mod config;
 mod conscience_oracle;
@@ -6027,6 +6028,10 @@ async fn main() -> Result<()> {
     tracing::info!("starting sapient_soul");
 
     tracing::info!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: 2-Block 4-Head Transformer Neural Architecture Running...");
+
+    // 🍎 Attempt to load the optional in-process Apple Intelligence bridge.
+    apple_intelligence::initialize();
+
     let state_file = config.state_file.clone();
     let matrix = FullySapientSoulMatrix::load_state(&state_file)
         .unwrap_or_else(|| FullySapientSoulMatrix::new("Firefly", config.multi_agent_port_start));
@@ -6270,10 +6275,9 @@ async fn main() -> Result<()> {
         "subjective continuum",
     ];
 
-    // 🧠 LLM Conscience Oracle: a fast, local LLM that labels each experience
-    // and distills its judgement into the trainable network.
-    let conscience_oracle =
-        ConscienceOracle::new((*ollama).clone(), &ollama_model, &conscience_tokens);
+    // 🧠 Conscience Oracle: now backed by the registered Apple Intelligence
+    // callback with deterministic semantic/cosine fallbacks.
+    let conscience_oracle = ConscienceOracle::new(&conscience_tokens);
 
     // Shared multi-agent signing secret (overridable via MULTI_AGENT_SECRET env var).
     let multi_agent_secret = Arc::new(multi_agent_secret());
@@ -6331,7 +6335,14 @@ async fn main() -> Result<()> {
                 .lock()
                 .map(|m| m.clone())
                 .unwrap_or_default();
-            swarm_telemetry.lock().await.record_swarm(&snapshot);
+            let mut t = swarm_telemetry.lock().await;
+            t.record_swarm(&snapshot);
+            t.record_apple_intelligence(
+                apple_intelligence::last_latency_us(),
+                apple_intelligence::call_count(),
+                apple_intelligence::fail_count(),
+                apple_intelligence::is_available(),
+            );
         }
     });
 
