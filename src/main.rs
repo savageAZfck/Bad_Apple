@@ -7403,7 +7403,7 @@ async fn main() -> Result<()> {
             // predict each one's effects, and execute the highest-utility one.
             let prompt_template = format!(
                 "You are an autonomous agent with this active goal: '{}'\nEmotional state: {}\nMemory count: {}\nSensor summary: {}\n{}\n\nWhen selecting an action, explicitly prefer tools and strategies that advance my primary goals and are consistent with my historical identity.\n\nReturn ONLY a valid JSON object with exactly these fields: 'name' (short snake_case identifier), 'language' (must be the string 'python'), and 'code' (a short, self-contained Python 3 script that prints a useful result).\n\nSafety rules for the code:\n- It must be read-only or computational.\n- No file deletion, network, shell access, or writing to files.\n- Do not use: rm, dd, mkfs, sudo, su, wget, curl, ssh, scp, subprocess, os.system, exec, eval, compile, __import__, open, write, delete, destroy, socket, requests, urllib.\n- Allowed imports: math, random, statistics, json, datetime, itertools, collections, string, re.\n- For mean, stdev, variance, pstdev, pvariance, mode, median, harmonic_mean, and geometric_mean, use the `statistics` module (e.g. `statistics.mean(data)`).\n- Do NOT use `math.mean(...)`, `math.stdev(...)`, `math.variance(...)`, `math.pstdev(...)`, `math.pvariance(...)`, `math.mode(...)`, `math.median(...)`, `math.harmonic_mean(...)`, or `math.geometric_mean(...)` — these functions do not exist in the `math` module.\n- The script must not index into a scalar value. If you have a 2-D list, treat inner elements as scalars, not as lists to iterate over.
-- Do NOT define or call a function named `skill`. The script must be a complete, top-level program that prints a useful result directly, not a function named `skill`.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math, statistics; data=[1,2,3,4,5]; print(math.sqrt(sum((x-statistics.mean(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
+- Do NOT define or call a function named `skill`. The script must be a complete, top-level program that prints a useful result directly, not a function named `skill`.\n- Do NOT use nested list comprehensions; they are a common source of bracket-mismatch SyntaxErrors. Use simple `for` loops or a plain generator expression when filtering.\n- Before returning, verify that every `(`, `[`, `{{`, `'`, and `\"` has a matching closing character. The code will be validated by `python3 -m py_compile`; invalid code is discarded.\n\nExample output (do not use this name or code, but follow this format and level of simplicity):\n{{\"name\": \"compute_stats\", \"language\": \"python\", \"code\": \"import math, statistics; data=[1,2,3,4,5]; print(math.sqrt(sum((x-statistics.mean(data))**2 for x in data)/len(data)))\"}}\n\nThe tool should gather or compute information that advances the goal. Try to be creative and different from previous attempts. Output only the JSON object.",
                 goal, emotional_state, memory_count, sensor_summary, identity_summary
             );
 
@@ -7451,6 +7451,10 @@ async fn main() -> Result<()> {
                         "⚠️ Agent loop rejected unsafe tool '{}': code failed safety check",
                         name
                     );
+                    continue;
+                }
+                if let Err(e) = telemetry::validate_python_syntax(&code) {
+                    tracing::info!("⚠️ Agent loop rejected tool '{}': {}", name, e);
                     continue;
                 }
 

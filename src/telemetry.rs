@@ -661,6 +661,24 @@ pub fn run_sandboxed_tool(name: &str, code: &str, language: &str) -> Result<Stri
 
     fs::write(&filename, code).map_err(|e| format!("Cannot write tool file: {}", e))?;
 
+    // For Python, compile-check the file before executing.  This turns
+    // bracket-mismatch and other SyntaxErrors into a clear early failure.
+    if language == "python" {
+        let check = Command::new("python3")
+            .arg("-m")
+            .arg("py_compile")
+            .arg(&filename)
+            .output()
+            .map_err(|e| format!("Failed to run py_compile: {}", e))?;
+        if !check.status.success() {
+            let _ = fs::remove_file(&filename);
+            return Err(format!(
+                "Python syntax error: {}",
+                String::from_utf8_lossy(&check.stderr).trim()
+            ));
+        }
+    }
+
     let output = if language == "python" {
         Command::new("python3").arg(&filename).output()
     } else {
@@ -764,6 +782,36 @@ pub fn strip_markdown_code(raw: &str) -> String {
         end -= 1;
     }
     lines[start..end].join("\n").trim().to_string()
+}
+
+/// Compile-check a snippet of Python 3 before it is executed.
+/// This catches bracket-mismatch and other `SyntaxError`s produced by LLM output.
+pub fn validate_python_syntax(code: &str) -> Result<(), String> {
+    if code.trim().is_empty() {
+        return Err("Empty Python code".to_string());
+    }
+
+    let tools_dir = PathBuf::from("tools");
+    fs::create_dir_all(&tools_dir).map_err(|e| format!("Cannot create tools dir: {}", e))?;
+
+    let stamp = current_secs();
+    let source_path = tools_dir.join(format!(".syntax_check_{}.py", stamp));
+    fs::write(&source_path, code).map_err(|e| format!("Cannot write syntax-check file: {}", e))?;
+
+    let output = Command::new("python3")
+        .arg("-m")
+        .arg("py_compile")
+        .arg(&source_path)
+        .output()
+        .map_err(|e| format!("Failed to invoke python3 -m py_compile: {}", e))?;
+
+    // Best-effort cleanup of the temporary source file.
+    let _ = fs::remove_file(&source_path);
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 async fn learn_skill_handler(
