@@ -64,7 +64,7 @@ impl OllamaClient {
         // Prefer the native Apple Intelligence bridge if it has been registered.
         let full_prompt = build_prompt(system, prompt, Some(max_tokens), Some(temperature));
         if let Some(resp) = apple_intelligence::call(&full_prompt).await {
-            return Ok(resp.trim().to_string());
+            return Ok(strip_code_fence(&resp));
         }
 
         // Legacy Ollama fallback (only reached when the bridge is not loaded).
@@ -99,7 +99,7 @@ impl OllamaClient {
         let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
         data.get("response")
             .and_then(|r| r.as_str())
-            .map(|s| s.trim().to_string())
+            .map(strip_code_fence)
             .ok_or_else(|| "Ollama response missing 'response' field".to_string())
     }
 
@@ -111,7 +111,7 @@ impl OllamaClient {
     ) -> Result<String, String> {
         let full_prompt = build_prompt(system, prompt, None, None);
         if let Some(resp) = apple_intelligence::call(&full_prompt).await {
-            return Ok(resp.trim().to_string());
+            return Ok(strip_code_fence(&resp));
         }
 
         let model = self.resolve_model(_model).await?;
@@ -142,7 +142,7 @@ impl OllamaClient {
         let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
         data.get("response")
             .and_then(|r| r.as_str())
-            .map(|s| s.trim().to_string())
+            .map(strip_code_fence)
             .ok_or_else(|| "Ollama response missing 'response' field".to_string())
     }
 
