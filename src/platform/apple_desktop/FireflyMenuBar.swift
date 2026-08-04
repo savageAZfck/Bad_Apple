@@ -11,6 +11,7 @@ private typealias FireflyPushPursuitFn = @convention(c) (OpaquePointer?, UnsafeP
 private typealias FireflyGetAppleLatencyUsFn = @convention(c) () -> UInt64
 private typealias FireflyGenerateTextFn = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 private typealias FireflyFreeStringFn = @convention(c) (UnsafeMutablePointer<CChar>?) -> Void
+private typealias InitFireflySiriBridgeFn = @convention(c) () -> Void
 
 // MARK: - Dynamic loader for libsapient_soul.dylib
 
@@ -33,6 +34,26 @@ final class FireflyFFI {
     var isLoaded: Bool { handle != nil && context != nil }
 
     func load() {
+        // First load the Apple Intelligence Siri bridge so the lib can answer prompts.
+        let bridgeSearchPaths = [
+            "libFireflySiriBridge.dylib",
+            "./libFireflySiriBridge.dylib",
+            "../libFireflySiriBridge.dylib",
+            "target/release/libFireflySiriBridge.dylib",
+            "target/debug/libFireflySiriBridge.dylib",
+        ]
+        var bridgeHandle: UnsafeMutableRawPointer?
+        for path in bridgeSearchPaths {
+            if let h = dlopen(path, RTLD_LAZY) {
+                bridgeHandle = h
+                break
+            }
+        }
+        if let h = bridgeHandle, let sym = dlsym(h, "init_firefly_siri_bridge") {
+            let initBridge = unsafeBitCast(sym, to: InitFireflySiriBridgeFn.self)
+            initBridge()
+        }
+
         let bundleDir = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
         let searchPaths = [
             bundleDir + "/libsapient_soul.dylib",
