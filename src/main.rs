@@ -6792,11 +6792,11 @@ async fn main() -> Result<()> {
                 network_ref,
                 brain_outputs,
                 local_goal,
+                mut entry,
             )) = ({
                 let mind_arc = autonomous_clock_mind.clone();
                 let hc = hc.clone();
                 let telemetry = clock_telemetry.clone();
-                let metrics = metrics_logger.clone();
                 let tokens = conscience_tokens.clone();
                 let clock_oracle = clock_oracle.clone();
                 let input_vector = input_vector.clone();
@@ -6997,25 +6997,23 @@ async fn main() -> Result<()> {
                     let spatial_snapshot = mind.spatial_sensory_register;
                     let network_ref = mind.associative_memory_network.clone();
 
-                    // 📈 Record evaluation metrics.
-                    {
-                        let mut m = metrics.blocking_lock();
-                        m.record(metrics::MetricsEntry {
-                            timestamp: telemetry::current_secs(),
-                            cycle,
-                            conscience_loss: mind.metabolics.conscience_loss_accumulator,
-                            language_loss,
-                            goal_loss: goal_loss_value,
-                            world_model_loss: world_model_loss_value,
-                            learning_rate: live_learning_rate_sample,
-                            critic_score: 0.0,
-                            active_goals: mind.active_pursuits.len(),
-                            memory_nodes: total_nodes,
-                            local_conscience_conf: Some(local_conf),
-                            local_conscience_agreement: local_agreement,
-                            tokens_per_second: tps,
-                        });
-                    }
+                    // 📈 Build the evaluation metrics entry; the final critic score
+                    // is filled in after the async LLM critic call completes.
+                    let entry = metrics::MetricsEntry {
+                        timestamp: telemetry::current_secs(),
+                        cycle,
+                        conscience_loss: mind.metabolics.conscience_loss_accumulator,
+                        language_loss,
+                        goal_loss: goal_loss_value,
+                        world_model_loss: world_model_loss_value,
+                        learning_rate: live_learning_rate_sample,
+                        critic_score: 0.0,
+                        active_goals: mind.active_pursuits.len(),
+                        memory_nodes: total_nodes,
+                        local_conscience_conf: Some(local_conf),
+                        local_conscience_agreement: local_agreement,
+                        tokens_per_second: tps,
+                    };
 
                     Some((
                         decoded_conscience_0,
@@ -7030,6 +7028,7 @@ async fn main() -> Result<()> {
                         network_ref,
                         brain_outputs.clone(),
                         local_goal_text,
+                        entry,
                     ))
                 })
                 .await
@@ -7069,6 +7068,13 @@ async fn main() -> Result<()> {
                     let mut t = clock_telemetry.lock().await;
                     t.record_critic(critic_score);
                 }
+                entry.critic_score = critic_score;
+            }
+
+            // 📈 Persist the metrics entry now that the (optional) critic score is known.
+            {
+                let mut m = metrics_logger.lock().await;
+                m.record(entry);
             }
 
             tracing::info!(
