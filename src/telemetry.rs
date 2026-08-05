@@ -212,6 +212,7 @@ pub struct SensorSnapshot {
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
     pub memory_pressure_percent: f64,
+    pub process_memory_used_bytes: u64,
     pub cpu_temperature_celsius: f64,
     pub battery_percent: f64,
     pub battery_charging: bool,
@@ -311,6 +312,16 @@ pub fn update_sensor_snapshot(
         system.processes().len()
     } else {
         snapshot.process_count
+    };
+
+    snapshot.process_memory_used_bytes = if slow_refresh {
+        let own_pid = sysinfo::Pid::from_u32(std::process::id());
+        system
+            .process(own_pid)
+            .map(|p| p.memory())
+            .unwrap_or(snapshot.process_memory_used_bytes)
+    } else {
+        snapshot.process_memory_used_bytes
     };
 
     if slow_refresh {

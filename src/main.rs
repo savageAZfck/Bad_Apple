@@ -6374,7 +6374,7 @@ async fn main() -> Result<()> {
             interval.tick().await;
             let used = {
                 let s = memory_sensors.lock().await;
-                s.memory_used_bytes
+                s.process_memory_used_bytes
             };
             let now = current_secs();
             let drift = profiler.record(used, now);
