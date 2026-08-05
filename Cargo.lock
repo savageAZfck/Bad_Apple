@@ -966,6 +966,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "firefly_edgeos"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.0",
+ "bytemuck",
+ "candle-core",
+ "candle-nn",
+ "cbindgen",
+ "chrono",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "dashmap",
+ "futures-util",
+ "hmac",
+ "libc",
+ "libloading",
+ "md-5",
+ "memmap2",
+ "ndarray",
+ "notify",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sled",
+ "starship-battery",
+ "sysinfo",
+ "tokenizers 0.15.2",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "float8"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2613,42 +2651,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "sapient_soul"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.23.0",
- "candle-core",
- "candle-nn",
- "cbindgen",
- "chrono",
- "crossbeam-queue",
- "crossbeam-utils",
- "dashmap",
- "futures-util",
- "hmac",
- "libc",
- "libloading",
- "md-5",
- "ndarray",
- "notify",
- "rand 0.8.7",
- "serde",
- "serde_json",
- "sha2",
- "sled",
- "starship-battery",
- "sysinfo",
- "tokenizers 0.15.2",
- "tokio",
- "tokio-tungstenite",
- "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ import FoundationModels
 #endif
 
 /// Imported Rust registration primitive.  This symbol is exposed by the
-/// `sapient_soul` library through `firefly_core.h`.
+/// `firefly_edgeos` library through `firefly_core.h`.
 @_silgen_name("register_apple_intelligence_oracle")
 func registerAppleIntelligenceOracle(
     _ callback: @convention(c) (UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>?

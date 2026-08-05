@@ -120,7 +120,7 @@ impl DataCurriculum {
 pub fn default_curriculum_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(&home).join("firefly-agi").join("curriculum"));
+        dirs.push(PathBuf::from(&home).join("firefly-edgeos").join("curriculum"));
         dirs.push(
             PathBuf::from(&home)
                 .join("Documents")

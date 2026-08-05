@@ -17,7 +17,7 @@ use tokenizers::tokenizer::TokenizerImpl;
 use tokenizers::{AddedToken, Tokenizer};
 
 /// Dimensionality of the Transformer hidden / brain state.
-pub const BRAIN_DIM: usize = 256;
+pub const BRAIN_DIM: usize = 576;
 
 /// Legacy MLP layer-dimension list kept for API compatibility.
 ///
@@ -53,6 +53,57 @@ pub fn no_candle_brain() -> Option<CandleBrain> {
     None
 }
 
+/// Attention head dropout (DropHead).
+///
+/// Drops entire attention heads during training with probability `p`, while
+/// scaling the surviving heads by `1 / (1 - p)` so that the expected value is
+/// preserved.  This forces the 12 heads to stay robust rather than silently
+/// co-adapting.
+#[derive(Clone, Debug)]
+struct DropHead {
+    p: f64,
+    scale: f64,
+}
+
+impl DropHead {
+    fn new(p: f64) -> Self {
+        let p = p.clamp(0.0, 0.999_999);
+        Self {
+            p,
+            scale: 1.0 / (1.0 - p),
+        }
+    }
+
+    /// Apply the same head mask to Q, K, and V tensors of shape
+    /// `(batch, heads, seq, head_dim)`.
+    fn apply_to_heads(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        training: bool,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        if !training || self.p == 0.0 {
+            return Ok((q.clone(), k.clone(), v.clone()));
+        }
+
+        let num_heads = q.dim(1)?;
+        let mut mask = vec![0.0f32; num_heads];
+        let mut rng = rand::thread_rng();
+        for m in mask.iter_mut() {
+            if !rng.gen_bool(self.p) {
+                *m = self.scale as f32;
+            }
+        }
+
+        let mask_t = Tensor::new(mask, q.device())?.reshape((1, num_heads, 1, 1))?;
+        let q_out = q.broadcast_mul(&mask_t)?;
+        let k_out = k.broadcast_mul(&mask_t)?;
+        let v_out = v.broadcast_mul(&mask_t)?;
+        Ok((q_out, k_out, v_out))
+    }
+}
+
 /// A small multi-head self-attention Transformer block.
 struct TransformerBlock {
     dim: usize,
@@ -66,6 +117,8 @@ struct TransformerBlock {
     ffn2: Linear,
     num_heads: usize,
     head_dim: usize,
+    /// Head-dropout regularizer; applied during training only.
+    drop_head: DropHead,
 }
 
 impl TransformerBlock {
@@ -84,11 +137,40 @@ impl TransformerBlock {
             ffn2: linear(ffn_dim, dim, vb.pp("ffn2"))?,
             num_heads,
             head_dim,
+            drop_head: DropHead::new(0.1),
         })
     }
 
+    /// Orthogonality penalty on the flattened Q and K head weight matrices.
+    ///
+    /// Computes `sum_{i != j} <W_i, W_j>^2` across heads, encouraging each of
+    /// the 12 heads to occupy a distinct subspace of the 512-D geometry.
+    fn orthogonality_penalty(&self, proj: &Linear) -> Result<Tensor> {
+        // Weight shape is (dim, dim).  Reshape to (num_heads, head_dim, dim),
+        // then flatten each head to a vector.
+        let w = proj.weight();
+        let w_3d = w.reshape((self.num_heads, self.head_dim, self.dim))?;
+        let w_2d = w_3d.reshape((self.num_heads, self.head_dim * self.dim))?;
+
+        // Gram matrix G = W @ W^T, then mask the diagonal and penalize the
+        // off-diagonal energy.
+        let g = w_2d.matmul(&w_2d.transpose(D::Minus2, D::Minus1)?)?;
+        let eye = Tensor::eye(self.num_heads, DType::F32, w.device())?;
+        let ones = Tensor::ones((self.num_heads, self.num_heads), DType::F32, w.device())?;
+        let off_diag_mask = ones.sub(&eye)?;
+        let off_diag = g.mul(&off_diag_mask)?;
+        off_diag.sqr()?.mean_all()?.reshape(())
+    }
+
+    /// Total orthogonality regularization for this block (Q + K).
+    fn block_orthogonality_penalty(&self) -> Result<Tensor> {
+        let q = self.orthogonality_penalty(&self.q_proj)?;
+        let k = self.orthogonality_penalty(&self.k_proj)?;
+        q.add(&k)?.reshape(())
+    }
+
     /// Forward on a tensor of shape `(batch, seq, dim)`.
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    fn forward(&self, x: &Tensor, training: bool) -> Result<Tensor> {
         let (_b, _s, d) = x.dims3()?;
 
         // Self-attention sub-layer.
@@ -109,6 +191,9 @@ impl TransformerBlock {
             .transpose(1, 2)?
             .contiguous()?;
 
+        // Drop entire attention heads during training.
+        let (q, k, v) = self.drop_head.apply_to_heads(&q, &k, &v, training)?;
+
         let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
         let scale = (self.head_dim as f32).sqrt();
         let scale_t = Tensor::new(&[scale], q.device())?.reshape((1, 1, 1, 1))?;
@@ -127,6 +212,17 @@ impl TransformerBlock {
         let x = x.add(&ffn)?;
         self.ln2.forward(&x)
     }
+}
+
+/// Layer-wise learning-rate decay (LLRD) group.
+///
+/// Holds one AdamW optimizer for a subset of parameters and a multiplier
+/// `gamma` that is applied on top of the global base learning rate set by the
+/// Conscience Oracle.  Earlier blocks / embeddings get `gamma = 0.75`; later
+/// blocks and downstream heads get `gamma = 1.0`.
+struct OptimizerGroup {
+    optimizer: AdamW,
+    gamma: f64,
 }
 
 /// A real Candle tensor backend for the Firefly brain.
@@ -161,7 +257,16 @@ pub struct CandleBrain {
     system2_lr_multiplier: f64,
     /// Unscaled learning rate set by the caller.
     base_lr: f64,
-    optimizer: AdamW,
+    /// Layer-wise optimizers for LLRD.
+    optimizers: Vec<OptimizerGroup>,
+    /// Coefficient for the Q/K orthogonality regularization term.
+    ortho_lambda: f64,
+    /// Current global cycle count (used for the 30-cycle post-boot LR dampener).
+    cycle: u64,
+    /// Maximum learning rate during the post-boot warmup.
+    warmup_max_lr: f64,
+    /// Number of cycles the LR dampener stays active after boot.
+    warmup_cycles: u64,
 }
 
 impl fmt::Debug for CandleBrain {
@@ -172,9 +277,21 @@ impl fmt::Debug for CandleBrain {
             .field("dim", &self.dim)
             .field("transformer_blocks", &self.transformer_blocks.len())
             .field("num_classes", &self.num_classes)
-            .field("learning_rate", &self.optimizer.learning_rate())
+            .field("learning_rate", &self.base_lr)
             .finish()
     }
+}
+
+/// Returns true for token / positional embeddings and Transformer Blocks 0 and 1.
+///
+/// These receive a reduced learning rate under LLRD so foundational grammar
+/// and vocabulary stay locked, while later blocks and task heads can adapt
+/// faster.
+fn is_early_var(name: &str) -> bool {
+    name.starts_with("token_embedding")
+        || name == "pos_embed"
+        || name.starts_with("0/")
+        || name.starts_with("1/")
 }
 
 impl CandleBrain {
@@ -194,17 +311,17 @@ impl CandleBrain {
         let seq_len = 32usize;
         let token_dim = 64usize;
         let dim = BRAIN_DIM;
-        let num_heads = 8usize;
-        let ffn_dim = 1024usize;
+        let num_heads = 12usize;
+        let ffn_dim = dim * 4;
         let num_blocks = 4usize;
 
-        // Embed 64-dim token vectors into the model dimension.
+        // Embed 64-dim token vectors into the 576-D transformer trunk.
         let token_embedding = linear(token_dim, dim, vb.pp("token_embedding"))?;
 
         // Learnable positional embeddings.
         let pos_embed = vb.get((seq_len, dim), "pos_embed")?;
 
-        // Four larger Transformer blocks.
+        // Four 12-head Transformer blocks.
         let mut transformer_blocks = Vec::new();
         for i in 0..num_blocks {
             let block = TransformerBlock::new(dim, num_heads, ffn_dim, vb.pp(i.to_string()))?;
@@ -223,7 +340,31 @@ impl CandleBrain {
         // Language head: pooled brain state -> 2048-dim next-input embedding.
         let language_head = linear(dim, 2048, vb.pp("language_head"))?;
 
-        let optimizer = AdamW::new_lr(varmap.all_vars(), 0.001)?;
+        // Layer-wise learning-rate decay: embeddings + Blocks 0/1 -> 0.75x,
+        // Blocks 2/3 + all task heads -> 1.0x.
+        let mut early = Vec::new();
+        let mut late = Vec::new();
+        {
+            let data = varmap.data().lock().unwrap();
+            for (name, var) in data.iter() {
+                if is_early_var(name) {
+                    early.push(var.clone());
+                } else {
+                    late.push(var.clone());
+                }
+            }
+        }
+
+        let optimizers = vec![
+            OptimizerGroup {
+                optimizer: AdamW::new_lr(early, 0.001 * 0.75)?,
+                gamma: 0.75,
+            },
+            OptimizerGroup {
+                optimizer: AdamW::new_lr(late, 0.001)?,
+                gamma: 1.0,
+            },
+        ];
 
         Ok(Self {
             name: name.to_string(),
@@ -244,7 +385,11 @@ impl CandleBrain {
             system2_active: true,
             system2_lr_multiplier: 1.0,
             base_lr: 0.001,
-            optimizer,
+            optimizers,
+            ortho_lambda: 1e-4,
+            cycle: 0,
+            warmup_max_lr: 0.00005,
+            warmup_cycles: 30,
         })
     }
 
@@ -287,14 +432,14 @@ impl CandleBrain {
     /// In System 2, the full 4-block Transformer processes the token sequence.
     /// In System 1, the Transformer blocks are bypassed for a fast embedding
     /// path while still projecting to the same `dim`-dimensional state space.
-    fn brain_state(&self, input: &[f64]) -> Result<Tensor> {
+    fn brain_state(&self, input: &[f64], training: bool) -> Result<Tensor> {
         let mut x = self.prepare_input(input)?;
         x = self.token_embedding.forward(&x)?;
         x = x.add(&self.pos_embed.reshape((1, self.seq_len, self.dim))?)?;
 
         if self.system2_active {
             for block in &self.transformer_blocks {
-                x = block.forward(&x)?;
+                x = block.forward(&x, training)?;
             }
         }
 
@@ -305,14 +450,14 @@ impl CandleBrain {
 
     /// Run a full forward pass through the Transformer and project to dim-D.
     pub fn forward(&self, input: &[f64]) -> Result<Vec<f64>> {
-        let out = self.brain_state(input)?;
+        let out = self.brain_state(input, false)?;
         let values = out.squeeze(0)?.to_vec1::<f32>()?;
         Ok(values.into_iter().map(|v| v as f64).collect())
     }
 
     /// Run a full forward pass and return num_classes conscience logits.
     pub fn classify(&self, input: &[f64]) -> Result<Vec<f64>> {
-        let state = self.brain_state(input)?;
+        let state = self.brain_state(input, false)?;
         let logits = self.conscience_head.forward(&state)?.squeeze(0)?;
         let values = logits.to_vec1::<f32>()?;
         Ok(values.into_iter().map(|v| v as f64).collect())
@@ -338,6 +483,26 @@ impl CandleBrain {
         Ok((idx, p as f64))
     }
 
+    /// Sum the Q/K orthogonality penalties across all 4 Transformer blocks.
+    fn orthogonality_penalty(&self) -> Result<Tensor> {
+        let mut total = Tensor::zeros((), DType::F32, &self.device)?;
+        for block in &self.transformer_blocks {
+            total = total.add(&block.block_orthogonality_penalty()?)?;
+        }
+        Ok(total)
+    }
+
+    /// Shared gradient-backward step across the LLRD optimizer groups.
+    fn backward_step(&mut self, loss: &Tensor) -> Result<()> {
+        let grads = loss.backward()?;
+        for g in &mut self.optimizers {
+            let lr = self.base_lr * g.gamma * self.system2_lr_multiplier;
+            g.optimizer.set_learning_rate(lr);
+            g.optimizer.step(&grads)?;
+        }
+        Ok(())
+    }
+
     /// Forward + cross-entropy classification loss + AdamW optimizer step.
     ///
     /// In System 1 the loss is computed for telemetry but no weights are
@@ -345,12 +510,18 @@ impl CandleBrain {
     pub fn train_step(&mut self, input: &[f64], target_idx: usize) -> Result<f64> {
         let target = Tensor::new(&[target_idx as u32], &self.device)?;
 
-        let state = self.brain_state(input)?;
+        let state = self.brain_state(input, true)?;
         let logits = self.conscience_head.forward(&state)?;
 
         let loss = nn_loss::cross_entropy(&logits, &target)?;
+
+        // Add Q/K orthogonality regularization to keep the 12 heads separated.
+        let ortho = self.orthogonality_penalty()?.reshape(())?;
+        let lambda = Tensor::new(self.ortho_lambda as f32, &self.device)?;
+        let total_loss = loss.add(&ortho.broadcast_mul(&lambda)?)?;
+
         if self.system2_active {
-            self.optimizer.backward_step(&loss)?;
+            self.backward_step(&total_loss)?;
         }
         let loss_scalar = loss.to_vec0::<f32>()? as f64;
         Ok(loss_scalar)
@@ -377,7 +548,7 @@ impl CandleBrain {
         let scaled = loss.broadcast_mul(&scale_t)?;
 
         if self.system2_active {
-            self.optimizer.backward_step(&scaled)?;
+            self.backward_step(&scaled)?;
         }
         let loss_scalar = loss.to_vec0::<f32>()? as f64;
         Ok(loss_scalar)
@@ -414,16 +585,34 @@ impl CandleBrain {
 
         let loss = pred.sub(&target_t)?.sqr()?.mean_all()?;
         if self.system2_active {
-            self.optimizer.backward_step(&loss)?;
+            self.backward_step(&loss)?;
         }
         let loss_scalar = loss.to_vec0::<f32>()? as f64;
         Ok(loss_scalar.sqrt())
     }
 
+    /// Update the current global training cycle.
+    pub fn set_cycle(&mut self, cycle: u64) {
+        self.cycle = cycle;
+    }
+
     pub fn set_learning_rate(&mut self, lr: f64) {
+        let max_lr = if self.cycle > 0 && self.cycle <= self.warmup_cycles {
+            self.warmup_max_lr
+        } else {
+            f64::MAX
+        };
+        let lr = lr.min(max_lr);
         self.base_lr = lr;
-        let scaled = lr * self.system2_lr_multiplier;
-        self.optimizer.set_learning_rate(scaled);
+        for g in &mut self.optimizers {
+            let scaled = lr * g.gamma * self.system2_lr_multiplier;
+            g.optimizer.set_learning_rate(scaled);
+        }
+    }
+
+    /// Set the Q/K orthogonality regularization coefficient.
+    pub fn set_ortho_lambda(&mut self, lambda: f64) {
+        self.ortho_lambda = lambda.clamp(0.0, 1.0);
     }
 
     pub fn learning_rate(&self) -> f64 {

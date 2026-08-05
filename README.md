@@ -1,8 +1,8 @@
-# Firefly AGI Core
+# Firefly EdgeOS
 
 **Sovereign, local-first AGI research runtime.**
 
-Firefly is a self-contained, self-training cognitive OS written in Rust. It runs a 14,224-line async runtime (8,047 lines in `src/main.rs`) with a native Transformer, a local LLM oracle, an associative memory graph, a Sled-backed strategy library, a live telemetry server, a multi-transport swarm fabric, and a C FFI bridge — all on your own hardware, with no cloud required.
+Firefly EdgeOS is a self-contained, self-training cognitive OS written in Rust. It runs a 14,224-line async runtime (8,047 lines in `src/main.rs`) with a native Transformer, a local LLM oracle, an associative memory graph, a Sled-backed strategy library, a live telemetry server, a multi-transport swarm fabric, and a C FFI bridge — all on your own hardware, with no cloud required.
 
 This is private, early-access research code. **Do not share or distribute.**
 
@@ -12,7 +12,7 @@ Contact: savagetism@icloud.com
 
 ## What it does
 
-`sapient_soul` is a continuously running agent that:
+`firefly_edgeos` is a continuously running agent that:
 
 - **Senses the host**: CPU, RAM, battery, photons/audio/mass proxies.
 - **Encodes experience**: BPE tokenization + 2048-D grounded embeddings fused with real sensor anchors.
@@ -26,7 +26,7 @@ Contact: savagetism@icloud.com
 - **Operates in a wild sandbox**: watches `wild_workspace/`, ingests new files, and synthesizes read-only Python cleaners without touching the network. Demo scripts live in `wild_workspace/demo_scripts/`.
 - **Forms a wide-area swarm grid**: signed engrams over TCP, UDP, and WebSocket via an async `ConnectionRegistry` with exponential-backoff retries and transport auto-detection.
 - **Exposes everything on `http://127.0.0.1:8080`**: live dashboards, metrics, skill runner, transfer evaluator, and identity endpoints.
-- **Exposes a C FFI bridge**: `build.rs` generates `firefly_core.h` and `cargo build --release` produces `libsapient_soul.dylib` for native macOS interop.
+- **Exposes a C FFI bridge**: `build.rs` generates `firefly_core.h` and `cargo build --release` produces `libfirefly_edgeos.dylib` for native macOS interop.
 - **Uses structured `tracing` logging**, `anyhow` error handling, and a centralized `Config` loaded from `FIREFLY_*` environment variables.
 - **Routes all LLM generation through the native Apple Intelligence bridge**; no external LLM server is required.
 
@@ -38,9 +38,9 @@ Requires Rust, macOS with the native Apple Intelligence bridge built, and a `cur
 
 ```bash
 git clone <private repo>
-cd firefly-agi
+cd firefly-edgeos
 cargo build --release
-./target/release/sapient_soul
+./target/release/firefly_edgeos
 ```
 
 The system starts training immediately, opens the telemetry server, and watches `wild_workspace/`.
@@ -49,7 +49,7 @@ To build the macOS C bridge:
 
 ```bash
 cargo build --release
-# generates firefly_core.h and target/release/libsapient_soul.dylib
+# generates firefly_core.h and target/release/libfirefly_edgeos.dylib
 ```
 
 ---
@@ -95,8 +95,8 @@ cargo build --release
 ```bash
 cargo fmt --check   # pass
 cargo clippy --all-targets -- -D warnings   # pass, zero warnings
-cargo test          # 36 tests passed (17 lib + 19 bin)
-cargo build --release   # pass, libsapient_soul.dylib + firefly_core.h generated
+cargo test          # 49 tests passed (23 lib + 26 bin)
+cargo build --release   # pass, libfirefly_edgeos.dylib + firefly_core.h generated
 ```
 
 - `protocol::tests::wan_tcp_roundtrip` — single-packet TCP roundtrip through `ConnectionManager`.

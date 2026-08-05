@@ -1,4 +1,4 @@
-//! Runtime configuration for the sapient_soul agent.
+//! Runtime configuration for the firefly_edgeos agent.
 //!
 //! Values are loaded from environment variables (prefixed with `FIREFLY_`) and
 //! fall back to sensible defaults for local development. A JSON config file

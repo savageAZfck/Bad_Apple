@@ -1,13 +1,15 @@
 //! Asynchronous directory watcher for the "wild" local sandbox.
 //!
-//! The agent watches `~/firefly-agi/wild_workspace`, ingests incoming text
+//! The agent watches `~/firefly-edgeos/wild_workspace`, ingests incoming text
 //! payloads, and uses the local LLM to synthesize a read-only Python tool to
 //! parse/clean the file. Execution is sandboxed and metrics are logged to the
 //! SelfModel. No network access is permitted.
 
 use notify::{Event, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::apple_intelligence;
@@ -15,6 +17,7 @@ use crate::apple_intelligence_client::AppleIntelligenceClient;
 use crate::benchmark::RustValidator;
 use crate::hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
 use crate::is_safe_agent_code;
+use crate::protocol::{CompactEngramPacket, ConnectionManager};
 use crate::strategy_library::{RustSynthesizer, Strategy, StrategyLibrary};
 use crate::telemetry::run_sandboxed_tool;
 use tokio::task::spawn_blocking;
@@ -29,6 +32,54 @@ const WATCH_POLL_IDLE: Duration = Duration::from_secs(60);
 const ALLOWED_EXTENSIONS: &[&str] = &[
     "txt", "csv", "json", "log", "md", "xml", "yaml", "yml", "tsv", "py",
 ];
+
+/// Queue length at which incoming tool synthesis is offloaded to peer nodes.
+pub const HEAVY_EXECUTION_THRESHOLD: usize = 8;
+
+/// Prefix for a `CompactEngramPacket` carrying a wild-workspace task request.
+pub const WILD_TASK_PREFIX: &str = "@@WILD_TASK@@";
+
+/// Prefix for a `CompactEngramPacket` carrying a wild-workspace task result.
+pub const WILD_TASK_RESULT: &str = "@@WILD_TASK_RESULT@@";
+
+/// Serializable wild-workspace task.  `source` is the file contents; `path` is
+/// the original workspace path and is used for logging/reply routing.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WildTask {
+    pub path: String,
+    pub source: String,
+    pub is_script: bool,
+}
+
+/// Result of a peer-executed wild-workspace task.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WildTaskResult {
+    pub path: String,
+    pub name: String,
+    pub output: String,
+}
+
+/// Execute a `WildTask` and return a uniform `(name, output)` pair regardless of
+/// whether it is a script synthesis or a raw payload cleaning task.
+pub async fn execute_wild_task(
+    task: &WildTask,
+    client: &AppleIntelligenceClient,
+    model: &str,
+    strategy_library: &StrategyLibrary,
+) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    if task.is_script {
+        let outcome = process_script(&task.source, strategy_library).await?;
+        Ok((
+            "wild_rust_synth".into(),
+            format!(
+                "compiled={} competence={:.2} energy={:.2} velocity_ms={:.2}",
+                outcome.compiled, outcome.competence, outcome.energy, outcome.velocity_ms
+            ),
+        ))
+    } else {
+        process_wild_source(client, model, &task.source).await
+    }
+}
 
 /// Start the wild-workspace watcher. Returns the async receiver.
 /// The underlying `notify` watcher is kept alive inside a `spawn_blocking` task
@@ -105,12 +156,19 @@ pub async fn process_wild_payload(
     model: &str,
     path: &Path,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-    const MAX_SELF_HEAL_ATTEMPTS: usize = 3;
-
     let path = path.to_path_buf();
     let payload = spawn_blocking(move || read_limited_text(&path))
         .await
         .map_err(|e| format!("read task failed: {}", e))??;
+    process_wild_source(client, model, &payload).await
+}
+
+pub async fn process_wild_source(
+    client: &AppleIntelligenceClient,
+    model: &str,
+    payload: &str,
+) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_SELF_HEAL_ATTEMPTS: usize = 3;
 
     let preview: String = payload.chars().take(MAX_PREVIEW_CHARS).collect();
     let mut previous_error: Option<String> = None;
@@ -316,19 +374,107 @@ pub struct SynthesisOutcome {
 }
 
 /// Run the wild workspace ingestion loop.
+///
+/// Ingested files are placed on a shared work queue.  If the local queue length
+/// exceeds `HEAVY_EXECUTION_THRESHOLD`, the worker offloads the task as a signed
+/// `CompactEngramPacket` to the `ConnectionManager` gossip fabric instead of
+/// executing it locally.  Otherwise the tool is run in-process.
 pub async fn run_wild_loop(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
     client: Arc<AppleIntelligenceClient>,
     model: String,
     watch_path: PathBuf,
     strategy_library: Arc<StrategyLibrary>,
+    wan: Option<Arc<ConnectionManager>>,
+    origin: String,
 ) {
+    let pending: Arc<Mutex<VecDeque<WildTask>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+    // Worker: pops from the queue and either executes locally or offloads to peers.
+    let worker_pending = Arc::clone(&pending);
+    let worker_client = Arc::clone(&client);
+    let worker_model = model;
+    let worker_strategy = Arc::clone(&strategy_library);
+    let worker_wan = wan;
+    let worker_origin = origin;
+    tokio::spawn(async move {
+        loop {
+            let task = {
+                let mut q = worker_pending.lock().unwrap();
+                q.pop_front()
+            };
+            if let Some(task) = task {
+                let queue_len = {
+                    let q = worker_pending.lock().unwrap();
+                    q.len()
+                };
+
+                if queue_len >= HEAVY_EXECUTION_THRESHOLD {
+                    if let Some(ref wan) = worker_wan {
+                        let payload = match serde_json::to_string(&task) {
+                            Ok(v) => format!("{}{}", WILD_TASK_PREFIX, v),
+                            Err(_) => continue,
+                        };
+                        let packet = CompactEngramPacket {
+                            id: rand::random::<u64>(),
+                            timestamp: crate::telemetry::current_secs(),
+                            experiential_text: payload,
+                            emotional_state_snapshot: "distributed wild-workspace task".into(),
+                            origin_instance: worker_origin.clone(),
+                            brain_state: Vec::new(),
+                            embedding: Vec::new(),
+                            priority: 7,
+                        };
+                        wan.broadcast(&packet).await;
+                        tracing::info!(
+                            "🌿 [WILD QUEUE] offloaded {} to swarm (queue_len={})",
+                            task.path,
+                            queue_len
+                        );
+                        continue;
+                    }
+                }
+
+                // Local execution.
+                if task.is_script {
+                    match process_script(&task.source, &worker_strategy).await {
+                        Ok(outcome) => {
+                            println!(
+                                "🦀 [WILD SYNTH] {}: compiled={} competence={:.2}",
+                                task.path, outcome.compiled, outcome.competence
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("🦀 [WILD SYNTH] {} failed: {}", task.path, e);
+                        }
+                    }
+                } else {
+                    match process_wild_source(&worker_client, &worker_model, &task.source).await {
+                        Ok((name, output)) => {
+                            println!(
+                                "🌿 [WILD] Processed {} with '{}': {}",
+                                task.path,
+                                name,
+                                output.chars().take(120).collect::<String>()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("🌿 [WILD] Failed to process {}: {}", task.path, e);
+                        }
+                    }
+                }
+            } else {
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    });
+
+    // Ingestion: read allowed files and push them onto the shared queue.
     loop {
         match timeout(Duration::from_secs(60), rx.recv()).await {
             Ok(Some(event)) => {
                 for path in event.paths {
                     if is_allowed_file(&path, &watch_path) {
-                        // Route scripts (.py / .txt) through the optimization harness.
                         let ext = path
                             .extension()
                             .and_then(|e| e.to_str())
@@ -336,52 +482,18 @@ pub async fn run_wild_loop(
                             .to_lowercase();
                         let is_script = ext == "py" || ext == "txt";
 
-                        if is_script {
-                            match read_limited_text(&path) {
-                                Ok(source) => {
-                                    match process_script(&source, &strategy_library).await {
-                                        Ok(outcome) => {
-                                            println!(
-                                                "🦀 [WILD SYNTH] {}: compiled={} competence={:.2}",
-                                                path.display(),
-                                                outcome.compiled,
-                                                outcome.competence
-                                            );
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "🦀 [WILD SYNTH] {} failed: {}",
-                                                path.display(),
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "🦀 [WILD SYNTH] {} read failed: {}",
-                                        path.display(),
-                                        e
-                                    );
-                                }
+                        match read_limited_text(&path) {
+                            Ok(source) => {
+                                let task = WildTask {
+                                    path: path.display().to_string(),
+                                    source,
+                                    is_script,
+                                };
+                                let mut q = pending.lock().unwrap();
+                                q.push_back(task);
                             }
-                        } else {
-                            match process_wild_payload(&client, &model, &path).await {
-                                Ok((name, output)) => {
-                                    println!(
-                                        "🌿 [WILD] Processed {} with '{}': {}",
-                                        path.display(),
-                                        name,
-                                        output.chars().take(120).collect::<String>()
-                                    );
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "🌿 [WILD] Failed to process {}: {}",
-                                        path.display(),
-                                        e
-                                    );
-                                }
+                            Err(e) => {
+                                eprintln!("🌿 [WILD] Failed to read {}: {}", path.display(), e);
                             }
                         }
                     }

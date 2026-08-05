@@ -32,6 +32,10 @@ pub struct DualProcessGovernor {
     system2_cycles: u64,
     /// Current clock interval.
     tick_ms: u64,
+    /// Multiplier applied to the orthogonality regularization lambda.
+    ortho_lambda_scale: f64,
+    /// Consecutive cycles the 100-cycle rolling average loss has plateaued.
+    plateau_cycles: u64,
 }
 
 impl DualProcessGovernor {
@@ -42,6 +46,8 @@ impl DualProcessGovernor {
             resource_stress: 0.0,
             system2_cycles: 0,
             tick_ms: 6_000,
+            ortho_lambda_scale: 1.0,
+            plateau_cycles: 0,
         }
     }
 
@@ -49,10 +55,14 @@ impl DualProcessGovernor {
     pub fn update(&mut self, telemetry: &TelemetryState, sensors: &SensorSnapshot) {
         // Entropy index: combines memory-leak score, transfer/loss volatility,
         // and incoming data unpredictability.  Higher = more surprising.
+        //
+        // The loss component is weighted from the 100-cycle average so transient
+        // spikes do not dominate, but sustained high loss keeps the deep 12-head
+        // Transformer engaged while the wider model is still learning.
         let memory_component = telemetry.memory_leak_score.clamp(0.0, 1.0);
         let critic_component = (1.0 - telemetry.critic_score.clamp(0.0, 1.0)) * 0.3;
         let transfer_component = (1.0 - telemetry.transfer_score.clamp(0.0, 1.0)) * 0.2;
-        let loss_component = telemetry.last_loss.min(1.0) * 0.2;
+        let loss_component = (telemetry.avg_loss / 5.0).min(1.0) * 0.4;
 
         self.entropy_index =
             (memory_component * 0.5 + critic_component + transfer_component + loss_component)
@@ -64,10 +74,28 @@ impl DualProcessGovernor {
             + (sensors.cpu_temperature_celsius / 100.0).clamp(0.0, 1.0) * 0.3)
             .clamp(0.0, 1.0);
 
-        // Hysteresis: System 2 triggers on high entropy *or* high stress.
-        let should_activate = self.entropy_index > 0.65 || self.resource_stress > 0.80;
+        // Plateau detector: if the 100-cycle rolling average loss is flat while
+        // entropy remains below 0.45, the Q/K heads may have collapsed into a
+        // shared subspace.  Ramp up the orthogonality regularization lambda to
+        // push them apart; otherwise drift back to the baseline.
+        let plateau = Self::detect_loss_plateau(&telemetry.loss_history);
+        if plateau && self.entropy_index < 0.45 {
+            self.plateau_cycles += 1;
+        } else {
+            self.plateau_cycles = 0;
+        }
+
+        if self.plateau_cycles >= 10 {
+            self.ortho_lambda_scale = (self.ortho_lambda_scale * 1.05).min(3.0);
+        } else {
+            self.ortho_lambda_scale = (self.ortho_lambda_scale * 0.995).max(1.0);
+        }
+
+        // Hysteresis: wider activation band so the scaled 576-D model does not
+        // get stuck in System 1 while it is still converging.
+        let should_activate = self.entropy_index > 0.45 || self.resource_stress > 0.80;
         let should_release =
-            self.entropy_index < 0.35 && self.resource_stress < 0.50 && self.system2_cycles > 2;
+            self.entropy_index < 0.20 && self.resource_stress < 0.50 && self.system2_cycles > 2;
 
         match self.mode {
             SystemMode::System1 if should_activate => {
@@ -89,6 +117,25 @@ impl DualProcessGovernor {
                 self.tick_ms = 6_000;
             }
         }
+    }
+
+    /// Returns the current orthogonality regularization multiplier.
+    pub fn ortho_lambda_scale(&self) -> f64 {
+        self.ortho_lambda_scale
+    }
+
+    /// Detect whether the 100-cycle rolling average loss has plateaued.
+    /// A plateau is defined as a <5% relative difference between the first and
+    /// second halves of the current loss-history window.
+    fn detect_loss_plateau(history: &[f64]) -> bool {
+        if history.len() < 20 {
+            return false;
+        }
+        let mid = history.len() / 2;
+        let first: f64 = history[..mid].iter().sum::<f64>() / mid.max(1) as f64;
+        let second: f64 = history[mid..].iter().sum::<f64>() / (history.len() - mid).max(1) as f64;
+        let denom = first.max(1e-6);
+        (first - second).abs() / denom < 0.05
     }
 
     /// Current tick interval as a `Duration`.

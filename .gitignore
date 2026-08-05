@@ -3,6 +3,8 @@
 /target-clean
 /target-release
 /target-release-mods
+/target-clippy
+/target-rebrand
 src/platform/apple_desktop/.build
 
 # Cargo lock is intentionally committed for this binary
@@ -43,3 +45,4 @@ sapient_agi_soul_5001.*
 /PILOT_EVALUATION_METRICS.md
 /firefly_core.h
 firefly.log
+*.connectome

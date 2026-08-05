@@ -1,18 +1,18 @@
 [package]
-name = "sapient_soul"
+name = "firefly_edgeos"
 version = "0.1.0"
 edition = "2021"
 authors = ["Adam Clark <savagetism@icloud.com>"]
 license-file = "LICENSE.txt"
-description = "Firefly AGI Core — a local-first, self-training AGI research runtime"
+description = "Firefly EdgeOS — a local-first, self-training AGI runtime"
 build = "build.rs"
 
 [lib]
-name = "sapient_soul"
+name = "firefly_edgeos"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [[bin]]
-name = "sapient_soul"
+name = "firefly_edgeos"
 path = "src/main.rs"
 
 [dependencies]
@@ -45,6 +45,8 @@ crossbeam-queue = "0.3.12"
 crossbeam-utils = "0.8.21"
 libloading = "0.8.6"
 libc = "0.2"
+memmap2 = "0.9.11"
+bytemuck = { version = "1.25.2", features = ["derive"] }
 
 [build-dependencies]
 cbindgen = "0.26"

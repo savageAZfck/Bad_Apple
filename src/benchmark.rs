@@ -667,6 +667,7 @@ mod tests {
                 emotional_state_snapshot: "ok".to_string(),
                 origin_instance: "bench".to_string(),
                 brain_state: vec![0.1; ENGRAM_DIM],
+                ..Default::default()
             };
             client_cm.broadcast(&packet).await;
         }

@@ -26,6 +26,7 @@ mod apple_intelligence;
 mod apple_intelligence_client;
 mod benchmark;
 mod config;
+mod connectome_mmap;
 mod conscience_oracle;
 mod data_feed;
 mod governor;
@@ -4780,11 +4781,15 @@ struct MemoryGraphNode {
     timestamp: u64,
     experiential_text: String,
     emotional_state_snapshot: String,
+    /// High-dimensional engram embedding persisted in the mmap-backed
+    /// `ConnectomeMmap` to keep `state.json` compact.
+    #[serde(skip)]
     embedding: Vec<f64>,
     associated_edge_ids: Vec<u64>,
     #[serde(default)]
     origin_instance: String,
-    #[serde(default)]
+    /// Brain-state snapshot persisted in the mmap-backed `ConnectomeMmap`.
+    #[serde(default, skip)]
     brain_state: Vec<f64>,
 }
 
@@ -4927,6 +4932,12 @@ pub(crate) struct FullySapientSoulMatrix {
     network_stack: EnhancedNetworkStack,
     persistence_enabled: bool,
     auto_save_interval: Duration,
+    /// Path to the mmap-backed connectome slab (default: `state.connectome`).
+    #[serde(default)]
+    connectome_path: PathBuf,
+    /// Mmap-backed store for the 2048-D embeddings and 576-D brain states.
+    #[serde(skip)]
+    connectome_mmap: std::sync::Mutex<Option<connectome_mmap::ConnectomeMmap>>,
     // 🧠 ADVANCED AGI SYSTEMS
     episodic_memory: EpisodicMemory,
     semantic_memory: SemanticMemory,
@@ -4987,11 +4998,11 @@ impl FullySapientSoulMatrix {
     fn new(name: &str, local_port: u16) -> Self {
         let now = current_secs();
 
-        // Real Candle tensor brain: small 2-block 4-head Transformer encoder.
+        // Real Candle tensor brain: 4-block 12-head Transformer encoder (576-D trunk).
         // Legacy scalar brain_layers are kept empty for backward compatibility.
         let num_conscience_tokens = 100;
         let candle_brain = CandleBrain::new(
-            "Firefly",
+            "Firefly EdgeOS",
             num_conscience_tokens,
             &tensor_brain::layer_dims(),
         )
@@ -5059,6 +5070,8 @@ impl FullySapientSoulMatrix {
             network_stack: EnhancedNetworkStack::new(local_port),
             persistence_enabled: true,
             auto_save_interval: Duration::from_secs(30),
+            connectome_path: PathBuf::from("state.connectome"),
+            connectome_mmap: std::sync::Mutex::new(None),
             // 🧠 ADVANCED AGI SYSTEMS
             episodic_memory: EpisodicMemory::new(),
             semantic_memory,
@@ -5195,6 +5208,22 @@ impl FullySapientSoulMatrix {
         // 🆕 Save network stack state
         let network_path = PathBuf::from(filename).with_extension("network");
         let _ = self.network_stack.save_state(&network_path);
+
+        // 🧬 Persist 2048-D connectome embeddings and 576-D brain states via
+        // zero-copy memory mapping so the JSON save stays small and fast.
+        let connectome_path = self.connectome_path.clone();
+        if let Ok(mut guard) = self.connectome_mmap.lock() {
+            if guard.is_none() {
+                if let Ok(store) =
+                    connectome_mmap::ConnectomeMmap::open(&connectome_path, MAX_MEMORY_NODES)
+                {
+                    *guard = Some(store);
+                }
+            }
+            if let Some(ref store) = *guard {
+                let _ = store.persist(&self.associative_memory_network);
+            }
+        }
     }
 
     fn load_state(filename: &std::path::Path) -> Option<Self> {
@@ -5232,6 +5261,19 @@ impl FullySapientSoulMatrix {
                 }
             }
 
+            // 🧬 Load 2048-D embeddings and 576-D brain states from the mmap slab.
+            let connectome_path = PathBuf::from(filename).with_extension("connectome");
+            if let Ok(store) =
+                connectome_mmap::ConnectomeMmap::open(&connectome_path, MAX_MEMORY_NODES)
+            {
+                let _ = store.load_into(
+                    &mut parsed.associative_memory_network,
+                    &parsed.spatial_sensory_register,
+                );
+                parsed.connectome_path = connectome_path;
+                parsed.connectome_mmap = std::sync::Mutex::new(Some(store));
+            }
+
             // 🔄 Dimension migration: reset world model and previous brain state if they
             // were saved with an older brain-state size.
             if parsed.neural_world_model.w.len() != tensor_brain::BRAIN_DIM {
@@ -5247,7 +5289,7 @@ impl FullySapientSoulMatrix {
 
             // 🧠 Rebuild the real Candle tensor brain and load its safetensors weights if available.
             let mut candle_brain =
-                CandleBrain::new("Firefly", 100, &tensor_brain::layer_dims()).ok()?;
+                CandleBrain::new("Firefly EdgeOS", 100, &tensor_brain::layer_dims()).ok()?;
             let safetensors_path = PathBuf::from(filename).with_extension("safetensors");
             if safetensors_path.exists() {
                 let _ = candle_brain.load_weights(&safetensors_path);
@@ -5560,7 +5602,7 @@ impl FullySapientSoulMatrix {
             self.associative_memory_network.len(),
         );
         self.identity_journal.push(summary);
-        if self.identity_journal.len() > 100 {
+        if self.identity_journal.len() > 10000 {
             self.identity_journal.remove(0);
         }
         self.last_journal_entry = now;
@@ -6064,11 +6106,17 @@ fn compute_predicted_utility(
 /// Merge a batch of verified `CompactEngramPacket`s into the local memory graph
 /// and broadcast through the global workspace. The heavy work is done in the
 /// blocking pool to keep UDP receive latency low.
+#[allow(clippy::too_many_arguments)]
 async fn merge_engram_batch(
     batch: Vec<CompactEngramPacket>,
     mind: Arc<TokioMutex<FullySapientSoulMatrix>>,
     gw: Arc<TokioMutex<GlobalWorkspace>>,
     swarm: Arc<std::sync::Mutex<SwarmMetrics>>,
+    client: Arc<AppleIntelligenceClient>,
+    model: String,
+    wan: Arc<ConnectionManager>,
+    origin: String,
+    strategy_library: Arc<StrategyLibrary>,
 ) {
     if batch.is_empty() {
         return;
@@ -6088,6 +6136,56 @@ async fn merge_engram_batch(
                 continue;
             }
 
+            // Distributed wild-workspace task request: execute offloaded tool
+            // synthesis and broadcast the finalized state vector back to peers.
+            if compact.experiential_text.starts_with(wild_workspace::WILD_TASK_PREFIX) {
+                let client = client.clone();
+                let model = model.clone();
+                let strategy_library = strategy_library.clone();
+                let wan = wan.clone();
+                let origin = origin.clone();
+                let task_json =
+                    compact.experiential_text[wild_workspace::WILD_TASK_PREFIX.len()..].to_string();
+                tokio::spawn(async move {
+                    let Ok(task) = serde_json::from_str::<wild_workspace::WildTask>(&task_json)
+                    else {
+                        return;
+                    };
+                    let res = wild_workspace::execute_wild_task(
+                        &task,
+                        &client,
+                        &model,
+                        &strategy_library,
+                    )
+                    .await;
+                    let (name, output) = match res {
+                        Ok((n, o)) => (n, o),
+                        Err(e) => ("wild_failed".into(), format!("{}", e)),
+                    };
+                    let result = wild_workspace::WildTaskResult {
+                        path: task.path,
+                        name,
+                        output,
+                    };
+                    let text = match serde_json::to_string(&result) {
+                        Ok(v) => format!("{}{}", wild_workspace::WILD_TASK_RESULT, v),
+                        Err(_) => return,
+                    };
+                    let packet = CompactEngramPacket {
+                        id: rand::random::<u64>(),
+                        timestamp: crate::telemetry::current_secs(),
+                        experiential_text: text,
+                        emotional_state_snapshot: "distributed wild-workspace result".into(),
+                        origin_instance: origin,
+                        brain_state: Vec::new(),
+                        embedding: Vec::new(),
+                        priority: 7,
+                    };
+                    wan.broadcast(&packet).await;
+                });
+                continue;
+            }
+
             let state_preview = compact.brain_state.len().min(protocol::ENGRAM_DIM);
             println!("\n📥 [TELEPATHIC EXCHANGER]: Merging signed external engram from '{}' (brain_state dim={}) via lockless channel: ..{:X}",
                 compact.origin_instance, state_preview, compact.id % 0xFFFF);
@@ -6095,15 +6193,23 @@ async fn merge_engram_batch(
             let mut brain_state = compact.brain_state;
             brain_state.truncate(protocol::ENGRAM_DIM);
 
+            // Prefer the sender's 2048-D embedding; it was computed from the
+            // original (untruncated) text and is what the socket gate approved.
+            let embedding = if compact.embedding.len() == protocol::EMBEDDING_DIM {
+                compact.embedding.clone()
+            } else {
+                generate_2048_grounded_embedding(
+                    &compact.experiential_text,
+                    &mind.spatial_sensory_register,
+                )
+            };
+
             let payload_node = MemoryGraphNode {
                 id: compact.id,
                 timestamp: compact.timestamp,
                 experiential_text: compact.experiential_text.clone(),
                 emotional_state_snapshot: compact.emotional_state_snapshot,
-                embedding: generate_2048_grounded_embedding(
-                    &compact.experiential_text,
-                    &mind.spatial_sensory_register,
-                ),
+                embedding,
                 associated_edge_ids: Vec::new(),
                 origin_instance: compact.origin_instance,
                 brain_state,
@@ -6151,16 +6257,20 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = Config::from_env();
-    tracing::info!("starting sapient_soul");
+    tracing::info!("starting firefly_edgeos");
 
-    tracing::info!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: 2-Block 4-Head Transformer Neural Architecture Running...");
+    tracing::info!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: Firefly EdgeOS 4-Block 12-Head 576-D Transformer Neural Architecture Running...");
 
     // 🍎 Attempt to load the optional in-process Apple Intelligence bridge.
     apple_intelligence::initialize();
 
     let state_file = config.state_file.clone();
-    let matrix = FullySapientSoulMatrix::load_state(&state_file)
-        .unwrap_or_else(|| FullySapientSoulMatrix::new("Firefly", config.multi_agent_port_start));
+    let mut matrix = FullySapientSoulMatrix::load_state(&state_file).unwrap_or_else(|| {
+        FullySapientSoulMatrix::new("Firefly EdgeOS", config.multi_agent_port_start)
+    });
+    matrix.connectome_path = state_file.with_extension("connectome");
+    // Capture the origin name before the matrix is moved into the async runtime.
+    let wild_origin = matrix.name.clone();
     let core_mind = Arc::new(TokioMutex::new(matrix));
 
     // 📚 Strategy library (Sled-backed) for durable learned procedural templates.
@@ -6173,7 +6283,7 @@ async fn main() -> Result<()> {
                 e
             );
             let tmp = std::env::temp_dir()
-                .join(format!("sapient_soul_strategies_{}", std::process::id()));
+                .join(format!("firefly_edgeos_strategies_{}", std::process::id()));
             std::fs::create_dir_all(&tmp).context("temp dir must be writable")?;
             StrategyLibrary::open(&tmp)
                 .context("Sled strategy library must open in a writable directory")?
@@ -6239,27 +6349,6 @@ async fn main() -> Result<()> {
             telemetry_port,
         )
         .await;
-    });
-
-    // 🌿 WILD WORKSPACE: local file-watcher sandbox.
-    let wild_path = config.wild_workspace_dir.clone();
-    let wild_client = Arc::clone(&client);
-    let wild_model = model_id.clone();
-    let wild_strategy_library = Arc::clone(&strategy_library);
-    tokio::spawn(async move {
-        match start_watcher(&wild_path) {
-            Ok(rx) => {
-                run_wild_loop(
-                    rx,
-                    wild_client,
-                    wild_model,
-                    wild_path,
-                    wild_strategy_library,
-                )
-                .await;
-            }
-            Err(e) => tracing::info!("🌿 [WILD] Could not start watcher: {}", e),
-        }
     });
 
     {
@@ -6465,6 +6554,31 @@ async fn main() -> Result<()> {
         }
     });
 
+    // 🌿 WILD WORKSPACE: local file-watcher sandbox with distributed work-stealing.
+    let wild_path = config.wild_workspace_dir.clone();
+    let wild_client = Arc::clone(&client);
+    let wild_model = model_id.clone();
+    let wild_strategy_library = Arc::clone(&strategy_library);
+    let wild_wan = wan_manager.clone();
+    let wild_origin_wild = wild_origin.clone();
+    tokio::spawn(async move {
+        match start_watcher(&wild_path) {
+            Ok(rx) => {
+                run_wild_loop(
+                    rx,
+                    wild_client,
+                    wild_model,
+                    wild_path,
+                    wild_strategy_library,
+                    Some(wild_wan),
+                    wild_origin_wild,
+                )
+                .await;
+            }
+            Err(e) => tracing::info!("🌿 [WILD] Could not start watcher: {}", e),
+        }
+    });
+
     // 🧠 Background memory-leak profiling: sample heap every 5 seconds and
     // compute a moving-average drift score for the live dashboard.
     let memory_telemetry = telemetry.clone();
@@ -6573,6 +6687,7 @@ async fn main() -> Result<()> {
     // Receiver: bound to the configured multi-agent port range.
     let recv_secret = socket_secret;
     let recv_actual_port = actual_port_clone;
+    let recv_wan = wan_manager.clone();
     tokio::spawn(async move {
         let secret = recv_secret;
         let mut socket: Option<UdpSocket> = None;
@@ -6613,9 +6728,26 @@ async fn main() -> Result<()> {
                     if let Some(payload) = decode_payload(&packet) {
                         if let Ok(compact) = serde_json::from_slice::<CompactEngramPacket>(&payload)
                         {
-                            // Truncate to the 100-D engram limit before queueing.
+                            // Truncate vectors to protocol dimensions and run the
+                            // active-goal cosine gate at the socket layer.
                             let mut compact = compact;
                             compact.brain_state.truncate(protocol::ENGRAM_DIM);
+                            compact.embedding.truncate(protocol::EMBEDDING_DIM);
+                            if !compact.embedding.is_empty() {
+                                let sim = recv_wan.max_goal_similarity(&compact.embedding);
+                                if sim < protocol::ENGRAM_SIMILARITY_THRESHOLD {
+                                    if let Ok(mut m) = recv_wan.metrics.lock() {
+                                        m.engrams_dropped_similarity += 1;
+                                    }
+                                    tracing::info!(
+                                        "🛡️ Dropped UDP engram from '{}': similarity {:.3} < {}",
+                                        compact.origin_instance,
+                                        sim,
+                                        protocol::ENGRAM_SIMILARITY_THRESHOLD
+                                    );
+                                    continue;
+                                }
+                            }
                             engram_ring_udp.push(compact);
                         }
                     }
@@ -6628,6 +6760,11 @@ async fn main() -> Result<()> {
     let merge_mind = socket_mind;
     let merge_gw = socket_global_workspace;
     let merge_swarm = swarm_metrics.clone();
+    let merge_client = Arc::clone(&client);
+    let merge_model = model_id.clone();
+    let merge_wan = wan_manager.clone();
+    let merge_strategy_library = Arc::clone(&strategy_library);
+    let merge_origin = wild_origin.clone();
     tokio::spawn(async move {
         let mut batch: Vec<CompactEngramPacket> = Vec::with_capacity(64);
         loop {
@@ -6647,6 +6784,11 @@ async fn main() -> Result<()> {
                             Arc::clone(&merge_mind),
                             Arc::clone(&merge_gw),
                             Arc::clone(&merge_swarm),
+                            Arc::clone(&merge_client),
+                            merge_model.clone(),
+                            merge_wan.clone(),
+                            merge_origin.clone(),
+                            Arc::clone(&merge_strategy_library),
                         )
                         .await;
                     }
@@ -6659,6 +6801,11 @@ async fn main() -> Result<()> {
                             Arc::clone(&merge_mind),
                             Arc::clone(&merge_gw),
                             Arc::clone(&merge_swarm),
+                            Arc::clone(&merge_client),
+                            merge_model.clone(),
+                            merge_wan.clone(),
+                            merge_origin.clone(),
+                            Arc::clone(&merge_strategy_library),
                         )
                         .await;
                     }
@@ -6694,11 +6841,18 @@ async fn main() -> Result<()> {
         let mut last_state_save = current_secs();
         const MIN_STATE_SAVE_INTERVAL_SECS: u64 = 15;
         let state_save_in_flight = Arc::new(AtomicBool::new(false));
+        let mut cached_goal_texts: Vec<String> = Vec::new();
         loop {
             sleep(governor.tick_duration()).await;
 
             // Phase 1: Extract data from mutex (no async operations)
-            let (incoming_experience, spatial_register, should_process, sensors_for_governor) = {
+            let (
+                incoming_experience,
+                spatial_register,
+                active_pursuits,
+                should_process,
+                sensors_for_governor,
+            ) = {
                 let mut mind = autonomous_clock_mind.lock().await;
 
                 // 📡 Real sensor grounding: refresh system telemetry and bind to sensory register
@@ -6748,6 +6902,10 @@ async fn main() -> Result<()> {
                 // critic, and memory-leak values so the next cycle's mode is current.
                 if let Some(ref mut brain) = mind.candle_brain {
                     brain.set_system2_active(governor.system2_active());
+                    {
+                        let t = clock_telemetry.lock().await;
+                        brain.set_cycle(t.cycle_count);
+                    }
                 }
 
                 mind.calculate_temporal_decay();
@@ -6792,13 +6950,26 @@ async fn main() -> Result<()> {
                     (mind.metabolics.neural_wear + 0.000005).clamp(0.0, 1.0);
 
                 let spatial_register = mind.spatial_sensory_register;
+                let active_pursuits: Vec<String> = mind.active_pursuits.iter().cloned().collect();
                 (
                     incoming_experience,
                     spatial_register,
+                    active_pursuits,
                     true,
                     sensors_for_governor,
                 )
             };
+
+            // Update the wide-area socket's similarity gate whenever active goals change.
+            if active_pursuits != cached_goal_texts {
+                cached_goal_texts = active_pursuits.clone();
+                clock_wan.set_goal_embeddings(
+                    active_pursuits
+                        .iter()
+                        .map(|g| generate_2048_grounded_embedding(g, &spatial_register))
+                        .collect(),
+                );
+            }
 
             if !should_process {
                 continue;
@@ -7251,17 +7422,27 @@ async fn main() -> Result<()> {
                 brain_state: brain_outputs.clone(),
             };
 
-            // Compact engram for UDP exchange (large 2048-D embedding is omitted and regenerated by the receiver).
-            // Truncate brain state to the 100-D multi-agent engram limit.
+            // Compact engram for UDP exchange.  The 2048-D embedding is included
+            // so the receiver's socket gate can compute goal similarity before
+            // regenerating the vector from `experiential_text`.  The 100-D brain
+            // state is truncated to the multi-agent engram limit.
             let mut compact_brain_state = engram_node.brain_state.clone();
             compact_brain_state.truncate(protocol::ENGRAM_DIM);
+            let mut compact_embedding = engram_node.embedding.clone();
+            compact_embedding.truncate(protocol::EMBEDDING_DIM);
             let compact_engram = CompactEngramPacket {
                 id: engram_node.id,
                 timestamp: engram_node.timestamp,
-                experiential_text: engram_node.experiential_text.clone(),
+                experiential_text: engram_node
+                    .experiential_text
+                    .chars()
+                    .take(protocol::MAX_ENGRAM_TEXT_CHARS)
+                    .collect(),
                 emotional_state_snapshot: engram_node.emotional_state_snapshot.clone(),
                 origin_instance: engram_node.origin_instance.clone(),
                 brain_state: compact_brain_state,
+                embedding: compact_embedding,
+                priority: 10, // primary cognitive engram: high priority
             };
 
             // Phase 3: Save to network and prepare for sending.
@@ -7356,7 +7537,15 @@ async fn main() -> Result<()> {
                         let signed =
                             serde_json::to_vec(&sign_packet(&name_copy, &payload, &secret))
                                 .unwrap_or_default();
-                        if !signed.is_empty() {
+                        if signed.is_empty() {
+                            tracing::info!("⚠️ Signed engram payload empty");
+                        } else if signed.len() > 60000 {
+                            tracing::warn!(
+                                "🛰️ Engram {} too large for UDP ({} bytes); skipping local broadcast",
+                                compact_engram.id,
+                                signed.len()
+                            );
+                        } else {
                             let mut sent = 0;
                             for p in p_start..=p_end {
                                 match sock.send_to(&signed, format!("127.0.0.1:{}", p)).await {
@@ -7370,8 +7559,6 @@ async fn main() -> Result<()> {
                                     sent
                                 );
                             }
-                        } else {
-                            tracing::info!("⚠️ Signed engram payload empty");
                         }
                     }
                 } else {
@@ -7435,6 +7622,9 @@ async fn main() -> Result<()> {
                 let mut mind = autonomous_clock_mind.lock().await;
                 if let Some(ref mut brain) = mind.candle_brain {
                     brain.set_system2_active(governor.system2_active());
+                    // Dynamically scale orthogonality regularization when the
+                    // 100-cycle loss plateaus and entropy stays below 0.45.
+                    brain.set_ortho_lambda(1e-4 * governor.ortho_lambda_scale());
                 }
             }
         }
@@ -7642,7 +7832,7 @@ async fn main() -> Result<()> {
                 )
             };
             let identity_summary = format!(
-                "I am Firefly. My primary goals are: {:?}. My narrative identity: {}",
+                "I am Firefly EdgeOS. My primary goals are: {:?}. My narrative identity: {}",
                 primary_goals,
                 identity_context.replace('\n', " ")
             );
@@ -7966,6 +8156,8 @@ async fn main() -> Result<()> {
                         emotional_state_snapshot: "Agentic strategy blueprint cached".to_string(),
                         origin_instance: origin,
                         brain_state: Vec::new(),
+                        embedding: Vec::new(),
+                        priority: 2, // lower-priority scout / curiosity traffic
                     };
                     tokio::spawn(async move {
                         let _ = sl.put(&strategy).await;

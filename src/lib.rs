@@ -1,6 +1,6 @@
 #![allow(dead_code, clippy::new_without_default)]
 
-//! Public C-compatible library interface for the `sapient_soul` runtime.
+//! Public C-compatible library interface for the `firefly_edgeos` runtime.
 //!
 //! This is an **Evaluation Kit** scaffold. It exposes a small, thread-safe FFI
 //! surface so macOS native code (Swift / C++ / Objective-C) can initialize the
@@ -31,7 +31,7 @@ pub use apple_intelligence::{
 use config::Config;
 use hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
 
-/// Opaque handle to an initialized Firefly evaluation context.
+/// Opaque handle to an initialized Firefly EdgeOS evaluation context.
 ///
 /// The internals are intentionally hidden from C. Only the pointer is exposed;
 /// the Rust side owns and synchronizes the state with a `std::sync::Mutex`.
@@ -60,7 +60,7 @@ impl FireflyState {
     }
 }
 
-/// Initialize a Firefly evaluation context.
+/// Initialize a Firefly EdgeOS evaluation context.
 ///
 /// `config_path` may be a null pointer, in which case configuration is loaded
 /// from `FIREFLY_*` environment variables. The returned pointer must be freed
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn firefly_push_pursuit(
 ///
 /// # Safety
 ///
-/// `s` must be a pointer previously returned by a Firefly FFI function that
+/// `s` must be a pointer previously returned by a Firefly EdgeOS FFI function that
 /// returns ownership of a C string, and it must not have been freed before.
 /// Both Rust-allocated (`CString`) and bridge-allocated (`strdup`) strings
 /// are released through the C library `free()` path used by the global

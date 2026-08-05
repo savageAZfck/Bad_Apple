@@ -700,7 +700,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let tid = std::thread::current().id();
-        let base = std::env::temp_dir().join(format!("sapient_soul_test_{:?}_{}", tid, ts));
+        let base = std::env::temp_dir().join(format!("firefly_edgeos_test_{:?}_{}", tid, ts));
         std::fs::create_dir_all(&base).unwrap();
         StrategyLibrary::open(&base).unwrap()
     }

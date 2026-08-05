@@ -1,8 +1,8 @@
-FIREFLY AGI CORE - PROPRIETARY LICENSE
+FIREFLY EDGEOS - PROPRIETARY LICENSE
 
 Copyright (c) 2026 Adam Clark. All rights reserved.
 
-This source code and all associated files ("Firefly AGI Core") are the
+This source code and all associated files ("Firefly EdgeOS") are the
 proprietary and confidential property of Adam Clark ("the Owner").
 
 Permission is hereby granted to select collaborators, contributors, and
@@ -17,7 +17,7 @@ the Owner's explicit prior written consent.
 Any unauthorized copying, sharing, reproduction, or public disclosure, in any
 form or by any means, is strictly prohibited.
 
-The Owner retains all rights to the Firefly AGI Core, including all rights to
+The Owner retains all rights to the Firefly EdgeOS, including all rights to
 future commercialization, licensing, and public release.
 
 For permissions, please contact: savagetism@icloud.com

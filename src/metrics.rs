@@ -1,5 +1,4 @@
 use crossbeam_queue::ArrayQueue;
-use crossbeam_utils::CachePadded;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -24,22 +23,50 @@ macro_rules! ns_latency {
     }};
 }
 
+/// Apple Silicon aligned cache-line padding.  Explicit 128-byte alignment
+/// isolates the hot-path atomics so M1/M2/M3/M4 performance cores never
+/// invalidate a shared cache line.
+#[repr(align(128))]
+pub struct CacheLinePadded<T> {
+    value: T,
+}
+
+impl<T> CacheLinePadded<T> {
+    pub fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+impl<T> std::ops::Deref for CacheLinePadded<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for CacheLinePadded<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
 /// Lock-free, L2-cache-aligned atomic ring buffer for nanosecond latency
 /// samples.  Stores a fixed capacity of `u64` nanosecond measurements and
 /// can compute percentile / mean statistics on demand.
 pub struct LatencyRingBuffer<const N: usize> {
     /// Cache-padded slot array to reduce false sharing under heavy contention.
-    slots: CachePadded<ArrayQueue<u64>>,
+    slots: CacheLinePadded<ArrayQueue<u64>>,
     /// Total samples pushed (monotonically increasing; may wrap, used only
     /// for diagnostics).
-    samples: CachePadded<AtomicU64>,
+    samples: CacheLinePadded<AtomicU64>,
 }
 
 impl<const N: usize> LatencyRingBuffer<N> {
     pub fn new() -> Self {
         Self {
-            slots: CachePadded::new(ArrayQueue::new(N)),
-            samples: CachePadded::new(AtomicU64::new(0)),
+            slots: CacheLinePadded::new(ArrayQueue::new(N)),
+            samples: CacheLinePadded::new(AtomicU64::new(0)),
         }
     }
 

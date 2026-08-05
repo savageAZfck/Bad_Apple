@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the FireflyMenuBar macOS status-bar control app.
+# Build the Firefly EdgeOS menu-bar control app.
 # This is a separate Swift/ObjC runtime that dynamically loads
-# libsapient_soul.dylib at launch and uses the C FFI from firefly_core.h.
+# libfirefly_edgeos.dylib at launch and uses the C FFI from firefly_core.h.
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 BUILD_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}/release"
@@ -26,4 +26,4 @@ chmod +x "${BUILD_DIR}/FireflyMenuBar"
 
 echo "Built: ${BUILD_DIR}/FireflyMenuBar"
 echo "Run it with: ${BUILD_DIR}/FireflyMenuBar"
-echo "(Ensure libsapient_soul.dylib and libFireflySiriBridge.dylib are in target/release or a known rpath.)"
+echo "(Ensure libfirefly_edgeos.dylib and libFireflySiriBridge.dylib are in target/release or a known rpath.)"

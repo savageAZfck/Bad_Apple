@@ -13,7 +13,7 @@ private typealias FireflyGenerateTextFn = @convention(c) (UnsafePointer<CChar>?)
 private typealias FireflyFreeStringFn = @convention(c) (UnsafeMutablePointer<CChar>?) -> Void
 private typealias InitFireflySiriBridgeFn = @convention(c) () -> Void
 
-// MARK: - Dynamic loader for libsapient_soul.dylib
+// MARK: - Dynamic loader for libfirefly_edgeos.dylib
 
 final class FireflyFFI {
     static let shared = FireflyFFI()
@@ -56,14 +56,14 @@ final class FireflyFFI {
 
         let bundleDir = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
         let searchPaths = [
-            bundleDir + "/libsapient_soul.dylib",
-            bundleDir + "/../libsapient_soul.dylib",
-            "libsapient_soul.dylib",
-            "./libsapient_soul.dylib",
-            "../libsapient_soul.dylib",
-            "target/release/libsapient_soul.dylib",
-            "target/debug/libsapient_soul.dylib",
-            "/usr/local/lib/libsapient_soul.dylib",
+            bundleDir + "/libfirefly_edgeos.dylib",
+            bundleDir + "/../libfirefly_edgeos.dylib",
+            "libfirefly_edgeos.dylib",
+            "./libfirefly_edgeos.dylib",
+            "../libfirefly_edgeos.dylib",
+            "target/release/libfirefly_edgeos.dylib",
+            "target/debug/libfirefly_edgeos.dylib",
+            "/usr/local/lib/libfirefly_edgeos.dylib",
         ]
 
         for path in searchPaths {
@@ -74,7 +74,7 @@ final class FireflyFFI {
         }
 
         guard let h = handle else {
-            lastError = "libsapient_soul.dylib not found in any search path"
+            lastError = "libfirefly_edgeos.dylib not found in any search path"
             return
         }
 
@@ -164,7 +164,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.title = "🔥"
 
-        menu = NSMenu(title: "Firefly")
+        menu = NSMenu(title: "Firefly EdgeOS")
         statusItem?.menu = menu
 
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -177,13 +177,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let menu = menu else { return }
         menu.removeAllItems()
 
-        let header = NSMenuItem(title: "Firefly Menu Bar", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Firefly EdgeOS Menu Bar", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(NSMenuItem.separator())
 
         if !FireflyFFI.shared.isLoaded {
-            let err = NSMenuItem(title: "⚠️ libsapient_soul not loaded", action: nil, keyEquivalent: "")
+            let err = NSMenuItem(title: "⚠️ libfirefly_edgeos not loaded", action: nil, keyEquivalent: "")
             err.isEnabled = false
             menu.addItem(err)
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(terminate), keyEquivalent: "q"))
