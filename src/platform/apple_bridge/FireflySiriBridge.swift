@@ -77,6 +77,13 @@ public func freeSwiftString(_ ptr: UnsafeMutablePointer<CChar>?) {
     free(ptr)
 }
 
+/// Returns true only when the process is running inside a proper `.app`
+/// bundle.  `UNUserNotificationCenter` requires a bundle identifier and will
+/// throw `NSInternalInconsistencyException` if called from a bare executable.
+private func isRunningInAppBundle() -> Bool {
+    Bundle.main.bundleURL.pathExtension == "app"
+}
+
 /// Request authorization to show local user notifications.
 private func requestNotificationAuthorization() {
     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
@@ -93,7 +100,9 @@ private func requestNotificationAuthorization() {
 /// callback with the `register_apple_intelligence_oracle` primitive.
 @_cdecl("init_firefly_siri_bridge")
 public func initFireflySiriBridge() {
-    requestNotificationAuthorization()
+    if isRunningInAppBundle() {
+        requestNotificationAuthorization()
+    }
     registerAppleIntelligenceOracle(fireflyAppleIntelligenceCallback)
 }
 
@@ -104,6 +113,10 @@ public func dispatchDesktopNotification(
     _ title: UnsafePointer<CChar>,
     _ body: UnsafePointer<CChar>
 ) {
+    guard isRunningInAppBundle() else {
+        print("🍎 Desktop notifications require an app bundle; skipping.")
+        return
+    }
     let titleString = String(cString: title)
     let bodyString = String(cString: body)
     let content = UNMutableNotificationContent()
