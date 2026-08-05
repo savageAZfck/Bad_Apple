@@ -39,6 +39,7 @@ sapient_agi_soul_5001.*
 /wild_workspace
 !/wild_workspace/demo_scripts/
 !/wild_workspace/demo_scripts/*.txt
+!/wild_workspace/twin_node_setup.sh
 
 # Runtime databases and reports
 /strategy_db/
