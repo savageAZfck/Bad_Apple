@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables)]
 use dashmap::DashMap;
 use ndarray::Array1;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// System Parameters for Optimal Cognitive Resonance
@@ -241,5 +242,170 @@ impl HomeostaticController {
     /// Feed hardware stress into the thermodynamic governor.
     pub fn update_thermodynamics(&mut self, state: &ThermalState) {
         self.governor.update(state);
+    }
+}
+
+/// Logical relation between two nodes in the causal knowledge graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CausalRelation {
+    Enforces,
+    Protects,
+    Enables,
+    Causes,
+    Violates,
+    DependsOn,
+}
+
+impl CausalRelation {
+    /// Human-readable relation name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CausalRelation::Enforces => "ENFORCES",
+            CausalRelation::Protects => "PROTECTS",
+            CausalRelation::Enables => "ENABLES",
+            CausalRelation::Causes => "CAUSES",
+            CausalRelation::Violates => "VIOLATES",
+            CausalRelation::DependsOn => "DEPENDS_ON",
+        }
+    }
+
+    /// Inverse used during backward failure traversal.
+    pub fn inverse(&self) -> &'static str {
+        match self {
+            CausalRelation::Enforces => "VIOLATED BY",
+            CausalRelation::Protects => "ENDANGERED BY",
+            CausalRelation::Enables => "BLOCKED BY",
+            CausalRelation::Causes => "RESULTED FROM",
+            CausalRelation::Violates => "VIOLATES",
+            CausalRelation::DependsOn => "REQUIRED BY",
+        }
+    }
+}
+
+/// A neuro-symbolic causal knowledge graph.
+///
+/// Stores explicit logical relations between system assets, skills, and
+/// constraints.  When a plan or tool step fails, the graph can be traversed
+/// backwards from the failed node to produce a plain-text causal explanation
+/// of the broken primitive.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CausalGraph {
+    nodes: Vec<String>,
+    edges: Vec<(usize, CausalRelation, usize)>,
+}
+
+impl CausalGraph {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a node and return its index.
+    pub fn add_node(&mut self, name: &str) -> usize {
+        if let Some(idx) = self.nodes.iter().position(|n| n == name) {
+            return idx;
+        }
+        let idx = self.nodes.len();
+        self.nodes.push(name.to_string());
+        idx
+    }
+
+    /// Add a directed causal relation between two named nodes.
+    pub fn add_relation(&mut self, src: &str, rel: CausalRelation, dst: &str) {
+        let s = self.add_node(src);
+        let d = self.add_node(dst);
+        self.edges.push((s, rel, d));
+    }
+
+    /// Backward traversal from a failed node, returning a causal explanation.
+    pub fn explain_failure(&self, failed_node: &str) -> Option<String> {
+        let start = self.nodes.iter().position(|n| n == failed_node)?;
+
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = vec![(start, false)];
+        let mut antecedents: Vec<String> = Vec::new();
+
+        while let Some((idx, is_root)) = stack.pop() {
+            if !visited.insert(idx) {
+                continue;
+            }
+
+            for (s, rel, d) in &self.edges {
+                if *d == idx && !visited.contains(s) {
+                    let explanation = if is_root {
+                        format!(
+                            "[{}] {} [{}]",
+                            self.nodes[*s],
+                            rel.inverse(),
+                            self.nodes[idx]
+                        )
+                    } else {
+                        format!(
+                            "[{}] {} [{}]",
+                            self.nodes[*s],
+                            rel.as_str(),
+                            self.nodes[idx]
+                        )
+                    };
+                    antecedents.push(explanation);
+                    stack.push((*s, false));
+                }
+            }
+        }
+
+        if antecedents.is_empty() {
+            Some(format!("Failure at isolated node [{}]", failed_node))
+        } else {
+            Some(format!(
+                "Causal chain for failure at [{}]:\n{}",
+                failed_node,
+                antecedents.join("\n")
+            ))
+        }
+    }
+
+    /// Return the node name of the most likely broken primitive for a given
+    /// failure string by looking for the first node name that appears in it.
+    pub fn find_broken_primitive(&self, failure: &str) -> Option<&str> {
+        self.nodes
+            .iter()
+            .find(|n| failure.to_lowercase().contains(&n.to_lowercase()))
+            .map(|s| s.as_str())
+    }
+
+    /// Built-in causal map for the Firefly agent architecture.
+    pub fn firefly_default() -> Self {
+        let mut g = Self::new();
+        g.add_relation(
+            "apple_intelligence_bridge",
+            CausalRelation::Enables,
+            "llm_oracle",
+        );
+        g.add_relation("llm_oracle", CausalRelation::Enables, "planning_head");
+        g.add_relation("llm_oracle", CausalRelation::Enables, "tool_synthesis");
+        g.add_relation("candle_brain", CausalRelation::Enables, "local_conscience");
+        g.add_relation(
+            "local_conscience",
+            CausalRelation::Protects,
+            "goal_integrity",
+        );
+        g.add_relation(
+            "conscience_oracle",
+            CausalRelation::Enforces,
+            "safety_policy",
+        );
+        g.add_relation("safety_policy", CausalRelation::Protects, "system_asset");
+        g.add_relation("wild_workspace", CausalRelation::Protects, "system_asset");
+        g.add_relation(
+            "transfer_evaluator",
+            CausalRelation::Enables,
+            "skill_memory",
+        );
+        g.add_relation("skill_memory", CausalRelation::Enables, "planning_head");
+        g.add_relation(
+            "strategy_library",
+            CausalRelation::DependsOn,
+            "skill_memory",
+        );
+        g
     }
 }

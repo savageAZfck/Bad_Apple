@@ -14,8 +14,11 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
 
 pub mod apple_intelligence;
+pub mod benchmark;
 pub mod config;
 pub mod hyperdimensional_core;
+pub mod metrics;
+pub mod production_blueprint;
 pub mod protocol;
 pub mod strategy_library;
 pub mod tensor_brain;
@@ -249,12 +252,26 @@ pub unsafe extern "C" fn firefly_push_pursuit(
 ///
 /// `s` must be a pointer previously returned by a Firefly FFI function that
 /// returns ownership of a C string, and it must not have been freed before.
+/// Both Rust-allocated (`CString`) and bridge-allocated (`strdup`) strings
+/// are released through the C library `free()` path used by the global
+/// allocator, so this is safe for all C string exchanges.
 #[no_mangle]
 pub unsafe extern "C" fn firefly_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
-    let _ = CString::from_raw(s);
+    libc::free(s as *mut c_void);
+}
+
+/// Alias for `firefly_free_string` that explicitly signals to the host
+/// environment that a Swift-allocated string is being released.
+///
+/// # Safety
+///
+/// Same as `firefly_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn free_swift_string(s: *mut c_char) {
+    firefly_free_string(s);
 }
 
 /// Run a prompt through the registered Apple Intelligence callback and return
@@ -280,6 +297,32 @@ pub unsafe extern "C" fn firefly_generate_text(prompt: *const c_char) -> *mut c_
     }
 }
 
+/// Dispatch a native macOS desktop notification through the loaded
+/// FireflySiriBridge.  If the bridge is not loaded or notification
+/// authorization was not granted, the call is a silent no-op.
+///
+/// # Safety
+///
+/// `title` and `body` must be valid, null-terminated UTF-8 C strings.
+#[no_mangle]
+pub unsafe extern "C" fn firefly_dispatch_desktop_notification(
+    title: *const c_char,
+    body: *const c_char,
+) {
+    if title.is_null() || body.is_null() {
+        return;
+    }
+    let title = match CStr::from_ptr(title).to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let body = match CStr::from_ptr(body).to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    apple_intelligence::dispatch_desktop_notification(title, body);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +336,7 @@ mod tests {
         let out = unsafe { firefly_process_stream(ctx, input.as_ptr(), input.len()) };
         assert!(!out.is_null());
         let _ = unsafe { CStr::from_ptr(out) };
+        unsafe { firefly_free_string(out) };
 
         let idx = unsafe { firefly_get_mastery_index(ctx) };
         assert!((0.0..=1.0).contains(&idx));

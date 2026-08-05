@@ -24,6 +24,7 @@ mod benchmark;
 mod config;
 mod conscience_oracle;
 mod data_feed;
+mod governor;
 mod hyperdimensional_core;
 mod metrics;
 mod ollama_client;
@@ -37,11 +38,12 @@ use benchmark::{BenchmarkSuite, PilotReport, TransferSuite, TransferTask};
 use conscience_oracle::ConscienceOracle;
 use dashmap::DashMap;
 use data_feed::{default_curriculum_dirs, DataCurriculum};
+use governor::DualProcessGovernor;
 use metrics::MemoryProfiler;
 use ollama_client::OllamaClient;
 use production_blueprint::{
-    GlobalWorkspace, HomeostaticController, NeuroSymbolicEngine as ProductionNeuroSymbolicEngine,
-    ThermalState,
+    CausalGraph, GlobalWorkspace, HomeostaticController,
+    NeuroSymbolicEngine as ProductionNeuroSymbolicEngine, ThermalState,
 };
 use protocol::{
     decode_payload, multi_agent_secret, sign_packet, verify_packet, CompactEngramPacket,
@@ -4973,6 +4975,9 @@ pub(crate) struct FullySapientSoulMatrix {
     domain_mastery: HashMap<String, f64>,
     #[serde(default)]
     skill_reliability: HashMap<String, f64>,
+    // 🕸️ CAUSAL KNOWLEDGE GRAPH
+    #[serde(default = "CausalGraph::firefly_default")]
+    pub(crate) causal_graph: CausalGraph,
 }
 
 impl FullySapientSoulMatrix {
@@ -5091,6 +5096,7 @@ impl FullySapientSoulMatrix {
             last_journal_entry: 0,
             domain_mastery: HashMap::new(),
             skill_reliability: HashMap::new(),
+            causal_graph: CausalGraph::firefly_default(),
         }
     }
 
@@ -5812,8 +5818,24 @@ fn update_plan_after_step(mind: &mut FullySapientSoulMatrix, success: bool, erro
     if let Some(plan) = &mut mind.current_plan {
         plan.mark_current(success);
         if !success {
-            plan.last_failure = error.map(|e| e.to_string());
+            let failure = error.map(|e| e.to_string()).unwrap_or_default();
+            plan.last_failure = Some(failure.clone());
             println!("⚠️ Step failed: {:?}", plan.last_failure);
+
+            // 🕸️ Causal graph backward traversal: identify the broken primitive.
+            if let Some(primitive) = mind.causal_graph.find_broken_primitive(&failure) {
+                if let Some(explanation) = mind.causal_graph.explain_failure(primitive) {
+                    let entry = format!("[CAUSAL] Plan '{}' failed. {}", plan.goal, explanation);
+                    mind.identity_journal.push(entry);
+                    println!("🕸️ {}", explanation);
+                }
+            } else {
+                let entry = format!(
+                    "[CAUSAL] Plan '{}' failed. No explicit causal primitive mapped yet; root cause: {}",
+                    plan.goal, failure
+                );
+                mind.identity_journal.push(entry);
+            }
         }
         if plan.is_complete() {
             println!("✅ Plan complete for '{}'", plan.goal);
@@ -6359,6 +6381,22 @@ async fn main() -> Result<()> {
             };
             let now = current_secs();
             let drift = profiler.record(used, now);
+
+            // If the leak score stays high for three samples, force a memory
+            // consolidation pass and route oracle calls through the fast
+            // semantic matcher until the heap stabilizes.
+            if profiler.should_flush() {
+                tracing::warn!(
+                    "🧠 Memory leak score {:.2} for {} samples — triggering heap consolidation",
+                    drift.leak_score,
+                    profiler.consecutive_leak_samples()
+                );
+                profiler.trigger_flush();
+                conscience_oracle::set_memory_pressure(true);
+            } else if drift.leak_score < 0.3 {
+                conscience_oracle::set_memory_pressure(false);
+            }
+
             let mut t = memory_telemetry.lock().await;
             t.record_memory_drift(
                 drift.used_bytes,
@@ -6366,6 +6404,69 @@ async fn main() -> Result<()> {
                 drift.leak_score,
                 profiler.sample_count() as u64,
             );
+        }
+    });
+
+    // 🦋 Intrinsic curiosity loop: when idle (no user-injected pursuits),
+    // scan un-mapped workspace files, cache a benchmark strategy for each one,
+    // and push a self-directed discovery pursuit.
+    let curiosity_mind = Arc::clone(&core_mind);
+    let curiosity_strategies = Arc::clone(&strategy_library);
+    let curiosity_telemetry = telemetry.clone();
+    let curiosity_path = config.wild_workspace_dir.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let idle = {
+                let mind = curiosity_mind.lock().await;
+                mind.active_pursuits.is_empty()
+            };
+            if !idle {
+                continue;
+            }
+            let mut discovered = 0u64;
+            if let Ok(entries) = std::fs::read_dir(&curiosity_path) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            let name = entry.file_name().to_string_lossy().into_owned();
+                            let key = format!("curiosity:{}", name);
+                            let code = format!("def skill(x):\n    return 'explored: {}'", name);
+                            let strategy = Strategy::new(
+                                key.clone(),
+                                format!("Autonomous benchmark for {}", name),
+                                "python".to_string(),
+                                code,
+                            );
+                            match curiosity_strategies.put(&strategy).await {
+                                Ok(_) => {
+                                    tracing::info!("🦋 Curiosity cached strategy {}", key);
+                                    discovered += 1;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("curiosity cache failed for {}: {}", key, e)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            {
+                let mut mind = curiosity_mind.lock().await;
+                mind.push_pursuit("Autonomously map un-mapped workspace patterns".to_string());
+                if let Some(brain) = mind.candle_brain.as_mut() {
+                    brain.set_curiosity_reward(0.3);
+                }
+            }
+            {
+                let mut t = curiosity_telemetry.lock().await;
+                t.autonomously_discovered_strategies += discovered;
+                t.curiosity_cycles += 1;
+                t.curiosity_reward = 0.3;
+            }
+            tracing::info!("🦋 Curiosity cycle triggered");
         }
     });
 
@@ -6488,8 +6589,9 @@ async fn main() -> Result<()> {
         let curriculum = clock_curriculum;
         let mut system = system;
         let battery_manager = battery_manager;
+        let mut governor = DualProcessGovernor::new();
         loop {
-            sleep(Duration::from_secs(6)).await;
+            sleep(governor.tick_duration()).await;
 
             // Phase 1: Extract data from mutex (no async operations)
             let (incoming_experience, spatial_register, should_process) = {
@@ -6532,7 +6634,35 @@ async fn main() -> Result<()> {
                         // Approximate power reduction from CPU headroom.
                         telemetry_guard.power_reduction =
                             (100.0 - sensors_guard.cpu_usage_percent) / 100.0;
+
+                        // 🌡 Dual-process attention governor.
+                        governor.update(&telemetry_guard, &sensors_guard);
+                        telemetry_guard.record_governor(
+                            governor.entropy_index(),
+                            governor.resource_stress(),
+                            governor.system2_active(),
+                            governor.system2_cycles(),
+                        );
+                        if governor.system2_active() {
+                            tracing::info!(
+                                "⚡ System 2 engaged: entropy={:.2}, stress={:.2}, tick={:?}",
+                                governor.entropy_index(),
+                                governor.resource_stress(),
+                                governor.tick_duration()
+                            );
+                        } else {
+                            tracing::info!(
+                                "🧘 System 1 routine: entropy={:.2}, tick={:?}",
+                                governor.entropy_index(),
+                                governor.tick_duration()
+                            );
+                        }
                     }
+                }
+
+                // Sync the Candle brain with the governor mode.
+                if let Some(ref mut brain) = mind.candle_brain {
+                    brain.set_system2_active(governor.system2_active());
                 }
 
                 mind.calculate_temporal_decay();
@@ -7820,7 +7950,15 @@ async fn main() -> Result<()> {
                 evaluate_transfer_task(&transfer_ollama, &transfer_model, &task).await;
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
             let peak_rss_mb = PilotReport::current_rss_mb().unwrap_or(0.0);
-            pilot.record_run(task.domain, success, latency_ms, peak_rss_mb, token_count);
+            pilot.record_run(
+                task.domain,
+                success,
+                latency_ms,
+                peak_rss_mb,
+                token_count,
+                0.0,
+                crate::metrics::LatencyStats::default(),
+            );
             pilot.save_to_disk(); // synchronous side-effect file write
             suite.record(task.domain, success);
             let score = suite.score();

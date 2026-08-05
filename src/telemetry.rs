@@ -64,9 +64,17 @@ pub struct TelemetryState {
     pub memory_drift_bytes_per_sec: f64,
     pub memory_leak_score: f64,
     pub memory_sample_count: u64,
+    pub curiosity_reward: f64,
+    pub curiosity_cycles: u64,
+    pub autonomously_discovered_strategies: u64,
+    pub entropy_index: f64,
+    pub resource_stress: f64,
+    pub system2_active: bool,
+    pub system2_cycles: u64,
     pub domain_mastery: std::collections::HashMap<String, f64>,
     pub synthesis_speedup: f64,
     pub power_reduction: f64,
+    pub latency_stats: crate::metrics::LatencyStats,
     pub swarm_metrics: SwarmMetrics,
 }
 
@@ -159,6 +167,37 @@ impl TelemetryState {
         self.memory_drift_bytes_per_sec = drift;
         self.memory_leak_score = leak_score;
         self.memory_sample_count = samples;
+    }
+
+    pub fn record_curiosity(&mut self, reward: f64) {
+        self.curiosity_reward = reward.clamp(0.0, 1.0);
+    }
+
+    pub fn increment_curiosity_cycle(&mut self) {
+        self.curiosity_cycles += 1;
+    }
+
+    pub fn increment_discovered_strategy(&mut self) {
+        self.autonomously_discovered_strategies += 1;
+    }
+
+    pub fn record_governor(
+        &mut self,
+        entropy: f64,
+        stress: f64,
+        system2: bool,
+        system2_cycles: u64,
+    ) {
+        self.entropy_index = entropy.clamp(0.0, 1.0);
+        self.resource_stress = stress.clamp(0.0, 1.0);
+        self.system2_active = system2;
+        self.system2_cycles = system2_cycles;
+    }
+
+    /// Record nanosecond ring-buffer latency statistics into the live
+    /// telemetry dashboard.
+    pub fn record_latency(&mut self, stats: crate::metrics::LatencyStats) {
+        self.latency_stats = stats;
     }
 
     pub fn record_swarm(&mut self, swarm: &SwarmMetrics) {
@@ -601,6 +640,27 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
         telemetry.memory_sample_count
     );
 
+    let reward_bar = (telemetry.curiosity_reward * 300.0).clamp(0.0, 300.0);
+    let curiosity_svg = format!(
+        r##"<svg viewBox="0 0 600 160" class="panel-svg">
+           <text x="20" y="25" fill="#7df" font-size="16">Curiosity &amp; Autonomy Panel</text>
+
+           <text x="20" y="60" fill="#d0d0e0" font-size="13">Reward: {:.2}</text>
+           <rect x="180" y="48" width="300" height="12" fill="#1f1f2a" stroke="#334" rx="2"/>
+           <rect x="180" y="48" width="{:.2}" height="12" fill="#7df" rx="2">
+             <animate attributeName="width" from="0" to="{:.2}" dur="0.6s" fill="freeze"/>
+           </rect>
+
+           <text x="20" y="90" fill="#d0d0e0" font-size="13">Curiosity Cycles: {}</text>
+           <text x="20" y="120" fill="#d0d0e0" font-size="13">Autonomously Discovered Strategies: {}</text>
+         </svg>"##,
+        telemetry.curiosity_reward,
+        reward_bar,
+        reward_bar,
+        telemetry.curiosity_cycles,
+        telemetry.autonomously_discovered_strategies
+    );
+
     format!(
         r##"<!DOCTYPE html>
 <html>
@@ -638,10 +698,14 @@ fn live_dashboard_html(telemetry: &TelemetryState, sensors: &SensorSnapshot) -> 
   <h2>Memory Leak Profiler Panel</h2>
   {}
 </div>
+<div class="panel">
+  <h2>Curiosity &amp; Autonomy Panel</h2>
+  {}
+</div>
 <p><a href="/" style="color:#8af">Metrics</a> | <a href="/telemetry" style="color:#8af">Telemetry JSON</a></p>
 </body>
 </html>"##,
-        competence_svg, thermodynamic_svg, swarm_svg, ai_svg, memory_svg
+        competence_svg, thermodynamic_svg, swarm_svg, ai_svg, memory_svg, curiosity_svg
     )
 }
 

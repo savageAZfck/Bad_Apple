@@ -6,9 +6,10 @@
 //! low-reliability templates.
 
 use crate::hyperdimensional_core::{HDCMemory, OverheadAnalyzer, ScriptProfile};
+use crate::production_blueprint::{CausalGraph, CausalRelation};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::task::spawn_blocking;
 
 /// A cached tool/strategy with empirical reliability.
@@ -52,13 +53,19 @@ impl Strategy {
 #[derive(Clone)]
 pub struct StrategyLibrary {
     db: Arc<sled::Db>,
+    /// Causal graph that records how strategies relate to system assets and
+    /// constraints.  Shared across clones of the library.
+    causal_graph: Arc<Mutex<CausalGraph>>,
 }
 
 impl StrategyLibrary {
     /// Open or create the Sled database at the given path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, sled::Error> {
         let db = sled::open(path)?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            causal_graph: Arc::new(Mutex::new(CausalGraph::firefly_default())),
+        })
     }
 
     /// Read a strategy by key.
@@ -71,7 +78,8 @@ impl StrategyLibrary {
         }
     }
 
-    /// Insert or overwrite a strategy.
+    /// Insert or overwrite a strategy and record its causal relation in the
+    /// knowledge graph.
     pub async fn put(
         &self,
         strategy: &Strategy,
@@ -80,7 +88,19 @@ impl StrategyLibrary {
         let bytes = serde_json::to_vec(strategy)?;
         let key = strategy.key.clone();
         spawn_blocking(move || db.insert(key.as_bytes(), bytes).map(|_| ())).await??;
+
+        if let Ok(mut graph) = self.causal_graph.lock() {
+            graph.add_relation(&strategy.key, CausalRelation::Enables, &strategy.problem);
+            graph.add_relation("skill_memory", CausalRelation::DependsOn, &strategy.key);
+        }
         Ok(())
+    }
+
+    /// Return a causal explanation for a failed problem signature.
+    pub fn explain_failure(&self, problem: &str) -> Option<String> {
+        let graph = self.causal_graph.lock().ok()?;
+        let primitive = graph.find_broken_primitive(problem)?;
+        graph.explain_failure(primitive)
     }
 
     /// Delete a strategy.
@@ -540,6 +560,108 @@ async fn main() {
 
         format!("{}{}", header, base_template)
     }
+
+    /// Repair a failed Rust source using raw `cargo check` diagnostics.
+    ///
+    /// Parses the exact error line, deduces the missing logical boundary, and
+    /// rewrites the source tokens heuristically.  This is the self-healing
+    /// primitive used in the multi-episode compiler loop.
+    pub fn repair(&mut self, source: &str, diagnostics: &str) -> String {
+        let diag_lower = diagnostics.to_lowercase();
+        let mut repaired = source.to_string();
+
+        // Missing `tokio::main` attribute on `async fn main`.
+        if diag_lower.contains("main function cannot be async")
+            && !repaired.contains("#[tokio::main]")
+        {
+            repaired = repaired.replace("async fn main()", "#[tokio::main]\nasync fn main()");
+        }
+
+        // Missing import for a crate name.
+        if diag_lower.contains("use of undeclared crate or module")
+            || diag_lower.contains("cannot find")
+        {
+            if diag_lower.contains("serde_json") && !repaired.contains("use serde_json") {
+                repaired = format!("use serde_json::Value;\n{}", repaired);
+            }
+            if diag_lower.contains("sha2") && !repaired.contains("use sha2") {
+                repaired = format!("use sha2::{{Sha256, Digest}};\n{}", repaired);
+            }
+        }
+
+        // Type mismatch / missing `mut`.
+        if diag_lower.contains("cannot assign to") || diag_lower.contains("cannot borrow") {
+            repaired = repaired.replace("let input =", "let mut input =");
+            repaired = repaired.replace("let numbers: Vec<i64>", "let mut numbers: Vec<i64>");
+        }
+
+        // Missing `std::fs` or `std::path` imports.
+        if diag_lower.contains("fs::") && !repaired.contains("use std::fs") {
+            repaired = format!("use std::fs;\n{}", repaired);
+        }
+        if diag_lower.contains("path::") && !repaired.contains("use std::path") {
+            repaired = format!("use std::path::Path;\n{}", repaired);
+        }
+
+        // Missing semicolons: parse `--> src/main.rs:LINE:COL` snippets and
+        // append a semicolon to the end of each reported line.
+        if diag_lower.contains("expected `;`")
+            || diag_lower.contains("expected semicolon")
+            || diag_lower.contains("expected `;`, found")
+        {
+            let error_lines = Self::parse_cargo_error_lines(diagnostics);
+            let mut owned: Vec<String> = repaired.lines().map(|s| s.to_string()).collect();
+            for line_no in error_lines {
+                if line_no == 0 || line_no > owned.len() {
+                    continue;
+                }
+                let l = owned[line_no - 1].trim_end();
+                if !l.ends_with(';') && !l.ends_with('{') && !l.ends_with('}') && !l.is_empty() {
+                    owned[line_no - 1] = format!("{};", l);
+                }
+            }
+            repaired = owned.join("\n");
+        }
+
+        // Unclosed delimiters (e.g., missing `}`): balance braces by appending
+        // the missing closing braces at the end of the source.
+        if diag_lower.contains("unclosed delimiter")
+            || (diag_lower.contains("expected one of") && diag_lower.contains("`}`"))
+        {
+            let open = repaired.chars().filter(|c| *c == '{').count();
+            let close = repaired.chars().filter(|c| *c == '}').count();
+            if open > close {
+                repaired.push_str(&"}".repeat(open - close));
+            }
+        }
+
+        repaired
+    }
+
+    /// Parse `cargo` diagnostics of the form `--> src/main.rs:LINE:COL` and
+    /// return the set of 1-indexed line numbers.
+    fn parse_cargo_error_lines(diagnostics: &str) -> Vec<usize> {
+        let mut lines = Vec::new();
+        for line in diagnostics.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("-->") {
+                if let Some(path_start) = trimmed.find(' ') {
+                    let path_part = &trimmed[path_start + 1..];
+                    // path_part looks like `src/main.rs:10:15`
+                    if let Some(colon) = path_part.rfind(':') {
+                        let before_col = &path_part[..colon];
+                        if let Some(line_colon) = before_col.rfind(':') {
+                            let num = &before_col[line_colon + 1..];
+                            if let Ok(n) = num.parse::<usize>() {
+                                lines.push(n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        lines
+    }
 }
 
 impl StrategyLibrary {
@@ -647,5 +769,39 @@ mod tests {
         assert!(s.reliability > 0.5);
         s.record(false);
         assert!(s.reliability < 1.0);
+    }
+
+    #[tokio::test]
+    async fn rust_synthesizer_repair_missing_semicolon() {
+        use crate::benchmark::RustValidator;
+        let broken = "fn main() {\n    let x = 1\n    println!(\"{}\", x);\n}";
+        let first = RustValidator::validate("repair_semi", broken, 0).await;
+        assert!(!first.compiled);
+
+        let mut synthesizer = RustSynthesizer::new();
+        let fixed = synthesizer.repair(broken, &first.diagnostics);
+        let second = RustValidator::validate("repair_semi_2", &fixed, 0).await;
+        assert!(
+            second.compiled,
+            "missing semicolon not repaired: {}",
+            second.diagnostics
+        );
+    }
+
+    #[tokio::test]
+    async fn rust_synthesizer_repair_unclosed_block() {
+        use crate::benchmark::RustValidator;
+        let broken = "fn main() {\n    let x = 1;\n    println!(\"{}\", x);";
+        let first = RustValidator::validate("repair_block", broken, 0).await;
+        assert!(!first.compiled);
+
+        let mut synthesizer = RustSynthesizer::new();
+        let fixed = synthesizer.repair(broken, &first.diagnostics);
+        let second = RustValidator::validate("repair_block_2", &fixed, 0).await;
+        assert!(
+            second.compiled,
+            "unclosed block not repaired: {}",
+            second.diagnostics
+        );
     }
 }

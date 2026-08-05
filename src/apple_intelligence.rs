@@ -24,7 +24,15 @@ use std::time::Instant;
 /// allocate with the C library allocator (e.g. `strdup`).
 pub type AppleIntelligenceCallback = extern "C" fn(*const c_char) -> *mut c_char;
 
+/// C-compatible deallocator for strings the bridge allocates and returns.
+pub type FreeStringCallback = extern "C" fn(*mut c_char);
+
+/// C-compatible desktop notification dispatcher.
+pub type DesktopNotificationCallback = extern "C" fn(*const c_char, *const c_char);
+
 static CALLBACK: OnceLock<AppleIntelligenceCallback> = OnceLock::new();
+static FREE_CB: OnceLock<FreeStringCallback> = OnceLock::new();
+static NOTIFY_CB: OnceLock<DesktopNotificationCallback> = OnceLock::new();
 
 static LAST_LATENCY_US: AtomicU64 = AtomicU64::new(0);
 static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -46,8 +54,9 @@ pub fn is_available() -> bool {
 /// Synchronously invoke the registered Apple Intelligence callback.
 ///
 /// Panics inside the foreign function are caught and treated as a failure,
-/// preserving the calling async task.  The returned C string is freed with
-/// `free` before the function returns.
+/// preserving the calling async task.  The returned C string is copied into a
+/// Rust `String` and then released through the bridge's registered `free`
+/// callback (or `libc::free` as a fallback) before the function returns.
 pub fn call_sync(prompt: &str) -> Option<String> {
     let cb = *CALLBACK.get()?;
     let c_prompt = CString::new(prompt).ok()?;
@@ -64,13 +73,31 @@ pub fn call_sync(prompt: &str) -> Option<String> {
         return None;
     }
 
+    let guard = CStringOwner(result);
+
     let output = unsafe {
-        let out = CStr::from_ptr(result).to_str().ok()?.to_string();
-        libc::free(result as *mut c_void);
-        out
+        // to_string_lossy() guarantees we always consume and free the C string,
+        // even if the bytes are not strict UTF-8.
+        CStr::from_ptr(guard.0).to_string_lossy().into_owned()
     };
 
     Some(output)
+}
+
+/// RAII guard that owns a foreign-allocated C string and frees it on drop.
+struct CStringOwner(*mut c_char);
+
+impl Drop for CStringOwner {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        if let Some(free) = FREE_CB.get() {
+            free(self.0);
+        } else {
+            unsafe { libc::free(self.0 as *mut c_void) };
+        }
+    }
 }
 
 /// Asynchronously invoke the callback on a blocking thread so the async
@@ -89,6 +116,8 @@ pub fn try_load_bridge() -> Result<(), String> {
     use libloading::{Library, Symbol};
 
     type InitFn = extern "C" fn();
+    type FreeFn = extern "C" fn(*mut c_char);
+    type NotifyFn = extern "C" fn(*const c_char, *const c_char);
 
     let mut paths: Vec<String> = vec![
         "libFireflySiriBridge.dylib".to_string(),
@@ -124,6 +153,19 @@ pub fn try_load_bridge() -> Result<(), String> {
 
         init();
 
+        // Load the bridge's matching string deallocator if it exposes one.
+        // This lets us free returned C strings in the same runtime that
+        // allocated them, avoiding cross-runtime allocator drift.
+        if let Ok(free) = unsafe { lib.get::<FreeFn>(b"free_swift_string\0") } {
+            let _ = FREE_CB.set(*free);
+            tracing::info!("🍎 Swift string deallocator registered");
+        }
+
+        if let Ok(dispatch) = unsafe { lib.get::<NotifyFn>(b"dispatch_desktop_notification\0") } {
+            let _ = NOTIFY_CB.set(*dispatch);
+            tracing::info!("🍎 Desktop notification dispatcher registered");
+        }
+
         // Intentionally leak the library handle so the callback remains
         // valid for the lifetime of the process.  This is a daemon-style
         // bridge; cleanup happens on process exit.
@@ -141,6 +183,27 @@ pub fn initialize() {
         Ok(()) => tracing::info!("🍎 FireflySiriBridge loaded and initialized"),
         Err(e) => tracing::warn!("🍎 FireflySiriBridge not available: {}", e),
     }
+}
+
+/// Dispatch a native macOS desktop notification if the bridge is loaded.
+///
+/// Title and body are passed as null-terminated C strings to the Swift
+/// `dispatch_desktop_notification` hook.  If the bridge is unavailable or
+/// notification authorization was denied, this logs and returns silently.
+pub fn dispatch_desktop_notification(title: &str, body: &str) {
+    let cb = match NOTIFY_CB.get() {
+        Some(cb) => *cb,
+        None => return,
+    };
+    let title_c = match CString::new(title) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let body_c = match CString::new(body) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    cb(title_c.as_ptr(), body_c.as_ptr());
 }
 
 /// Return the latency (in microseconds) of the most recent call.

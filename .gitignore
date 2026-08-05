@@ -2,6 +2,7 @@
 /target
 /target-clean
 /target-release
+/target-release-mods
 src/platform/apple_desktop/.build
 
 # Cargo lock is intentionally committed for this binary

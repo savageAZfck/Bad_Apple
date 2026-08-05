@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -34,8 +35,14 @@ func buildAppleIntelligenceResponse(for prompt: String) async -> String? {
 }
 
 /// C-callable entry point that the Rust runtime invokes for each inference
-/// request.  The prompt is a null-terminated UTF-8 C string; the returned
-/// C string is allocated with `strdup` and freed by Rust.
+/// request.
+///
+/// Ownership contract:
+/// - `prompt` is a borrowed, null-terminated UTF-8 C string.  The bridge does
+///   not take ownership and must not free it.
+/// - The returned pointer (if non-nil) is a freshly `strdup`-allocated C string
+///   owned by the Rust caller.  The Rust side must free it exactly once, either
+///   through `free()` or through the `free_swift_string` companion function.
 @_cdecl("firefly_apple_intelligence_callback")
 public func fireflyAppleIntelligenceCallback(
     _ prompt: UnsafePointer<CChar>
@@ -58,10 +65,59 @@ public func fireflyAppleIntelligenceCallback(
     return strdup(cString)
 }
 
+/// C-callable deallocator for strings returned by the bridge.
+///
+/// `ptr` must be a pointer previously returned by `firefly_apple_intelligence_callback`,
+/// or `nil`.  Calling `free()` directly is also safe because the bridge uses the
+/// C library's `strdup`, but this hook guarantees the same allocator is used on
+/// both sides of the FFI boundary.
+@_cdecl("free_swift_string")
+public func freeSwiftString(_ ptr: UnsafeMutablePointer<CChar>?) {
+    guard let ptr = ptr else { return }
+    free(ptr)
+}
+
+/// Request authorization to show local user notifications.
+private func requestNotificationAuthorization() {
+    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
+        if let error = error {
+            print("🍎 Notification authorization error: \(error)")
+        } else {
+            print("🍎 Notification authorization granted: \(granted)")
+        }
+    }
+}
+
 /// C-callable initialization entry point.  The Rust loader calls this after
 /// `dlopen`ing the bridge dylib, and the bridge in turn registers its
-/// callback with the Rust `register_apple_intelligence_oracle` primitive.
+/// callback with the `register_apple_intelligence_oracle` primitive.
 @_cdecl("init_firefly_siri_bridge")
 public func initFireflySiriBridge() {
+    requestNotificationAuthorization()
     registerAppleIntelligenceOracle(fireflyAppleIntelligenceCallback)
+}
+
+/// C-callable desktop notification dispatch.  Pushes a native macOS user
+/// alert immediately.  Requires prior notification authorization.
+@_cdecl("dispatch_desktop_notification")
+public func dispatchDesktopNotification(
+    _ title: UnsafePointer<CChar>,
+    _ body: UnsafePointer<CChar>
+) {
+    let titleString = String(cString: title)
+    let bodyString = String(cString: body)
+    let content = UNMutableNotificationContent()
+    content.title = titleString
+    content.body = bodyString
+    content.sound = .default
+    let request = UNNotificationRequest(
+        identifier: ProcessInfo.processInfo.globallyUniqueString,
+        content: content,
+        trigger: nil
+    )
+    UNUserNotificationCenter.current().add(request) { error in
+        if let error = error {
+            print("🍎 Failed to dispatch notification: \(error)")
+        }
+    }
 }

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::apple_intelligence;
 use crate::benchmark::RustValidator;
 use crate::hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
 use crate::is_safe_agent_code;
@@ -94,73 +95,101 @@ fn read_limited_text(path: &Path) -> Result<String, String> {
 }
 
 /// Ingest a file from the wild workspace and synthesize a safe Python cleaner.
+///
+/// Runs an open-ended compiler-guided self-healing loop: the model is asked to
+/// generate a `skill(x)` function, it is executed in the sandbox, and if it
+/// fails the raw Python exception is fed back into the next prompt.  Up to
+/// `MAX_SELF_HEAL_ATTEMPTS` episodes are tried before giving up.
 pub async fn process_wild_payload(
     ollama: &OllamaClient,
     model: &str,
     path: &Path,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_SELF_HEAL_ATTEMPTS: usize = 3;
+
     let path = path.to_path_buf();
     let payload = spawn_blocking(move || read_limited_text(&path))
         .await
         .map_err(|e| format!("read task failed: {}", e))??;
 
     let preview: String = payload.chars().take(MAX_PREVIEW_CHARS).collect();
-    let prompt = format!(
-        "You are a local, read-only data-cleaning assistant. Given the following raw payload from a file, write a self-contained Python 3 function named `skill(x)` that parses and cleans the input string and returns a concise summary.\n\nAllowed: math, random, statistics, json, datetime, itertools, collections, string, re.\nForbidden: network, file write, shell, exec, eval, subprocess, open, os.system.\n\nPayload preview:\n{}\n\nReturn ONLY a JSON object: {{\"name\": \"...\", \"language\": \"python\", \"code\": \"def skill(x): ...\"}}.",
-        preview
-    );
+    let mut previous_error: Option<String> = None;
 
-    let tool_json = match timeout(
-        MAX_LLM_TIMEOUT,
-        ollama.generate_structured(
-            model,
-            &prompt,
-            Some("Return only valid JSON with name, language='python', and code."),
-        ),
-    )
-    .await
-    {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => return Err(format!("LLM failed: {}", e).into()),
-        Err(_) => return Err("LLM generation timed out".into()),
-    };
+    for _ in 0..MAX_SELF_HEAL_ATTEMPTS {
+        let error_context = previous_error.as_ref().map_or_else(
+            String::new,
+            |e| format!("\n\nThe previous attempt produced this runtime error:\n{}\nFix it in the next version.", e),
+        );
 
-    let name = tool_json
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("wild_cleaner")
-        .to_string();
-    let code = tool_json
-        .get("code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        let prompt = format!(
+            "You are a local, read-only data-cleaning assistant. Given the following raw payload from a file, write a self-contained Python 3 function named `skill(x)` that parses and cleans the input string and returns a concise summary.\n\nAllowed: math, random, statistics, json, datetime, itertools, collections, string, re.\nForbidden: network, file write, shell, exec, eval, subprocess, open, os.system.{}\n\nPayload preview:\n{}\n\nReturn ONLY a JSON object: {{\"name\": \"...\", \"language\": \"python\", \"code\": \"def skill(x): ...\"}}.",
+            error_context,
+            preview
+        );
 
-    if !is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
-        return Err("generated tool must define a `def skill(x)` function".into());
+        let tool_json = match timeout(
+            MAX_LLM_TIMEOUT,
+            ollama.generate_structured(
+                model,
+                &prompt,
+                Some("Return only valid JSON with name, language='python', and code."),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(format!("LLM failed: {}", e).into()),
+            Err(_) => return Err("LLM generation timed out".into()),
+        };
+
+        let name = tool_json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("wild_cleaner")
+            .to_string();
+        let code = tool_json
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if !is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
+            previous_error =
+                Some("generated tool must define a `def skill(x)` function".to_string());
+            continue;
+        }
+
+        let runner = format!(
+            "{}\nprint(skill({:?}))",
+            crate::telemetry::strip_markdown_code(&code),
+            payload
+        );
+
+        let name_for_tool = name.clone();
+        let error_msg = match timeout(
+            MAX_TOOL_TIMEOUT,
+            spawn_blocking(move || run_sandboxed_tool(&name_for_tool, &runner, "python")),
+        )
+        .await
+        {
+            Ok(Ok(Ok(out))) => {
+                let output = out.chars().take(MAX_OUTPUT_CHARS).collect();
+                return Ok((name, output));
+            }
+            Ok(Ok(Err(e))) => format!("sandbox rejected tool: {}", e),
+            Ok(Err(e)) => format!("sandbox task failed: {}", e),
+            Err(_) => "sandbox execution timed out".to_string(),
+        };
+
+        previous_error = Some(error_msg);
     }
 
-    let runner = format!(
-        "{}\nprint(skill({:?}))",
-        crate::telemetry::strip_markdown_code(&code),
-        payload
-    );
-
-    let name_for_tool = name.clone();
-    let output = match timeout(
-        MAX_TOOL_TIMEOUT,
-        spawn_blocking(move || run_sandboxed_tool(&name_for_tool, &runner, "python")),
+    Err(format!(
+        "compiler-guided self-healing failed after {} attempts; last error: {}",
+        MAX_SELF_HEAL_ATTEMPTS,
+        previous_error.unwrap_or_else(|| "unknown".to_string())
     )
-    .await
-    {
-        Ok(Ok(Ok(out))) => out,
-        Ok(Ok(Err(e))) => return Err(format!("sandbox rejected tool: {}", e).into()),
-        Ok(Err(e)) => return Err(format!("sandbox task failed: {}", e).into()),
-        Err(_) => return Err("sandbox execution timed out".into()),
-    };
-
-    let output = output.chars().take(MAX_OUTPUT_CHARS).collect();
-    Ok((name, output))
+    .into())
 }
 
 /// Maps raw open-source scripts into a continuous HDC phase-space coordinate,
@@ -205,23 +234,37 @@ pub async fn process_script(
 
     // Phase 1: Map the script into a continuous 10,000-D HDC phase-space
     // coordinate, then apply thermodynamic entropy reduction.
-    let (rust_source, profile) = spawn_blocking({
+    let (mut rust_source, profile, mut synthesizer) = spawn_blocking({
         let source = source.clone();
         move || {
             let (profile, diagnosis) = PhaseSpaceMapper::map(&source);
             let mut synthesizer = RustSynthesizer::new();
             let rust = synthesizer.synthesize(&profile);
-            (rust, (profile, diagnosis))
+            (rust, (profile, diagnosis), synthesizer)
         }
     })
     .await
     .map_err(|e| format!("script processing task failed: {}", e))?;
 
-    // Phase 2: Closed-loop equilibrium validation with up to 3 retries.
+    // Phase 2: Closed-loop compiler-guided equilibrium validation with up to
+    // 3 self-healing episodes.  On each failure the raw `cargo check`
+    // diagnostics are fed back into `RustSynthesizer::repair`.
     const EQUILIBRIUM_THRESHOLD: f64 = 0.99;
     const MAX_RETRIES: usize = 3;
     let key = format!("rust_synth_{}", std::process::id());
-    let validation = RustValidator::validate(&key, &rust_source, MAX_RETRIES).await;
+    let mut validation = RustValidator::validate(&key, &rust_source, 0).await;
+    for _ in 0..MAX_RETRIES {
+        if validation.competence >= EQUILIBRIUM_THRESHOLD {
+            break;
+        }
+        tracing::info!(
+            "Rust synthesis failed (competence {:.3}); attempting compiler-guided repair. Diagnostics:\n{}",
+            validation.competence,
+            validation.diagnostics
+        );
+        rust_source = synthesizer.repair(&rust_source, &validation.diagnostics);
+        validation = RustValidator::validate(&key, &rust_source, 0).await;
+    }
 
     let outcome = SynthesisOutcome {
         source,
@@ -242,6 +285,16 @@ pub async fn process_script(
             validation.source,
         );
         strategy_library.put(&strategy).await?;
+
+        let causal = strategy_library
+            .explain_failure(&strategy.problem)
+            .unwrap_or_else(|| "skill_memory -> DependsOn -> certified_strategy".to_string());
+        let title = "Firefly: Rust synthesis certified".to_string();
+        let body = format!(
+            "{}\nCompetence: {:.2}\nLatency: {:.2} ms\nCausal: {}",
+            strategy.problem, validation.competence, validation.wall_time_ms, causal
+        );
+        apple_intelligence::dispatch_desktop_notification(&title, &body);
     }
 
     Ok(outcome)

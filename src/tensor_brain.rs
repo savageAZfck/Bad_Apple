@@ -151,6 +151,16 @@ pub struct CandleBrain {
     num_classes: usize,
     /// 2048-dim next-embedding language head on top of the last layer.
     language_head: Linear,
+    /// Intrinsic curiosity reward used to modulate the goal-head loss.
+    /// 0.0 = no bonus; 1.0 = maximum exploration bonus.
+    curiosity_reward: f64,
+    /// Dual-process governor switch.  When false, the Transformer blocks are
+    /// bypassed and training becomes inference-only, keeping routine ticks fast.
+    system2_active: bool,
+    /// Learning-rate multiplier when System 2 is active.
+    system2_lr_multiplier: f64,
+    /// Unscaled learning rate set by the caller.
+    base_lr: f64,
     optimizer: AdamW,
 }
 
@@ -230,8 +240,39 @@ impl CandleBrain {
             goal_head,
             num_classes,
             language_head,
+            curiosity_reward: 0.0,
+            system2_active: true,
+            system2_lr_multiplier: 1.0,
+            base_lr: 0.001,
             optimizer,
         })
+    }
+
+    /// Set the intrinsic curiosity reward in [0.0, 1.0].
+    /// A higher value increases exploratory pressure on the goal head.
+    pub fn set_curiosity_reward(&mut self, reward: f64) {
+        self.curiosity_reward = reward.clamp(0.0, 1.0);
+    }
+
+    /// Current curiosity reward used by the loss modulation.
+    pub fn curiosity_reward(&self) -> f64 {
+        self.curiosity_reward
+    }
+
+    /// Engage or disengage System 2 deep attention.
+    ///
+    /// When System 2 is active, the full 4-block Transformer runs, the
+    /// effective context window is expanded, and the learning rate is scaled
+    /// up.  When inactive, the Transformer blocks are bypassed and training
+    /// becomes inference-only.
+    pub fn set_system2_active(&mut self, active: bool) {
+        self.system2_active = active;
+        self.system2_lr_multiplier = if active { 1.5 } else { 1.0 };
+        self.set_learning_rate(self.base_lr);
+    }
+
+    pub fn system2_active(&self) -> bool {
+        self.system2_active
     }
 
     /// Reshape a flat 2048 input into `(1, seq_len, token_dim)`.
@@ -242,13 +283,19 @@ impl CandleBrain {
     }
 
     /// Shared trunk: input -> dim-dim brain state.
+    ///
+    /// In System 2, the full 4-block Transformer processes the token sequence.
+    /// In System 1, the Transformer blocks are bypassed for a fast embedding
+    /// path while still projecting to the same `dim`-dimensional state space.
     fn brain_state(&self, input: &[f64]) -> Result<Tensor> {
         let mut x = self.prepare_input(input)?;
         x = self.token_embedding.forward(&x)?;
         x = x.add(&self.pos_embed.reshape((1, self.seq_len, self.dim))?)?;
 
-        for block in &self.transformer_blocks {
-            x = block.forward(&x)?;
+        if self.system2_active {
+            for block in &self.transformer_blocks {
+                x = block.forward(&x)?;
+            }
         }
 
         // Mean-pool over the sequence and project to `dim` output units.
@@ -292,6 +339,9 @@ impl CandleBrain {
     }
 
     /// Forward + cross-entropy classification loss + AdamW optimizer step.
+    ///
+    /// In System 1 the loss is computed for telemetry but no weights are
+    /// updated, keeping routine ticks fast.
     pub fn train_step(&mut self, input: &[f64], target_idx: usize) -> Result<f64> {
         let target = Tensor::new(&[target_idx as u32], &self.device)?;
 
@@ -299,12 +349,20 @@ impl CandleBrain {
         let logits = self.conscience_head.forward(&state)?;
 
         let loss = nn_loss::cross_entropy(&logits, &target)?;
-        self.optimizer.backward_step(&loss)?;
+        if self.system2_active {
+            self.optimizer.backward_step(&loss)?;
+        }
         let loss_scalar = loss.to_vec0::<f32>()? as f64;
         Ok(loss_scalar)
     }
 
     /// Train the goal / intention head to predict the teacher-assigned goal class from the brain state.
+    ///
+    /// The cross-entropy loss is modulated by the intrinsic curiosity reward:
+    /// a higher curiosity reward scales the loss down, encouraging the goal
+    /// head to prefer exploratory, non-greedy trajectories.
+    ///
+    /// In System 1 the loss is computed but no weights are updated.
     pub fn train_goal_step(&mut self, brain_state: &[f64], target_idx: usize) -> Result<f64> {
         let state_f32: Vec<f32> = brain_state.iter().map(|v| *v as f32).collect();
         let state_t = Tensor::new(state_f32.as_slice(), &self.device)?;
@@ -312,7 +370,15 @@ impl CandleBrain {
         let logits = self.goal_head.forward(&state_batch)?;
         let target = Tensor::new(&[target_idx as u32], &self.device)?;
         let loss = nn_loss::cross_entropy(&logits, &target)?;
-        self.optimizer.backward_step(&loss)?;
+
+        // Curiosity modulation: 0.0 -> scale 1.0, 1.0 -> scale 0.5.
+        let scale = 1.0 - 0.5 * self.curiosity_reward as f32;
+        let scale_t = Tensor::new(&[scale], &self.device)?;
+        let scaled = loss.broadcast_mul(&scale_t)?;
+
+        if self.system2_active {
+            self.optimizer.backward_step(&scaled)?;
+        }
         let loss_scalar = loss.to_vec0::<f32>()? as f64;
         Ok(loss_scalar)
     }
@@ -335,6 +401,8 @@ impl CandleBrain {
     }
 
     /// Train the language head to predict the next input embedding from the brain state.
+    ///
+    /// In System 1 the language loss is computed for telemetry only.
     pub fn train_language_step(&mut self, brain_state: &[f64], next_target: &[f64]) -> Result<f64> {
         let state_f32: Vec<f32> = brain_state.iter().map(|v| *v as f32).collect();
         let target_f32: Vec<f32> = next_target.iter().map(|v| *v as f32).collect();
@@ -345,17 +413,21 @@ impl CandleBrain {
         let pred = self.language_head.forward(&state_batch)?.squeeze(0)?;
 
         let loss = pred.sub(&target_t)?.sqr()?.mean_all()?;
-        self.optimizer.backward_step(&loss)?;
+        if self.system2_active {
+            self.optimizer.backward_step(&loss)?;
+        }
         let loss_scalar = loss.to_vec0::<f32>()? as f64;
         Ok(loss_scalar.sqrt())
     }
 
     pub fn set_learning_rate(&mut self, lr: f64) {
-        self.optimizer.set_learning_rate(lr);
+        self.base_lr = lr;
+        let scaled = lr * self.system2_lr_multiplier;
+        self.optimizer.set_learning_rate(scaled);
     }
 
     pub fn learning_rate(&self) -> f64 {
-        self.optimizer.learning_rate()
+        self.base_lr
     }
 
     pub fn sample_weight_00(&self) -> f64 {

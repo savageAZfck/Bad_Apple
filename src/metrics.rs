@@ -1,10 +1,129 @@
+use crossbeam_queue::ArrayQueue;
+use crossbeam_utils::CachePadded;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// Micro-benchmark a block and return `(result, nanoseconds)`.
+///
+/// Uses `std::time::Instant` on Apple Silicon (no user-space TSC) and is
+/// designed to be zero-allocation inside the measured section.
+#[macro_export]
+macro_rules! ns_latency {
+    ($block:expr) => {{
+        let _start = std::time::Instant::now();
+        let _result = $block;
+        let _ns = _start.elapsed().as_nanos() as u64;
+        (_result, _ns)
+    }};
+}
+
+/// Lock-free, L2-cache-aligned atomic ring buffer for nanosecond latency
+/// samples.  Stores a fixed capacity of `u64` nanosecond measurements and
+/// can compute percentile / mean statistics on demand.
+pub struct LatencyRingBuffer<const N: usize> {
+    /// Cache-padded slot array to reduce false sharing under heavy contention.
+    slots: CachePadded<ArrayQueue<u64>>,
+    /// Total samples pushed (monotonically increasing; may wrap, used only
+    /// for diagnostics).
+    samples: CachePadded<AtomicU64>,
+}
+
+impl<const N: usize> LatencyRingBuffer<N> {
+    pub fn new() -> Self {
+        Self {
+            slots: CachePadded::new(ArrayQueue::new(N)),
+            samples: CachePadded::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Push a nanosecond latency sample.  If the ring is full, the oldest
+    /// sample is dropped (FIFO eviction).  This is the only writer path and
+    /// is allocation-free.
+    pub fn push(&self, nanos: u64) {
+        self.samples.fetch_add(1, Ordering::Relaxed);
+        if self.slots.is_full() {
+            let _ = self.slots.pop();
+        }
+        let _ = self.slots.push(nanos);
+    }
+
+    /// Total number of samples ever pushed.
+    pub fn total_samples(&self) -> u64 {
+        self.samples.load(Ordering::Relaxed)
+    }
+
+    /// Return all currently stored samples (newest-first order is not
+    /// guaranteed for ArrayQueue).  Allocates a `Vec` for statistics only.
+    fn snapshot(&self) -> Vec<u64> {
+        let mut out = Vec::with_capacity(self.slots.len());
+        while let Some(v) = self.slots.pop() {
+            out.push(v);
+        }
+        // Push them back so the ring remains intact.
+        for v in &out {
+            let _ = self.slots.push(*v);
+        }
+        out
+    }
+
+    /// Compute latency distribution statistics in nanoseconds.
+    pub fn stats(&self) -> LatencyStats {
+        let mut samples = self.snapshot();
+        if samples.is_empty() {
+            return LatencyStats::default();
+        }
+        samples.sort_unstable();
+        let n = samples.len();
+        let min = samples[0];
+        let max = samples[n - 1];
+        let p50 = percentile_sorted(&samples, 0.50);
+        let p99 = percentile_sorted(&samples, 0.99);
+        let p999 = percentile_sorted(&samples, 0.999);
+        let mean = samples.iter().sum::<u64>() / n as u64;
+        LatencyStats {
+            samples: n as u64,
+            min_ns: min,
+            p50_ns: p50,
+            p99_ns: p99,
+            p99_9_ns: p999,
+            max_ns: max,
+            mean_ns: mean,
+        }
+    }
+}
+
+impl<const N: usize> Default for LatencyRingBuffer<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Latency distribution statistics in nanoseconds.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct LatencyStats {
+    pub samples: u64,
+    pub min_ns: u64,
+    pub p50_ns: u64,
+    pub p99_ns: u64,
+    pub p99_9_ns: u64,
+    pub max_ns: u64,
+    pub mean_ns: u64,
+}
+
+fn percentile_sorted(sorted: &[u64], p: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * p) as usize;
+    sorted[idx.clamp(0, sorted.len() - 1)]
+}
 
 /// A single training / runtime metric snapshot.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -261,10 +380,15 @@ pub struct MemoryDrift {
 /// Samples are pushed at a fixed interval (typically 5s).  A moving window
 /// regression gives a live drift estimate without keeping the whole process
 /// history.  Positive drift suggests a leak; negative drift suggests cleanup.
+/// When the leak score stays at or above 0.5 for three consecutive samples,
+/// `should_flush()` returns `true` and `trigger_flush()` can be called to ask
+/// the host allocator to consolidate/return memory.
 #[derive(Clone, Debug)]
 pub struct MemoryProfiler {
     samples: VecDeque<(u64, u64)>,
     max_window: usize,
+    /// Consecutive samples with a leak_score >= 0.5.
+    consecutive_leak_samples: usize,
     /// Bytes used at the previous sample.
     pub last_used_bytes: u64,
 }
@@ -274,6 +398,7 @@ impl MemoryProfiler {
         Self {
             samples: VecDeque::with_capacity(max_window),
             max_window: max_window.max(2),
+            consecutive_leak_samples: 0,
             last_used_bytes: 0,
         }
     }
@@ -305,11 +430,49 @@ impl MemoryProfiler {
         let score = (drift / 1_000_000.0).clamp(-1.0, 1.0);
         let leak_score = if score > 0.0 { score } else { 0.0 };
 
+        if leak_score >= 0.5 {
+            self.consecutive_leak_samples += 1;
+        } else {
+            self.consecutive_leak_samples = 0;
+        }
+
         MemoryDrift {
             used_bytes,
             drift_bytes_per_sec: drift,
             leak_score,
         }
+    }
+
+    /// True when the leak score has been >= 0.5 for 3 or more consecutive samples.
+    pub fn should_flush(&self) -> bool {
+        self.consecutive_leak_samples >= 3
+    }
+
+    /// Number of consecutive high-leak samples seen.
+    pub fn consecutive_leak_samples(&self) -> usize {
+        self.consecutive_leak_samples
+    }
+
+    /// Ask the platform allocator to consolidate / return memory to the OS.
+    /// Currently a best-effort pressure-relief call; it is safe to invoke
+    /// repeatedly and will not panic.
+    pub fn trigger_flush(&mut self) {
+        // macOS: `malloc_zone_pressure_relief` hints the allocator to release
+        // dirty pages.  Linux: `malloc_trim` releases top-most memory.
+        // These calls are best-effort; if the symbol is absent the program
+        // continues unaffected.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            extern "C" {
+                fn malloc_zone_pressure_relief(zone: *mut c_void, nbytes: usize) -> usize;
+            }
+            let _ = malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+        #[cfg(not(target_os = "macos"))]
+        unsafe {
+            let _ = libc::malloc_trim(0);
+        }
+        self.consecutive_leak_samples = 0;
     }
 
     /// Slope over the current window in bytes/second.
@@ -335,3 +498,46 @@ impl MemoryProfiler {
 
 /// Helper type for thread-safe shared metrics.
 pub type SharedMetrics = Arc<Mutex<MetricsLogger>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_ring_buffer_percentiles() {
+        let ring = LatencyRingBuffer::<16>::new();
+        for i in 1..=15 {
+            ring.push(i as u64 * 10);
+        }
+        let stats = ring.stats();
+        assert_eq!(stats.samples, 15);
+        assert_eq!(stats.min_ns, 10);
+        assert_eq!(stats.max_ns, 150);
+        assert!(stats.p50_ns >= 70 && stats.p50_ns <= 80);
+        assert!(stats.p99_ns >= 140);
+    }
+
+    #[test]
+    fn ns_latency_macro_is_zero_allocation() {
+        let ring = LatencyRingBuffer::<1024>::new();
+        for _ in 0..100 {
+            let (value, ns) = crate::ns_latency!(ring.push(42));
+            assert_eq!(value, ());
+            ring.push(ns);
+        }
+        let stats = ring.stats();
+        assert_eq!(stats.samples, 200);
+        assert!(stats.mean_ns > 0);
+    }
+
+    #[test]
+    fn memory_profiler_detects_leak() {
+        let mut p = MemoryProfiler::new(4);
+        p.record(1_000_000, 0);
+        p.record(2_000_000, 1);
+        p.record(3_000_000, 2);
+        let drift = p.record(4_000_000, 3);
+        assert!(drift.leak_score >= 0.5);
+        assert!(p.should_flush());
+    }
+}

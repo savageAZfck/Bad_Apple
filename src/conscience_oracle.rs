@@ -1,5 +1,19 @@
 use crate::{apple_intelligence, calculate_cosine_similarity, generate_2048_grounded_embedding};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global memory-pressure switch.  When set, the oracle avoids the Apple
+/// Intelligence bridge and falls back to the 2048-D cosine semantic matcher.
+static MEMORY_PRESSURE: AtomicBool = AtomicBool::new(false);
+
+/// Set the global memory-pressure flag from the background diagnostics loop.
+pub fn set_memory_pressure(high: bool) {
+    MEMORY_PRESSURE.store(high, Ordering::Relaxed);
+}
+
+fn under_memory_pressure() -> bool {
+    MEMORY_PRESSURE.load(Ordering::Relaxed)
+}
 
 #[derive(Clone)]
 pub struct ConscienceOracle {
@@ -45,58 +59,62 @@ impl ConscienceOracle {
 
         let token_count = tokens.len();
 
-        if let Some(response) = apple_intelligence::call(&prompt).await {
-            let summary = response
-                .trim()
-                .to_lowercase()
-                .replace(['.', ',', '!', '?', '"', '\'', ':', ';'], " ");
-            let summary = summary
-                .split_whitespace()
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" ");
+        // Under memory pressure we skip the bridge entirely and route straight
+        // into the 2048-D cosine semantic matcher.
+        if !under_memory_pressure() {
+            if let Some(response) = apple_intelligence::call(&prompt).await {
+                let summary = response
+                    .trim()
+                    .to_lowercase()
+                    .replace(['.', ',', '!', '?', '"', '\'', ':', ';'], " ");
+                let summary = summary
+                    .split_whitespace()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(" ");
 
-            if !summary.is_empty() {
-                // 1. exact / substring match
-                if let Some(idx) = tokens.iter().position(|t| t.to_lowercase() == summary) {
-                    self.cache.insert(key, idx);
-                    return Some(idx);
-                }
-                for (idx, token) in tokens.iter().enumerate() {
-                    let t = token.to_lowercase();
-                    if t.contains(&summary) || summary.contains(&t) {
+                if !summary.is_empty() {
+                    // 1. exact / substring match
+                    if let Some(idx) = tokens.iter().position(|t| t.to_lowercase() == summary) {
+                        self.cache.insert(key, idx);
+                        return Some(idx);
+                    }
+                    for (idx, token) in tokens.iter().enumerate() {
+                        let t = token.to_lowercase();
+                        if t.contains(&summary) || summary.contains(&t) {
+                            self.cache.insert(key, idx);
+                            return Some(idx);
+                        }
+                    }
+
+                    // 2. word-overlap fallback
+                    let summary_words: HashSet<&str> = summary.split_whitespace().collect();
+                    let mut best_idx = 0;
+                    let mut best_score = 0;
+                    for (idx, token) in tokens.iter().enumerate() {
+                        let token_low = token.to_lowercase();
+                        let token_words: HashSet<&str> = token_low.split_whitespace().collect();
+                        let overlap = summary_words.intersection(&token_words).count();
+                        if overlap > best_score {
+                            best_score = overlap;
+                            best_idx = idx;
+                        }
+                    }
+                    if best_score > 0 {
+                        self.cache.insert(key, best_idx);
+                        return Some(best_idx);
+                    }
+
+                    // 3. semantic cosine against the model summary
+                    let summary_emb =
+                        generate_2048_grounded_embedding(&summary, &[0.5, 0.5, 0.5, 9.81]);
+                    if let Some(idx) = self.match_by_embedding(&summary_emb, token_count) {
                         self.cache.insert(key, idx);
                         return Some(idx);
                     }
                 }
-
-                // 2. word-overlap fallback
-                let summary_words: HashSet<&str> = summary.split_whitespace().collect();
-                let mut best_idx = 0;
-                let mut best_score = 0;
-                for (idx, token) in tokens.iter().enumerate() {
-                    let token_low = token.to_lowercase();
-                    let token_words: HashSet<&str> = token_low.split_whitespace().collect();
-                    let overlap = summary_words.intersection(&token_words).count();
-                    if overlap > best_score {
-                        best_score = overlap;
-                        best_idx = idx;
-                    }
-                }
-                if best_score > 0 {
-                    self.cache.insert(key, best_idx);
-                    return Some(best_idx);
-                }
-
-                // 3. semantic cosine against the model summary
-                let summary_emb =
-                    generate_2048_grounded_embedding(&summary, &[0.5, 0.5, 0.5, 9.81]);
-                if let Some(idx) = self.match_by_embedding(&summary_emb, token_count) {
-                    self.cache.insert(key, idx);
-                    return Some(idx);
-                }
             }
-        }
+        } // end memory-pressure guard
 
         // Apple Intelligence not available or produced an unusable answer:
         // fall back to the internal high-speed semantic cosine matcher.
@@ -121,18 +139,20 @@ impl ConscienceOracle {
             input, concepts
         );
 
-        if let Some(resp) = apple_intelligence::call(&prompt).await {
-            if let Some(score) = resp
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f64>().ok())
-            {
-                return Some((score / 10.0).clamp(0.0, 1.0));
+        if !under_memory_pressure() {
+            if let Some(resp) = apple_intelligence::call(&prompt).await {
+                if let Some(score) = resp
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    return Some((score / 10.0).clamp(0.0, 1.0));
+                }
             }
         }
 
-        // Fallback: high-speed semantic cosine between the input and the
-        // top concept embeddings.
+        // Fallback under memory pressure or model failure: high-speed semantic
+        // cosine between the input and the top concept embeddings.
         let input_emb = generate_2048_grounded_embedding(input, &[0.5, 0.5, 0.5, 9.81]);
         let mut best_sim = 0.0;
         for concept in top_tokens.iter().take(4) {
@@ -163,19 +183,21 @@ impl ConscienceOracle {
             emotional_state, concepts
         );
 
-        if let Some(resp) = apple_intelligence::call(&prompt).await {
-            let text = resp
-                .trim()
-                .replace(['"', '\'', '\n'], " ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if text.len() > 10 {
-                return Some(text);
+        if !under_memory_pressure() {
+            if let Some(resp) = apple_intelligence::call(&prompt).await {
+                let text = resp
+                    .trim()
+                    .replace(['"', '\'', '\n'], " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if text.len() > 10 {
+                    return Some(text);
+                }
             }
         }
 
-        // Fallback template avoids any main-thread I/O.
+        // Fallback template under memory pressure or model failure.
         let top = top_tokens.first().copied().unwrap_or("stillness");
         Some(format!(
             "As {}, I feel the shape of {} moving through me.",
@@ -195,19 +217,21 @@ impl ConscienceOracle {
             memory_text, emotional_state
         );
 
-        if let Some(resp) = apple_intelligence::call(&prompt).await {
-            let insight = resp
-                .trim()
-                .replace(['"', '\'', '\n'], " ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if insight.len() > 20 {
-                return Some(insight);
+        if !under_memory_pressure() {
+            if let Some(resp) = apple_intelligence::call(&prompt).await {
+                let insight = resp
+                    .trim()
+                    .replace(['"', '\'', '\n'], " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if insight.len() > 20 {
+                    return Some(insight);
+                }
             }
         }
 
-        // Fallback template.
+        // Fallback template under memory pressure or model failure.
         Some(format!(
             "In this {} moment, the memory of {} reveals a pattern worth keeping.",
             emotional_state.to_lowercase(),
