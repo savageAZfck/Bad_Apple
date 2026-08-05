@@ -39,7 +39,7 @@ Requires Rust, macOS with the native Apple Intelligence bridge built, and a `cur
 
 ```bash
 git clone <private repo>
-cd firefly-edgeos
+cd Firefly-EdgeOS
 cargo build --release
 ./target/release/firefly_edgeos
 ```

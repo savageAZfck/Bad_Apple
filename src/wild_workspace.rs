@@ -1,6 +1,6 @@
 //! Asynchronous directory watcher for the "wild" local sandbox.
 //!
-//! The agent watches `~/firefly-edgeos/wild_workspace`, ingests incoming text
+//! The agent watches `~/Firefly-EdgeOS/wild_workspace`, ingests incoming text
 //! payloads, and uses the local LLM to synthesize a read-only Python tool to
 //! parse/clean the file. Execution is sandboxed and metrics are logged to the
 //! SelfModel. No network access is permitted.
