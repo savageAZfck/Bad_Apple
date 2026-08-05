@@ -8,7 +8,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant, SystemTime},
 };
 use sysinfo::System;
@@ -3360,7 +3363,7 @@ impl WeightPersistenceSubnode {
     }
 
     fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
-        let data = serde_json::to_string_pretty(self)?;
+        let data = serde_json::to_vec(self)?;
         fs::write(path, data)?;
         Ok(())
     }
@@ -3557,7 +3560,7 @@ impl FileDefenseQuarantine {
     }
 
     fn save_state(&self, path: &Path) -> std::io::Result<()> {
-        let data = serde_json::to_string_pretty(self)?;
+        let data = serde_json::to_vec(self)?;
         fs::write(path, data)?;
         Ok(())
     }
@@ -3658,7 +3661,7 @@ impl EnhancedNetworkStack {
     }
 
     fn save_state(&self, path: &Path) -> std::io::Result<()> {
-        let data = serde_json::to_string_pretty(self)?;
+        let data = serde_json::to_vec(self)?;
         fs::write(path, data)?;
         Ok(())
     }
@@ -5173,7 +5176,9 @@ impl FullySapientSoulMatrix {
             let _ = brain.save_weights(&safetensors_path);
         }
 
-        if let Ok(save) = serde_json::to_string_pretty(self) {
+        // Use compact JSON serialization; it is ~2x faster than pretty-printing
+        // and the loader accepts any valid JSON.
+        if let Ok(save) = serde_json::to_vec(self) {
             let _ = fs::write(filename, save);
         }
 
@@ -5718,97 +5723,195 @@ async fn evaluate_transfer_task(
     model: &str,
     task: &TransferTask,
 ) -> (bool, Option<String>, Option<String>) {
+    const LLM_TIMEOUT: Duration = Duration::from_secs(60);
+    const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+    const MAX_ATTEMPTS: usize = 3;
+
     let mut previous_attempt: Option<String> = None;
     let mut previous_error: Option<String> = None;
 
-    for attempt in 0..3 {
-        let mut prompt = format!(
-            "You are a Python 3 code generator. The task is from a NEW domain the system has never trained on. Given a description and one training example, write a self-contained function named `skill(x)` that solves the task. The function must be read-only and computational, using only: math, random, statistics, json, datetime, itertools, collections, string, re. Do not use: network, shell, file write, exec, eval, subprocess. Do not include markdown or explanations. Return ONLY the function definition.\n\nDomain: {}\nTask description: {}\nTraining input: {:?}\nTraining output: {:?}",
-            task.domain, task.description, task.train_input, task.train_output
+    for attempt in 0..MAX_ATTEMPTS {
+        let error_context = previous_error.as_ref().map_or_else(
+            String::new,
+            |e| {
+                format!(
+                    "\n\nYour previous attempt failed: {}\nPrevious code:\n{}\n\nRewrite the function so it works for the training example, the test example, and any similar input.",
+                    e,
+                    previous_attempt.as_deref().unwrap_or("")
+                )
+            },
         );
-        if let (Some(prev), Some(err)) = (previous_attempt.as_ref(), previous_error.as_ref()) {
-            prompt.push_str(&format!(
-                "\n\nYour previous attempt failed: {}\nPrevious code:\n{}\n\nRewrite the function so it works for both the training example and any similar input. Provide only the corrected Python function `def skill(x): ...`",
-                err, prev
-            ));
-        } else {
-            prompt.push_str("\n\nProvide only the Python function `def skill(x): ...`");
-        }
 
-        let raw_code = match client
-            .generate(
+        let prompt = format!(
+            "You are a Python 3 code generator. The task is from a NEW domain the system has never trained on. Given a description and one training example, write a self-contained function named `skill(x)` that solves the task and returns the answer as a string.\n\
+            The function must be read-only and computational, using only: math, random, statistics, json, datetime, itertools, collections, string, re.\n\
+            Forbidden: network, shell, file write, exec, eval, subprocess, open, os.system, import os, import sys, import shutil.\n\
+            Do not include markdown, explanations, or a main block. Return ONLY a JSON object: {{\"name\": \"...\", \"language\": \"python\", \"code\": \"def skill(x): ...\"}}.\n\
+            The function must return the answer, not print it.\n\n\
+            Domain: {}\nTask description: {}\nTraining input: {:?}\nTraining output: {:?}\nTest input: {:?}\nTest output: {:?}{}",
+            task.domain,
+            task.description,
+            task.train_input,
+            task.train_output,
+            task.test_input,
+            task.test_output,
+            error_context
+        );
+
+        let tool_json = match timeout(
+            LLM_TIMEOUT,
+            client.generate_structured(
                 model,
                 &prompt,
-                Some("Return a valid Python 3 function named skill(x) only."),
-            )
-            .await
+                Some("Return only valid JSON with name, language='python', and code. The code must define a function def skill(x) that returns a string."),
+            ),
+        )
+        .await
         {
-            Ok(c) => c,
-            Err(_) => return (false, None, previous_attempt),
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                tracing::info!("⚠️ Transfer LLM generation failed: {}", e);
+                return (false, None, previous_attempt);
+            }
+            Err(_) => {
+                tracing::info!("⚠️ Transfer LLM generation timed out");
+                return (false, None, previous_attempt);
+            }
         };
 
+        let name = tool_json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("transfer_skill")
+            .to_string();
+        let raw_code = tool_json
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let code = telemetry::strip_markdown_code(&raw_code);
+
         if !is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
             previous_attempt = Some(code.clone());
             previous_error =
                 Some("Generated code must define a `def skill(x)` function".to_string());
-            if attempt < 2 {
+            if attempt < MAX_ATTEMPTS - 1 {
                 continue;
             }
             return (false, None, Some(code));
         }
-        let train_code = format!("{}\nprint(skill({:?}))", code, task.train_input);
 
-        match telemetry::run_sandboxed_tool("transfer_train", &train_code, "python") {
-            Ok(output) => {
-                let actual = output.trim();
-                let expected = task.train_output.trim();
-                if actual != expected {
-                    previous_attempt = Some(code.clone());
-                    previous_error = Some(format!(
-                        "Training example mismatch: got {:?}, expected {:?}",
-                        actual, expected
-                    ));
-                    if attempt < 2 {
-                        continue;
-                    }
-                    return (false, None, Some(code));
-                }
-
-                let test_code = format!("{}\nprint(skill({:?}))", code, task.test_input);
-                match telemetry::run_sandboxed_tool("transfer_test", &test_code, "python") {
-                    Ok(output) => {
-                        let test_output = output.trim().to_string();
-                        let passed = test_output == task.test_output;
-                        if !passed && attempt < 2 {
-                            previous_attempt = Some(code.clone());
-                            previous_error = Some(format!(
-                                "Test input {:?} produced {:?}, expected {:?}",
-                                task.test_input, test_output, task.test_output
-                            ));
-                            continue;
-                        }
-                        return (passed, Some(test_output), Some(code));
-                    }
-                    Err(_) => {
-                        previous_attempt = Some(code.clone());
-                        previous_error = Some("Test execution failed".to_string());
-                        if attempt < 2 {
-                            continue;
-                        }
-                        return (false, None, Some(code));
-                    }
-                }
+        // Validate that the function returns the answer, not just prints it.
+        if !code.to_lowercase().contains("return ") {
+            previous_attempt = Some(code.clone());
+            previous_error =
+                Some("The function must use `return` to produce its output".to_string());
+            if attempt < MAX_ATTEMPTS - 1 {
+                continue;
             }
-            Err(_) => {
+            return (false, None, Some(code));
+        }
+
+        let train_code = format!("{}\nprint(skill({:?}))", code, task.train_input);
+        let train_name = name.clone();
+
+        let train_result = match timeout(
+            TOOL_TIMEOUT,
+            spawn_blocking(move || {
+                telemetry::run_sandboxed_tool(&train_name, &train_code, "python")
+            }),
+        )
+        .await
+        {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(e))) => {
                 previous_attempt = Some(code.clone());
-                previous_error = Some("Training execution failed".to_string());
-                if attempt < 2 {
+                previous_error = Some(format!("Training execution failed: {}", e));
+                if attempt < MAX_ATTEMPTS - 1 {
                     continue;
                 }
                 return (false, None, Some(code));
             }
+            Ok(Err(e)) => {
+                previous_attempt = Some(code.clone());
+                previous_error = Some(format!("Training sandbox task failed: {}", e));
+                if attempt < MAX_ATTEMPTS - 1 {
+                    continue;
+                }
+                return (false, None, Some(code));
+            }
+            Err(_) => {
+                previous_attempt = Some(code.clone());
+                previous_error = Some("Training execution timed out".to_string());
+                if attempt < MAX_ATTEMPTS - 1 {
+                    continue;
+                }
+                return (false, None, Some(code));
+            }
+        };
+
+        let actual = train_result.trim();
+        let expected = task.train_output.trim();
+        if actual != expected {
+            previous_attempt = Some(code.clone());
+            previous_error = Some(format!(
+                "Training example mismatch: got {:?}, expected {:?}",
+                actual, expected
+            ));
+            if attempt < MAX_ATTEMPTS - 1 {
+                continue;
+            }
+            return (false, None, Some(code));
         }
+
+        let test_code = format!("{}\nprint(skill({:?}))", code, task.test_input);
+        let test_name = format!("{}_test", name);
+
+        let test_output = match timeout(
+            TOOL_TIMEOUT,
+            spawn_blocking(move || telemetry::run_sandboxed_tool(&test_name, &test_code, "python")),
+        )
+        .await
+        {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(e))) => {
+                previous_attempt = Some(code.clone());
+                previous_error = Some(format!("Test execution failed: {}", e));
+                if attempt < MAX_ATTEMPTS - 1 {
+                    continue;
+                }
+                return (false, None, Some(code));
+            }
+            Ok(Err(e)) => {
+                previous_attempt = Some(code.clone());
+                previous_error = Some(format!("Test sandbox task failed: {}", e));
+                if attempt < MAX_ATTEMPTS - 1 {
+                    continue;
+                }
+                return (false, None, Some(code));
+            }
+            Err(_) => {
+                previous_attempt = Some(code.clone());
+                previous_error = Some("Test execution timed out".to_string());
+                if attempt < MAX_ATTEMPTS - 1 {
+                    continue;
+                }
+                return (false, None, Some(code));
+            }
+        };
+
+        let test_output = test_output.trim().to_string();
+        let passed = test_output == task.test_output;
+        if !passed && attempt < MAX_ATTEMPTS - 1 {
+            previous_attempt = Some(code.clone());
+            previous_error = Some(format!(
+                "Test input {:?} produced {:?}, expected {:?}",
+                task.test_input, test_output, task.test_output
+            ));
+            continue;
+        }
+
+        return (passed, Some(test_output), Some(code));
     }
 
     (false, previous_attempt.clone(), previous_attempt)
@@ -5860,7 +5963,7 @@ struct CognitiveProcessingResult {
 // 🤖 AGENT SAFETY + MODEL-BASED PLANNING UTILITIES
 // =========================================================================
 pub(crate) fn is_safe_agent_code(code: &str) -> bool {
-    if code.len() > 2000 {
+    if code.len() > 4000 {
         return false;
     }
     let lower = code.to_lowercase();
@@ -6587,15 +6690,19 @@ async fn main() -> Result<()> {
         let mut system = system;
         let battery_manager = battery_manager;
         let mut governor = DualProcessGovernor::new();
+        let latency_ring = Arc::new(metrics::LatencyRingBuffer::<1024>::new());
+        let mut last_state_save = current_secs();
+        const MIN_STATE_SAVE_INTERVAL_SECS: u64 = 15;
+        let state_save_in_flight = Arc::new(AtomicBool::new(false));
         loop {
             sleep(governor.tick_duration()).await;
 
             // Phase 1: Extract data from mutex (no async operations)
-            let (incoming_experience, spatial_register, should_process) = {
+            let (incoming_experience, spatial_register, should_process, sensors_for_governor) = {
                 let mut mind = autonomous_clock_mind.lock().await;
 
                 // 📡 Real sensor grounding: refresh system telemetry and bind to sensory register
-                {
+                let sensors_for_governor = {
                     let mut sensors_guard = clock_sensors.lock().await;
                     update_sensor_snapshot(
                         &mut system,
@@ -6631,33 +6738,14 @@ async fn main() -> Result<()> {
                         // Approximate power reduction from CPU headroom.
                         telemetry_guard.power_reduction =
                             (100.0 - sensors_guard.cpu_usage_percent) / 100.0;
-
-                        // 🌡 Dual-process attention governor.
-                        governor.update(&telemetry_guard, &sensors_guard);
-                        telemetry_guard.record_governor(
-                            governor.entropy_index(),
-                            governor.resource_stress(),
-                            governor.system2_active(),
-                            governor.system2_cycles(),
-                        );
-                        if governor.system2_active() {
-                            tracing::info!(
-                                "⚡ System 2 engaged: entropy={:.2}, stress={:.2}, tick={:?}",
-                                governor.entropy_index(),
-                                governor.resource_stress(),
-                                governor.tick_duration()
-                            );
-                        } else {
-                            tracing::info!(
-                                "🧘 System 1 routine: entropy={:.2}, tick={:?}",
-                                governor.entropy_index(),
-                                governor.tick_duration()
-                            );
-                        }
                     }
-                }
 
-                // Sync the Candle brain with the governor mode.
+                    sensors_guard.clone()
+                };
+
+                // Sync the Candle brain with the governor mode from the previous cycle.
+                // The governor is updated again at the end of this cycle with fresh loss,
+                // critic, and memory-leak values so the next cycle's mode is current.
                 if let Some(ref mut brain) = mind.candle_brain {
                     brain.set_system2_active(governor.system2_active());
                 }
@@ -6704,7 +6792,12 @@ async fn main() -> Result<()> {
                     (mind.metabolics.neural_wear + 0.000005).clamp(0.0, 1.0);
 
                 let spatial_register = mind.spatial_sensory_register;
-                (incoming_experience, spatial_register, true)
+                (
+                    incoming_experience,
+                    spatial_register,
+                    true,
+                    sensors_for_governor,
+                )
             };
 
             if !should_process {
@@ -6803,6 +6896,7 @@ async fn main() -> Result<()> {
                 let next_input_vector = next_input_vector.clone();
                 let incoming_experience = incoming_experience.clone();
                 let tps = tokens_per_second;
+                let latency_ring = latency_ring.clone();
                 tokio::task::spawn_blocking(move || {
                     let mut mind = mind_arc.blocking_lock();
                     let total_start = Instant::now();
@@ -6974,6 +7068,13 @@ async fn main() -> Result<()> {
                             .record_tokens_per_second(token_count, forward_ms + train_ms);
                     }
 
+                    // 📈 Push nanosecond latency samples into the hot-path ring buffer.
+                    let ms_to_ns = |ms: f64| (ms * 1_000_000.0) as u64;
+                    latency_ring.push(ms_to_ns(train_ms));
+                    latency_ring.push(ms_to_ns(forward_ms));
+                    latency_ring.push(ms_to_ns(lang_ms));
+                    latency_ring.push(total_start.elapsed().as_nanos() as u64);
+
                     // 5. Local conscience classification: the Transformer now chooses its own labels.
                     let local_logits = match mind.candle_brain.as_ref()?.classify(&contextual_input)
                     {
@@ -7048,13 +7149,16 @@ async fn main() -> Result<()> {
             }
 
             // 🎓 LLM as critic/teacher: score the brain's decoded output against the input.
-            if let Some(critic_score) = clock_oracle
-                .critic_score(
-                    &incoming_experience,
-                    &[decoded_conscience_0, decoded_conscience_1],
-                )
-                .await
-            {
+            let (critic_score, critic_ns) = crate::ns_latency!(
+                clock_oracle
+                    .critic_score(
+                        &incoming_experience,
+                        &[decoded_conscience_0, decoded_conscience_1],
+                    )
+                    .await
+            );
+            latency_ring.push(critic_ns);
+            if let Some(critic_score) = critic_score {
                 tracing::info!("🎓 Critic/teacher score: {:.2}", critic_score);
                 {
                     let mut mind = autonomous_clock_mind.lock().await;
@@ -7072,6 +7176,10 @@ async fn main() -> Result<()> {
             }
 
             // 📈 Persist the metrics entry now that the (optional) critic score is known.
+            {
+                let mut t = clock_telemetry.lock().await;
+                t.active_goal_count = entry.active_goals;
+            }
             {
                 let mut m = metrics_logger.lock().await;
                 m.record(entry);
@@ -7158,10 +7266,12 @@ async fn main() -> Result<()> {
 
             // Phase 3: Save to network and prepare for sending.
             // State serialization is offloaded to a blocking thread so the 6-second
-            // Transformer clock never waits on SSD I/O.
+            // Transformer clock never waits on SSD I/O.  Saves are throttled so they
+            // do not overlap and do not run on every cognitive tick.
             let save_mind = Arc::clone(&autonomous_clock_mind);
             let save_state_file = state_file_copy.clone();
             let save_telemetry = clock_telemetry.clone();
+            let save_in_flight_flag = Arc::clone(&state_save_in_flight);
             let should_send = {
                 let mut mind_write = autonomous_clock_mind.lock().await;
                 // 🆕 Update weight persistence
@@ -7177,24 +7287,35 @@ async fn main() -> Result<()> {
                     telemetry_guard.memory_node_count = mind_write.associative_memory_network.len();
                 }
 
-                // Offload the full state save (weights + JSON + defense + network) to a
-                // dedicated blocking thread and record the exact duration.
-                let _handle = tokio::spawn(async move {
-                    let duration_ms = tokio::task::spawn_blocking(move || {
-                        let start = std::time::Instant::now();
+                // Throttle state saves: at most one every MIN_STATE_SAVE_INTERVAL_SECS,
+                // and never start a new one while another is still running.
+                let now = current_secs();
+                let elapsed = now.saturating_sub(last_state_save);
+                let can_save = elapsed >= MIN_STATE_SAVE_INTERVAL_SECS
+                    && !save_in_flight_flag.load(Ordering::Relaxed);
+
+                if can_save {
+                    last_state_save = now;
+                    save_in_flight_flag.store(true, Ordering::Relaxed);
+
+                    let _handle = tokio::spawn(async move {
+                        let duration_ms = tokio::task::spawn_blocking(move || {
+                            let start = std::time::Instant::now();
+                            {
+                                let mind = save_mind.blocking_lock();
+                                mind.save_state(&save_state_file);
+                            }
+                            start.elapsed().as_millis() as u64
+                        })
+                        .await
+                        .unwrap_or(0);
                         {
-                            let mind = save_mind.blocking_lock();
-                            mind.save_state(&save_state_file);
+                            let mut t = save_telemetry.lock().await;
+                            t.record_state_save(duration_ms);
                         }
-                        start.elapsed().as_millis() as u64
-                    })
-                    .await
-                    .unwrap_or(0);
-                    {
-                        let mut t = save_telemetry.lock().await;
-                        t.record_state_save(duration_ms);
-                    }
-                });
+                        save_in_flight_flag.store(false, Ordering::Relaxed);
+                    });
+                }
 
                 should_send
             };
@@ -7277,6 +7398,43 @@ async fn main() -> Result<()> {
                             );
                         }
                     }
+                }
+            }
+
+            // 🌡 Update the dual-process governor with the *actual* cycle results
+            // (loss, critic score, memory leak, transfer score) so the telemetry
+            // snapshot and the next tick's mode are current, not one cycle stale.
+            {
+                let mut telemetry_guard = clock_telemetry.lock().await;
+                telemetry_guard.record_latency(latency_ring.stats());
+                governor.update(&telemetry_guard, &sensors_for_governor);
+                telemetry_guard.record_governor(
+                    governor.entropy_index(),
+                    governor.resource_stress(),
+                    governor.system2_active(),
+                    governor.system2_cycles(),
+                );
+                if governor.system2_active() {
+                    tracing::info!(
+                        "⚡ System 2 engaged: entropy={:.2}, stress={:.2}, tick={:?}",
+                        governor.entropy_index(),
+                        governor.resource_stress(),
+                        governor.tick_duration()
+                    );
+                } else {
+                    tracing::info!(
+                        "🧘 System 1 routine: entropy={:.2}, tick={:?}",
+                        governor.entropy_index(),
+                        governor.tick_duration()
+                    );
+                }
+            }
+
+            // Sync the Candle brain with the (now current) governor mode for the next tick.
+            {
+                let mut mind = autonomous_clock_mind.lock().await;
+                if let Some(ref mut brain) = mind.candle_brain {
+                    brain.set_system2_active(governor.system2_active());
                 }
             }
         }
