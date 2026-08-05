@@ -122,15 +122,11 @@ pub fn try_load_bridge() -> Result<(), String> {
     let mut paths: Vec<String> = vec![
         "libFireflySiriBridge.dylib".to_string(),
         "./libFireflySiriBridge.dylib".to_string(),
-        "target/release/libFireflySiriBridge.dylib".to_string(),
-        "target/debug/libFireflySiriBridge.dylib".to_string(),
     ];
 
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        paths.push(format!("{}/release/libFireflySiriBridge.dylib", target_dir));
-        paths.push(format!("{}/debug/libFireflySiriBridge.dylib", target_dir));
-    }
-
+    // Prefer the bridge sitting next to the running executable, then the
+    // build target directory matching the executable, then the default
+    // `target/{release,debug}` fallback for manual runs.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(d) = dir.to_str() {
@@ -141,6 +137,14 @@ pub fn try_load_bridge() -> Result<(), String> {
             }
         }
     }
+
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        paths.push(format!("{}/release/libFireflySiriBridge.dylib", target_dir));
+        paths.push(format!("{}/debug/libFireflySiriBridge.dylib", target_dir));
+    }
+
+    paths.push("target/release/libFireflySiriBridge.dylib".to_string());
+    paths.push("target/debug/libFireflySiriBridge.dylib".to_string());
 
     for path in &paths {
         let lib = match unsafe { Library::new(path) } {

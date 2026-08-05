@@ -2,6 +2,17 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // macOS: the Swift bridge dylib calls back into the executable to register
+    // the Apple Intelligence callback.  In release builds with LTO enabled, the
+    // linker may not put public C symbols in the dynamic symbol table by
+    // default, causing the dylib to call a NULL function pointer and segfault.
+    // `-Wl,-export_dynamic` keeps the required symbols visible at runtime.
+    if let Ok(target) = env::var("TARGET") {
+        if target.contains("apple-darwin") {
+            println!("cargo:rustc-link-arg=-Wl,-export_dynamic");
+        }
+    }
+
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing");
     let target_dir = env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
