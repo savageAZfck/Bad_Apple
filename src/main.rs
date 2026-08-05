@@ -7422,10 +7422,11 @@ async fn main() -> Result<()> {
                 brain_state: brain_outputs.clone(),
             };
 
-            // Compact engram for UDP exchange.  The 2048-D embedding is included
-            // so the receiver's socket gate can compute goal similarity before
-            // regenerating the vector from `experiential_text`.  The 100-D brain
-            // state is truncated to the multi-agent engram limit.
+            // Compact engram for network exchange.  The 2048-D embedding is
+            // included for TCP/WebSocket peers so their socket gate can compute
+            // goal similarity, but it is stripped from the UDP copy to keep the
+            // datagram under the 65 KB limit.  The 100-D brain state is
+            // truncated to the multi-agent engram limit.
             let mut compact_brain_state = engram_node.brain_state.clone();
             compact_brain_state.truncate(protocol::ENGRAM_DIM);
             let mut compact_embedding = engram_node.embedding.clone();
@@ -7527,12 +7528,19 @@ async fn main() -> Result<()> {
                 gw_lock.coordinate_attention_broadcast(signals);
             }
 
+            // UDP engrams are kept small: drop the 2048-D embedding so the
+            // signed JSON payload reliably fits inside a single datagram.  The
+            // full embedding is still sent over TCP/WebSocket through
+            // `clock_wan.broadcast`.
+            let mut udp_compact_engram = compact_engram.clone();
+            udp_compact_engram.embedding.clear();
+
             // Phase 4: Multi-agent UDP broadcast to localhost peers 5001-5010
             //          and wide-area TCP/WebSocket gossip to configured peers.
             if should_send {
                 clock_wan.broadcast(&compact_engram).await;
                 if let Some(ref sock) = send_socket {
-                    let payload = serde_json::to_vec(&compact_engram).unwrap_or_default();
+                    let payload = serde_json::to_vec(&udp_compact_engram).unwrap_or_default();
                     if !payload.is_empty() {
                         let signed =
                             serde_json::to_vec(&sign_packet(&name_copy, &payload, &secret))
