@@ -20,6 +20,7 @@ use tokio::{
 };
 
 mod apple_intelligence;
+mod apple_intelligence_client;
 mod benchmark;
 mod config;
 mod conscience_oracle;
@@ -27,20 +28,19 @@ mod data_feed;
 mod governor;
 mod hyperdimensional_core;
 mod metrics;
-mod ollama_client;
 mod production_blueprint;
 mod protocol;
 mod strategy_library;
 mod telemetry;
 mod tensor_brain;
 mod wild_workspace;
+use apple_intelligence_client::AppleIntelligenceClient;
 use benchmark::{BenchmarkSuite, PilotReport, TransferSuite, TransferTask};
 use conscience_oracle::ConscienceOracle;
 use dashmap::DashMap;
 use data_feed::{default_curriculum_dirs, DataCurriculum};
 use governor::DualProcessGovernor;
 use metrics::MemoryProfiler;
-use ollama_client::OllamaClient;
 use production_blueprint::{
     CausalGraph, GlobalWorkspace, HomeostaticController,
     NeuroSymbolicEngine as ProductionNeuroSymbolicEngine, ThermalState,
@@ -5608,7 +5608,7 @@ impl FullySapientSoulMatrix {
 /// Generate a `Plan` from a high-level goal using the local LLM.
 /// Optionally includes a note about a previous failure to avoid the same mistake.
 async fn generate_plan(
-    ollama: &OllamaClient,
+    client: &AppleIntelligenceClient,
     model: &str,
     goal: &str,
     previous_failure: Option<&str>,
@@ -5624,7 +5624,7 @@ async fn generate_plan(
         "Break the following goal into at most 4 concrete sub-steps.\n\nGoal: {}{}\n\nReturn a numbered list, one step per line. Example:\n1. load data\n2. filter rows\n3. compute summary",
         goal, failure_note
     );
-    let raw = match ollama.generate(model, &prompt, Some(system)).await {
+    let raw = match client.generate(model, &prompt, Some(system)).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("⚠️ Plan generation LLM call failed: {}", e);
@@ -5714,7 +5714,7 @@ fn best_matching_skill(mind: &FullySapientSoulMatrix, step: &str) -> Option<(Str
 /// 🧠 Evaluate a single transfer-learning task: learn from one example and test on another.
 /// Returns (success, test_output, cleaned_code).
 async fn evaluate_transfer_task(
-    ollama: &OllamaClient,
+    client: &AppleIntelligenceClient,
     model: &str,
     task: &TransferTask,
 ) -> (bool, Option<String>, Option<String>) {
@@ -5735,7 +5735,7 @@ async fn evaluate_transfer_task(
             prompt.push_str("\n\nProvide only the Python function `def skill(x): ...`");
         }
 
-        let raw_code = match ollama
+        let raw_code = match client
             .generate(
                 model,
                 &prompt,
@@ -6094,7 +6094,7 @@ async fn main() -> Result<()> {
     let homeostatic_controller = Arc::new(TokioMutex::new(HomeostaticController::new()));
     let dual_process_reasoner = Arc::new(TokioMutex::new(ProductionNeuroSymbolicEngine::new()));
 
-    // 📡 Real-time telemetry + sensor grounding + Ollama LLM client
+    // 📡 Real-time telemetry + sensor grounding + Apple Intelligence client
     let telemetry = Arc::new(TokioMutex::new(TelemetryState::new()));
     let sensors = Arc::new(TokioMutex::new(SensorSnapshot::new()));
     let metrics_logger: metrics::SharedMetrics = Arc::new(TokioMutex::new(
@@ -6111,13 +6111,10 @@ async fn main() -> Result<()> {
             default_curriculum_dirs().as_slice(),
         );
     }
-    let ollama = Arc::new(OllamaClient::new());
-    let ollama_model = config.ollama_model.clone();
-    if ollama.is_available().await {
-        tracing::info!(
-            "🧠 Oracle backend available; default model: {}",
-            ollama_model
-        );
+    let client = Arc::new(AppleIntelligenceClient::new());
+    let model_id = config.apple_intelligence_model.clone();
+    if client.is_available().await {
+        tracing::info!("🧠 Oracle backend available; default model: {}", model_id);
     } else {
         tracing::info!("⚠️  Apple Intelligence bridge not loaded. LLM reflection will be skipped.");
     }
@@ -6125,7 +6122,7 @@ async fn main() -> Result<()> {
     let telemetry_server_sensors = sensors.clone();
     let telemetry_server_metrics = metrics_logger.clone();
     let telemetry_server_mind = Arc::clone(&core_mind);
-    let telemetry_server_ollama = Arc::clone(&ollama);
+    let telemetry_server_client = Arc::clone(&client);
     let telemetry_server_strategy_library = Arc::clone(&strategy_library);
     let telemetry_port = config.telemetry_port;
     tokio::spawn(async move {
@@ -6134,7 +6131,7 @@ async fn main() -> Result<()> {
             telemetry_server_sensors,
             telemetry_server_metrics,
             telemetry_server_mind,
-            telemetry_server_ollama,
+            telemetry_server_client,
             telemetry_server_strategy_library,
             telemetry_port,
         )
@@ -6143,15 +6140,15 @@ async fn main() -> Result<()> {
 
     // 🌿 WILD WORKSPACE: local file-watcher sandbox.
     let wild_path = config.wild_workspace_dir.clone();
-    let wild_ollama = Arc::clone(&ollama);
-    let wild_model = ollama_model.clone();
+    let wild_client = Arc::clone(&client);
+    let wild_model = model_id.clone();
     let wild_strategy_library = Arc::clone(&strategy_library);
     tokio::spawn(async move {
         match start_watcher(&wild_path) {
             Ok(rx) => {
                 run_wild_loop(
                     rx,
-                    wild_ollama,
+                    wild_client,
                     wild_model,
                     wild_path,
                     wild_strategy_library,
@@ -7382,15 +7379,15 @@ async fn main() -> Result<()> {
     let agent_mind = Arc::clone(&core_mind);
     let agent_sensors = sensors.clone();
     let agent_telemetry = telemetry.clone();
-    let agent_ollama = ollama.clone();
+    let agent_client = client.clone();
     let agent_strategy_library = Arc::clone(&strategy_library);
-    let agent_model = ollama_model.clone();
+    let agent_model = model_id.clone();
     let agent_wan = wan_manager.clone();
     tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(60)).await;
 
-            if !agent_ollama.is_available().await {
+            if !agent_client.is_available().await {
                 continue;
             }
 
@@ -7419,7 +7416,7 @@ async fn main() -> Result<()> {
 
             if needs_replan {
                 if let Some(plan) = generate_plan(
-                    &agent_ollama,
+                    &agent_client,
                     &agent_model,
                     &high_level_goal,
                     last_failure.as_deref(),
@@ -7562,14 +7559,14 @@ async fn main() -> Result<()> {
 
             for attempt in 0..3 {
                 let prompt = format!("{}\n(Attempt {})", prompt_template, attempt + 1);
-                let tool_json: serde_json::Value = match agent_ollama
+                let tool_json: serde_json::Value = match agent_client
                     .generate_structured(&agent_model, &prompt, None)
                     .await
                 {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::info!(
-                            "⚠️ Agent loop Ollama call failed (attempt {}): {}",
+                            "⚠️ Agent loop Apple Intelligence call failed (attempt {}): {}",
                             attempt + 1,
                             e
                         );
@@ -7850,14 +7847,14 @@ async fn main() -> Result<()> {
     });
 
     // --- BENCHMARK THREAD: math / logic / code puzzle evaluation ---
-    let benchmark_ollama = ollama.clone();
-    let benchmark_model = ollama_model.clone();
+    let benchmark_client = client.clone();
+    let benchmark_model = model_id.clone();
     let benchmark_telemetry = telemetry.clone();
     tokio::spawn(async move {
         let mut suite = BenchmarkSuite::new();
         loop {
             sleep(Duration::from_secs(120)).await;
-            if !benchmark_ollama.is_available().await {
+            if !benchmark_client.is_available().await {
                 continue;
             }
             let task = suite.next_task().clone();
@@ -7866,7 +7863,7 @@ async fn main() -> Result<()> {
                 "You are a Python 3 coding assistant. Return ONLY a JSON object with exactly these fields:\n'name' (short identifier),\n'language' (must be 'python'),\n'code' (a short Python 3 script that computes and prints only the answer).\n\nTask: {}\n\nExample response for a different task: {{\"name\":\"solve\",\"language\":\"python\",\"code\":\"print(17*23 + 12*31)\"}}",
                 task.prompt
             );
-            let code = match benchmark_ollama.generate_structured(&benchmark_model, &prompt, Some("Return only the JSON object. The code must be valid Python 3 and print only the final answer. Do not add explanation or markdown.")).await {
+            let code = match benchmark_client.generate_structured(&benchmark_model, &prompt, Some("Return only the JSON object. The code must be valid Python 3 and print only the final answer. Do not add explanation or markdown.")).await {
                 Ok(v) => {
                     let lang = v.get("language").and_then(|l| l.as_str()).unwrap_or("").to_string();
                     if lang != "python" {
@@ -7928,8 +7925,8 @@ async fn main() -> Result<()> {
     });
 
     // --- TRANSFER-LEARNING THREAD: evaluate one-shot domain transfer ---
-    let transfer_ollama = ollama.clone();
-    let transfer_model = ollama_model.clone();
+    let transfer_client = client.clone();
+    let transfer_model = model_id.clone();
     let transfer_telemetry = telemetry.clone();
     let transfer_mind = core_mind.clone();
     tokio::spawn(async move {
@@ -7937,7 +7934,7 @@ async fn main() -> Result<()> {
         let mut pilot = PilotReport::new();
         loop {
             sleep(Duration::from_secs(180)).await;
-            if !transfer_ollama.is_available().await {
+            if !transfer_client.is_available().await {
                 continue;
             }
             let task = suite.next_task().clone();
@@ -7947,7 +7944,7 @@ async fn main() -> Result<()> {
                 + task.test_input.split_whitespace().count()
                 + task.test_output.split_whitespace().count();
             let (success, output, code) =
-                evaluate_transfer_task(&transfer_ollama, &transfer_model, &task).await;
+                evaluate_transfer_task(&transfer_client, &transfer_model, &task).await;
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
             let peak_rss_mb = PilotReport::current_rss_mb().unwrap_or(0.0);
             pilot.record_run(
@@ -8091,10 +8088,10 @@ async fn main() -> Result<()> {
             let result = mind.process_cognitive_cycle(&reasoning_input, &reasoner_guard);
             let self_awareness = mind.meta_cognition.self_awareness;
             drop(reasoner_guard);
-            drop(mind); // release while talking to Ollama
+            drop(mind); // release while talking to Apple Intelligence
 
-            // 🧠 Ollama LLM reflection + goal generation
-            let reflection_prompt = ollama_client::ReflectionPrompt {
+            // 🧠 Apple Intelligence reflection + goal generation
+            let reflection_prompt = apple_intelligence_client::ReflectionPrompt {
                 input: reasoning_input.clone(),
                 active_goals: result.active_goals.clone(),
                 emotional_state: result.emotional_state.active_primary_blend.clone(),
@@ -8108,10 +8105,10 @@ async fn main() -> Result<()> {
                     sensor_snapshot.mass),
             };
 
-            if ollama.is_available().await {
+            if client.is_available().await {
                 let llm_start = Instant::now();
-                match ollama
-                    .generate(&ollama_model, &reflection_prompt.to_prompt(), None)
+                match client
+                    .generate(&model_id, &reflection_prompt.to_prompt(), None)
                     .await
                 {
                     Ok(reflection) => {
@@ -8138,9 +8135,9 @@ async fn main() -> Result<()> {
                 }
 
                 let goal_system = "You are a strict planning AI. Output only a compact valid JSON array of at most 3 short concrete sub-goal strings. No objects, no keys, no explanations, no markdown, no repetition.";
-                match ollama
+                match client
                     .generate_constrained(
-                        &ollama_model,
+                        &model_id,
                         &reflection_prompt.to_goal_prompt(),
                         Some(goal_system),
                         160,
@@ -8188,7 +8185,7 @@ async fn main() -> Result<()> {
                     Err(e) => tracing::info!("⚠️ LLM goal generation failed: {}", e),
                 }
             } else {
-                tracing::info!("⚠️ Ollama not available; skipping LLM reflection.");
+                tracing::info!("⚠️ Apple Intelligence not available; skipping LLM reflection.");
             }
 
             mind = core_mind.lock().await;

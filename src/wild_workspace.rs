@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::apple_intelligence;
+use crate::apple_intelligence_client::AppleIntelligenceClient;
 use crate::benchmark::RustValidator;
 use crate::hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
 use crate::is_safe_agent_code;
-use crate::ollama_client::OllamaClient;
 use crate::strategy_library::{RustSynthesizer, Strategy, StrategyLibrary};
 use crate::telemetry::run_sandboxed_tool;
 use tokio::task::spawn_blocking;
@@ -101,7 +101,7 @@ fn read_limited_text(path: &Path) -> Result<String, String> {
 /// fails the raw Python exception is fed back into the next prompt.  Up to
 /// `MAX_SELF_HEAL_ATTEMPTS` episodes are tried before giving up.
 pub async fn process_wild_payload(
-    ollama: &OllamaClient,
+    client: &AppleIntelligenceClient,
     model: &str,
     path: &Path,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
@@ -129,7 +129,7 @@ pub async fn process_wild_payload(
 
         let tool_json = match timeout(
             MAX_LLM_TIMEOUT,
-            ollama.generate_structured(
+            client.generate_structured(
                 model,
                 &prompt,
                 Some("Return only valid JSON with name, language='python', and code."),
@@ -318,7 +318,7 @@ pub struct SynthesisOutcome {
 /// Run the wild workspace ingestion loop.
 pub async fn run_wild_loop(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
-    ollama: Arc<OllamaClient>,
+    client: Arc<AppleIntelligenceClient>,
     model: String,
     watch_path: PathBuf,
     strategy_library: Arc<StrategyLibrary>,
@@ -366,7 +366,7 @@ pub async fn run_wild_loop(
                                 }
                             }
                         } else {
-                            match process_wild_payload(&ollama, &model, &path).await {
+                            match process_wild_payload(&client, &model, &path).await {
                                 Ok((name, output)) => {
                                     println!(
                                         "🌿 [WILD] Processed {} with '{}': {}",

@@ -1,5 +1,5 @@
+use crate::apple_intelligence_client::AppleIntelligenceClient;
 use crate::metrics::MetricsLogger;
-use crate::ollama_client::OllamaClient;
 use crate::protocol::SwarmMetrics;
 use crate::strategy_library::StrategyLibrary;
 use crate::{FullySapientSoulMatrix, Skill};
@@ -226,7 +226,7 @@ pub struct SensorSnapshot {
     pub disk_total_bytes: u64,
     pub disk_used_bytes: u64,
     pub network_localhost_reachable: bool,
-    pub network_ollama_reachable: bool,
+    pub apple_intelligence_available: bool,
     pub network_rx_bytes_per_sec: f64,
     pub network_tx_bytes_per_sec: f64,
     pub top_process_name: String,
@@ -381,7 +381,7 @@ pub fn update_sensor_snapshot(
 
     // Network reachability (cheap, keep every cycle)
     snapshot.network_localhost_reachable = is_host_reachable("127.0.0.1", 8080);
-    snapshot.network_ollama_reachable = is_host_reachable("127.0.0.1", 11434);
+    snapshot.apple_intelligence_available = crate::apple_intelligence::is_available();
 
     // Curriculum footprint
     let (c_files, c_bytes) = count_curriculum(curriculum_dirs);
@@ -423,7 +423,7 @@ struct AppState {
     sensors: Arc<Mutex<SensorSnapshot>>,
     metrics: Arc<Mutex<MetricsLogger>>,
     core_mind: Arc<Mutex<FullySapientSoulMatrix>>,
-    ollama: Arc<OllamaClient>,
+    client: Arc<AppleIntelligenceClient>,
     strategy_library: Arc<StrategyLibrary>,
 }
 
@@ -943,7 +943,7 @@ Provide only the Python function `def skill(x): ...`",
     );
 
     let raw_code = match state
-        .ollama
+        .client
         .generate(
             model,
             &prompt,
@@ -1190,7 +1190,7 @@ Training output: {:?}",
         }
 
         let raw_code = match state
-            .ollama
+            .client
             .generate(
                 model,
                 &prompt,
@@ -1391,7 +1391,7 @@ pub async fn run_telemetry_server(
     sensors: Arc<Mutex<SensorSnapshot>>,
     metrics: Arc<Mutex<MetricsLogger>>,
     core_mind: Arc<Mutex<FullySapientSoulMatrix>>,
-    ollama: Arc<OllamaClient>,
+    client: Arc<AppleIntelligenceClient>,
     strategy_library: Arc<StrategyLibrary>,
     port: u16,
 ) {
@@ -1400,7 +1400,7 @@ pub async fn run_telemetry_server(
         sensors,
         metrics,
         core_mind,
-        ollama,
+        client,
         strategy_library,
     };
     let app = Router::new()

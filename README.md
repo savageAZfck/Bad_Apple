@@ -28,13 +28,13 @@ Contact: savagetism@icloud.com
 - **Exposes everything on `http://127.0.0.1:8080`**: live dashboards, metrics, skill runner, transfer evaluator, and identity endpoints.
 - **Exposes a C FFI bridge**: `build.rs` generates `firefly_core.h` and `cargo build --release` produces `libsapient_soul.dylib` for native macOS interop.
 - **Uses structured `tracing` logging**, `anyhow` error handling, and a centralized `Config` loaded from `FIREFLY_*` environment variables.
-- **Auto-falls back to a working Ollama model** when the configured one is unavailable.
+- **Routes all LLM generation through the native Apple Intelligence bridge**; no external LLM server is required.
 
 ---
 
 ## Quick start
 
-Requires Rust, an Ollama-compatible LLM at `127.0.0.1:11434`, and a `curriculum/` directory with `.txt` files.
+Requires Rust, macOS with the native Apple Intelligence bridge built, and a `curriculum/` directory with `.txt` files.
 
 ```bash
 git clone <private repo>
@@ -76,7 +76,7 @@ cargo build --release
 - `src/main.rs` — 8,047-line cognitive loop, planning, identity, memory, multi-agent wiring.
 - `src/tensor_brain.rs` — Candle Transformer, BPE tokenizer, three heads, AdamW training.
 - `src/conscience_oracle.rs` — LLM oracle + semantic cosine fallback.
-- `src/ollama_client.rs` — Ollama HTTP client with model auto-fallback.
+- `src/apple_intelligence_client.rs` — Native Apple Intelligence oracle client with JSON repair and auto-fallback.
 - `src/strategy_library.rs` — Sled-backed durable cache for proven tool blueprints.
 - `src/wild_workspace.rs` — Async directory watcher and payload processor.
 - `src/benchmark.rs` — Transfer and puzzle benchmark suites, plus `PilotReport` metrics.

@@ -16,8 +16,8 @@ pub struct Config {
     pub multi_agent_port_start: u16,
     /// Last port in the multi-agent UDP range.
     pub multi_agent_port_end: u16,
-    /// Apple Intelligence / oracle model identifier (legacy field, kept for config compatibility).
-    pub ollama_model: String,
+    /// Native Apple Intelligence / oracle model identifier.
+    pub apple_intelligence_model: String,
     /// Path to the persistent agent state file.
     pub state_file: PathBuf,
     /// Path to the local curriculum directory.
@@ -67,7 +67,10 @@ impl Config {
             telemetry_port: env_u16("FIREFLY_TELEMETRY_PORT", 8080),
             multi_agent_port_start: env_u16("FIREFLY_MULTI_AGENT_PORT_START", 5001),
             multi_agent_port_end: env_u16("FIREFLY_MULTI_AGENT_PORT_END", 5010),
-            ollama_model: env_or("FIREFLY_OLLAMA_MODEL", "apple-intelligence"),
+            apple_intelligence_model: env_or(
+                "FIREFLY_APPLE_INTELLIGENCE_MODEL",
+                "apple-intelligence",
+            ),
             state_file: env_path("FIREFLY_STATE_FILE", "state.json"),
             curriculum_dir: env_path("FIREFLY_CURRICULUM_DIR", "curriculum"),
             wild_workspace_dir: env_path("FIREFLY_WILD_WORKSPACE_DIR", "wild_workspace"),
@@ -152,8 +155,8 @@ fn merge_config(base: &mut Config, overlay: Config) {
     if overlay.multi_agent_port_end != 0 {
         base.multi_agent_port_end = overlay.multi_agent_port_end;
     }
-    if !overlay.ollama_model.is_empty() {
-        base.ollama_model = overlay.ollama_model;
+    if !overlay.apple_intelligence_model.is_empty() {
+        base.apple_intelligence_model = overlay.apple_intelligence_model;
     }
     if !overlay.state_file.as_os_str().is_empty() {
         base.state_file = overlay.state_file;
