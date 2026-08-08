@@ -3,7 +3,8 @@ name = "firefly_edgeos"
 version = "0.1.0"
 edition = "2021"
 authors = ["Adam Clark <savagetism@icloud.com>"]
-license-file = "LICENSE.txt"
+repository = "https://github.com/savageAZfck/Firefly-EdgeOS"
+license = "LicenseRef-Proprietary"
 description = "Firefly EdgeOS — a local-first, self-training AGI runtime"
 build = "build.rs"
 
