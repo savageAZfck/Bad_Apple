@@ -9,7 +9,7 @@ build = "build.rs"
 
 [lib]
 name = "firefly_edgeos"
-crate-type = ["lib", "staticlib", "cdylib"]
+crate-type = ["lib"]
 
 [[bin]]
 name = "firefly_edgeos"
