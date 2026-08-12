@@ -267,6 +267,9 @@ pub struct CandleBrain {
     warmup_max_lr: f64,
     /// Number of cycles the LR dampener stays active after boot.
     warmup_cycles: u64,
+    /// Maximum global gradient L2 norm.  Anything larger is rescaled to this
+    /// ceiling to stop loss explosions during backpropagation.
+    max_grad_norm: f64,
 }
 
 impl fmt::Debug for CandleBrain {
@@ -390,6 +393,7 @@ impl CandleBrain {
             cycle: 0,
             warmup_max_lr: 0.00005,
             warmup_cycles: 30,
+            max_grad_norm: 1.0,
         })
     }
 
@@ -493,8 +497,41 @@ impl CandleBrain {
     }
 
     /// Shared gradient-backward step across the LLRD optimizer groups.
+    ///
+    /// Computes gradients, rescales them if their global L2 norm exceeds
+    /// `max_grad_norm`, and then applies the AdamW optimizer.  Hard gradient
+    /// clipping prevents the loss explosions seen during extended training.
     fn backward_step(&mut self, loss: &Tensor) -> Result<()> {
-        let grads = loss.backward()?;
+        let mut grads = loss.backward()?;
+
+        // Global L2 norm across all parameter gradients.
+        let mut norm_sq = 0.0;
+        let data = self.varmap.data().lock().unwrap();
+        for var in data.values() {
+            if let Some(g) = grads.get(var.as_tensor()) {
+                let n = g.sqr()?.sum_all()?.to_vec0::<f32>()? as f64;
+                norm_sq += n;
+            }
+        }
+        drop(data);
+
+        let norm = norm_sq.sqrt();
+        let scale = if norm > self.max_grad_norm {
+            self.max_grad_norm / norm
+        } else {
+            1.0
+        };
+
+        if scale < 1.0 {
+            let data = self.varmap.data().lock().unwrap();
+            for var in data.values() {
+                if let Some(g) = grads.get(var.as_tensor()) {
+                    let scaled = g.affine(scale, 0.0)?;
+                    let _ = grads.insert(var.as_tensor(), scaled);
+                }
+            }
+        }
+
         for g in &mut self.optimizers {
             let lr = self.base_lr * g.gamma * self.system2_lr_multiplier;
             g.optimizer.set_learning_rate(lr);
