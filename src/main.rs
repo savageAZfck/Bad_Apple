@@ -8311,8 +8311,18 @@ async fn main() -> Result<()> {
                 + task.test_output.split_whitespace().count();
             let (success, output, code) =
                 evaluate_transfer_task(&transfer_client, &transfer_model, &task).await;
-            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let latency_ns = start.elapsed().as_nanos() as u64;
+            let latency_ms = latency_ns as f64 / 1_000_000.0;
             let peak_rss_mb = PilotReport::current_rss_mb().unwrap_or(0.0);
+            let latency_stats = crate::metrics::LatencyStats {
+                samples: 1,
+                min_ns: latency_ns,
+                p50_ns: latency_ns,
+                p99_ns: latency_ns,
+                p99_9_ns: latency_ns,
+                max_ns: latency_ns,
+                mean_ns: latency_ns,
+            };
             pilot.record_run(
                 task.domain,
                 success,
@@ -8320,7 +8330,7 @@ async fn main() -> Result<()> {
                 peak_rss_mb,
                 token_count,
                 0.0,
-                crate::metrics::LatencyStats::default(),
+                latency_stats,
             );
             pilot.save_to_disk(); // synchronous side-effect file write
             suite.record(task.domain, success);
