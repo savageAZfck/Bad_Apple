@@ -10,6 +10,7 @@
 //! through the C FFI rather than via HTTP/JSON, and the returned string is
 //! freed on the Rust side as soon as it is converted.
 
+use crossbeam_channel::{bounded, unbounded, Sender};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +39,29 @@ static LAST_LATENCY_US: AtomicU64 = AtomicU64::new(0);
 static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 static FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Request sent to the dedicated Apple Intelligence actor thread.
+///
+/// The actor is the only thread that ever calls the registered C callback,
+/// serializing all native framework invocations.  Callers receive the result
+/// through the supplied one-shot reply channel.
+type ActorRequest = (String, Sender<Option<String>>);
+
+/// MPMC send handle for the actor thread.  Lazily initialized on the first
+/// Apple Intelligence request.
+static FFI_TX: OnceLock<Sender<ActorRequest>> = OnceLock::new();
+
+/// Spawn the single background actor that owns the Apple Intelligence callback.
+fn spawn_actor() -> Sender<ActorRequest> {
+    let (tx, rx) = unbounded::<ActorRequest>();
+    std::thread::spawn(move || {
+        while let Ok((prompt, reply)) = rx.recv() {
+            let result = invoke_callback(&prompt);
+            let _ = reply.send(result);
+        }
+    });
+    tx
+}
+
 /// Register the Apple Intelligence callback.  This is the public FFI
 /// primitive used by the embedded Swift bridge and by external daemons.
 #[no_mangle]
@@ -51,13 +75,12 @@ pub fn is_available() -> bool {
     CALLBACK.get().is_some()
 }
 
-/// Synchronously invoke the registered Apple Intelligence callback.
+/// Internal, unsynchronized C callback invocation.
 ///
-/// Panics inside the foreign function are caught and treated as a failure,
-/// preserving the calling async task.  The returned C string is copied into a
-/// Rust `String` and then released through the bridge's registered `free`
-/// callback (or `libc::free` as a fallback) before the function returns.
-pub fn call_sync(prompt: &str) -> Option<String> {
+/// This is intentionally private: the single actor thread is the only caller,
+/// so NLEmbedding / SystemLanguageModel calls never race.  Panics inside the
+/// foreign function are caught and treated as a failure.
+fn invoke_callback(prompt: &str) -> Option<String> {
     let cb = *CALLBACK.get()?;
     let c_prompt = CString::new(prompt).ok()?;
     let start = Instant::now();
@@ -84,6 +107,18 @@ pub fn call_sync(prompt: &str) -> Option<String> {
     Some(output)
 }
 
+/// Synchronously invoke the Apple Intelligence callback through the actor.
+///
+/// This keeps all native framework calls on a single, dedicated thread so the
+/// main runtime never contends the NLEmbedding lock.  The caller blocks only
+/// on the reply channel, not on the Apple framework itself.
+pub fn call_sync(prompt: &str) -> Option<String> {
+    let actor = FFI_TX.get_or_init(spawn_actor);
+    let (reply_tx, reply_rx) = bounded(1);
+    actor.send((prompt.to_string(), reply_tx)).ok()?;
+    reply_rx.recv().ok()?
+}
+
 /// RAII guard that owns a foreign-allocated C string and frees it on drop.
 struct CStringOwner(*mut c_char);
 
@@ -100,11 +135,18 @@ impl Drop for CStringOwner {
     }
 }
 
-/// Asynchronously invoke the callback on a blocking thread so the async
-/// runtime is never paused by the model inference.
+/// Asynchronously invoke the callback through the dedicated actor thread.
+///
+/// The caller pushes the request into the lock-free MPMC queue and awaits the
+/// one-shot reply, keeping the async runtime unblocked and the native
+/// framework calls serialized on a single background thread.
 pub async fn call(prompt: &str) -> Option<String> {
-    let prompt = prompt.to_string();
-    tokio::task::spawn_blocking(move || call_sync(&prompt))
+    let actor = FFI_TX.get_or_init(spawn_actor);
+    let (reply_tx, reply_rx) = bounded(1);
+    actor
+        .send((prompt.to_string(), reply_tx))
+        .ok()?;
+    tokio::task::spawn_blocking(move || reply_rx.recv().ok()?)
         .await
         .ok()?
 }

@@ -5189,10 +5189,15 @@ impl FullySapientSoulMatrix {
             let _ = brain.save_weights(&safetensors_path);
         }
 
-        // Use compact JSON serialization; it is ~2x faster than pretty-printing
-        // and the loader accepts any valid JSON.
-        if let Ok(save) = serde_json::to_vec(self) {
-            let _ = fs::write(filename, save);
+        // Stream compact JSON directly to a buffered, atomically-renamed file.
+        // This avoids the 200+ MiB `Vec<u8>` peak that `serde_json::to_vec` creates
+        // and keeps `state.json` uncorrupted if the process is killed mid-write.
+        let tmp = filename.with_extension("json.tmp");
+        if let Ok(file) = fs::File::create(&tmp) {
+            let writer = std::io::BufWriter::new(file);
+            if serde_json::to_writer(writer, self).is_ok() {
+                let _ = fs::rename(&tmp, filename);
+            }
         }
 
         // 🆕 Save weight persistence subnode
@@ -5227,8 +5232,9 @@ impl FullySapientSoulMatrix {
     }
 
     fn load_state(filename: &std::path::Path) -> Option<Self> {
-        fs::read_to_string(filename).ok().and_then(|s| {
-            let mut parsed: FullySapientSoulMatrix = serde_json::from_str(&s).ok()?;
+        fs::File::open(filename).ok().and_then(|file| {
+            let reader = std::io::BufReader::new(file);
+            let mut parsed: FullySapientSoulMatrix = serde_json::from_reader(reader).ok()?;
 
             // 🆕 Load weight persistence subnode
             let weight_path = PathBuf::from(filename).with_extension("weights");

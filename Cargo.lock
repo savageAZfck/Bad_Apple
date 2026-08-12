@@ -977,6 +977,7 @@ dependencies = [
  "candle-nn",
  "cbindgen",
  "chrono",
+ "crossbeam-channel",
  "crossbeam-queue",
  "crossbeam-utils",
  "dashmap",
