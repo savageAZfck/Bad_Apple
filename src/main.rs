@@ -358,6 +358,13 @@ struct NeuralWorldModel {
     w: Vec<Vec<f64>>,
     b: Vec<f64>,
     lr: f64,
+    /// Maximum per-element gradient used during SGD updates.  Capping this
+    /// stops the world-model from accumulating astronomically large weights
+    /// when the target 2048-D embedding is far from the prediction.
+    max_grad: f64,
+    /// Maximum absolute weight update on a single step, independent of the
+    /// gradient cap, to prevent any single dimension from exploding.
+    max_update: f64,
 }
 
 impl NeuralWorldModel {
@@ -378,9 +385,60 @@ impl NeuralWorldModel {
             w,
             b: vec![0.0; output_dim],
             lr: 0.001,
+            max_grad: 10.0,
+            max_update: 0.1,
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    fn predict(&self, state: &[f64]) -> Vec<f64> {
+        use core::arch::aarch64::*;
+
+        let out_dim = self.b.len();
+        let mut out: Vec<f64> = self.b.clone();
+
+        // Exponent-mask for f64: bits 62..52 all 1s => NaN or Inf.
+        const EXP_MASK: u64 = 0x7FF0_0000_0000_0000;
+
+        unsafe {
+            for (i, &s_raw) in state.iter().enumerate() {
+                if i >= self.w.len() {
+                    break;
+                }
+
+                // Sanitize the input state inside the vector lane: NaN/Inf become 0.
+                let s = if s_raw.is_finite() { s_raw } else { 0.0 };
+                let s_v = vdupq_n_f64(s);
+
+                let weights = &self.w[i];
+                let mut j = 0;
+                while j + 2 <= out_dim {
+                    let w = vld1q_f64(weights[j..].as_ptr());
+                    let o = vld1q_f64(out[j..].as_ptr());
+
+                    // vbslq_f64 mask: zero out any weight whose exponent is all 1s.
+                    let w_u = vreinterpretq_u64_f64(w);
+                    let masked_exp = vandq_u64(w_u, vdupq_n_u64(EXP_MASK));
+                    let is_anom = vceqq_u64(masked_exp, vdupq_n_u64(EXP_MASK));
+                    let w_clean = vbslq_f64(is_anom, vdupq_n_f64(0.0), w);
+
+                    // FMA: o += w_clean * s
+                    let new_o = vfmaq_f64(o, w_clean, s_v);
+                    vst1q_f64(out[j..].as_mut_ptr(), new_o);
+
+                    j += 2;
+                }
+                // Tail
+                while j < out_dim {
+                    out[j] += s * weights[j];
+                    j += 1;
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
     fn predict(&self, state: &[f64]) -> Vec<f64> {
         let mut out = self.b.clone();
         for (i, &s) in state.iter().enumerate() {
@@ -394,13 +452,139 @@ impl NeuralWorldModel {
         out
     }
 
+    #[cfg(target_arch = "aarch64")]
+    fn train(&mut self, state: &[f64], target: &[f64]) -> f64 {
+        use core::arch::aarch64::*;
+
+        let out_dim = self.b.len();
+        let pred = self.predict(state);
+
+        const EXP_MASK: u64 = 0x7FF0_0000_0000_0000;
+
+        let mut errors = vec![0.0; out_dim];
+        let mut loss = 0.0;
+
+        unsafe {
+            let max_grad_v = vdupq_n_f64(self.max_grad);
+            let neg_max_grad_v = vdupq_n_f64(-self.max_grad);
+
+            // 1) Vector error + hard gradient clip
+            let mut j = 0;
+            while j + 2 <= out_dim {
+                let p = vld1q_f64(pred[j..].as_ptr());
+                let t = vld1q_f64(target[j..].as_ptr());
+
+                // e = target - pred, then clamp to [-max_grad, max_grad]
+                let e_raw = vsubq_f64(t, p);
+                let e_neg_clamped = vmaxq_f64(e_raw, neg_max_grad_v);
+                let e = vminq_f64(e_neg_clamped, max_grad_v);
+
+                // SIMD loss contribution: loss += sum(e^2)
+                let e_sq = vmulq_f64(e, e);
+                loss += vaddvq_f64(e_sq);
+
+                // Sanitize target/pred anomalies via vbslq_f64 exponent mask
+                let e_u = vreinterpretq_u64_f64(e);
+                let masked_exp = vandq_u64(e_u, vdupq_n_u64(EXP_MASK));
+                let is_anom = vceqq_u64(masked_exp, vdupq_n_u64(EXP_MASK));
+                let e_clean = vbslq_f64(is_anom, vdupq_n_f64(0.0), e);
+
+                vst1q_f64(errors[j..].as_mut_ptr(), e_clean);
+
+                j += 2;
+            }
+            // Tail
+            while j < out_dim {
+                let e = (target[j] - pred[j]).clamp(-self.max_grad, self.max_grad);
+                errors[j] = if e.is_finite() { e } else { 0.0 };
+                loss += e * e;
+                j += 1;
+            }
+            loss = (loss / out_dim as f64).sqrt();
+
+            // 2) Weight update with vector clipping and NaN/Inf sanitization
+            let max_update_v = vdupq_n_f64(self.max_update);
+            let neg_max_update_v = vdupq_n_f64(-self.max_update);
+            let lr_v = vdupq_n_f64(self.lr);
+
+            for (i, &s_raw) in state.iter().enumerate() {
+                if i >= self.w.len() {
+                    break;
+                }
+
+                let s = if s_raw.is_finite() { s_raw } else { 0.0 };
+                let s_v = vdupq_n_f64(s);
+
+                let row = &mut self.w[i];
+                let mut j = 0;
+                while j + 2 <= out_dim {
+                    let e = vld1q_f64(errors[j..].as_ptr());
+                    let w = vld1q_f64(row[j..].as_ptr());
+
+                    // update = clamp(lr * e * s, -max_update, max_update)
+                    let upd1 = vmulq_f64(e, s_v);
+                    let upd2 = vmulq_f64(upd1, lr_v);
+                    let upd_neg_clamped = vmaxq_f64(upd2, neg_max_update_v);
+                    let upd = vminq_f64(upd_neg_clamped, max_update_v);
+
+                    let new_w = vaddq_f64(w, upd);
+
+                    // Final NaN/Inf mask on the updated weight
+                    let new_u = vreinterpretq_u64_f64(new_w);
+                    let masked_exp = vandq_u64(new_u, vdupq_n_u64(EXP_MASK));
+                    let is_anom = vceqq_u64(masked_exp, vdupq_n_u64(EXP_MASK));
+                    let new_w_clean = vbslq_f64(is_anom, vdupq_n_f64(0.0), new_w);
+
+                    vst1q_f64(row[j..].as_mut_ptr(), new_w_clean);
+
+                    j += 2;
+                }
+                while j < out_dim {
+                    let e = errors[j];
+                    let update = (self.lr * e * s).clamp(-self.max_update, self.max_update);
+                    row[j] += if update.is_finite() { update } else { 0.0 };
+                    j += 1;
+                }
+            }
+
+            // 3) Bias update with the same vector discipline
+            let mut j = 0;
+            while j + 2 <= out_dim {
+                let e = vld1q_f64(errors[j..].as_ptr());
+                let b = vld1q_f64(self.b[j..].as_ptr());
+
+                let upd = vmulq_f64(e, lr_v);
+                let upd_neg_clamped = vmaxq_f64(upd, neg_max_update_v);
+                let upd_clamped = vminq_f64(upd_neg_clamped, max_update_v);
+
+                let new_b = vaddq_f64(b, upd_clamped);
+                let new_u = vreinterpretq_u64_f64(new_b);
+                let masked_exp = vandq_u64(new_u, vdupq_n_u64(EXP_MASK));
+                let is_anom = vceqq_u64(masked_exp, vdupq_n_u64(EXP_MASK));
+                let new_b_clean = vbslq_f64(is_anom, vdupq_n_f64(0.0), new_b);
+
+                vst1q_f64(self.b[j..].as_mut_ptr(), new_b_clean);
+
+                j += 2;
+            }
+            while j < out_dim {
+                let update = (self.lr * errors[j]).clamp(-self.max_update, self.max_update);
+                self.b[j] += if update.is_finite() { update } else { 0.0 };
+                j += 1;
+            }
+        }
+
+        loss
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
     fn train(&mut self, state: &[f64], target: &[f64]) -> f64 {
         let pred = self.predict(state);
         let mut loss = 0.0;
         let mut errors = vec![0.0; target.len()];
         for (j, (&p, &t)) in pred.iter().zip(target.iter()).enumerate() {
-            let e = t - p;
-            errors[j] = e;
+            let e = (t - p).clamp(-self.max_grad, self.max_grad);
+            errors[j] = if e.is_finite() { e } else { 0.0 };
             loss += e * e;
         }
         loss = (loss / target.len() as f64).sqrt();
@@ -409,11 +593,13 @@ impl NeuralWorldModel {
                 break;
             }
             for (j, e) in errors.iter().enumerate() {
-                self.w[i][j] += self.lr * e * s;
+                let update = (self.lr * e * s).clamp(-self.max_update, self.max_update);
+                self.w[i][j] += if update.is_finite() { update } else { 0.0 };
             }
         }
         for (j, e) in errors.iter().enumerate() {
-            self.b[j] += self.lr * e;
+            let update = (self.lr * e).clamp(-self.max_update, self.max_update);
+            self.b[j] += if update.is_finite() { update } else { 0.0 };
         }
         loss
     }
@@ -7740,7 +7926,16 @@ async fn main() -> Result<()> {
             }
             if synapses_forged > 0 {
                 tracing::info!("🧬 [OFFLINE CONNECTOME SHIFT]: Successfully forged {} native vector adjacency links.", synapses_forged);
-                mind.save_state(&state_file_copy_2);
+                drop(mind); // release the mutex before the save begins
+                let save_mind = Arc::clone(&cluster_mind);
+                let save_path = state_file_copy_2.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let mind = save_mind.blocking_lock();
+                        mind.save_state(&save_path);
+                    })
+                    .await;
+                });
             }
         }
     });

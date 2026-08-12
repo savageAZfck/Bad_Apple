@@ -153,8 +153,11 @@ impl TransformerBlock {
         let w_2d = w_3d.reshape((self.num_heads, self.head_dim * self.dim))?;
 
         // Gram matrix G = W @ W^T, then mask the diagonal and penalize the
-        // off-diagonal energy.
-        let g = w_2d.matmul(&w_2d.transpose(D::Minus2, D::Minus1)?)?;
+        // off-diagonal energy.  Clamp G before squaring to prevent FPU
+        // overflow when Q/K weights have grown large.
+        let g = w_2d
+            .matmul(&w_2d.transpose(D::Minus2, D::Minus1)?)?
+            .clamp(-10.0, 10.0)?;
         let eye = Tensor::eye(self.num_heads, DType::F32, w.device())?;
         let ones = Tensor::ones((self.num_heads, self.num_heads), DType::F32, w.device())?;
         let off_diag_mask = ones.sub(&eye)?;
@@ -449,7 +452,10 @@ impl CandleBrain {
 
         // Mean-pool over the sequence and project to `dim` output units.
         let pooled = x.mean(1)?.reshape((1, self.dim))?;
-        self.output_head.forward(&pooled)
+        let out = self.output_head.forward(&pooled)?;
+        // Hard vector clamp keeps the 576-D trunk in a finite band, preventing
+        // FPU microcode traps from cascading downstream heads and world model.
+        out.clamp(-10.0, 10.0)
     }
 
     /// Run a full forward pass through the Transformer and project to dim-D.
@@ -462,7 +468,11 @@ impl CandleBrain {
     /// Run a full forward pass and return num_classes conscience logits.
     pub fn classify(&self, input: &[f64]) -> Result<Vec<f64>> {
         let state = self.brain_state(input, false)?;
-        let logits = self.conscience_head.forward(&state)?.squeeze(0)?;
+        let logits = self
+            .conscience_head
+            .forward(&state)?
+            .squeeze(0)?
+            .clamp(-10.0, 10.0)?;
         let values = logits.to_vec1::<f32>()?;
         Ok(values.into_iter().map(|v| v as f64).collect())
     }
@@ -548,7 +558,7 @@ impl CandleBrain {
         let target = Tensor::new(&[target_idx as u32], &self.device)?;
 
         let state = self.brain_state(input, true)?;
-        let logits = self.conscience_head.forward(&state)?;
+        let logits = self.conscience_head.forward(&state)?.clamp(-10.0, 10.0)?;
 
         let loss = nn_loss::cross_entropy(&logits, &target)?;
 
@@ -575,7 +585,7 @@ impl CandleBrain {
         let state_f32: Vec<f32> = brain_state.iter().map(|v| *v as f32).collect();
         let state_t = Tensor::new(state_f32.as_slice(), &self.device)?;
         let state_batch = state_t.reshape((1, state_f32.len()))?;
-        let logits = self.goal_head.forward(&state_batch)?;
+        let logits = self.goal_head.forward(&state_batch)?.clamp(-10.0, 10.0)?;
         let target = Tensor::new(&[target_idx as u32], &self.device)?;
         let loss = nn_loss::cross_entropy(&logits, &target)?;
 
@@ -596,7 +606,11 @@ impl CandleBrain {
         let state_f32: Vec<f32> = brain_state.iter().map(|v| *v as f32).collect();
         let state_t = Tensor::new(state_f32.as_slice(), &self.device)?;
         let state_batch = state_t.reshape((1, state_f32.len()))?;
-        let logits = self.goal_head.forward(&state_batch)?.squeeze(0)?;
+        let logits = self
+            .goal_head
+            .forward(&state_batch)?
+            .squeeze(0)?
+            .clamp(-10.0, 10.0)?;
         let logits_vec = logits.to_vec1::<f32>()?;
         let logits_t = Tensor::new(logits_vec.as_slice(), &self.device)?;
         let probs = nn_ops::softmax(&logits_t, D::Minus1)?.to_vec1::<f32>()?;
@@ -618,7 +632,12 @@ impl CandleBrain {
         let target_t = Tensor::new(target_f32.as_slice(), &self.device)?;
 
         let state_batch = state_t.reshape((1, state_f32.len()))?;
-        let pred = self.language_head.forward(&state_batch)?.squeeze(0)?;
+        let pred = self
+            .language_head
+            .forward(&state_batch)?
+            .squeeze(0)?
+            .clamp(-10.0, 10.0)?;
+        let target_t = target_t.clamp(-10.0, 10.0)?;
 
         let loss = pred.sub(&target_t)?.sqr()?.mean_all()?;
         if self.system2_active {
