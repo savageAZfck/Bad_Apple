@@ -39,7 +39,7 @@ sha2 = "0.11.0"
 base64 = "0.23.0"
 anyhow = "1.0.104"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tokio-tungstenite = { version = "0.23.1", default-features = false, features = ["connect", "handshake", "stream"] }
 futures-util = "0.3.33"
 crossbeam-queue = "0.3.12"

@@ -6254,7 +6254,9 @@ async fn merge_engram_batch(
 #[tokio::main]
 #[allow(unreachable_code)]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,sapient_soul=warn"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = Config::from_env();
     tracing::info!("starting firefly_edgeos");
