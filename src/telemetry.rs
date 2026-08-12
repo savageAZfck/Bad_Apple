@@ -46,6 +46,7 @@ pub struct TelemetryState {
     pub memory_node_count: usize,
     pub active_goal_count: usize,
     pub state_save_duration_ms: u64,
+    pub state_save_handoff_us: u64,
     pub last_llm_latency_ms: f64,
     pub llm_tokens_per_second: f64,
     pub tool_executions: u64,
@@ -127,6 +128,10 @@ impl TelemetryState {
 
     pub fn record_state_save(&mut self, ms: u64) {
         self.state_save_duration_ms = ms;
+    }
+
+    pub fn record_state_save_handoff(&mut self, us: u64) {
+        self.state_save_handoff_us = us;
     }
 
     pub fn record_benchmark(&mut self, score: f64, attempts: u64) {

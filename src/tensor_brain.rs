@@ -735,14 +735,20 @@ impl CandleBrain {
         self.varmap.save(path)
     }
 
-    /// Return a deep copy of every variable in the VarMap as a `name -> tensor`
-    /// map.  This is used by the double-buffered background state saver so the
-    /// main loop can hand off a consistent snapshot and continue immediately.
+    /// Return a lightweight, read-only view of every variable in the VarMap as
+    /// a `name -> tensor` map.  The `Tensor` values are Arc-cloned (shallow),
+    /// not deep-copied; the background `StateSaveWorker` performs the deep copy
+    /// on its own thread once the main loop has resumed.  The main loop only
+    /// mutates weights inside the cognitive tick, so the worker has the whole
+    /// inter-tick interval to copy and flush safely.
     pub fn snapshot_weights(&self) -> Result<HashMap<String, Tensor>> {
         let data = self.varmap.data().lock().unwrap();
         let mut snapshot = HashMap::with_capacity(data.len());
         for (name, var) in data.iter() {
-            snapshot.insert(name.clone(), var.as_tensor().copy()?);
+            // Shallow clone: increments the Arc to the underlying storage, so
+            // the worker can deep-copy on its own thread without blocking the
+            // main cognitive clock.
+            snapshot.insert(name.clone(), var.as_tensor().clone());
         }
         Ok(snapshot)
     }

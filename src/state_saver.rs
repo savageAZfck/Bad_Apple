@@ -76,8 +76,17 @@ impl SavePayload {
         }
 
         // Real Candle tensor weights to a separate safetensors file.
+        // The incoming `weights` map contains shallow Tensor Arc references;
+        // copy the underlying storage on this background thread before writing,
+        // then release the copies once the flush is complete.
         if let Some(weights) = self.weights {
-            let _ = safetensors::save(&weights, &self.paths.safetensors);
+            let mut copied = HashMap::with_capacity(weights.len());
+            for (name, t) in &weights {
+                if let Ok(t) = t.copy() {
+                    copied.insert(name.clone(), t);
+                }
+            }
+            let _ = safetensors::save(&copied, &self.paths.safetensors);
         }
 
         // Persist 2048-D connectome embeddings and 576-D brain states via mmap.

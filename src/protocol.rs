@@ -108,6 +108,72 @@ const BACKPRESSURE_THRESHOLD: f64 = 0.85;
 /// active goal matrix before the engram is accepted into the ring.
 pub const ENGRAM_SIMILARITY_THRESHOLD: f64 = 0.35;
 
+// ---------------------------------------------------------------------------
+// Fused 2048-D vector dot product for the inbound firewall.
+//
+// On Apple Silicon (aarch64) the slice is streamed through 128-bit NEON
+// registers four `f32`s at a time: two `float64x2_t` loads are converted to
+// `float32x2_t`, combined into `float32x4_t`, multiplied and accumulated.
+// `vbslq_f32` masks away NaN/Inf lanes so they contribute 0 rather than
+// poisoning the dot product.  Non-aarch64 targets fall back to a scalar loop.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn dot_f64x2_f32x4(a: &[f64], b: &[f64]) -> f32 {
+    use core::arch::aarch64::*;
+
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len();
+    let mut acc = vdupq_n_f32(0.0);
+    let mut i = 0usize;
+
+    while i + 4 <= n {
+        let a0 = vld1q_f64(a.as_ptr().add(i));
+        let a1 = vld1q_f64(a.as_ptr().add(i + 2));
+        let b0 = vld1q_f64(b.as_ptr().add(i));
+        let b1 = vld1q_f64(b.as_ptr().add(i + 2));
+
+        let va = vcombine_f32(vcvt_f32_f64(a0), vcvt_f32_f64(a1));
+        let vb = vcombine_f32(vcvt_f32_f64(b0), vcvt_f32_f64(b1));
+
+        // Keep the product only if both lanes are finite (not NaN/Inf).
+        let finite_mask = vandq_u32(vceqq_f32(va, va), vceqq_f32(vb, vb));
+        let prod = vmulq_f32(va, vb);
+        let safe_prod = vbslq_f32(finite_mask, prod, vdupq_n_f32(0.0));
+
+        acc = vaddq_f32(acc, safe_prod);
+        i += 4;
+    }
+
+    let mut sum = vaddvq_f32(acc);
+
+    while i < n {
+        let x = a[i] as f32;
+        let y = b[i] as f32;
+        if x.is_finite() && y.is_finite() {
+            sum += x * y;
+        }
+        i += 1;
+    }
+
+    sum
+}
+
+fn dot_f64_f32(a: &[f64], b: &[f64]) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        dot_f64x2_f32x4(a, b) as f64
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let p = x * y;
+            if p.is_finite() { p } else { 0.0 }
+        })
+        .sum::<f64>()
+}
+
 /// Maximum characters of `experiential_text` that are sent in a compact engram
 /// across the network.  This keeps JSON-serialized packets under the UDP
 /// datagram size limit (~65 KB) while the full embedding and brain state are
@@ -352,6 +418,10 @@ pub struct ConnectionManager {
     secret: Arc<Vec<u8>>,
     peers: Arc<DashMap<PeerId, PeerHandle>>,
     incoming: Arc<LockFreeRing<CompactEngramPacket>>,
+    /// Lock-free outgoing ring for wild-workspace and other fire-and-forget
+    /// broadcast producers.  Producers push synchronously; a single background
+    /// sweeper drains the ring and calls `broadcast`.
+    outgoing: Arc<LockFreeRing<CompactEngramPacket>>,
     pub metrics: Arc<Mutex<SwarmMetrics>>,
     max_peers: usize,
     retry_base: Duration,
@@ -375,6 +445,9 @@ impl ConnectionManager {
             secret: Arc::new(secret),
             peers: Arc::new(DashMap::with_capacity(max_peers)),
             incoming,
+            // Fire-and-forget outbound broadcast queue.  Capacity is sized to
+            // absorb a full wild_workspace burst without backpressure.
+            outgoing: Arc::new(LockFreeRing::new(256)),
             metrics,
             max_peers,
             retry_base,
@@ -411,6 +484,24 @@ impl ConnectionManager {
                 cm.connect_with_retry(peer).await;
             });
         }
+    }
+
+    /// Push a packet onto the lock-free outbound ring.  This is the zero-wait
+    /// interface for wild_workspace and any other producers that must not block.
+    pub fn push_outgoing(&self, packet: CompactEngramPacket) {
+        self.outgoing.push(packet);
+    }
+
+    /// Spawn a single background sweeper that drains the outbound ring and
+    /// broadcasts each packet.  Only one sweeper should be running per manager.
+    pub fn start_outbound_sweeper(&self) {
+        let cm = self.clone();
+        tokio::spawn(async move {
+            while let Some(packet) = cm.outgoing.pop_async().await {
+                cm.broadcast(&packet).await;
+            }
+            // Ring is closed and empty.
+        });
     }
 
     /// Broadcast a compact engram to every connected peer. The engram is signed
@@ -719,8 +810,9 @@ impl ConnectionManager {
         if goals.is_empty() || embedding.is_empty() {
             return 1.0;
         }
-        let norm_a = (embedding.iter().map(|x| x * x).sum::<f64>()).sqrt();
-        if norm_a == 0.0 {
+        let norm_a_sq = dot_f64_f32(embedding, embedding);
+        let norm_a = norm_a_sq.sqrt();
+        if norm_a == 0.0 || !norm_a.is_finite() {
             return 0.0;
         }
         let mut best = -1.0_f64;
@@ -728,11 +820,15 @@ impl ConnectionManager {
             if goal.len() != embedding.len() {
                 continue;
             }
-            let norm_b = (goal.iter().map(|x| x * x).sum::<f64>()).sqrt();
-            if norm_b == 0.0 {
+            let norm_b_sq = dot_f64_f32(goal, goal);
+            let norm_b = norm_b_sq.sqrt();
+            if norm_b == 0.0 || !norm_b.is_finite() {
                 continue;
             }
-            let dot = embedding.iter().zip(goal).map(|(a, b)| a * b).sum::<f64>();
+            let dot = dot_f64_f32(embedding, goal);
+            if !dot.is_finite() {
+                continue;
+            }
             let sim = dot / (norm_a * norm_b);
             if sim > best {
                 best = sim;

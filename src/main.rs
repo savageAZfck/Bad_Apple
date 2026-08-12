@@ -6810,6 +6810,7 @@ async fn main() -> Result<()> {
         Duration::from_millis(config.peer_retry_base_ms),
         Duration::from_millis(config.peer_retry_max_ms),
     ));
+    wan_manager.start_outbound_sweeper();
 
     let wan_tcp_port = config.wan_tcp_port;
     let wan_ws_port = config.wan_ws_port;
@@ -7788,12 +7789,19 @@ async fn main() -> Result<()> {
                     // mind lock.  Only lightweight copies happen here; the
                     // physical 800+ ms flush is delegated to the background
                     // StateSaveWorker thread.
+                    let handoff_start = std::time::Instant::now();
                     let weights = mind_write
                         .candle_brain
                         .as_ref()
                         .and_then(|brain| brain.snapshot_weights().ok());
                     let mut payload =
                         state_saver::SavePayload::from_mind(&mind_write, &save_state_file, weights);
+                    let handoff_us = handoff_start.elapsed().as_micros() as u64;
+                    {
+                        let mut t = save_telemetry.lock().await;
+                        t.record_state_save_handoff(handoff_us);
+                    }
+
                     let save_telemetry2 = save_telemetry.clone();
                     let save_in_flight_flag2 = Arc::clone(&save_in_flight_flag);
                     payload.completion = Some(Box::new(move |duration_ms: u64| {

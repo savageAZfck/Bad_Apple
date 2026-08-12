@@ -425,7 +425,11 @@ pub async fn run_wild_loop(
                             embedding: Vec::new(),
                             priority: 7,
                         };
-                        wan.broadcast(&packet).await;
+                        // Fire-and-forget onto the lock-free outbound ring.  The
+                        // ConnectionManager sweeper drains the ring and broadcasts
+                        // without the wild_workspace worker ever waiting on a peer
+                        // socket or a system mutex.
+                        wan.push_outgoing(packet);
                         tracing::info!(
                             "🌿 [WILD QUEUE] offloaded {} to swarm (queue_len={})",
                             task.path,
