@@ -365,6 +365,11 @@ struct NeuralWorldModel {
     /// Maximum absolute weight update on a single step, independent of the
     /// gradient cap, to prevent any single dimension from exploding.
     max_update: f64,
+    /// Hard weight magnitude ceiling for w and b.  Recovering from a stale
+    /// or corrupted state with astronomically large weights is impossible if
+    /// the cap is loose, so the model clamps every parameter back into this
+    /// band after each training step.
+    max_weight: f64,
 }
 
 impl NeuralWorldModel {
@@ -384,9 +389,10 @@ impl NeuralWorldModel {
         Self {
             w,
             b: vec![0.0; output_dim],
-            lr: 0.001,
-            max_grad: 10.0,
-            max_update: 0.1,
+            lr: 0.01,
+            max_grad: 100.0,
+            max_update: 1.0,
+            max_weight: 10.0,
         }
     }
 
@@ -395,12 +401,19 @@ impl NeuralWorldModel {
         use core::arch::aarch64::*;
 
         let out_dim = self.b.len();
-        let mut out: Vec<f64> = self.b.clone();
+        let mut out: Vec<f64> = self
+            .b
+            .iter()
+            .map(|&v| v.clamp(-self.max_weight, self.max_weight))
+            .collect();
 
         // Exponent-mask for f64: bits 62..52 all 1s => NaN or Inf.
         const EXP_MASK: u64 = 0x7FF0_0000_0000_0000;
 
         unsafe {
+            let max_w_v = vdupq_n_f64(self.max_weight);
+            let neg_max_w_v = vdupq_n_f64(-self.max_weight);
+
             for (i, &s_raw) in state.iter().enumerate() {
                 if i >= self.w.len() {
                     break;
@@ -422,15 +435,19 @@ impl NeuralWorldModel {
                     let is_anom = vceqq_u64(masked_exp, vdupq_n_u64(EXP_MASK));
                     let w_clean = vbslq_f64(is_anom, vdupq_n_f64(0.0), w);
 
-                    // FMA: o += w_clean * s
-                    let new_o = vfmaq_f64(o, w_clean, s_v);
+                    // Clamp weight magnitude to the recovery band before FMA.
+                    let w_clamped = vminq_f64(vmaxq_f64(w_clean, neg_max_w_v), max_w_v);
+
+                    // FMA: o += w_clamped * s
+                    let new_o = vfmaq_f64(o, w_clamped, s_v);
                     vst1q_f64(out[j..].as_mut_ptr(), new_o);
 
                     j += 2;
                 }
                 // Tail
                 while j < out_dim {
-                    out[j] += s * weights[j];
+                    let w = weights[j].clamp(-self.max_weight, self.max_weight);
+                    out[j] += s * w;
                     j += 1;
                 }
             }
@@ -440,13 +457,19 @@ impl NeuralWorldModel {
 
     #[cfg(not(target_arch = "aarch64"))]
     fn predict(&self, state: &[f64]) -> Vec<f64> {
-        let mut out = self.b.clone();
-        for (i, &s) in state.iter().enumerate() {
+        let mut out: Vec<f64> = self
+            .b
+            .iter()
+            .map(|&v| v.clamp(-self.max_weight, self.max_weight))
+            .collect();
+        for (i, &s_raw) in state.iter().enumerate() {
             if i >= self.w.len() {
                 break;
             }
-            for (j, weight) in self.w[i].iter().enumerate() {
-                out[j] += s * weight;
+            let s = if s_raw.is_finite() { s_raw } else { 0.0 };
+            for (j, &weight) in self.w[i].iter().enumerate() {
+                let w = weight.clamp(-self.max_weight, self.max_weight);
+                out[j] += s * w;
             }
         }
         out
@@ -467,6 +490,8 @@ impl NeuralWorldModel {
         unsafe {
             let max_grad_v = vdupq_n_f64(self.max_grad);
             let neg_max_grad_v = vdupq_n_f64(-self.max_grad);
+            let max_w_v = vdupq_n_f64(self.max_weight);
+            let neg_max_w_v = vdupq_n_f64(-self.max_weight);
 
             // 1) Vector error + hard gradient clip
             let mut j = 0;
@@ -529,13 +554,15 @@ impl NeuralWorldModel {
 
                     let new_w = vaddq_f64(w, upd);
 
-                    // Final NaN/Inf mask on the updated weight
+                    // Final NaN/Inf mask on the updated weight, then hard
+                    // magnitude clamp to the recovery band.
                     let new_u = vreinterpretq_u64_f64(new_w);
                     let masked_exp = vandq_u64(new_u, vdupq_n_u64(EXP_MASK));
                     let is_anom = vceqq_u64(masked_exp, vdupq_n_u64(EXP_MASK));
                     let new_w_clean = vbslq_f64(is_anom, vdupq_n_f64(0.0), new_w);
+                    let new_w_clamped = vminq_f64(vmaxq_f64(new_w_clean, neg_max_w_v), max_w_v);
 
-                    vst1q_f64(row[j..].as_mut_ptr(), new_w_clean);
+                    vst1q_f64(row[j..].as_mut_ptr(), new_w_clamped);
 
                     j += 2;
                 }
@@ -562,8 +589,9 @@ impl NeuralWorldModel {
                 let masked_exp = vandq_u64(new_u, vdupq_n_u64(EXP_MASK));
                 let is_anom = vceqq_u64(masked_exp, vdupq_n_u64(EXP_MASK));
                 let new_b_clean = vbslq_f64(is_anom, vdupq_n_f64(0.0), new_b);
+                let new_b_clamped = vminq_f64(vmaxq_f64(new_b_clean, neg_max_w_v), max_w_v);
 
-                vst1q_f64(self.b[j..].as_mut_ptr(), new_b_clean);
+                vst1q_f64(self.b[j..].as_mut_ptr(), new_b_clamped);
 
                 j += 2;
             }
@@ -588,18 +616,21 @@ impl NeuralWorldModel {
             loss += e * e;
         }
         loss = (loss / target.len() as f64).sqrt();
-        for (i, &s) in state.iter().enumerate() {
+        for (i, &s_raw) in state.iter().enumerate() {
             if i >= self.w.len() {
                 break;
             }
+            let s = if s_raw.is_finite() { s_raw } else { 0.0 };
             for (j, e) in errors.iter().enumerate() {
                 let update = (self.lr * e * s).clamp(-self.max_update, self.max_update);
-                self.w[i][j] += if update.is_finite() { update } else { 0.0 };
+                self.w[i][j] = (self.w[i][j] + if update.is_finite() { update } else { 0.0 })
+                    .clamp(-self.max_weight, self.max_weight);
             }
         }
         for (j, e) in errors.iter().enumerate() {
             let update = (self.lr * e).clamp(-self.max_update, self.max_update);
-            self.b[j] += if update.is_finite() { update } else { 0.0 };
+            self.b[j] = (self.b[j] + if update.is_finite() { update } else { 0.0 })
+                .clamp(-self.max_weight, self.max_weight);
         }
         loss
     }
