@@ -283,6 +283,28 @@ fn is_host_reachable(addr: &str, port: u16) -> bool {
     TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500)).is_ok()
 }
 
+/// Resident set size of this process, in bytes.  Read from the kernel via
+/// `proc_pid_rusage` on macOS, which is the authoritative physical-memory
+/// figure and avoids the allocation-variance drift seen in higher-level
+/// library estimates.
+#[cfg(target_os = "macos")]
+fn rss_bytes() -> Option<u64> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V4,
+            &mut info as *mut libc::rusage_info_v4 as *mut *mut libc::c_void,
+        )
+    };
+    (rc == 0 && info.ri_resident_size > 0).then_some(info.ri_resident_size)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn rss_bytes() -> Option<u64> {
+    None
+}
+
 pub fn update_sensor_snapshot(
     system: &mut System,
     battery_manager: &Option<starship_battery::Manager>,
@@ -315,11 +337,16 @@ pub fn update_sensor_snapshot(
     };
 
     snapshot.process_memory_used_bytes = if slow_refresh {
-        let own_pid = sysinfo::Pid::from_u32(std::process::id());
-        system
-            .process(own_pid)
-            .map(|p| p.memory())
-            .unwrap_or(snapshot.process_memory_used_bytes)
+        // Prefer the kernel's RSS figure; it tracks actual resident pages and
+        // eliminates the allocation-accounting drift that can read +72 KiB/sec
+        // while physical host RAM is flat.
+        rss_bytes().unwrap_or_else(|| {
+            let own_pid = sysinfo::Pid::from_u32(std::process::id());
+            system
+                .process(own_pid)
+                .map(|p| p.memory())
+                .unwrap_or(snapshot.process_memory_used_bytes)
+        })
     } else {
         snapshot.process_memory_used_bytes
     };
