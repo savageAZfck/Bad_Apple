@@ -188,6 +188,11 @@ pub fn try_load_bridge() -> Result<(), String> {
     paths.push("target/release/libFireflySiriBridge.dylib".to_string());
     paths.push("target/debug/libFireflySiriBridge.dylib".to_string());
 
+    // Sibling-repo fallback: when EdgeOS is run from its own tree but the
+    // canonical bridge was installed into the firefly_inferno tree next door.
+    paths.push("../firefly_inferno/target/release/libFireflySiriBridge.dylib".to_string());
+    paths.push("../firefly_inferno/target/debug/libFireflySiriBridge.dylib".to_string());
+
     for path in &paths {
         let lib = match unsafe { Library::new(path) } {
             Ok(l) => l,
