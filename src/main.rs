@@ -391,8 +391,8 @@ impl NeuralWorldModel {
             b: vec![0.0; output_dim],
             lr: 0.01,
             max_grad: 100.0,
-            max_update: 0.1,
-            max_weight: 0.1,
+            max_update: 0.01,
+            max_weight: 0.01,
         }
     }
 
