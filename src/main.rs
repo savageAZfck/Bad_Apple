@@ -34,6 +34,7 @@ mod hyperdimensional_core;
 mod metrics;
 mod production_blueprint;
 mod protocol;
+mod state_saver;
 mod strategy_library;
 mod telemetry;
 mod tensor_brain;
@@ -5333,6 +5334,72 @@ impl FullySapientSoulMatrix {
         }
     }
 
+    /// Return a snapshot of all serializable state except the live Candle brain
+    /// and the open connectome mmap.  This is the lightweight, instantly
+    /// cloneable "shadow" that the main loop hands off to the background state
+    /// saver.  The heavy tensor weights and the connectome slab flush are run in
+    /// the dedicated writer thread.
+    fn save_snapshot(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            metabolics: self.metabolics.clone(),
+            emotions: self.emotions.clone(),
+            brain_layers: self.brain_layers.clone(),
+            candle_brain: None,
+            attention_core: self.attention_core.clone(),
+            associative_memory_network: self.associative_memory_network.clone(),
+            active_pursuits: self.active_pursuits.clone(),
+            input_buffer: self.input_buffer.clone(),
+            last_input: self.last_input.clone(),
+            spatial_sensory_register: self.spatial_sensory_register,
+            weight_persistence: self.weight_persistence.clone(),
+            file_defense: self.file_defense.clone(),
+            network_stack: self.network_stack.clone(),
+            persistence_enabled: self.persistence_enabled,
+            auto_save_interval: self.auto_save_interval,
+            connectome_path: self.connectome_path.clone(),
+            connectome_mmap: std::sync::Mutex::new(None),
+            episodic_memory: self.episodic_memory.clone(),
+            semantic_memory: self.semantic_memory.clone(),
+            working_memory: self.working_memory.clone(),
+            meta_cognition: self.meta_cognition.clone(),
+            reasoning_engine: self.reasoning_engine.clone(),
+            goal_hierarchy: self.goal_hierarchy.clone(),
+            decision_context: self.decision_context.clone(),
+            creativity_engine: self.creativity_engine.clone(),
+            theory_of_mind: self.theory_of_mind.clone(),
+            language_engine: self.language_engine.clone(),
+            ethical_reasoning: self.ethical_reasoning.clone(),
+            analogical_reasoning: self.analogical_reasoning.clone(),
+            temporal_memory: self.temporal_memory.clone(),
+            consciousness_model: self.consciousness_model.clone(),
+            distributed_intelligence: self.distributed_intelligence.clone(),
+            emotional_intelligence: self.emotional_intelligence.clone(),
+            creative_problem_solving: self.creative_problem_solving.clone(),
+            adaptive_architecture: self.adaptive_architecture.clone(),
+            hyperdimensional_engine: self.hyperdimensional_engine.clone(),
+            neuro_symbolic: self.neuro_symbolic.clone(),
+            world_model: self.world_model.clone(),
+            neural_world_model: self.neural_world_model.clone(),
+            prev_brain_state: self.prev_brain_state.clone(),
+            recent_tool_names: self.recent_tool_names.clone(),
+            iit_consciousness: self.iit_consciousness.clone(),
+            meta_learner: self.meta_learner.clone(),
+            creative_space: self.creative_space.clone(),
+            common_sense: self.common_sense.clone(),
+            true_theory_of_mind: self.true_theory_of_mind.clone(),
+            self_improvement: self.self_improvement.clone(),
+            skill_memory: self.skill_memory.clone(),
+            current_plan: self.current_plan.clone(),
+            identity_journal: self.identity_journal.clone(),
+            born_at: self.born_at,
+            last_journal_entry: self.last_journal_entry,
+            domain_mastery: self.domain_mastery.clone(),
+            skill_reliability: self.skill_reliability.clone(),
+            causal_graph: self.causal_graph.clone(),
+        }
+    }
+
     /// 📡 Bounds unbounded memory growth: evicts oldest engrams once the network exceeds MAX_MEMORY_NODES.
     /// This prevents the O(n^2) clustering pass from growing without bound and starving the async runtime.
     fn enforce_memory_cap(&mut self) {
@@ -6498,6 +6565,11 @@ async fn main() -> Result<()> {
     let wild_origin = matrix.name.clone();
     let core_mind = Arc::new(TokioMutex::new(matrix));
 
+    // 🛡 Double-buffered background state saver.  The main cognitive loop
+    // hands off an immutable snapshot and continues immediately while a
+    // dedicated thread performs the physical flush to disk.
+    let state_saver = Arc::new(state_saver::StateSaveWorker::new());
+
     // 📚 Strategy library (Sled-backed) for durable learned procedural templates.
     std::fs::create_dir_all(&config.wild_workspace_dir).ok();
     let strategy_library = Arc::new(match StrategyLibrary::open(&config.sled_db_path) {
@@ -7050,6 +7122,7 @@ async fn main() -> Result<()> {
     let clock_tokens = conscience_tokens.clone();
     let clock_secret = Arc::clone(&multi_agent_secret);
     let clock_wan = wan_manager.clone();
+    let clock_state_saver = Arc::clone(&state_saver);
     let state_file_copy = state_file.clone();
     tokio::spawn(async move {
         let send_socket = UdpSocket::bind("127.0.0.1:0").await.ok();
@@ -7393,6 +7466,13 @@ async fn main() -> Result<()> {
 
                     mind.metabolics.conscience_loss_accumulator = train_loss;
 
+                    // If the conscience head is still stuck at uniform
+                    // cross-entropy after cycle 50, force a hard LR floor so the
+                    // newly Xavier-initialized heads can break symmetry.
+                    if let Some(ref mut brain) = mind.candle_brain {
+                        brain.set_lr_floor_if_stuck(train_loss, cycle);
+                    }
+
                     // 🏭 Production Blueprint: Active Inference homeostatic learning-rate modulation
                     {
                         let mut controller = hc.blocking_lock();
@@ -7675,7 +7755,6 @@ async fn main() -> Result<()> {
             // State serialization is offloaded to a blocking thread so the 6-second
             // Transformer clock never waits on SSD I/O.  Saves are throttled so they
             // do not overlap and do not run on every cognitive tick.
-            let save_mind = Arc::clone(&autonomous_clock_mind);
             let save_state_file = state_file_copy.clone();
             let save_telemetry = clock_telemetry.clone();
             let save_in_flight_flag = Arc::clone(&state_save_in_flight);
@@ -7705,23 +7784,24 @@ async fn main() -> Result<()> {
                     last_state_save = now;
                     save_in_flight_flag.store(true, Ordering::Relaxed);
 
-                    let _handle = tokio::spawn(async move {
-                        let duration_ms = tokio::task::spawn_blocking(move || {
-                            let start = std::time::Instant::now();
-                            {
-                                let mind = save_mind.blocking_lock();
-                                mind.save_state(&save_state_file);
-                            }
-                            start.elapsed().as_millis() as u64
-                        })
-                        .await
-                        .unwrap_or(0);
-                        {
-                            let mut t = save_telemetry.lock().await;
-                            t.record_state_save(duration_ms);
-                        }
-                        save_in_flight_flag.store(false, Ordering::Relaxed);
-                    });
+                    // Build the double-buffered snapshot while holding the
+                    // mind lock.  Only lightweight copies happen here; the
+                    // physical 800+ ms flush is delegated to the background
+                    // StateSaveWorker thread.
+                    let weights = mind_write
+                        .candle_brain
+                        .as_ref()
+                        .and_then(|brain| brain.snapshot_weights().ok());
+                    let mut payload =
+                        state_saver::SavePayload::from_mind(&mind_write, &save_state_file, weights);
+                    let save_telemetry2 = save_telemetry.clone();
+                    let save_in_flight_flag2 = Arc::clone(&save_in_flight_flag);
+                    payload.completion = Some(Box::new(move |duration_ms: u64| {
+                        save_in_flight_flag2.store(false, Ordering::Relaxed);
+                        let mut t = save_telemetry2.blocking_lock();
+                        t.record_state_save(duration_ms);
+                    }));
+                    clock_state_saver.submit(payload);
                 }
 
                 should_send

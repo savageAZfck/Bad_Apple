@@ -1,6 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor, D};
+use std::collections::HashMap;
 use candle_nn::{
-    layer_norm, linear, loss as nn_loss, ops as nn_ops, AdamW, LayerNorm, Linear, Module,
+    layer_norm, linear, loss as nn_loss, ops as nn_ops, AdamW, Init, LayerNorm, Linear, Module,
     Optimizer, VarBuilder, VarMap,
 };
 use rand::rngs::StdRng;
@@ -260,6 +261,9 @@ pub struct CandleBrain {
     system2_lr_multiplier: f64,
     /// Unscaled learning rate set by the caller.
     base_lr: f64,
+    /// Hard floor on the learning rate; raised when the conscience head is
+    /// stuck at uniform cross-entropy.
+    lr_floor: f64,
     /// Layer-wise optimizers for LLRD.
     optimizers: Vec<OptimizerGroup>,
     /// Coefficient for the Q/K orthogonality regularization term.
@@ -300,6 +304,39 @@ fn is_early_var(name: &str) -> bool {
         || name.starts_with("1/")
 }
 
+/// Xavier/Glorot uniform init clamped to a `max_bound` recovery band.
+///
+/// The standard fan-in/out bound is `sqrt(6 / (fan_in + fan_out))`; for the
+/// small downstream task heads this is capped at `max_bound` (0.01) so the
+/// initial predictions stay in the finite recovery band while still giving the
+/// head enough asymmetry to break out of the uniform cross-entropy symmetry.
+fn xavier_head(
+    in_dim: usize,
+    out_dim: usize,
+    max_bound: f64,
+    vb: VarBuilder<'_>,
+) -> Result<Linear> {
+    let xavier_bound = (6.0 / (in_dim + out_dim) as f64).sqrt();
+    let bound = xavier_bound.min(max_bound);
+    let ws = vb.get_with_hints(
+        (out_dim, in_dim),
+        "weight",
+        Init::Uniform {
+            lo: -bound,
+            up: bound,
+        },
+    )?;
+    let bs = vb.get_with_hints(
+        out_dim,
+        "bias",
+        Init::Uniform {
+            lo: -bound,
+            up: bound,
+        },
+    )?;
+    Ok(Linear::new(ws, Some(bs)))
+}
+
 impl CandleBrain {
     /// Build a small Transformer encoder using `candle_nn` and `VarMap`.
     ///
@@ -337,14 +374,13 @@ impl CandleBrain {
         // Final projection to the dim-dim conscience/classifier space.
         let output_head = linear(dim, dim, vb.pp("output_head"))?;
 
-        // Conscience classifier: brain state -> num_classes logits.
-        let conscience_head = linear(dim, num_classes, vb.pp("conscience_head"))?;
-
-        // Goal / intention generator: brain state -> num_classes goal logits.
-        let goal_head = linear(dim, num_classes, vb.pp("goal_head"))?;
-
-        // Language head: pooled brain state -> 2048-dim next-input embedding.
-        let language_head = linear(dim, 2048, vb.pp("language_head"))?;
+        // Conscience, goal, and language heads use a scaled Xavier/Glorot init
+        // capped at the 0.01 stability band so the initial predictions are
+        // finite and start with enough asymmetry to escape uniform logits.
+        let max_head_bound = 0.01;
+        let conscience_head = xavier_head(dim, num_classes, max_head_bound, vb.pp("conscience_head"))?;
+        let goal_head = xavier_head(dim, num_classes, max_head_bound, vb.pp("goal_head"))?;
+        let language_head = xavier_head(dim, 2048, max_head_bound, vb.pp("language_head"))?;
 
         // Layer-wise learning-rate decay: embeddings + Blocks 0/1 -> 0.75x,
         // Blocks 2/3 + all task heads -> 1.0x.
@@ -391,6 +427,7 @@ impl CandleBrain {
             system2_active: true,
             system2_lr_multiplier: 1.0,
             base_lr: 0.001,
+            lr_floor: 0.0,
             optimizers,
             ortho_lambda: 1e-4,
             cycle: 0,
@@ -652,13 +689,22 @@ impl CandleBrain {
         self.cycle = cycle;
     }
 
+    /// Aggressive floor for a stuck conscience head: if cross-entropy is still
+    /// uniform (`ln(100) ~ 4.6`) after cycle 50, force the learning rate to at
+    /// least 0.005 so the heads can break symmetry.
+    pub fn set_lr_floor_if_stuck(&mut self, conscience_loss: f64, cycle: u64) {
+        if cycle > 50 && conscience_loss > 4.5 {
+            self.lr_floor = 0.005;
+        }
+    }
+
     pub fn set_learning_rate(&mut self, lr: f64) {
         let max_lr = if self.cycle > 0 && self.cycle <= self.warmup_cycles {
             self.warmup_max_lr
         } else {
             f64::MAX
         };
-        let lr = lr.min(max_lr);
+        let lr = lr.min(max_lr).max(self.lr_floor);
         self.base_lr = lr;
         for g in &mut self.optimizers {
             let scaled = lr * g.gamma * self.system2_lr_multiplier;
@@ -687,6 +733,18 @@ impl CandleBrain {
 
     pub fn save_weights<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
         self.varmap.save(path)
+    }
+
+    /// Return a deep copy of every variable in the VarMap as a `name -> tensor`
+    /// map.  This is used by the double-buffered background state saver so the
+    /// main loop can hand off a consistent snapshot and continue immediately.
+    pub fn snapshot_weights(&self) -> Result<HashMap<String, Tensor>> {
+        let data = self.varmap.data().lock().unwrap();
+        let mut snapshot = HashMap::with_capacity(data.len());
+        for (name, var) in data.iter() {
+            snapshot.insert(name.clone(), var.as_tensor().copy()?);
+        }
+        Ok(snapshot)
     }
 
     pub fn load_weights<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
