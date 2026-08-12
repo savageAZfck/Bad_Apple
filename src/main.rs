@@ -7467,11 +7467,11 @@ async fn main() -> Result<()> {
 
                     mind.metabolics.conscience_loss_accumulator = train_loss;
 
-                    // If the conscience head is still stuck at uniform
-                    // cross-entropy after cycle 50, force a hard LR floor so the
-                    // newly Xavier-initialized heads can break symmetry.
+                    // Track conscience loss and, if it is perfectly flat for
+                    // more than three cycles, break symmetry with a small
+                    // parameter-space noise injection and a learning-rate bump.
                     if let Some(ref mut brain) = mind.candle_brain {
-                        brain.set_lr_floor_if_stuck(train_loss, cycle);
+                        brain.note_conscience_loss(train_loss);
                     }
 
                     // 🏭 Production Blueprint: Active Inference homeostatic learning-rate modulation

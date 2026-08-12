@@ -1,5 +1,5 @@
 use candle_core::{DType, Device, Result, Tensor, D};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use candle_nn::{
     layer_norm, linear, loss as nn_loss, ops as nn_ops, AdamW, Init, LayerNorm, Linear, Module,
     Optimizer, VarBuilder, VarMap,
@@ -277,6 +277,16 @@ pub struct CandleBrain {
     /// Maximum global gradient L2 norm.  Anything larger is rescaled to this
     /// ceiling to stop loss explosions during backpropagation.
     max_grad_norm: f64,
+    /// Recent conscience losses used to detect a perfectly flat plateau.
+    loss_history: VecDeque<f64>,
+    /// Number of consecutive losses that must be flat to trigger a symmetry break.
+    stagnation_window: usize,
+    /// Two losses are considered "identical" if they differ by less than this.
+    stagnation_epsilon: f64,
+    /// Scale of the uniform noise injected into head weights during a symmetry break.
+    symmetry_noise_scale: f64,
+    /// Maximum learning-rate floor applied when a symmetry break fires.
+    symmetry_lr_bump: f64,
 }
 
 impl fmt::Debug for CandleBrain {
@@ -431,9 +441,18 @@ impl CandleBrain {
             optimizers,
             ortho_lambda: 1e-4,
             cycle: 0,
-            warmup_max_lr: 0.00005,
+            // The post-boot cap used to be 0.00005, which is below the
+            // HomeostaticController's minimum active rate and starved the
+            // conscience head during the critical first 30 cycles. Allow it
+            // to reach the controller's maximum (0.001) so symmetry can break.
+            warmup_max_lr: 0.001,
             warmup_cycles: 30,
-            max_grad_norm: 1.0,
+            max_grad_norm: 5.0,
+            loss_history: VecDeque::with_capacity(8),
+            stagnation_window: 4,
+            stagnation_epsilon: 0.001,
+            symmetry_noise_scale: 0.005,
+            symmetry_lr_bump: 0.005,
         })
     }
 
@@ -689,13 +708,75 @@ impl CandleBrain {
         self.cycle = cycle;
     }
 
-    /// Aggressive floor for a stuck conscience head: if cross-entropy is still
-    /// uniform (`ln(100) ~ 4.6`) after cycle 50, force the learning rate to at
-    /// least 0.005 so the heads can break symmetry.
-    pub fn set_lr_floor_if_stuck(&mut self, conscience_loss: f64, cycle: u64) {
-        if cycle > 50 && conscience_loss > 4.5 {
-            self.lr_floor = 0.005;
+    /// Record a conscience loss and break symmetry if the loss has been
+    /// perfectly flat for too many cycles.  The detector is triggered when the
+    /// last `stagnation_window` values are all within `stagnation_epsilon` of
+    /// each other and the loss is still high enough to be stuck in the uniform
+    /// cross-entropy basin.  When triggered we:
+    ///
+    ///   1. raise the learning-rate floor to `symmetry_lr_bump`,
+    ///   2. add small uniform noise to all task-head and output-head weights,
+    ///   3. increase the noise scale so repeated stalls get stronger nudges.
+    pub fn note_conscience_loss(&mut self, conscience_loss: f64) {
+        self.loss_history.push_back(conscience_loss);
+        if self.loss_history.len() > self.stagnation_window {
+            self.loss_history.pop_front();
         }
+
+        let uniform = (self.num_classes as f64).ln();
+        let high = conscience_loss > uniform - 0.5;
+
+        let flat = self.loss_history.len() >= self.stagnation_window
+            && self.loss_history.iter().all(|&v| (v - conscience_loss).abs() < self.stagnation_epsilon);
+
+        if flat && high {
+            tracing::info!(
+                "conscience head stagnant at {:.6} for {} cycles; breaking symmetry",
+                conscience_loss,
+                self.stagnation_window
+            );
+            self.lr_floor = (self.lr_floor * 1.5)
+                .max(self.symmetry_lr_bump)
+                .min(0.01);
+            self.symmetry_noise_scale = (self.symmetry_noise_scale * 1.2).min(0.05);
+            if let Err(e) = self.apply_symmetry_break() {
+                tracing::warn!("symmetry break failed: {:?}", e);
+            }
+        } else if conscience_loss < 3.5 && self.lr_floor > 0.0 {
+            // Loss is clearly dropping; decay the hard floor so the
+            // HomeostaticController can fine-tune once we leave the basin.
+            self.lr_floor = (self.lr_floor * 0.5).max(0.0001);
+        }
+    }
+
+    /// Inject small uniform noise into the task heads and the trunk output
+    /// projection.  This is a direct parameter-space perturbation; it does not
+    /// go through the optimizer, so it works even when AdamW momentum has
+    /// stalled.
+    fn apply_symmetry_break(&mut self) -> Result<()> {
+        let data = self.varmap.data().lock().unwrap();
+        let mut rng = StdRng::from_entropy();
+        let prefixes = ["conscience_head", "goal_head", "language_head", "output_head"];
+
+        for (name, var) in data.iter() {
+            if !prefixes.iter().any(|p| name.starts_with(p)) {
+                continue;
+            }
+
+            let shape = var.as_tensor().shape().clone();
+            let flat = var.as_tensor().flatten_all()?.to_vec1::<f32>()?;
+            let noise = self.symmetry_noise_scale as f32;
+            let mut noisy = Vec::with_capacity(flat.len());
+            for &v in &flat {
+                let delta = (rng.gen::<f32>() * 2.0 - 1.0) * noise;
+                noisy.push(v + delta);
+            }
+
+            let new_tensor = Tensor::new(noisy.as_slice(), &self.device)?.reshape(shape)?;
+            var.set(&new_tensor)?;
+        }
+
+        Ok(())
     }
 
     pub fn set_learning_rate(&mut self, lr: f64) {
@@ -704,7 +785,9 @@ impl CandleBrain {
         } else {
             f64::MAX
         };
-        let lr = lr.min(max_lr).max(self.lr_floor);
+        // The floor must not exceed the ceiling, otherwise `clamp` panics.
+        let max_lr = max_lr.max(self.lr_floor);
+        let lr = lr.clamp(self.lr_floor, max_lr);
         self.base_lr = lr;
         for g in &mut self.optimizers {
             let scaled = lr * g.gamma * self.system2_lr_multiplier;
