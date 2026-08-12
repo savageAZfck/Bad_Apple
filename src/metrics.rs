@@ -453,9 +453,14 @@ impl MemoryProfiler {
             0.0
         };
 
+        // The drift metric tracks *leak* pressure, not deallocation.  Negative
+        // swings from allocator clean-up or state compaction are reported as 0
+        // so the telemetry baseline is stable and only positive growth is flagged.
+        let drift = drift.max(0.0);
+
         // Score: 1.0 = 1 MB/sec sustained growth.  Clamp at 1.0; negative is 0.
-        let score = (drift / 1_000_000.0).clamp(-1.0, 1.0);
-        let leak_score = if score > 0.0 { score } else { 0.0 };
+        let score = (drift / 1_000_000.0).clamp(0.0, 1.0);
+        let leak_score = score;
 
         if leak_score >= 0.5 {
             self.consecutive_leak_samples += 1;
@@ -502,7 +507,8 @@ impl MemoryProfiler {
         self.consecutive_leak_samples = 0;
     }
 
-    /// Slope over the current window in bytes/second.
+    /// Slope over the current window in bytes/second, clamped to non-negative
+    /// values so only sustained growth is reported as drift.
     pub fn drift_bytes_per_sec(&self) -> f64 {
         if self.samples.len() < 2 {
             return 0.0;
@@ -511,7 +517,7 @@ impl MemoryProfiler {
         let last = self.samples.back().copied().unwrap();
         let dt = last.0.saturating_sub(first.0) as f64;
         if dt > 0.0 {
-            (last.1 as f64 - first.1 as f64) / dt
+            ((last.1 as f64 - first.1 as f64) / dt).max(0.0)
         } else {
             0.0
         }
