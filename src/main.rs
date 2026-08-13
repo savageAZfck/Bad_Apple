@@ -42,6 +42,17 @@ mod telemetry;
 mod tensor_brain;
 mod wasm_cage;
 mod wild_workspace;
+
+/// Reusable per-cycle buffers moved into and out of the `spawn_blocking`
+/// neural pass.  Keeping them outside the main `loop` lets the same allocation
+/// be reused across ticks.
+#[derive(Debug)]
+struct CycleBuffers {
+    input_vector: Vec<f64>,
+    next_input_vector: Vec<f64>,
+    brain_outputs: Vec<f64>,
+}
+
 use apple_intelligence_client::AppleIntelligenceClient;
 use benchmark::{BenchmarkSuite, PilotReport, TransferSuite, TransferTask};
 use conscience_oracle::ConscienceOracle;
@@ -7151,6 +7162,15 @@ async fn main() -> Result<()> {
         const MIN_STATE_SAVE_INTERVAL_SECS: u64 = 15;
         let state_save_in_flight = Arc::new(AtomicBool::new(false));
         let mut cached_goal_texts: Vec<String> = Vec::new();
+
+        // Pre-allocate the main-loop embedding and brain-output buffers once.  They
+        // are moved into the `spawn_blocking` closure each cycle and returned, so
+        // the hot path reuses the same heap capacity instead of reallocating every
+        // tick.
+        let mut input_vector = vec![0.0; 2048];
+        let mut next_input_vector = vec![0.0; 2048];
+        let mut brain_outputs = vec![0.0; tensor_brain::BRAIN_DIM];
+
         loop {
             sleep(governor.tick_duration()).await;
 
@@ -7287,8 +7307,11 @@ async fn main() -> Result<()> {
             // =========================================================================
             // 🧠 TRANSFORMER SELF-ATTENTION META-LEARNING BACKPROPAGATION PASS
             // =========================================================================
-            let input_vector =
-                generate_2048_grounded_embedding(&incoming_experience, &spatial_register);
+            tensor_brain::text_to_grounded_embedding_into(
+                &incoming_experience,
+                &spatial_register,
+                &mut input_vector,
+            );
 
             // Local-first conscience classification. If the brain is confident, use it;
             // otherwise ask the LLM oracle. This is the path to fully local agency.
@@ -7342,8 +7365,11 @@ async fn main() -> Result<()> {
             let best_token_idx = teacher_idx;
 
             let next_experience = { curriculum.lock().await.random_snippet() };
-            let next_input_vector =
-                generate_2048_grounded_embedding(&next_experience, &spatial_register);
+            tensor_brain::text_to_grounded_embedding_into(
+                &next_experience,
+                &spatial_register,
+                &mut next_input_vector,
+            );
 
             // Phase 2: Run the heavy synchronous neural pass on tokio's blocking thread pool
             // so the async runtime (HTTP telemetry server, UDP loop) keeps getting scheduled.
@@ -7363,17 +7389,18 @@ async fn main() -> Result<()> {
                 live_learning_rate_sample,
                 spatial_snapshot,
                 network_ref,
-                brain_outputs,
                 local_goal,
                 mut entry,
+                buffers,
             )) = ({
                 let mind_arc = autonomous_clock_mind.clone();
                 let hc = hc.clone();
                 let telemetry = clock_telemetry.clone();
                 let tokens = conscience_tokens.clone();
                 let clock_oracle = clock_oracle.clone();
-                let input_vector = input_vector.clone();
-                let next_input_vector = next_input_vector.clone();
+                let mut input_vector = std::mem::take(&mut input_vector);
+                let mut next_input_vector = std::mem::take(&mut next_input_vector);
+                let mut brain_outputs = std::mem::take(&mut brain_outputs);
                 let incoming_experience = incoming_experience.clone();
                 let tps = tokens_per_second;
                 let latency_ring = latency_ring.clone();
@@ -7460,13 +7487,11 @@ async fn main() -> Result<()> {
 
                     // 4. Forward pass to obtain the 100-dim brain state.
                     let forward_start = Instant::now();
-                    let brain_outputs = match mind.candle_brain.as_ref()?.forward(contextual_input)
+                    if let Err(e) =
+                        mind.candle_brain.as_ref()?.forward_into(contextual_input, &mut brain_outputs)
                     {
-                        Ok(out) => out,
-                        Err(e) => {
-                            tracing::info!("⚠️ Candle forward failed: {:?}", e);
-                            return None;
-                        }
+                        tracing::info!("⚠️ Candle forward failed: {:?}", e);
+                        return None;
                     };
                     let forward_ms = forward_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -7629,9 +7654,13 @@ async fn main() -> Result<()> {
                         live_learning_rate_sample,
                         spatial_snapshot,
                         network_ref,
-                        brain_outputs.clone(),
                         local_goal_text,
                         entry,
+                        CycleBuffers {
+                            input_vector: std::mem::take(&mut input_vector),
+                            next_input_vector: std::mem::take(&mut next_input_vector),
+                            brain_outputs: std::mem::take(&mut brain_outputs),
+                        },
                     ))
                 })();
 
@@ -7643,8 +7672,16 @@ async fn main() -> Result<()> {
             })
             else {
                 tracing::info!("⚠️ Neural pass returned None; skipping cycle.");
+                input_vector = vec![0.0; 2048];
+                next_input_vector = vec![0.0; 2048];
+                brain_outputs = vec![0.0; tensor_brain::BRAIN_DIM];
                 continue;
             };
+
+            // Restore the reusable buffers before the async post-processing.
+            brain_outputs = buffers.brain_outputs;
+            input_vector = buffers.input_vector;
+            next_input_vector = buffers.next_input_vector;
 
             // 🎯 Inject locally generated goal back into active pursuits.
             if let Some(goal) = local_goal {
@@ -7751,7 +7788,7 @@ async fn main() -> Result<()> {
                     incoming_copy, decoded_conscience_0, decoded_conscience_1
                 ),
                 emotional_state_snapshot: emotions_copy.active_primary_blend.clone(),
-                embedding: input_vector,
+                embedding: input_vector.clone(),
                 associated_edge_ids: Vec::new(),
                 origin_instance: name_copy.clone(),
                 brain_state: brain_outputs.clone(),

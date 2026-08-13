@@ -198,7 +198,7 @@ pub async fn process_wild_source(
         );
 
         let prompt = format!(
-            "You are a local, read-only data-cleaning assistant. Given the following raw payload from a file, write a self-contained Python 3 function named `skill(x)` that parses and cleans the input string and returns a concise summary.\n\nAllowed: math, random, statistics, json, datetime, itertools, collections, string, re.\nForbidden: network, file write, shell, exec, eval, subprocess, open, os.system.{}\n\nPayload preview:\n{}\n\nReturn ONLY a JSON object: {{\"name\": \"...\", \"language\": \"python\", \"code\": \"def skill(x): ...\"}}.",
+            "You are a local, read-only data-cleaning assistant. Given the following raw payload from a file, choose either:\n\n1. Python: write a self-contained Python 3 function named `skill(x)` that parses and cleans the input string and returns a concise summary.\n2. Rust: write a `no_std` function with this exact signature:\n\nfn process(input: &[u8]) -> usize {{\n    // Write a concise UTF-8 summary into the global `OUT` buffer and return its byte length.\n    // Use only `core`; no network, file write, shell, `std`, or `alloc`.\n    // Example pattern:\n    // unsafe {{\n    //     let n = input.len().min(4096);\n    //     core::ptr::copy_nonoverlapping(input.as_ptr(), OUT.as_mut_ptr(), n);\n    //     n\n    // }}\n}}\n\nReturn ONLY a JSON object: {{\"name\": \"...\", \"language\": \"python\" or \"rust\", \"code\": \"...\"}}.\n\nAllowed (Python): math, random, statistics, json, datetime, itertools, collections, string, re.\nForbidden (Python): network, file write, shell, exec, eval, subprocess, open, os.system.\nAllowed (Rust): `core` only.\nForbidden (Rust): `std`, `alloc`, network, file write, shell, `unsafe` blocks other than for reading `OUT`.{}\n\nPayload preview:\n{}\n",
             error_context,
             preview
         );
@@ -239,6 +239,41 @@ pub async fn process_wild_source(
                 .decode(&code)
                 .map_err(|e| format!("wasm base64 decode failed: {}", e))?;
             return run_wasm_tool(&name, &wasm_bytes, payload.as_bytes()).await;
+        }
+
+        if language == "rust" {
+            if !is_safe_agent_code(&code) || !code.contains("fn process(") {
+                previous_error =
+                    Some("generated rust tool must define a `fn process(input: &[u8]) -> usize`".to_string());
+                continue;
+            }
+
+            let full_source = wrap_rust_tool_snippet(&code);
+            let name_for_tool = name.clone();
+            let payload = payload.to_string();
+            let source = full_source.clone();
+            match timeout(
+                MAX_TOOL_TIMEOUT,
+                spawn_blocking(move || compile_rust_to_wasm(&source)),
+            )
+            .await
+            {
+                Ok(Ok(Ok(wasm))) => {
+                    return run_wasm_tool(&name_for_tool, &wasm, payload.as_bytes()).await;
+                }
+                Ok(Ok(Err(e))) => {
+                    previous_error = Some(format!("rust compile error: {}", e));
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    previous_error = Some(format!("rust compile task failed: {}", e));
+                    continue;
+                }
+                Err(_) => {
+                    previous_error = Some("rust compile timed out".to_string());
+                    continue;
+                }
+            }
         }
 
         if !is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
@@ -309,6 +344,86 @@ pub async fn run_wasm_tool(
         Ok(Err(e)) => Err(format!("wasm sandbox task failed: {}", e).into()),
         Err(_) => Err("wasm execution timed out".into()),
     }
+}
+
+/// Wrap a user-supplied `fn process(input: &[u8]) -> usize` body into a full
+/// `no_std` wasm32 cdylib source that links against the Firefly string ABI.
+///
+/// The function is expected to write its UTF-8 summary into the global `OUT`
+/// buffer and return the number of bytes written.
+pub fn wrap_rust_tool_snippet(process_body: &str) -> String {
+    format!(
+        r#"#![no_std]
+#![no_main]
+
+#[link(wasm_import_module = "firefly")]
+extern "C" {{
+    fn input_size() -> i32;
+    fn input_read(dst: i32);
+    fn output_write(src: i32, len: i32);
+}}
+
+pub static mut IN: [u8; 8192] = [0; 8192];
+pub static mut OUT: [u8; 4096] = [0; 4096];
+
+#[no_mangle]
+pub unsafe extern "C" fn run() {{
+    let n = input_size() as usize;
+    if n == 0 || n > 8192 {{
+        output_write(OUT.as_mut_ptr() as i32, 0);
+        return;
+    }}
+    input_read(IN.as_mut_ptr() as i32);
+    let input = core::slice::from_raw_parts(IN.as_ptr(), n);
+    let out_len = process(input);
+    output_write(OUT.as_mut_ptr() as i32, out_len as i32);
+}}
+
+{}
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo<'_>) -> ! {{
+    unsafe {{ core::arch::wasm32::unreachable() }};
+}}
+"#,
+        process_body
+    )
+}
+
+/// Compile `no_std` Rust source to a wasm32-unknown-unknown cdylib using the
+/// system `rustc`.  Returns the raw `.wasm` bytes on success, or `rustc` stderr
+/// as a string on failure.
+pub fn compile_rust_to_wasm(source: &str) -> Result<Vec<u8>, String> {
+    let tmp = std::env::temp_dir().join(format!("firefly_wasm_{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("create temp dir: {}", e))?;
+    let rs_path = tmp.join("tool.rs");
+    let wasm_path = tmp.join("tool.wasm");
+    std::fs::write(&rs_path, source).map_err(|e| format!("write tool.rs: {}", e))?;
+
+    let out = std::process::Command::new("rustc")
+        .args([
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-type",
+            "cdylib",
+            "-C",
+            "link-args=-zstack-size=65536",
+            "-C",
+            "panic=abort",
+            "-A",
+            "warnings",
+            "-o",
+            wasm_path.to_str().unwrap(),
+            rs_path.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("rustc failed to spawn: {}", e))?;
+
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+
+    std::fs::read(&wasm_path).map_err(|e| format!("read tool.wasm: {}", e))
 }
 
 /// Maps raw open-source scripts into a continuous HDC phase-space coordinate,
@@ -605,5 +720,29 @@ mod tests {
         assert!(read_limited_text(&bin_path).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compile_and_run_rust_tool_snippet() {
+        let snippet = r#"fn process(input: &[u8]) -> usize {
+    let n = input.len().min(5);
+    unsafe {
+        core::ptr::copy_nonoverlapping(input.as_ptr(), OUT.as_mut_ptr(), n);
+    }
+    n
+}"#;
+        let source = wrap_rust_tool_snippet(snippet);
+        let wasm = match compile_rust_to_wasm(&source) {
+            Ok(w) => w,
+            Err(e) if e.contains("wasm32-unknown-unknown") || e.contains("target may not be installed") => {
+                return;
+            }
+            Err(e) => panic!("compile failed: {}", e),
+        };
+
+        let mut cage = WasmCage::new().unwrap();
+        cage.compile(&wasm).unwrap();
+        let output = cage.run_with_input(b"hello world").unwrap();
+        assert_eq!(output, "hello");
     }
 }
