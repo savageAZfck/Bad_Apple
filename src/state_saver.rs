@@ -38,6 +38,7 @@ impl SavePaths {
 }
 
 /// A detached, immutable snapshot that the background writer owns.
+#[repr(align(128))]
 pub struct SavePayload {
     pub snapshot: FullySapientSoulMatrix,
     pub weights: Option<HashMap<String, Tensor>>,

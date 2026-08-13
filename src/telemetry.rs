@@ -32,6 +32,7 @@ pub fn current_secs() -> u64 {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[repr(align(128))]
 pub struct TelemetryState {
     pub start_time: u64,
     pub cycle_count: u64,

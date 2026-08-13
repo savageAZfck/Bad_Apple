@@ -14,14 +14,17 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
 
 pub mod apple_intelligence;
+pub mod arena;
 pub mod benchmark;
 pub mod config;
 pub mod hyperdimensional_core;
 pub mod metrics;
 pub mod production_blueprint;
 pub mod protocol;
+pub mod simd;
 pub mod strategy_library;
 pub mod tensor_brain;
+pub mod wasm_cage;
 
 pub use apple_intelligence::{
     call as apple_intelligence_call, call_sync as apple_intelligence_call_sync,

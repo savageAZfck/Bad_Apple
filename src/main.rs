@@ -34,10 +34,12 @@ mod hyperdimensional_core;
 mod metrics;
 mod production_blueprint;
 mod protocol;
+mod simd;
 mod state_saver;
 mod strategy_library;
 mod telemetry;
 mod tensor_brain;
+mod wasm_cage;
 mod wild_workspace;
 use apple_intelligence_client::AppleIntelligenceClient;
 use benchmark::{BenchmarkSuite, PilotReport, TransferSuite, TransferTask};
@@ -4092,8 +4094,10 @@ pub fn calculate_cosine_similarity(vec_a: &[f64], vec_b: &[f64]) -> f64 {
     if vec_a.len() != vec_b.len() {
         return 0.0;
     }
-    let dot_product: f64 = vec_a.iter().zip(vec_b.iter()).map(|(x, y)| x * y).sum();
-    dot_product.clamp(0.0, 1.0)
+    // Historical behavior: this function clamped the raw dot to [0, 1].  The
+    // SIMD path preserves that behavior while processing four f32 lanes per
+    // 128-bit NEON register on Apple Silicon.
+    simd::dot_f64_f32(vec_a, vec_b).clamp(0.0, 1.0)
 }
 
 // =========================================================================
@@ -4430,14 +4434,7 @@ impl AnalogicalReasoningEngine {
 }
 
 fn cosine_similarity(vec1: &[f64], vec2: &[f64]) -> f64 {
-    let dot_product: f64 = vec1.iter().zip(vec2.iter()).map(|(a, b)| a * b).sum();
-    let magnitude1: f64 = vec1.iter().map(|a| a * a).sum::<f64>().sqrt();
-    let magnitude2: f64 = vec2.iter().map(|a| a * a).sum::<f64>().sqrt();
-    if magnitude1 * magnitude2 == 0.0 {
-        0.0
-    } else {
-        dot_product / (magnitude1 * magnitude2)
-    }
+    simd::cosine_f64_f32(vec1, vec2)
 }
 
 // 10. Temporal Memory Networks
@@ -5129,6 +5126,7 @@ impl AgentPlan {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[repr(align(128))]
 pub(crate) struct FullySapientSoulMatrix {
     name: String,
     metabolics: HumanTemporalMetabolics,
