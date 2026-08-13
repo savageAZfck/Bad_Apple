@@ -24,6 +24,7 @@ use tokio::{
 
 mod apple_intelligence;
 mod apple_intelligence_client;
+mod arena;
 mod benchmark;
 mod config;
 mod connectome_mmap;
@@ -47,6 +48,7 @@ use conscience_oracle::ConscienceOracle;
 use dashmap::DashMap;
 use data_feed::{default_curriculum_dirs, DataCurriculum};
 use governor::DualProcessGovernor;
+use arena::MemoryArena;
 use metrics::MemoryProfiler;
 use production_blueprint::{
     CausalGraph, GlobalWorkspace, HomeostaticController,
@@ -5154,6 +5156,10 @@ pub(crate) struct FullySapientSoulMatrix {
     /// Mmap-backed store for the 2048-D embeddings and 576-D brain states.
     #[serde(skip)]
     connectome_mmap: std::sync::Mutex<Option<connectome_mmap::ConnectomeMmap>>,
+    /// Scratch arena for the cognitive tick.  Reset each cycle and used for
+    /// RAG blending and other per-step scratch slices.
+    #[serde(skip, default = "Option::default")]
+    workspace: Option<MemoryArena>,
     // 🧠 ADVANCED AGI SYSTEMS
     episodic_memory: EpisodicMemory,
     semantic_memory: SemanticMemory,
@@ -5329,6 +5335,7 @@ impl FullySapientSoulMatrix {
             domain_mastery: HashMap::new(),
             skill_reliability: HashMap::new(),
             causal_graph: CausalGraph::firefly_default(),
+            workspace: Some(MemoryArena::new(8 * 1024 * 1024)),
         }
     }
 
@@ -5357,6 +5364,7 @@ impl FullySapientSoulMatrix {
             auto_save_interval: self.auto_save_interval,
             connectome_path: self.connectome_path.clone(),
             connectome_mmap: std::sync::Mutex::new(None),
+            workspace: None,
             episodic_memory: self.episodic_memory.clone(),
             semantic_memory: self.semantic_memory.clone(),
             working_memory: self.working_memory.clone(),
@@ -5661,6 +5669,10 @@ impl FullySapientSoulMatrix {
                 layer.inputs_cache = vec![0.0; layer.weights[0].len()];
                 layer.outputs_cache = vec![0.0; layer.weights.len()];
             }
+
+            // Re-initialize the per-cycle scratch arena after deserialization.
+            parsed.workspace = Some(MemoryArena::new(8 * 1024 * 1024));
+
             Some(parsed)
         })
     }
@@ -7367,9 +7379,14 @@ async fn main() -> Result<()> {
                 let latency_ring = latency_ring.clone();
                 tokio::task::spawn_blocking(move || {
                     let mut mind = mind_arc.blocking_lock();
+                    let mut workspace = mind
+                        .workspace
+                        .take()
+                        .unwrap_or_else(|| MemoryArena::new(8 * 1024 * 1024));
                     let total_start = Instant::now();
 
-                    // 1. Use the LLM oracle (or its hash fallback) as the teacher label.
+                    let result = (|| -> Option<_> {
+                        // 1. Use the LLM oracle (or its hash fallback) as the teacher label.
                     let output_size = tokens.len();
                     tracing::info!("🎯 Conscience Class Target: '{}'", tokens[best_token_idx]);
 
@@ -7382,8 +7399,16 @@ async fn main() -> Result<()> {
                     let local_agreement = local_idx == best_token_idx && local_conf >= 0.85;
 
                     // 2. 🧠 RAG-style retrieval: blend the current input with its most similar memory.
-                    let contextual_input: Vec<f64> = if mind.associative_memory_network.is_empty() {
-                        input_vector.clone()
+                    // Use the mind's bump arena for the 2048-D scratch slice so we avoid a
+                    // per-cycle `collect`/`clone` heap allocation.
+                    workspace.reset();
+                    let Some(contextual_input) = workspace.alloc_f64(input_vector.len()) else {
+                        tracing::warn!("🧠 MemoryArena full; aborting cycle");
+                        return None;
+                    };
+
+                    if mind.associative_memory_network.is_empty() {
+                        contextual_input.copy_from_slice(&input_vector);
                     } else {
                         let (best_id, best_sim) = mind
                             .associative_memory_network
@@ -7403,18 +7428,20 @@ async fn main() -> Result<()> {
                                     best_id,
                                     best_sim
                                 );
-                                input_vector
+                                for (i, (a, b)) in input_vector
                                     .iter()
                                     .zip(best_node.embedding.iter())
-                                    .map(|(a, b)| 0.8 * a + 0.2 * b)
-                                    .collect()
+                                    .enumerate()
+                                {
+                                    contextual_input[i] = 0.8 * a + 0.2 * b;
+                                }
                             } else {
-                                input_vector.clone()
+                                contextual_input.copy_from_slice(&input_vector);
                             }
                         } else {
-                            input_vector.clone()
+                            contextual_input.copy_from_slice(&input_vector);
                         }
-                    };
+                    }
 
                     // 3. Train step: cross-entropy classification on the raw input and the LLM teacher label.
                     let train_start = Instant::now();
@@ -7433,7 +7460,7 @@ async fn main() -> Result<()> {
 
                     // 4. Forward pass to obtain the 100-dim brain state.
                     let forward_start = Instant::now();
-                    let brain_outputs = match mind.candle_brain.as_ref()?.forward(&contextual_input)
+                    let brain_outputs = match mind.candle_brain.as_ref()?.forward(contextual_input)
                     {
                         Ok(out) => out,
                         Err(e) => {
@@ -7490,7 +7517,7 @@ async fn main() -> Result<()> {
                     let mut world_model_loss_value: Option<f64> = None;
                     let prev_state = mind.prev_brain_state.take();
                     if let Some(ref prev) = prev_state {
-                        let wm_loss = mind.neural_world_model.train(prev, &contextual_input);
+                        let wm_loss = mind.neural_world_model.train(prev, contextual_input);
                         tracing::info!("🔮 Neural world-model loss: {:.4}", wm_loss);
                         world_model_loss_value = Some(wm_loss);
                     }
@@ -7551,7 +7578,7 @@ async fn main() -> Result<()> {
                     latency_ring.push(total_start.elapsed().as_nanos() as u64);
 
                     // 5. Local conscience classification: the Transformer now chooses its own labels.
-                    let local_logits = match mind.candle_brain.as_ref()?.classify(&contextual_input)
+                    let local_logits = match mind.candle_brain.as_ref()?.classify(contextual_input)
                     {
                         Ok(logits) => logits,
                         Err(e) => {
@@ -7606,6 +7633,10 @@ async fn main() -> Result<()> {
                         local_goal_text,
                         entry,
                     ))
+                })();
+
+                    mind.workspace = Some(workspace);
+                    result
                 })
                 .await
                 .unwrap_or(None)

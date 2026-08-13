@@ -516,9 +516,22 @@ impl CandleBrain {
 
     /// Run a full forward pass through the Transformer and project to dim-D.
     pub fn forward(&self, input: &[f64]) -> Result<Vec<f64>> {
-        let out = self.brain_state(input, false)?;
-        let values = out.squeeze(0)?.to_vec1::<f32>()?;
-        Ok(values.into_iter().map(|v| v as f64).collect())
+        let mut out = vec![0.0; self.dim];
+        self.forward_into(input, &mut out)?;
+        Ok(out)
+    }
+
+    /// In-place `forward` that writes the 576-D brain state into a pre-allocated
+    /// slice.  This avoids the `Vec<f64>` allocation for callers that already
+    /// own a reusable buffer (e.g. a `MemoryArena` or a pre-sized `Vec`).
+    pub fn forward_into(&self, input: &[f64], out: &mut [f64]) -> Result<()> {
+        assert_eq!(out.len(), self.dim, "forward output must be dim-D");
+        let out_tensor = self.brain_state(input, false)?;
+        let values = out_tensor.squeeze(0)?.to_vec1::<f32>()?;
+        for (i, &v) in values.iter().enumerate() {
+            out[i] = v as f64;
+        }
+        Ok(())
     }
 
     /// Run a full forward pass and return num_classes conscience logits.
@@ -939,9 +952,12 @@ impl BpeTokenizer {
         encoding.get_ids().to_vec()
     }
 
-    fn encode_to_2048(&self, text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
+    fn encode_to_2048_into(&self, text: &str, spatial_axes: &[f64; 4], out: &mut [f64]) {
         const SEQ_LEN: usize = 32;
         const TOKEN_DIM: usize = 64;
+        assert_eq!(out.len(), SEQ_LEN * TOKEN_DIM);
+
+        out.fill(0.0);
 
         let encoding = self.tokenizer.encode(text, false).unwrap_or_else(|e| {
             eprintln!("⚠️ BPE encode failed ({}); using empty encoding.", e);
@@ -952,13 +968,12 @@ impl BpeTokenizer {
         });
 
         let ids = encoding.get_ids();
-        let mut vec = vec![0.0; SEQ_LEN * TOKEN_DIM];
 
         for (row, &id) in ids.iter().take(SEQ_LEN).enumerate() {
             let idx = (id as usize).min(self.embeddings.len().saturating_sub(1));
             let emb = &self.embeddings[idx];
             for (col, &val) in emb.iter().take(TOKEN_DIM).enumerate() {
-                vec[row * TOKEN_DIM + col] = val;
+                out[row * TOKEN_DIM + col] = val;
             }
         }
 
@@ -966,17 +981,21 @@ impl BpeTokenizer {
         // rows 0, 8, 16, and 24 (indices 0, 512, 1024, 1536).
         for (i, &axis) in spatial_axes.iter().enumerate().take(4) {
             let slot = i * 8 * TOKEN_DIM;
-            vec[slot] += axis * 5.0;
+            out[slot] += axis * 5.0;
         }
 
-        let magnitude: f64 = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let magnitude: f64 = out.iter().map(|x| x * x).sum::<f64>().sqrt();
         if magnitude > 0.0 {
-            for v in vec.iter_mut() {
+            for v in out.iter_mut() {
                 *v /= magnitude;
             }
         }
+    }
 
-        vec
+    fn encode_to_2048(&self, text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
+        let mut out = vec![0.0; 32 * 64];
+        self.encode_to_2048_into(text, spatial_axes, &mut out);
+        out
     }
 }
 
@@ -984,8 +1003,18 @@ impl BpeTokenizer {
 /// `CandleBrain`.  The text is tokenized with the local BPE tokenizer, mapped
 /// into a 32 x 64 token matrix, and then fused with the four physical anchors.
 pub fn text_to_grounded_embedding(text: &str, spatial_axes: &[f64; 4]) -> Vec<f64> {
+    let mut out = vec![0.0; 2048];
+    text_to_grounded_embedding_into(text, spatial_axes, &mut out);
+    out
+}
+
+/// In-place variant of `text_to_grounded_embedding`.  The caller must supply a
+/// 2048-element `&mut [f64]` that is overwritten.  This eliminates the per-call
+/// `Vec` allocation when a pre-allocated or arena-backed buffer is reused.
+pub fn text_to_grounded_embedding_into(text: &str, spatial_axes: &[f64; 4], out: &mut [f64]) {
+    assert_eq!(out.len(), 2048, "grounded embedding must be 2048-D");
     let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train("tokenizer.json"));
-    bpe.encode_to_2048(text, spatial_axes)
+    bpe.encode_to_2048_into(text, spatial_axes, out);
 }
 
 /// Tokenize a string into BPE token IDs, returning the raw token sequence.

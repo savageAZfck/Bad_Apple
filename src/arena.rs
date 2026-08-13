@@ -19,6 +19,7 @@ use std::ptr::NonNull;
 /// line.  By bump-allocating from a single contiguous block, the main loop
 /// avoids repeated `malloc`/`free` calls and the false-sharing that can occur
 /// when unrelated vectors land on the same cache line.
+#[derive(Debug)]
 #[repr(align(128))]
 pub struct MemoryArena {
     ptr: NonNull<u8>,

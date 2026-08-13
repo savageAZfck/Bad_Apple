@@ -20,6 +20,8 @@ use crate::is_safe_agent_code;
 use crate::protocol::{CompactEngramPacket, ConnectionManager};
 use crate::strategy_library::{RustSynthesizer, Strategy, StrategyLibrary};
 use crate::telemetry::run_sandboxed_tool;
+use crate::wasm_cage::{WasmCage, WasmError};
+use base64::Engine;
 use tokio::task::spawn_blocking;
 use tokio::time::{sleep, timeout};
 
@@ -30,7 +32,7 @@ const MAX_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LLM_TIMEOUT: Duration = Duration::from_secs(60);
 const WATCH_POLL_IDLE: Duration = Duration::from_secs(60);
 const ALLOWED_EXTENSIONS: &[&str] = &[
-    "txt", "csv", "json", "log", "md", "xml", "yaml", "yml", "tsv", "py",
+    "txt", "csv", "json", "log", "md", "xml", "yaml", "yml", "tsv", "py", "wasm",
 ];
 
 /// Queue length at which incoming tool synthesis is offloaded to peer nodes.
@@ -132,8 +134,8 @@ fn is_allowed_file(path: &Path, watch_path: &Path) -> bool {
     canonical_path.starts_with(&canonical_watch)
 }
 
-/// Read at most `MAX_FILE_BYTES` of valid UTF-8 text from `path`.
-fn read_limited_text(path: &Path) -> Result<String, String> {
+/// Read at most `MAX_FILE_BYTES` of raw bytes from `path`.
+fn read_limited_bytes(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(|e| format!("open failed: {}", e))?;
     let mut buf = vec![0u8; MAX_FILE_BYTES];
@@ -141,6 +143,12 @@ fn read_limited_text(path: &Path) -> Result<String, String> {
         .read(&mut buf)
         .map_err(|e| format!("read failed: {}", e))?;
     buf.truncate(n);
+    Ok(buf)
+}
+
+/// Read at most `MAX_FILE_BYTES` of valid UTF-8 text from `path`.
+fn read_limited_text(path: &Path) -> Result<String, String> {
+    let buf = read_limited_bytes(path)?;
     // Reject binary or malformed payloads; do not silently lossy-decode.
     String::from_utf8(buf).map_err(|_| "file is not valid UTF-8".to_string())
 }
@@ -157,6 +165,16 @@ pub async fn process_wild_payload(
     path: &Path,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
     let path = path.to_path_buf();
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("wasm"))
+    {
+        let wasm = spawn_blocking(move || read_limited_bytes(&path))
+            .await
+            .map_err(|e| format!("read task failed: {}", e))??;
+        return run_wasm_tool("wild_wasm", &wasm, b"").await;
+    }
     let payload = spawn_blocking(move || read_limited_text(&path))
         .await
         .map_err(|e| format!("read task failed: {}", e))??;
@@ -210,6 +228,18 @@ pub async fn process_wild_source(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let language = tool_json
+            .get("language")
+            .and_then(|v| v.as_str())
+            .unwrap_or("python")
+            .to_lowercase();
+
+        if language == "wasm" {
+            let wasm_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&code)
+                .map_err(|e| format!("wasm base64 decode failed: {}", e))?;
+            return run_wasm_tool(&name, &wasm_bytes, payload.as_bytes()).await;
+        }
 
         if !is_safe_agent_code(&code) || !code.to_lowercase().contains("def skill(") {
             previous_error =
@@ -248,6 +278,37 @@ pub async fn process_wild_source(
         previous_error.unwrap_or_else(|| "unknown".to_string())
     )
     .into())
+}
+
+/// Compile and run an untrusted WASM payload in the `WasmCage`, returning the
+/// `(name, output)` pair expected by the wild-workspace pipeline.
+pub async fn run_wasm_tool(
+    name: &str,
+    wasm_bytes: &[u8],
+    input: &[u8],
+) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    let name = name.to_string();
+    let wasm_bytes = wasm_bytes.to_vec();
+    let input = input.to_vec();
+    match timeout(
+        MAX_TOOL_TIMEOUT,
+        spawn_blocking(move || {
+            let mut cage = WasmCage::new()?;
+            cage.compile(&wasm_bytes)?;
+            let output = cage.run_with_input(&input)?;
+            Ok::<_, WasmError>(output)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(Ok(out))) => {
+            let output = out.chars().take(MAX_OUTPUT_CHARS).collect();
+            Ok((name, output))
+        }
+        Ok(Ok(Err(e))) => Err(format!("wasm cage rejected tool: {}", e).into()),
+        Ok(Err(e)) => Err(format!("wasm sandbox task failed: {}", e).into()),
+        Err(_) => Err("wasm execution timed out".into()),
+    }
 }
 
 /// Maps raw open-source scripts into a continuous HDC phase-space coordinate,
