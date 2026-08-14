@@ -243,8 +243,10 @@ pub async fn process_wild_source(
 
         if language == "rust" {
             if !is_safe_agent_code(&code) || !code.contains("fn process(") {
-                previous_error =
-                    Some("generated rust tool must define a `fn process(input: &[u8]) -> usize`".to_string());
+                previous_error = Some(
+                    "generated rust tool must define a `fn process(input: &[u8]) -> usize`"
+                        .to_string(),
+                );
                 continue;
             }
 
@@ -734,7 +736,10 @@ mod tests {
         let source = wrap_rust_tool_snippet(snippet);
         let wasm = match compile_rust_to_wasm(&source) {
             Ok(w) => w,
-            Err(e) if e.contains("wasm32-unknown-unknown") || e.contains("target may not be installed") => {
+            Err(e)
+                if e.contains("wasm32-unknown-unknown")
+                    || e.contains("target may not be installed") =>
+            {
                 return;
             }
             Err(e) => panic!("compile failed: {}", e),

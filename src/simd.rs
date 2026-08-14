@@ -27,7 +27,11 @@ pub fn dot_f64_f32(a: &[f64], b: &[f64]) -> f64 {
         .zip(b.iter())
         .map(|(x, y)| {
             let p = x * y;
-            if p.is_finite() { p } else { 0.0 }
+            if p.is_finite() {
+                p
+            } else {
+                0.0
+            }
         })
         .sum::<f64>()
 }

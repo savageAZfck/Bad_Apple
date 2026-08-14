@@ -51,6 +51,8 @@ memmap2 = "0.9.11"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 wasmi = "0.35.0"
 wasmparser = { version = "0.100.2", package = "wasmparser-nostd", default-features = false }
+metal = "0.29.0"
+safetensors = "0.7.0"
 
 [build-dependencies]
 cbindgen = "0.26"

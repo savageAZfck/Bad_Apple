@@ -18,6 +18,7 @@ pub mod arena;
 pub mod benchmark;
 pub mod config;
 pub mod hyperdimensional_core;
+pub mod metal_uma;
 pub mod metrics;
 pub mod production_blueprint;
 pub mod protocol;

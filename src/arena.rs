@@ -40,7 +40,8 @@ impl MemoryArena {
     pub fn new(capacity: usize) -> Self {
         let cap = capacity.next_multiple_of(128).max(128);
         let layout = Layout::from_size_align(cap, 128).expect("arena layout");
-        let ptr = unsafe { NonNull::new(alloc(layout)).unwrap_or_else(|| handle_alloc_error(layout)) };
+        let ptr =
+            unsafe { NonNull::new(alloc(layout)).unwrap_or_else(|| handle_alloc_error(layout)) };
         Self {
             ptr,
             cap,

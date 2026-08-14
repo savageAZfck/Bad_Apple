@@ -143,9 +143,7 @@ impl Drop for CStringOwner {
 pub async fn call(prompt: &str) -> Option<String> {
     let actor = FFI_TX.get_or_init(spawn_actor);
     let (reply_tx, reply_rx) = bounded(1);
-    actor
-        .send((prompt.to_string(), reply_tx))
-        .ok()?;
+    actor.send((prompt.to_string(), reply_tx)).ok()?;
     tokio::task::spawn_blocking(move || reply_rx.recv().ok()?)
         .await
         .ok()?

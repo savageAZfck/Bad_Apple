@@ -1,11 +1,11 @@
 use candle_core::{DType, Device, Result, Tensor, D};
-use std::collections::{HashMap, VecDeque};
 use candle_nn::{
     layer_norm, linear, loss as nn_loss, ops as nn_ops, AdamW, Init, LayerNorm, Linear, Module,
     Optimizer, VarBuilder, VarMap,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -388,7 +388,8 @@ impl CandleBrain {
         // capped at the 0.01 stability band so the initial predictions are
         // finite and start with enough asymmetry to escape uniform logits.
         let max_head_bound = 0.01;
-        let conscience_head = xavier_head(dim, num_classes, max_head_bound, vb.pp("conscience_head"))?;
+        let conscience_head =
+            xavier_head(dim, num_classes, max_head_bound, vb.pp("conscience_head"))?;
         let goal_head = xavier_head(dim, num_classes, max_head_bound, vb.pp("goal_head"))?;
         let language_head = xavier_head(dim, 2048, max_head_bound, vb.pp("language_head"))?;
 
@@ -740,7 +741,10 @@ impl CandleBrain {
         let high = conscience_loss > uniform - 0.5;
 
         let flat = self.loss_history.len() >= self.stagnation_window
-            && self.loss_history.iter().all(|&v| (v - conscience_loss).abs() < self.stagnation_epsilon);
+            && self
+                .loss_history
+                .iter()
+                .all(|&v| (v - conscience_loss).abs() < self.stagnation_epsilon);
 
         if flat && high {
             tracing::info!(
@@ -748,9 +752,7 @@ impl CandleBrain {
                 conscience_loss,
                 self.stagnation_window
             );
-            self.lr_floor = (self.lr_floor * 1.5)
-                .max(self.symmetry_lr_bump)
-                .min(0.01);
+            self.lr_floor = (self.lr_floor * 1.5).max(self.symmetry_lr_bump).min(0.01);
             self.symmetry_noise_scale = (self.symmetry_noise_scale * 1.2).min(0.05);
             if let Err(e) = self.apply_symmetry_break() {
                 tracing::warn!("symmetry break failed: {:?}", e);
@@ -769,7 +771,12 @@ impl CandleBrain {
     fn apply_symmetry_break(&mut self) -> Result<()> {
         let data = self.varmap.data().lock().unwrap();
         let mut rng = StdRng::from_entropy();
-        let prefixes = ["conscience_head", "goal_head", "language_head", "output_head"];
+        let prefixes = [
+            "conscience_head",
+            "goal_head",
+            "language_head",
+            "output_head",
+        ];
 
         for (name, var) in data.iter() {
             if !prefixes.iter().any(|p| name.starts_with(p)) {

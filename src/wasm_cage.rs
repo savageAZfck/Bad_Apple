@@ -29,7 +29,7 @@
 //! ```
 
 use std::fmt;
-use wasmi::{Config, Engine, EnforcedLimits, Extern, Linker, Module, Store};
+use wasmi::{Config, EnforcedLimits, Engine, Extern, Linker, Module, Store};
 
 /// Maximum number of linear memory pages allowed per module.
 ///
@@ -111,11 +111,9 @@ impl WasmCage {
             .enforced_limits(EnforcedLimits::strict());
         let engine = Engine::new(&config);
         let mut store = Store::new(&engine, WasmHost::default());
-        store
-            .set_fuel(DEFAULT_FUEL)
-            .map_err(|e| WasmError {
-                reason: format!("fuel: {e}"),
-            })?;
+        store.set_fuel(DEFAULT_FUEL).map_err(|e| WasmError {
+            reason: format!("fuel: {e}"),
+        })?;
 
         Ok(Self {
             engine,
@@ -165,9 +163,7 @@ impl WasmCage {
             .func_wrap(
                 "firefly",
                 "input_size",
-                |caller: wasmi::Caller<'_, WasmHost>| -> i32 {
-                    caller.data().input.len() as i32
-                },
+                |caller: wasmi::Caller<'_, WasmHost>| -> i32 { caller.data().input.len() as i32 },
             )
             .map_err(|e| WasmError {
                 reason: format!("linker: {e}"),
@@ -247,12 +243,9 @@ impl WasmCage {
     /// Run the exported `run()` function with the provided input and return
     /// the guest's accumulated output.
     pub fn run_with_input(&mut self, input: &[u8]) -> Result<String, WasmError> {
-        let instance = self
-            .instance
-            .as_ref()
-            .ok_or_else(|| WasmError {
-                reason: "no compiled module".to_string(),
-            })?;
+        let instance = self.instance.as_ref().ok_or_else(|| WasmError {
+            reason: "no compiled module".to_string(),
+        })?;
 
         // Reset fuel and host state for this call.
         self.store
@@ -349,9 +342,9 @@ mod tests {
     //     i64.add)
     // )
     const ADD_ONE_WASM: &[u8] = &[
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7e,
-        0x01, 0x7e, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00,
-        0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x42, 0x01, 0x7c, 0x0b,
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7e, 0x01,
+        0x7e, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, 0x0a,
+        0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x42, 0x01, 0x7c, 0x0b,
     ];
 
     #[test]

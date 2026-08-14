@@ -32,6 +32,7 @@ mod conscience_oracle;
 mod data_feed;
 mod governor;
 mod hyperdimensional_core;
+mod metal_uma;
 mod metrics;
 mod production_blueprint;
 mod protocol;
@@ -54,12 +55,12 @@ struct CycleBuffers {
 }
 
 use apple_intelligence_client::AppleIntelligenceClient;
+use arena::MemoryArena;
 use benchmark::{BenchmarkSuite, PilotReport, TransferSuite, TransferTask};
 use conscience_oracle::ConscienceOracle;
 use dashmap::DashMap;
 use data_feed::{default_curriculum_dirs, DataCurriculum};
 use governor::DualProcessGovernor;
-use arena::MemoryArena;
 use metrics::MemoryProfiler;
 use production_blueprint::{
     CausalGraph, GlobalWorkspace, HomeostaticController,
@@ -5021,6 +5022,26 @@ struct MemoryGraphNode {
     brain_state: Vec<f64>,
 }
 
+impl MemoryGraphNode {
+    /// Return a metadata-only copy: id, text, edges, and origin are preserved,
+    /// but the large `embedding` and `brain_state` vectors are replaced with
+    /// empty placeholders.  This is used for the JSON state snapshot while the
+    /// high-dimensional data is flushed directly from the live connectome into
+    /// the memory-mapped slab.
+    fn metadata_only(&self) -> Self {
+        Self {
+            id: self.id,
+            timestamp: self.timestamp,
+            experiential_text: self.experiential_text.clone(),
+            emotional_state_snapshot: self.emotional_state_snapshot.clone(),
+            embedding: Vec::new(),
+            associated_edge_ids: self.associated_edge_ids.clone(),
+            origin_instance: self.origin_instance.clone(),
+            brain_state: Vec::new(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct HumanTemporalMetabolics {
     metabolic_energy: f64, // Human brain uses ~20W of power
@@ -5228,7 +5249,7 @@ pub(crate) struct FullySapientSoulMatrix {
 }
 
 impl FullySapientSoulMatrix {
-    fn new(name: &str, local_port: u16) -> Self {
+    pub(crate) fn new(name: &str, local_port: u16) -> Self {
         let now = current_secs();
 
         // Real Candle tensor brain: 4-block 12-head Transformer encoder (576-D trunk).
@@ -5350,12 +5371,12 @@ impl FullySapientSoulMatrix {
         }
     }
 
-    /// Return a snapshot of all serializable state except the live Candle brain
-    /// and the open connectome mmap.  This is the lightweight, instantly
-    /// cloneable "shadow" that the main loop hands off to the background state
-    /// saver.  The heavy tensor weights and the connectome slab flush are run in
-    /// the dedicated writer thread.
-    fn save_snapshot(&self) -> Self {
+    /// Original heavy snapshot used only for the regression benchmark.  It deep
+    /// clones the full `associative_memory_network`, including the 2048-D
+    /// embeddings and 576-D brain states, so a benchmark can compare the old
+    /// path against the new metadata-only + live-persist path.
+    #[cfg(test)]
+    pub(crate) fn save_snapshot_legacy(&self) -> Self {
         Self {
             name: self.name.clone(),
             metabolics: self.metabolics.clone(),
@@ -5364,6 +5385,79 @@ impl FullySapientSoulMatrix {
             candle_brain: None,
             attention_core: self.attention_core.clone(),
             associative_memory_network: self.associative_memory_network.clone(),
+            active_pursuits: self.active_pursuits.clone(),
+            input_buffer: self.input_buffer.clone(),
+            last_input: self.last_input.clone(),
+            spatial_sensory_register: self.spatial_sensory_register,
+            weight_persistence: self.weight_persistence.clone(),
+            file_defense: self.file_defense.clone(),
+            network_stack: self.network_stack.clone(),
+            persistence_enabled: self.persistence_enabled,
+            auto_save_interval: self.auto_save_interval,
+            connectome_path: self.connectome_path.clone(),
+            connectome_mmap: std::sync::Mutex::new(None),
+            workspace: None,
+            episodic_memory: self.episodic_memory.clone(),
+            semantic_memory: self.semantic_memory.clone(),
+            working_memory: self.working_memory.clone(),
+            meta_cognition: self.meta_cognition.clone(),
+            reasoning_engine: self.reasoning_engine.clone(),
+            goal_hierarchy: self.goal_hierarchy.clone(),
+            decision_context: self.decision_context.clone(),
+            creativity_engine: self.creativity_engine.clone(),
+            theory_of_mind: self.theory_of_mind.clone(),
+            language_engine: self.language_engine.clone(),
+            ethical_reasoning: self.ethical_reasoning.clone(),
+            analogical_reasoning: self.analogical_reasoning.clone(),
+            temporal_memory: self.temporal_memory.clone(),
+            consciousness_model: self.consciousness_model.clone(),
+            distributed_intelligence: self.distributed_intelligence.clone(),
+            emotional_intelligence: self.emotional_intelligence.clone(),
+            creative_problem_solving: self.creative_problem_solving.clone(),
+            adaptive_architecture: self.adaptive_architecture.clone(),
+            hyperdimensional_engine: self.hyperdimensional_engine.clone(),
+            neuro_symbolic: self.neuro_symbolic.clone(),
+            world_model: self.world_model.clone(),
+            neural_world_model: self.neural_world_model.clone(),
+            prev_brain_state: self.prev_brain_state.clone(),
+            recent_tool_names: self.recent_tool_names.clone(),
+            iit_consciousness: self.iit_consciousness.clone(),
+            meta_learner: self.meta_learner.clone(),
+            creative_space: self.creative_space.clone(),
+            common_sense: self.common_sense.clone(),
+            true_theory_of_mind: self.true_theory_of_mind.clone(),
+            self_improvement: self.self_improvement.clone(),
+            skill_memory: self.skill_memory.clone(),
+            current_plan: self.current_plan.clone(),
+            identity_journal: self.identity_journal.clone(),
+            born_at: self.born_at,
+            last_journal_entry: self.last_journal_entry,
+            domain_mastery: self.domain_mastery.clone(),
+            skill_reliability: self.skill_reliability.clone(),
+            causal_graph: self.causal_graph.clone(),
+        }
+    }
+
+    /// Return a snapshot of all serializable state except the live Candle brain,
+    /// the open connectome mmap, and the high-dimensional connectome vectors.
+    /// This is the lightweight, instantly cloneable "shadow" that the main loop
+    /// hands off to the background state saver.  The heavy tensor weights and the
+    /// connectome slab flush are run in the dedicated writer thread, but the
+    /// connectome vectors are now persisted from the live mind directly into the
+    /// mmap slab without being cloned into this snapshot.
+    pub(crate) fn save_snapshot(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            metabolics: self.metabolics.clone(),
+            emotions: self.emotions.clone(),
+            brain_layers: self.brain_layers.clone(),
+            candle_brain: None,
+            attention_core: self.attention_core.clone(),
+            associative_memory_network: self
+                .associative_memory_network
+                .iter()
+                .map(|(id, node)| (*id, node.metadata_only()))
+                .collect(),
             active_pursuits: self.active_pursuits.clone(),
             input_buffer: self.input_buffer.clone(),
             last_input: self.last_input.clone(),
@@ -5481,6 +5575,31 @@ impl FullySapientSoulMatrix {
             (self.metabolics.neural_wear + wear_accumulation).clamp(0.0, 1.0);
         self.metabolics.qualia_feedback_noise =
             (self.metabolics.neural_wear * self.emotions.arousal).clamp(0.0, 1.0);
+    }
+
+    /// Persist the 2048-D connectome embeddings and 576-D brain states directly
+    /// from the live `associative_memory_network` into the memory-mapped slab.
+    /// This is safe to call from the foreground while the async mind lock is held;
+    /// the work is a bounded mmap write and does not allocate large in-memory
+    /// copies.
+    pub(crate) fn persist_connectome(&self, filename: &std::path::Path) -> std::io::Result<()> {
+        let connectome_path = PathBuf::from(filename).with_extension("connectome");
+        if let Ok(mut guard) = self.connectome_mmap.lock() {
+            if guard.is_none() {
+                if let Ok(store) =
+                    connectome_mmap::ConnectomeMmap::open(&connectome_path, MAX_MEMORY_NODES)
+                {
+                    *guard = Some(store);
+                }
+            }
+            if let Some(ref store) = *guard {
+                return store.persist(&self.associative_memory_network);
+            }
+        }
+        // If the mutex is poisoned or the connectome cannot be opened, fall back
+        // to opening a fresh transient slab just for this persist.
+        let store = connectome_mmap::ConnectomeMmap::open(&connectome_path, MAX_MEMORY_NODES)?;
+        store.persist(&self.associative_memory_network)
     }
 
     fn save_state(&self, filename: &std::path::Path) {
@@ -7414,144 +7533,149 @@ async fn main() -> Result<()> {
 
                     let result = (|| -> Option<_> {
                         // 1. Use the LLM oracle (or its hash fallback) as the teacher label.
-                    let output_size = tokens.len();
-                    tracing::info!("🎯 Conscience Class Target: '{}'", tokens[best_token_idx]);
+                        let output_size = tokens.len();
+                        tracing::info!("🎯 Conscience Class Target: '{}'", tokens[best_token_idx]);
 
-                    // Pre-training local confidence and agreement probe.
-                    let (local_idx, local_conf) = mind
-                        .candle_brain
-                        .as_ref()?
-                        .classify_top(&input_vector)
-                        .unwrap_or((0, 0.0));
-                    let local_agreement = local_idx == best_token_idx && local_conf >= 0.85;
-
-                    // 2. 🧠 RAG-style retrieval: blend the current input with its most similar memory.
-                    // Use the mind's bump arena for the 2048-D scratch slice so we avoid a
-                    // per-cycle `collect`/`clone` heap allocation.
-                    workspace.reset();
-                    let Some(contextual_input) = workspace.alloc_f64(input_vector.len()) else {
-                        tracing::warn!("🧠 MemoryArena full; aborting cycle");
-                        return None;
-                    };
-
-                    if mind.associative_memory_network.is_empty() {
-                        contextual_input.copy_from_slice(&input_vector);
-                    } else {
-                        let (best_id, best_sim) = mind
-                            .associative_memory_network
-                            .iter()
-                            .map(|(id, node)| {
-                                (
-                                    *id,
-                                    calculate_cosine_similarity(&input_vector, &node.embedding),
-                                )
-                            })
-                            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                        // Pre-training local confidence and agreement probe.
+                        let (local_idx, local_conf) = mind
+                            .candle_brain
+                            .as_ref()?
+                            .classify_top(&input_vector)
                             .unwrap_or((0, 0.0));
-                        if best_sim > 0.0 {
-                            if let Some(best_node) = mind.associative_memory_network.get(&best_id) {
-                                tracing::info!(
-                                    "🧠 RAG context blended from memory {} (cosine={:.3})",
-                                    best_id,
-                                    best_sim
-                                );
-                                for (i, (a, b)) in input_vector
-                                    .iter()
-                                    .zip(best_node.embedding.iter())
-                                    .enumerate()
+                        let local_agreement = local_idx == best_token_idx && local_conf >= 0.85;
+
+                        // 2. 🧠 RAG-style retrieval: blend the current input with its most similar memory.
+                        // Use the mind's bump arena for the 2048-D scratch slice so we avoid a
+                        // per-cycle `collect`/`clone` heap allocation.
+                        workspace.reset();
+                        let Some(contextual_input) = workspace.alloc_f64(input_vector.len()) else {
+                            tracing::warn!("🧠 MemoryArena full; aborting cycle");
+                            return None;
+                        };
+
+                        if mind.associative_memory_network.is_empty() {
+                            contextual_input.copy_from_slice(&input_vector);
+                        } else {
+                            let (best_id, best_sim) = mind
+                                .associative_memory_network
+                                .iter()
+                                .map(|(id, node)| {
+                                    (
+                                        *id,
+                                        calculate_cosine_similarity(&input_vector, &node.embedding),
+                                    )
+                                })
+                                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                                .unwrap_or((0, 0.0));
+                            if best_sim > 0.0 {
+                                if let Some(best_node) =
+                                    mind.associative_memory_network.get(&best_id)
                                 {
-                                    contextual_input[i] = 0.8 * a + 0.2 * b;
+                                    tracing::info!(
+                                        "🧠 RAG context blended from memory {} (cosine={:.3})",
+                                        best_id,
+                                        best_sim
+                                    );
+                                    for (i, (a, b)) in input_vector
+                                        .iter()
+                                        .zip(best_node.embedding.iter())
+                                        .enumerate()
+                                    {
+                                        contextual_input[i] = 0.8 * a + 0.2 * b;
+                                    }
+                                } else {
+                                    contextual_input.copy_from_slice(&input_vector);
                                 }
                             } else {
                                 contextual_input.copy_from_slice(&input_vector);
                             }
-                        } else {
-                            contextual_input.copy_from_slice(&input_vector);
                         }
-                    }
 
-                    // 3. Train step: cross-entropy classification on the raw input and the LLM teacher label.
-                    let train_start = Instant::now();
-                    let train_loss = match mind
-                        .candle_brain
-                        .as_mut()?
-                        .train_step(&input_vector, best_token_idx)
-                    {
-                        Ok(loss) => loss,
-                        Err(e) => {
-                            tracing::info!("⚠️ Candle train_step failed: {:?}", e);
+                        // 3. Train step: cross-entropy classification on the raw input and the LLM teacher label.
+                        let train_start = Instant::now();
+                        let train_loss = match mind
+                            .candle_brain
+                            .as_mut()?
+                            .train_step(&input_vector, best_token_idx)
+                        {
+                            Ok(loss) => loss,
+                            Err(e) => {
+                                tracing::info!("⚠️ Candle train_step failed: {:?}", e);
+                                return None;
+                            }
+                        };
+                        let train_ms = train_start.elapsed().as_secs_f64() * 1000.0;
+
+                        // 4. Forward pass to obtain the 100-dim brain state.
+                        let forward_start = Instant::now();
+                        if let Err(e) = mind
+                            .candle_brain
+                            .as_ref()?
+                            .forward_into(contextual_input, &mut brain_outputs)
+                        {
+                            tracing::info!("⚠️ Candle forward failed: {:?}", e);
                             return None;
-                        }
-                    };
-                    let train_ms = train_start.elapsed().as_secs_f64() * 1000.0;
+                        };
+                        let forward_ms = forward_start.elapsed().as_secs_f64() * 1000.0;
 
-                    // 4. Forward pass to obtain the 100-dim brain state.
-                    let forward_start = Instant::now();
-                    if let Err(e) =
-                        mind.candle_brain.as_ref()?.forward_into(contextual_input, &mut brain_outputs)
-                    {
-                        tracing::info!("⚠️ Candle forward failed: {:?}", e);
-                        return None;
-                    };
-                    let forward_ms = forward_start.elapsed().as_secs_f64() * 1000.0;
-
-                    // 4. 🗣 Language modeling head: predict the next curriculum embedding.
-                    let lang_start = Instant::now();
-                    let language_loss = match mind
-                        .candle_brain
-                        .as_mut()?
-                        .train_language_step(&brain_outputs, &next_input_vector)
-                    {
-                        Ok(loss) => loss,
-                        Err(e) => {
-                            tracing::info!("⚠️ Candle language step failed: {:?}", e);
-                            return None;
-                        }
-                    };
-                    let lang_ms = lang_start.elapsed().as_secs_f64() * 1000.0;
-                    tracing::info!(
-                        "🗣 Language head next-embedding loss: {:.4} ({} ms)",
-                        language_loss,
-                        lang_ms as i32
-                    );
-
-                    mind.metabolics.conscience_loss_accumulator = train_loss;
-
-                    // Track conscience loss and, if it is perfectly flat for
-                    // more than three cycles, break symmetry with a small
-                    // parameter-space noise injection and a learning-rate bump.
-                    if let Some(ref mut brain) = mind.candle_brain {
-                        brain.note_conscience_loss(train_loss);
-                    }
-
-                    // 🏭 Production Blueprint: Active Inference homeostatic learning-rate modulation
-                    {
-                        let mut controller = hc.blocking_lock();
-                        let active_lr = controller.execute_active_inference_loop(
-                            mind.metabolics.conscience_loss_accumulator as f32,
+                        // 4. 🗣 Language modeling head: predict the next curriculum embedding.
+                        let lang_start = Instant::now();
+                        let language_loss = match mind
+                            .candle_brain
+                            .as_mut()?
+                            .train_language_step(&brain_outputs, &next_input_vector)
+                        {
+                            Ok(loss) => loss,
+                            Err(e) => {
+                                tracing::info!("⚠️ Candle language step failed: {:?}", e);
+                                return None;
+                            }
+                        };
+                        let lang_ms = lang_start.elapsed().as_secs_f64() * 1000.0;
+                        tracing::info!(
+                            "🗣 Language head next-embedding loss: {:.4} ({} ms)",
+                            language_loss,
+                            lang_ms as i32
                         );
+
+                        mind.metabolics.conscience_loss_accumulator = train_loss;
+
+                        // Track conscience loss and, if it is perfectly flat for
+                        // more than three cycles, break symmetry with a small
+                        // parameter-space noise injection and a learning-rate bump.
                         if let Some(ref mut brain) = mind.candle_brain {
-                            brain.set_learning_rate(active_lr as f64);
+                            brain.note_conscience_loss(train_loss);
                         }
-                    }
 
-                    // Sync structural emotional states with optimized tensor outputs
-                    mind.emotions.update_from_latent_layer(&brain_outputs);
+                        // 🏭 Production Blueprint: Active Inference homeostatic learning-rate modulation
+                        {
+                            let mut controller = hc.blocking_lock();
+                            let active_lr = controller.execute_active_inference_loop(
+                                mind.metabolics.conscience_loss_accumulator as f32,
+                            );
+                            if let Some(ref mut brain) = mind.candle_brain {
+                                brain.set_learning_rate(active_lr as f64);
+                            }
+                        }
 
-                    // 🔮 Train a neural predictive world model: previous brain state -> current input.
-                    let mut world_model_loss_value: Option<f64> = None;
-                    let prev_state = mind.prev_brain_state.take();
-                    if let Some(ref prev) = prev_state {
-                        let wm_loss = mind.neural_world_model.train(prev, contextual_input);
-                        tracing::info!("🔮 Neural world-model loss: {:.4}", wm_loss);
-                        world_model_loss_value = Some(wm_loss);
-                    }
-                    mind.prev_brain_state = Some(brain_outputs.clone());
+                        // Sync structural emotional states with optimized tensor outputs
+                        mind.emotions.update_from_latent_layer(&brain_outputs);
 
-                    // 🎯 Goal / intention generator: train on the current active pursuit, then sample a new local goal.
-                    let mut goal_loss_value: Option<f64> = None;
-                    let local_goal_text: Option<String> =
-                        if let Some(goal_text) = mind.active_pursuits.front().cloned() {
+                        // 🔮 Train a neural predictive world model: previous brain state -> current input.
+                        let mut world_model_loss_value: Option<f64> = None;
+                        let prev_state = mind.prev_brain_state.take();
+                        if let Some(ref prev) = prev_state {
+                            let wm_loss = mind.neural_world_model.train(prev, contextual_input);
+                            tracing::info!("🔮 Neural world-model loss: {:.4}", wm_loss);
+                            world_model_loss_value = Some(wm_loss);
+                        }
+                        mind.prev_brain_state = Some(brain_outputs.clone());
+
+                        // 🎯 Goal / intention generator: train on the current active pursuit, then sample a new local goal.
+                        let mut goal_loss_value: Option<f64> = None;
+                        let local_goal_text: Option<String> = if let Some(goal_text) =
+                            mind.active_pursuits.front().cloned()
+                        {
                             let goal_emb = generate_2048_grounded_embedding(
                                 &goal_text,
                                 &mind.spatial_sensory_register,
@@ -7583,86 +7707,89 @@ async fn main() -> Result<()> {
                             None
                         };
 
-                    // 📡 Record real performance benchmarks
-                    {
-                        let mut telemetry_guard = telemetry.blocking_lock();
-                        telemetry_guard.record_forward(forward_ms);
-                        telemetry_guard.record_backward(train_ms);
-                        telemetry_guard.record_total(total_start.elapsed().as_secs_f64() * 1000.0);
-                        telemetry_guard.record_loss(mind.metabolics.conscience_loss_accumulator);
-                        let token_count = incoming_experience.split_whitespace().count();
-                        telemetry_guard
-                            .record_tokens_per_second(token_count, forward_ms + train_ms);
-                    }
-
-                    // 📈 Push nanosecond latency samples into the hot-path ring buffer.
-                    let ms_to_ns = |ms: f64| (ms * 1_000_000.0) as u64;
-                    latency_ring.push(ms_to_ns(train_ms));
-                    latency_ring.push(ms_to_ns(forward_ms));
-                    latency_ring.push(ms_to_ns(lang_ms));
-                    latency_ring.push(total_start.elapsed().as_nanos() as u64);
-
-                    // 5. Local conscience classification: the Transformer now chooses its own labels.
-                    let local_logits = match mind.candle_brain.as_ref()?.classify(contextual_input)
-                    {
-                        Ok(logits) => logits,
-                        Err(e) => {
-                            tracing::info!("⚠️ Candle classify failed: {:?}", e);
-                            return None;
+                        // 📡 Record real performance benchmarks
+                        {
+                            let mut telemetry_guard = telemetry.blocking_lock();
+                            telemetry_guard.record_forward(forward_ms);
+                            telemetry_guard.record_backward(train_ms);
+                            telemetry_guard
+                                .record_total(total_start.elapsed().as_secs_f64() * 1000.0);
+                            telemetry_guard
+                                .record_loss(mind.metabolics.conscience_loss_accumulator);
+                            let token_count = incoming_experience.split_whitespace().count();
+                            telemetry_guard
+                                .record_tokens_per_second(token_count, forward_ms + train_ms);
                         }
-                    };
 
-                    let mut sorted_indices: Vec<usize> = (0..output_size).collect();
-                    sorted_indices.sort_by(|a, b| local_logits[*b].total_cmp(&local_logits[*a]));
-                    let decoded_conscience_0 = tokens[sorted_indices[0]];
-                    let decoded_conscience_1 = tokens[sorted_indices[1]];
-                    let name_copy = mind.name.clone();
-                    let metabolics_copy = mind.metabolics.clone();
-                    let emotions_copy = mind.emotions.clone();
-                    let total_nodes = mind.associative_memory_network.len();
-                    let live_synapse_0_0 = mind.candle_brain.as_ref()?.sample_weight_00();
-                    let live_learning_rate_sample = mind.candle_brain.as_ref()?.learning_rate();
-                    let spatial_snapshot = mind.spatial_sensory_register;
-                    let network_ref = mind.associative_memory_network.clone();
+                        // 📈 Push nanosecond latency samples into the hot-path ring buffer.
+                        let ms_to_ns = |ms: f64| (ms * 1_000_000.0) as u64;
+                        latency_ring.push(ms_to_ns(train_ms));
+                        latency_ring.push(ms_to_ns(forward_ms));
+                        latency_ring.push(ms_to_ns(lang_ms));
+                        latency_ring.push(total_start.elapsed().as_nanos() as u64);
 
-                    // 📈 Build the evaluation metrics entry; the final critic score
-                    // is filled in after the async LLM critic call completes.
-                    let entry = metrics::MetricsEntry {
-                        timestamp: telemetry::current_secs(),
-                        cycle,
-                        conscience_loss: mind.metabolics.conscience_loss_accumulator,
-                        language_loss,
-                        goal_loss: goal_loss_value,
-                        world_model_loss: world_model_loss_value,
-                        learning_rate: live_learning_rate_sample,
-                        critic_score: 0.0,
-                        active_goals: mind.active_pursuits.len(),
-                        memory_nodes: total_nodes,
-                        local_conscience_conf: Some(local_conf),
-                        local_conscience_agreement: local_agreement,
-                        tokens_per_second: tps,
-                    };
+                        // 5. Local conscience classification: the Transformer now chooses its own labels.
+                        let local_logits =
+                            match mind.candle_brain.as_ref()?.classify(contextual_input) {
+                                Ok(logits) => logits,
+                                Err(e) => {
+                                    tracing::info!("⚠️ Candle classify failed: {:?}", e);
+                                    return None;
+                                }
+                            };
 
-                    Some((
-                        decoded_conscience_0,
-                        decoded_conscience_1,
-                        name_copy,
-                        metabolics_copy,
-                        emotions_copy,
-                        total_nodes,
-                        live_synapse_0_0,
-                        live_learning_rate_sample,
-                        spatial_snapshot,
-                        network_ref,
-                        local_goal_text,
-                        entry,
-                        CycleBuffers {
-                            input_vector: std::mem::take(&mut input_vector),
-                            next_input_vector: std::mem::take(&mut next_input_vector),
-                            brain_outputs: std::mem::take(&mut brain_outputs),
-                        },
-                    ))
-                })();
+                        let mut sorted_indices: Vec<usize> = (0..output_size).collect();
+                        sorted_indices
+                            .sort_by(|a, b| local_logits[*b].total_cmp(&local_logits[*a]));
+                        let decoded_conscience_0 = tokens[sorted_indices[0]];
+                        let decoded_conscience_1 = tokens[sorted_indices[1]];
+                        let name_copy = mind.name.clone();
+                        let metabolics_copy = mind.metabolics.clone();
+                        let emotions_copy = mind.emotions.clone();
+                        let total_nodes = mind.associative_memory_network.len();
+                        let live_synapse_0_0 = mind.candle_brain.as_ref()?.sample_weight_00();
+                        let live_learning_rate_sample = mind.candle_brain.as_ref()?.learning_rate();
+                        let spatial_snapshot = mind.spatial_sensory_register;
+                        let network_ref = mind.associative_memory_network.clone();
+
+                        // 📈 Build the evaluation metrics entry; the final critic score
+                        // is filled in after the async LLM critic call completes.
+                        let entry = metrics::MetricsEntry {
+                            timestamp: telemetry::current_secs(),
+                            cycle,
+                            conscience_loss: mind.metabolics.conscience_loss_accumulator,
+                            language_loss,
+                            goal_loss: goal_loss_value,
+                            world_model_loss: world_model_loss_value,
+                            learning_rate: live_learning_rate_sample,
+                            critic_score: 0.0,
+                            active_goals: mind.active_pursuits.len(),
+                            memory_nodes: total_nodes,
+                            local_conscience_conf: Some(local_conf),
+                            local_conscience_agreement: local_agreement,
+                            tokens_per_second: tps,
+                        };
+
+                        Some((
+                            decoded_conscience_0,
+                            decoded_conscience_1,
+                            name_copy,
+                            metabolics_copy,
+                            emotions_copy,
+                            total_nodes,
+                            live_synapse_0_0,
+                            live_learning_rate_sample,
+                            spatial_snapshot,
+                            network_ref,
+                            local_goal_text,
+                            entry,
+                            CycleBuffers {
+                                input_vector: std::mem::take(&mut input_vector),
+                                next_input_vector: std::mem::take(&mut next_input_vector),
+                                brain_outputs: std::mem::take(&mut brain_outputs),
+                            },
+                        ))
+                    })();
 
                     mind.workspace = Some(workspace);
                     result
