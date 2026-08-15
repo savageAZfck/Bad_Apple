@@ -6742,7 +6742,7 @@ async fn bad_apple_boot() -> Result<String> {
 }
 
 async fn bad_apple_ipc_server() -> Result<()> {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::fs::{chown, FileTypeExt, MetadataExt, PermissionsExt};
 
     let socket_path = bad_apple_ipc::socket_path();
     let secret = Arc::new(bad_apple_ipc::load_slicks_secret()?);
@@ -6767,6 +6767,11 @@ async fn bad_apple_ipc_server() -> Result<()> {
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("unable to bind {}", socket_path.display()))?;
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))?;
+    if let Some(parent) = socket_path.parent() {
+        if let Ok(parent_meta) = std::fs::metadata(parent) {
+            let _ = chown(&socket_path, Some(0), Some(parent_meta.gid()));
+        }
+    }
     tracing::info!("BAD APPLE SLICKS ingress live at {}", socket_path.display());
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(32));
 

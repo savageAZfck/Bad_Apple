@@ -57,7 +57,9 @@ fi
 install -d -o root -g wheel -m 755 "${INSTALL_DIR}"
 install -d -o root -g wheel -m 755 "$(dirname "${CLI_TARGET}")"
 install -d -o root -g staff -m 750 "${DATA_DIR}"
-install -d -o root -g staff -m 2770 "${SOCKET_DIR}"
+install -d -o root -g staff -m 770 "${SOCKET_DIR}"
+chmod 770 "${SOCKET_DIR}"
+chown root:staff "${SOCKET_DIR}"
 for subdir in wild_workspace skills tools curriculum strategy_db; do
     install -d -o root -g wheel -m 700 "${DATA_DIR}/${subdir}"
 done
