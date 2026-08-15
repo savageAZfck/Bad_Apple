@@ -1,162 +1,232 @@
-# Firefly EdgeOS
+# Bad Apple
 
-**A sovereign, single-core-saturated, self-training cognitive operating system.**
+**An air-gapped, hardware-fused cognitive substrate for Apple Silicon.**
 
-Firefly EdgeOS is not a distributed system, a microservice mesh, or a cloud API wrapper. It is a single-threaded-at-the-core, hardware-aware cognitive runtime that keeps one Apple Silicon performance core packed and hands every heavy, non-deterministic, or I/O-bound operation to lock-free background lanes. It trains its own 576-dimensional Candle transformer on your machine, persists state to disk without blocking the cognitive clock, defends its swarm ports with a 2048-D vector firewall, and learns, plans, and reasons inside a self-contained process.
+Bad Apple runs a 3-billion-parameter Qwen-class language model locally and in-process on macOS. Its production daemon keeps a 36-layer stateful INT8 CoreML pipeline, four INT8 language-model heads, and a memory-mapped FP16 embedding table warm for low-latency requests. No cloud model, remote inference service, or external model daemon is required.
 
-This is a research runtime and a scaffold. It is private, early-access code.
+Text and voice requests share one path. The `badapple` terminal client and the native `BadAppleIntent` AppIntent authenticate with the same SLICKS challenge-response protocol, connect through a local Unix-domain socket, and stream generation from the one ANE engine owned by `badappled`.
 
----
+> Bad Apple is an experimental edge-AI runtime, not a claim of AGI or sentience.
 
-## What makes this different
+## Architecture
 
-Most machine-learning systems treat the CPU as a scheduler for a cloud of workers, GPUs, and network calls. Firefly EdgeOS inverts that model.
-
-- **Single-core saturation by design.** One performance thread runs the transformer, the memory graph, the planner, and the learner back-to-back, at >90% core utilization, with no yield to cross-core coordination.
-- **Zero-copy state persistence.** Tensor weights are snapshotted as lightweight `Arc` references and passed to a dedicated background thread. The foreground loop pays only the handoff, not the deep copy.
-- **Lock-free task offloading.** Wild-workspace and swarm packets are posted to `crossbeam`-backed `LockFreeRing`s with atomic priority-based backpressure. No mutexes, no thread-pool dispatch, no stalls.
-- **Hardware-fused network firewall.** The 2048-D cosine-similarity gate is implemented with ARM64 NEON intrinsics, streaming four `f32` lanes per 128-bit vector and zeroing NaN/Inf with `vbslq_f32`.
-- **Local-first, cloud-zero.** All training, inference, state, and swarm traffic stays on the host. No remote model endpoints, no telemetry exfiltration, no network calls for tool execution.
-
-This is a deliberate shift in the mental model of how a cognitive engine is built: one core, one stream of execution, one persistent self, with the rest of the machine reduced to an I/O and transport support plane.
-
----
-
-## Core capabilities
-
-- **Native Transformer training.** 576-dim, 4-block, 12-head Candle encoder with `conscience`, `goal`, and `language` heads, AdamW, layer-wise learning-rate decay, and dynamic orthogonality regularization.
-- **Self-supervised curriculum.** Trains on local text from `curriculum/`, continuously, from process start, using a self-generated BPE tokenizer.
-- **Conscience head with hard LR floor.** If the cross-entropy loss stays above `ln(100)` past cycle 50, the optimizer clamps to a 0.005 floor so the head breaks symmetry and converges.
-- **Xavier/Glorot head initialization.** The three transformer heads are initialized with scaled, clamped weights so gradients flow within the 0.01 stability band.
-- **Associative connectome.** A `HashMap`-based memory graph with 2048-D grounded embeddings, cosine-similarity edges, and a 10,000-entry identity journal.
-- **Emotional homeostasis and world model.** `production_blueprint.rs` and `governor.rs` modulate valence, arousal, planning mode, and orthogonality regularization from live loss and entropy.
-- **One-shot skill learning.** `/skills/learn` generates sandboxed Python functions from one example, validates them, and stores them in Sled.
-- **Wild workspace.** Watches a local directory and either runs read-only cleaners locally or offloads signed `CompactEngramPacket`s to peers when the queue saturates.
-- **Signed multi-transport swarm fabric.** TCP, UDP, and WebSocket gossip through `ConnectionManager`, with HMAC signing, exponential-backoff retry, transport auto-detection, and a 2048-D cosine firewall on every inbound frame.
-- **Lock-free rings everywhere.** `protocol.rs` already used `LockFreeRing` for incoming engrams. The new outbound ring makes wild-workspace task offloading completely non-blocking.
-- **Candle tensor snapshots without blocking.** `StateSaveWorker` flushes state, safetensors, connectome mmap, and legacy weight files on a background `std::thread` while the cognitive loop resumes immediately.
-- **Live telemetry and HTTP API.** Axum server on `http://127.0.0.1:8080` with `/telemetry`, `/metrics`, `/dashboard`, `/tools/run`, `/skills/learn`, `/skills/run`, `/pursuits/add`, `/transfer/evaluate`, and `/identity`.
-- **C FFI bridge.** `cargo build --release` produces `libfirefly_edgeos.dylib` and a generated `firefly_core.h` for macOS interop.
-
----
-
-## Measured performance
-
-These numbers come from the live telemetry endpoint on an Apple M4 Max:
-
-| Metric | Value | Note |
-|---|---|---|
-| State-save foreground handoff | **369 µs** | From main-loop start to `StateSaveWorker` queue, after removing the Tensor deep copy from the hot path. |
-| State-save background flush | **27-56 ms** | Time for the worker to deep-copy tensors and write JSON/safetensors/mmap. The foreground loop is unblocked. |
-| Conscience loss convergence | below 4.0 by cycle 6 | On a fresh state file with the new Xavier heads and LR floor. |
-| Single-core operation | 90%+ sustained | Cognitive tick, training, and inference saturate one core; all persistence and network work is backgrounded. |
-
-The handoff is the figure that matters. A full save used to block the main thread for hundreds of milliseconds. It now completes in under half a millisecond, letting the transformer training pipeline maintain mechanical sympathy with the CPU pipeline.
-
----
-
-## Architecture at a glance
-
-| Module | Responsibility |
-|---|---|
-| `src/main.rs` | Cognitive loop, planning, identity, memory, multi-agent wiring, and state-save orchestration. |
-| `src/tensor_brain.rs` | 576-D Candle Transformer, BPE tokenizer, three heads, AdamW, LLRD, orthogonality regularization, and the zero-copy `snapshot_weights` path. |
-| `src/conscience_oracle.rs` | LLM oracle routing and semantic cosine fallback. |
-| `src/apple_intelligence_client.rs` | Native Apple Intelligence client with JSON repair and fallback. |
-| `src/connectome_mmap.rs` | Zero-copy memory-mapped connectome persistence. |
-| `src/strategy_library.rs` | Sled-backed durable cache for proven tool blueprints with reliability tracking. |
-| `src/wild_workspace.rs` | Lock-free wild-workspace watcher, task queue, and distributed offloading via `push_outgoing`. |
-| `src/protocol.rs` | Signed multi-transport engram fabric, `ConnectionManager`, inbound and outbound `LockFreeRing`s, and the NEON 2048-D cosine firewall. |
-| `src/state_saver.rs` | Background `StateSaveWorker` that flushes double-buffered state snapshots. |
-| `src/telemetry.rs` | HTTP server, sandboxed tool runner, skill learner, metrics, and dashboard. |
-| `src/metrics.rs` | `MemoryProfiler`, `LatencyRingBuffer`, SVG dashboards. |
-| `src/governor.rs` | `DualProcessGovernor` scales orthogonality and tick rate from loss, entropy, and thermal state. |
-| `src/hyperdimensional_core.rs` | 10,000-D HDC vectors, script encoding, overhead analysis. |
-| `src/production_blueprint.rs` | Emotional homeostasis, memory graph, and causal world model. |
-| `src/config.rs` | Centralized `FIREFLY_*` environment configuration. |
-| `src/lib.rs` + `build.rs` | C FFI bridge and generated `firefly_core.h`. |
-
----
-
-## Quick start
-
-Requires Rust, macOS with Apple Intelligence support, and a `curriculum/` directory of `.txt` files.
-
-```bash
-git clone https://github.com/savageAZfck/Firefly-EdgeOS.git
-cd Firefly-EdgeOS
-cargo build --release
-./target/release/firefly_edgeos
+```text
+badapple CLI ─────────────┐
+                          │  Unix-domain IPC + SLICKS HMAC-SHA256
+Siri / BadAppleIntent ────┤  mutual proof, nonce, timestamp, prompt binding
+                          ▼
+                  badappled launch daemon
+                          │
+                          ▼
+                  in-process Rust/Swift FFI
+                          │
+            ┌─────────────┴─────────────┐
+            │ 36 stateful INT8 layers  │
+            │ mmap FP16 embeddings     │
+            │ 4 sharded INT8 LM heads  │
+            │ CoreML MLState KV cache  │
+            └─────────────┬─────────────┘
+                          ▼
+                  streamed local text
 ```
 
-The runtime starts training immediately, opens the telemetry server at `http://127.0.0.1:8080/telemetry`, and watches `wild_workspace/`.
+The CLI does not attempt to attach to a process ID or call FFI across a process boundary. Process IDs change after every restart, and FFI is in-process only. Instead, both ingress clients connect to the stable socket at `/var/run/badapple/substrate.sock`; the daemon alone owns and invokes the ANE FFI handle.
 
-To build the C bridge:
+## Bad Apple model substrate
+
+- **36 stateful CoreML layer shards.** Each transformer layer is independently compiled as INT8 and retains KV cache through `MLState`.
+- **Four INT8 LM-head shards.** The heads jointly cover the model's 151,936-token vocabulary.
+- **Memory-mapped embeddings.** The approximately 622 MB FP16 embedding table is mapped rather than copied into a second host buffer.
+- **Unified-memory handoff.** Hidden states move between CoreML shards as `MLMultiArray` values over Apple unified memory.
+- **Compute-unit selection.** Startup measures candidate CoreML configurations and rejects compiler failures or pathological prewarm latency.
+- **Warm daemon lifetime.** The ANE model handle, shard graph, and mapped artifacts remain owned by the long-running daemon.
+- **Observable inference.** Placement ratio, prewarm time, first-token latency, decode latency, throughput, call count, and failure count are exposed in local logs and tests.
+
+A reference M4 Max run measured 41.31% CoreML ANE operation placement, approximately 101 ms/token decode latency, and approximately 9.9 tokens/second. These are measurements from one machine and model conversion, not guaranteed performance figures.
+
+## Authenticated local ingress
+
+### SLICKS handshake
+
+Every request must complete a fail-closed local handshake before inference begins:
+
+1. The client sends a protocol version, timestamp, and 256-bit client nonce.
+2. The daemon returns a fresh 256-bit server nonce and an HMAC-SHA256 server proof.
+3. The client verifies the daemon and sends a client proof bound to both nonces, the timestamp, token limit, and SHA-256 hash of the prompt.
+4. The daemon rejects stale timestamps, malformed frames, invalid proofs, empty prompts, prompts over 64 KiB, and generation limits outside `1..=4096`.
+5. After authentication, the daemon emits `accepted`, `token`, and `done` frames.
+
+The production key is generated during installation at `/var/lib/bad_apple/slicks.key` with `root:staff` ownership and mode `0640`. The socket is created inside a setgid `root:staff` directory. No secret is compiled into either binary.
+
+### Terminal client
+
+```bash
+badapple "Explain quantum error correction"
+badapple --max-tokens 128 "Summarize the thermodynamic arrow of time"
+```
+
+`badapple` writes decoded token deltas to stdout as the warm daemon generates them. Configuration overrides:
+
+```text
+BADAPPLE_SOCKET_PATH
+BADAPPLE_SLICKS_KEY_PATH
+BADAPPLE_SLICKS_SECRET   # intended for tests and controlled development only
+```
+
+### Siri and AppIntents
+
+`BadAppleIntent` accepts a spoken-text array, joins it into one prompt, completes the same SLICKS handshake, and routes the request to the same daemon generation queue. `BadAppleShortcuts` publishes the shortcut title **Execute Bad Apple** and the Siri phrases **Execute Bad Apple** and **Ask Bad Apple** through the application-name token.
+
+Build the native bridge and AppIntent host:
+
+```bash
+src/platform/apple_bridge/build_apple_bridge.sh
+src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+```
+
+The second command creates `target/release/Bad Apple.app`. Install it in `/Applications` and launch it once in a logged-in user session so macOS can index its AppIntents metadata:
+
+```bash
+sudo ditto "target/release/Bad Apple.app" "/Applications/Bad Apple.app"
+open "/Applications/Bad Apple.app"
+```
+
+Siri cannot be registered by a pre-login LaunchDaemon alone: AppIntents must be hosted by a signed application in a user session. Inference still occurs in the system daemon; the application is only the Siri ingress host. Siri returns the completed response as a dialog, while the underlying daemon protocol remains token-streamed.
+
+## Build
+
+Requirements:
+
+- Apple Silicon Mac running macOS 26 or later
+- Rust toolchain with Cargo
+- macOS 26 SDK containing CoreML, FoundationModels, AppIntents, CryptoKit, and Security
+- Converted model artifacts under `tests/ane_brain_perf/artifacts/qwen3b_ane_shards/`, or equivalent paths supplied through the environment
 
 ```bash
 cargo build --release
-# generates firefly_core.h and target/release/libfirefly_edgeos.dylib
+src/platform/apple_bridge/build_apple_bridge.sh
 ```
 
----
+Release outputs:
 
-## HTTP endpoints
+```text
+target/release/badappled
+target/release/badapple
+target/release/libbad_apple.dylib
+target/release/libBadAppleBridge.dylib
+target/release/bad_apple_core.h
+```
 
-| Endpoint | Description |
+## Install the launch daemon
+
+The installation script validates the release binaries and model artifacts, installs immutable executable copies under `/usr/local`, creates the SLICKS key and restricted runtime directories, installs the launchd plist, and bootstraps the system job.
+
+```bash
+cargo build --release
+src/platform/apple_bridge/build_apple_bridge.sh
+sudo src/platform/apple_bridge/install_daemon.sh
+```
+
+Default artifacts can be overridden while installing:
+
+```bash
+sudo BADAPPLE_ANE_MODEL="/absolute/path/conversion_manifest.json" \
+     BADAPPLE_ANE_TOKENIZER="/absolute/path/tokenizer.json" \
+     src/platform/apple_bridge/install_daemon.sh
+```
+
+Inspect the service and logs:
+
+```bash
+sudo launchctl print system/com.badapple.substrate
+tail -f /var/log/bad_apple_daemon.log
+badapple "Report substrate status"
+```
+
+Installed paths:
+
+```text
+/usr/local/libexec/badapple/badappled
+/usr/local/libexec/badapple/libBadAppleBridge.dylib
+/usr/local/bin/badapple
+/Library/LaunchDaemons/com.badapple.substrate.plist
+/var/lib/bad_apple/
+/var/run/badapple/substrate.sock
+/var/log/bad_apple_daemon.log
+```
+
+The plist uses `RunAtLoad=true` and `KeepAlive=true`. `launchd` restarts crashes and unexpected exits, but an administrator can intentionally stop the service with `launchctl bootout`; no correctly administered macOS process is literally unkillable.
+
+## Air-gap boundary
+
+`badappled --daemon` returns into the dedicated SLICKS Unix-socket loop before the research runtime initializes its HTTP, TCP, UDP, or WebSocket services. The daemon integration test verifies `lsof -i -a -p <pid>` reports zero network sockets after model initialization and after an authenticated CLI generation.
+
+A Unix-domain socket is still local IPC. It is not an Internet socket and is not included by `lsof -i`. The daemon does not expose a TCP listener, contact a cloud endpoint, or start the repository's optional swarm/telemetry stack.
+
+Running `badappled` without `--daemon` starts the broader experimental cognitive runtime, which includes local HTTP telemetry and optional peer transports. That mode is intentionally separate and must not be described as having zero sockets.
+
+## One-shot benchmark mode
+
+```bash
+BADAPPLE_ANE_MODEL="/absolute/path/conversion_manifest.json" \
+BADAPPLE_ANE_TOKENIZER="/absolute/path/tokenizer.json" \
+BADAPPLE_ANE_BOOT_PROMPT="What is quantum computing?" \
+BADAPPLE_ANE_BOOT_TOKENS=20 \
+BADAPPLE_ANE_BOOT_ONESHOT=1 \
+./target/release/badappled --oneshot
+```
+
+The process prints the Bad Apple banner, ANE placement, prewarm time, decode latency, throughput, output text, and failure counters, then exits before any network service starts.
+
+## Model conversion
+
+The resumable conversion pipeline is documented in `tests/ane_brain_perf/README.md`:
+
+```bash
+python3 tests/ane_brain_perf/convert_ane_coreml.py --help
+```
+
+The generated `conversion_manifest.json` describes the embedding table, 36 stateful layer shards, LM-head ranges, context length, RoPE settings, and model metadata consumed by the Swift bridge.
+
+## Main components
+
+| Path | Responsibility |
 |---|---|
-| `/telemetry` | Live telemetry, sensors, and state-save timing. |
-| `/metrics` | Training metrics and summary JSON. |
-| `/dashboard` | HTML dashboard with SVG sparklines. |
-| `/live` | Live streaming dashboard. |
-| `/tools/run` | Run a sandboxed Python tool. |
-| `/skills/learn` | Learn a Python skill from one example. |
-| `/skills/run` | Execute a learned skill. |
-| `/pursuits/add` | Inject or merge a new active pursuit. |
-| `/transfer/evaluate` | Evaluate one-shot domain transfer. |
-| `/identity` | Return the persisted narrative identity and journal. |
+| `src/main.rs` | Daemon lifecycle, authenticated IPC server, one-shot telemetry, and research runtime. |
+| `src/bin/badapple.rs` | Lightweight streaming terminal client. |
+| `src/bad_apple_ipc.rs` | Shared SLICKS frames, proofs, key loading, limits, and blocking client. |
+| `src/ane_core.rs` | Tokenization, streaming generation, ANE bridge loading, counters, and governor policy. |
+| `src/platform/apple_bridge/BadAppleBridge.swift` | CoreML monolithic/sharded backends and C ABI exports. |
+| `src/platform/apple_bridge/BadAppleIntent.swift` | Native SLICKS client, `BadAppleIntent`, and `BadAppleShortcuts`. |
+| `src/platform/apple_desktop/BadAppleMenuBar.swift` | Logged-in AppIntent host and local menu-bar application. |
+| `src/platform/apple_bridge/com.badapple.substrate.plist` | System LaunchDaemon definition. |
+| `src/platform/apple_bridge/install_daemon.sh` | Root installation and launchd bootstrap. |
+| `src/metal_uma.rs` | Shared/private Metal residency, zero-copy buffers, and safetensors persistence. |
+| `src/lib.rs` + `build.rs` | `libbad_apple.dylib`, renamed C ABI, and `bad_apple_core.h`. |
 
----
-
-## Verified quality gates
+## Verification
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --all-features --release -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo test --release
-cargo build --release
-cargo deny check
+src/platform/apple_bridge/build_apple_bridge.sh
+src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+bash -n src/platform/apple_bridge/install_daemon.sh
+plutil -lint src/platform/apple_bridge/com.badapple.substrate.plist
 ```
 
-Results on the reference M4 Max:
+The daemon integration test starts `badappled` with an isolated socket and SLICKS secret, invokes the actual `badapple` binary, confirms generation succeeds, and asserts the daemon has zero Internet sockets.
 
-- `cargo clippy` — zero warnings, both `Firefly-EdgeOS` and `firefly_inferno`.
-- `cargo test --release` (EdgeOS) — 49 tests passed (23 lib + 26 bin).
-- `cargo test --release` (firefly_inferno) — 26 tests passed across agent, compiler, coprocessor, integration, and SLICKS suites.
-- `cargo deny check` — pass; only pre-existing duplicate-dependency warnings.
+## Security and privacy
 
----
-
-## Key design constraints
-
-- **No network access for tools.** Sandboxed Python runs with a restricted module list.
-- **No source-code self-modification.** The agent improves its cached strategies, not its own Rust source.
-- **Single-core cognitive hot path.** Background `std::thread` and `tokio` tasks handle persistence and transport only.
-- **Lock-free hot path.** The engram and task rings are `crossbeam` `ArrayQueue`s; priority-aware backpressure drops low-priority items above 85% occupancy.
-- **FFI safety.** Apple Intelligence calls are serialized by the Swift `NSLock` inside the Siri bridge; Rust paths stay lock-free.
-- **State survives restarts.** Memory graph, identity journal, learned skills, transformer weights, and connectome mmap are persisted on background threads.
-
----
-
-## Honest caveats
-
-This is a research runtime and a scaffold, not a shipping product.
-
-- It is **not enterprise-grade line-rate infrastructure**.
-- It is **not a real AGI** or a sentient system.
-- The HDC-based code synthesizer is a **pattern-matching template engine**, not a full compiler from hypervectors.
-- Throughput, latency, and thermodynamic figures are telemetry-derived measurements on one machine, not lab-benchmarked guarantees.
-
----
+- Inference prompts and model outputs remain local.
+- SLICKS uses HMAC-SHA256 mutual authentication and constant-time proof verification.
+- Request proofs are bound to nonces, timestamp, token budget, and prompt digest.
+- The daemon refuses to replace a non-socket filesystem object at its IPC path.
+- Model and tokenizer loading fail closed in daemon mode.
+- Secrets are never written to logs or committed to the repository.
+- See `SECURITY.md` and `PRIVACY.md` for the wider research-runtime threat model.
 
 ## License
 

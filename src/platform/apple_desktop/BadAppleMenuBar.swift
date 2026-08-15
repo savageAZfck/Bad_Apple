@@ -1,33 +1,34 @@
 import AppKit
+import BadAppleBridge
 import Foundation
 import Darwin
 
-// MARK: - C function signatures from firefly_core.h
+// MARK: - C function signatures from bad_apple_core.h
 
-private typealias FireflyInitFn = @convention(c) (UnsafePointer<CChar>?) -> OpaquePointer?
-private typealias FireflyFreeFn = @convention(c) (OpaquePointer?) -> Void
-private typealias FireflyGetActivePursuitsFn = @convention(c) (OpaquePointer?) -> UnsafeMutablePointer<CChar>?
-private typealias FireflyPushPursuitFn = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Bool
-private typealias FireflyGetAppleLatencyUsFn = @convention(c) () -> UInt64
-private typealias FireflyGenerateTextFn = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
-private typealias FireflyFreeStringFn = @convention(c) (UnsafeMutablePointer<CChar>?) -> Void
-private typealias InitFireflySiriBridgeFn = @convention(c) () -> Void
+private typealias BadAppleInitFn = @convention(c) (UnsafePointer<CChar>?) -> OpaquePointer?
+private typealias BadAppleFreeFn = @convention(c) (OpaquePointer?) -> Void
+private typealias BadAppleGetActivePursuitsFn = @convention(c) (OpaquePointer?) -> UnsafeMutablePointer<CChar>?
+private typealias BadApplePushPursuitFn = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Bool
+private typealias BadAppleGetAppleLatencyUsFn = @convention(c) () -> UInt64
+private typealias BadAppleGenerateTextFn = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+private typealias BadAppleFreeStringFn = @convention(c) (UnsafeMutablePointer<CChar>?) -> Void
+private typealias InitBadAppleBridgeFn = @convention(c) () -> Void
 
-// MARK: - Dynamic loader for libfirefly_edgeos.dylib
+// MARK: - Dynamic loader for libbad_apple.dylib
 
-final class FireflyFFI {
-    static let shared = FireflyFFI()
+final class BadAppleFFI {
+    static let shared = BadAppleFFI()
 
     private var handle: UnsafeMutableRawPointer?
     private(set) var context: OpaquePointer?
 
-    private var firefly_init: FireflyInitFn?
-    private var firefly_free: FireflyFreeFn?
-    private var firefly_get_active_pursuits: FireflyGetActivePursuitsFn?
-    private var firefly_push_pursuit: FireflyPushPursuitFn?
-    private var firefly_get_apple_latency_us: FireflyGetAppleLatencyUsFn?
-    private var firefly_generate_text: FireflyGenerateTextFn?
-    private var firefly_free_string: FireflyFreeStringFn?
+    private var bad_apple_init: BadAppleInitFn?
+    private var bad_apple_free: BadAppleFreeFn?
+    private var bad_apple_get_active_pursuits: BadAppleGetActivePursuitsFn?
+    private var bad_apple_push_pursuit: BadApplePushPursuitFn?
+    private var bad_apple_get_apple_latency_us: BadAppleGetAppleLatencyUsFn?
+    private var bad_apple_generate_text: BadAppleGenerateTextFn?
+    private var bad_apple_free_string: BadAppleFreeStringFn?
 
     private var lastError: String?
 
@@ -36,11 +37,11 @@ final class FireflyFFI {
     func load() {
         // First load the Apple Intelligence Siri bridge so the lib can answer prompts.
         let bridgeSearchPaths = [
-            "libFireflySiriBridge.dylib",
-            "./libFireflySiriBridge.dylib",
-            "../libFireflySiriBridge.dylib",
-            "target/release/libFireflySiriBridge.dylib",
-            "target/debug/libFireflySiriBridge.dylib",
+            "libBadAppleBridge.dylib",
+            "./libBadAppleBridge.dylib",
+            "../libBadAppleBridge.dylib",
+            "target/release/libBadAppleBridge.dylib",
+            "target/debug/libBadAppleBridge.dylib",
         ]
         var bridgeHandle: UnsafeMutableRawPointer?
         for path in bridgeSearchPaths {
@@ -49,21 +50,21 @@ final class FireflyFFI {
                 break
             }
         }
-        if let h = bridgeHandle, let sym = dlsym(h, "init_firefly_siri_bridge") {
-            let initBridge = unsafeBitCast(sym, to: InitFireflySiriBridgeFn.self)
+        if let h = bridgeHandle, let sym = dlsym(h, "init_bad_apple_bridge") {
+            let initBridge = unsafeBitCast(sym, to: InitBadAppleBridgeFn.self)
             initBridge()
         }
 
         let bundleDir = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
         let searchPaths = [
-            bundleDir + "/libfirefly_edgeos.dylib",
-            bundleDir + "/../libfirefly_edgeos.dylib",
-            "libfirefly_edgeos.dylib",
-            "./libfirefly_edgeos.dylib",
-            "../libfirefly_edgeos.dylib",
-            "target/release/libfirefly_edgeos.dylib",
-            "target/debug/libfirefly_edgeos.dylib",
-            "/usr/local/lib/libfirefly_edgeos.dylib",
+            bundleDir + "/libbad_apple.dylib",
+            bundleDir + "/../libbad_apple.dylib",
+            "libbad_apple.dylib",
+            "./libbad_apple.dylib",
+            "../libbad_apple.dylib",
+            "target/release/libbad_apple.dylib",
+            "target/debug/libbad_apple.dylib",
+            "/usr/local/lib/libbad_apple.dylib",
         ]
 
         for path in searchPaths {
@@ -74,31 +75,31 @@ final class FireflyFFI {
         }
 
         guard let h = handle else {
-            lastError = "libfirefly_edgeos.dylib not found in any search path"
+            lastError = "libbad_apple.dylib not found in any search path"
             return
         }
 
-        firefly_init = unsafeBitCast(dlsym(h, "firefly_init"), to: FireflyInitFn.self)
-        firefly_free = unsafeBitCast(dlsym(h, "firefly_free"), to: FireflyFreeFn.self)
-        firefly_get_active_pursuits = unsafeBitCast(dlsym(h, "firefly_get_active_pursuits"), to: FireflyGetActivePursuitsFn.self)
-        firefly_push_pursuit = unsafeBitCast(dlsym(h, "firefly_push_pursuit"), to: FireflyPushPursuitFn.self)
-        firefly_get_apple_latency_us = unsafeBitCast(dlsym(h, "firefly_get_apple_latency_us"), to: FireflyGetAppleLatencyUsFn.self)
-        firefly_generate_text = unsafeBitCast(dlsym(h, "firefly_generate_text"), to: FireflyGenerateTextFn.self)
-        firefly_free_string = unsafeBitCast(dlsym(h, "firefly_free_string"), to: FireflyFreeStringFn.self)
+        bad_apple_init = unsafeBitCast(dlsym(h, "bad_apple_init"), to: BadAppleInitFn.self)
+        bad_apple_free = unsafeBitCast(dlsym(h, "bad_apple_free"), to: BadAppleFreeFn.self)
+        bad_apple_get_active_pursuits = unsafeBitCast(dlsym(h, "bad_apple_get_active_pursuits"), to: BadAppleGetActivePursuitsFn.self)
+        bad_apple_push_pursuit = unsafeBitCast(dlsym(h, "bad_apple_push_pursuit"), to: BadApplePushPursuitFn.self)
+        bad_apple_get_apple_latency_us = unsafeBitCast(dlsym(h, "bad_apple_get_apple_latency_us"), to: BadAppleGetAppleLatencyUsFn.self)
+        bad_apple_generate_text = unsafeBitCast(dlsym(h, "bad_apple_generate_text"), to: BadAppleGenerateTextFn.self)
+        bad_apple_free_string = unsafeBitCast(dlsym(h, "bad_apple_free_string"), to: BadAppleFreeStringFn.self)
 
-        context = firefly_init?(nil)
+        context = bad_apple_init?(nil)
         if context == nil {
-            lastError = "firefly_init() returned nil"
+            lastError = "bad_apple_init() returned nil"
         }
     }
 
     func freeString(_ ptr: UnsafeMutablePointer<CChar>?) {
-        guard let ptr = ptr, let freeFn = firefly_free_string else { return }
+        guard let ptr = ptr, let freeFn = bad_apple_free_string else { return }
         freeFn(ptr)
     }
 
     func activePursuits() -> [String] {
-        guard let ctx = context, let fn = firefly_get_active_pursuits else { return [] }
+        guard let ctx = context, let fn = bad_apple_get_active_pursuits else { return [] }
         guard let raw = fn(ctx) else { return [] }
         defer { freeString(raw) }
         guard let cstr = String(cString: raw, encoding: .utf8) else { return [] }
@@ -111,18 +112,18 @@ final class FireflyFFI {
 
     @discardableResult
     func pushPursuit(_ text: String) -> Bool {
-        guard let ctx = context, let fn = firefly_push_pursuit else { return false }
+        guard let ctx = context, let fn = bad_apple_push_pursuit else { return false }
         return text.withCString { cstr in
             fn(ctx, cstr)
         }
     }
 
     func appleLatencyUs() -> UInt64 {
-        return firefly_get_apple_latency_us?() ?? 0
+        return bad_apple_get_apple_latency_us?() ?? 0
     }
 
     func generateText(_ prompt: String) -> String? {
-        guard let fn = firefly_generate_text else { return nil }
+        guard let fn = bad_apple_generate_text else { return nil }
         return prompt.withCString { cstr in
             guard let raw = fn(cstr) else { return nil }
             defer { freeString(raw) }
@@ -131,7 +132,7 @@ final class FireflyFFI {
     }
 
     deinit {
-        if let ctx = context, let freeFn = firefly_free {
+        if let ctx = context, let freeFn = bad_apple_free {
             freeFn(ctx)
         }
         if let h = handle {
@@ -143,7 +144,7 @@ final class FireflyFFI {
 // MARK: - Menu-bar application
 
 @main
-struct FireflyMenuBarApp {
+struct BadAppleMenuBarApp {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -159,12 +160,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var timer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        FireflyFFI.shared.load()
+        BadAppleFFI.shared.load()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.title = "🔥"
 
-        menu = NSMenu(title: "Firefly EdgeOS")
+        menu = NSMenu(title: "Bad Apple")
         statusItem?.menu = menu
 
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -177,20 +178,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let menu = menu else { return }
         menu.removeAllItems()
 
-        let header = NSMenuItem(title: "Firefly EdgeOS Menu Bar", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Bad Apple Menu Bar", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(NSMenuItem.separator())
 
-        if !FireflyFFI.shared.isLoaded {
-            let err = NSMenuItem(title: "⚠️ libfirefly_edgeos not loaded", action: nil, keyEquivalent: "")
+        if !BadAppleFFI.shared.isLoaded {
+            let err = NSMenuItem(title: "⚠️ libbad_apple not loaded", action: nil, keyEquivalent: "")
             err.isEnabled = false
             menu.addItem(err)
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(terminate), keyEquivalent: "q"))
             return
         }
 
-        let latencyUs = FireflyFFI.shared.appleLatencyUs()
+        let latencyUs = BadAppleFFI.shared.appleLatencyUs()
         let latencyMs = Double(latencyUs) / 1000.0
         let latencyItem = NSMenuItem(
             title: String(format: "Apple Latency: %.2f ms", latencyMs),
@@ -200,7 +201,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         latencyItem.isEnabled = false
         menu.addItem(latencyItem)
 
-        let pursuits = FireflyFFI.shared.activePursuits()
+        let pursuits = BadAppleFFI.shared.activePursuits()
         if pursuits.isEmpty {
             let empty = NSMenuItem(title: "No active pursuits", action: nil, keyEquivalent: "")
             empty.isEnabled = false
@@ -226,7 +227,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func pushPursuit() {
-        guard FireflyFFI.shared.isLoaded else { return }
+        guard BadAppleFFI.shared.isLoaded else { return }
         NSApp.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
@@ -240,16 +241,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             let text = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
-                _ = FireflyFFI.shared.pushPursuit(text)
+                _ = BadAppleFFI.shared.pushPursuit(text)
                 rebuildMenu()
             }
         }
     }
 
     @objc func generateReflection() {
-        guard FireflyFFI.shared.isLoaded else { return }
+        guard BadAppleFFI.shared.isLoaded else { return }
         let prompt = "Reflect on the current state of a local-first AGI runtime. Write one concise sentence about what to focus on next."
-        _ = FireflyFFI.shared.generateText(prompt)
+        _ = BadAppleFFI.shared.generateText(prompt)
         rebuildMenu()
     }
 

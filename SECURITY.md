@@ -1,6 +1,6 @@
 # Security Policy
 
-Firefly EdgeOS is a local-first, sovereign AGI research runtime. It runs entirely on the user's machine and does not require cloud services. This document outlines the security model, boundaries, and known limitations.
+Bad Apple is a local-first, sovereign AGI research runtime. It runs entirely on the user's machine and does not require cloud services. This document outlines the security model, boundaries, and known limitations.
 
 ## Threat model
 
@@ -11,7 +11,7 @@ Firefly EdgeOS is a local-first, sovereign AGI research runtime. It runs entirel
 - **Data exfiltration.** The runtime must not send source code, embeddings, or state to remote services.
 - **Resource exhaustion.** Unbounded memory, disk, or CPU usage from runaway training, planning, or tool execution.
 - **Swarm packet forgery.** A peer on the local network could send unsigned or malicious engrams.
-- **Dylib tampering.** A compromised `libfirefly_edgeos.dylib` or Apple Intelligence bridge could crash or mislead the runtime.
+- **Dylib tampering.** A compromised `libbad_apple.dylib` or Apple Intelligence bridge could crash or mislead the runtime.
 
 ### Out of scope
 
@@ -37,7 +37,7 @@ Firefly EdgeOS is a local-first, sovereign AGI research runtime. It runs entirel
 Sensors / curriculum / wild_workspace
                 │
                 ▼
-       Firefly EdgeOS (same process)
+       Bad Apple (same process)
                 │
     ┌───────────┼───────────┐
     ▼           ▼           ▼

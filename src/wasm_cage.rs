@@ -1,15 +1,15 @@
 //! WebAssembly execution cage for untrusted tool synthesis.
 //!
 //! The cage uses `wasmi` 0.35.0 to compile and run a guest module.  Host-side
-//! surface is intentionally tiny: `env::abort` and a small Firefly ABI for
+//! surface is intentionally tiny: `env::abort` and a small Bad Apple ABI for
 //! string I/O.  Linear memory is bounded by rejecting modules with more than
 //! one memory and by refusing modules whose declared initial or maximum memory
 //! exceeds the cage's limit.  Execution is fuel-metered and halted when the
 //! budget is exhausted.
 //!
-//! # Firefly string ABI
+//! # Bad Apple string ABI
 //!
-//! The guest imports four functions from the `firefly` module:
+//! The guest imports four functions from the `bad_apple` module:
 //!
 //! - `input_size() -> i32` – length of the host-provided input in bytes.
 //! - `input_read(dst: i32)` – copies the input into guest memory at `dst`.
@@ -133,9 +133,9 @@ impl WasmCage {
     /// Compile and validate an untrusted WASM module.
     ///
     /// Rejects modules that exceed the memory policy or that are not valid
-    /// WebAssembly binaries.  The module is instantiated with the Firefly host
-    /// ABI: `env::abort`, `firefly::input_size`, `firefly::input_read`,
-    /// `firefly::alloc`, and `firefly::output_write`.
+    /// WebAssembly binaries.  The module is instantiated with the Bad Apple host
+    /// ABI: `env::abort`, `bad_apple::input_size`, `bad_apple::input_read`,
+    /// `bad_apple::alloc`, and `bad_apple::output_write`.
     pub fn compile(&mut self, wasm_bytes: &[u8]) -> Result<(), WasmError> {
         self.validate_memory_policy(wasm_bytes)?;
 
@@ -158,10 +158,10 @@ impl WasmCage {
                 reason: format!("linker: {e}"),
             })?;
 
-        // Firefly string ABI.
+        // Bad Apple string ABI.
         linker
             .func_wrap(
-                "firefly",
+                "bad_apple",
                 "input_size",
                 |caller: wasmi::Caller<'_, WasmHost>| -> i32 { caller.data().input.len() as i32 },
             )
@@ -171,7 +171,7 @@ impl WasmCage {
 
         linker
             .func_wrap(
-                "firefly",
+                "bad_apple",
                 "input_read",
                 |mut caller: wasmi::Caller<'_, WasmHost>, dst: i32| {
                     let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
@@ -191,7 +191,7 @@ impl WasmCage {
 
         linker
             .func_wrap(
-                "firefly",
+                "bad_apple",
                 "alloc",
                 |mut caller: wasmi::Caller<'_, WasmHost>, len: i32| -> i32 {
                     let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
@@ -214,7 +214,7 @@ impl WasmCage {
 
         linker
             .func_wrap(
-                "firefly",
+                "bad_apple",
                 "output_write",
                 |mut caller: wasmi::Caller<'_, WasmHost>, src: i32, len: i32| {
                     let Some(Extern::Memory(mem)) = caller.get_export("memory") else {

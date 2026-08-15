@@ -67,7 +67,7 @@ impl DataCurriculum {
         }
         if self.corpus.is_empty() {
             self.corpus.push(
-                "The firefly soul observes the world through sensors and learns from every cycle."
+                "The Bad Apple substrate observes the world through sensors and learns from every cycle."
                     .to_string(),
             );
         }
@@ -116,19 +116,15 @@ impl DataCurriculum {
     }
 }
 
-/// Sensible default curriculum directories for a Firefly instance.
+/// Sensible default curriculum directories for a Bad Apple instance.
 pub fn default_curriculum_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
-        dirs.push(
-            PathBuf::from(&home)
-                .join("Firefly-EdgeOS")
-                .join("curriculum"),
-        );
+        dirs.push(PathBuf::from(&home).join("bad_apple").join("curriculum"));
         dirs.push(
             PathBuf::from(&home)
                 .join("Documents")
-                .join("firefly-curriculum"),
+                .join("bad-apple-curriculum"),
         );
     }
     dirs.push(PathBuf::from("curriculum"));

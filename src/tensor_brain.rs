@@ -1,3 +1,4 @@
+use crate::metal_uma::shared_var_builder;
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{
     layer_norm, linear, loss as nn_loss, ops as nn_ops, AdamW, Init, LayerNorm, Linear, Module,
@@ -229,7 +230,7 @@ struct OptimizerGroup {
     gamma: f64,
 }
 
-/// A real Candle tensor backend for the Firefly brain.
+/// A real Candle tensor backend for the Bad Apple brain.
 ///
 /// Replaces the legacy MLP with a small Transformer encoder that processes
 /// the 2048-dim grounded embedding as a 32-token sequence (64-dim tokens).
@@ -359,7 +360,11 @@ impl CandleBrain {
             tracing::info!("[CandleBrain '{}' initialized on CPU]", name);
         }
         let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let vb = if device.is_metal() {
+            shared_var_builder(&varmap, DType::F32, &device)
+        } else {
+            VarBuilder::from_varmap(&varmap, DType::F32, &device)
+        };
 
         let seq_len = 32usize;
         let token_dim = 64usize;

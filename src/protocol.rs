@@ -215,7 +215,7 @@ unsafe impl<T: Send + Priority> Sync for LockFreeRing<T> {}
 pub fn multi_agent_secret() -> Vec<u8> {
     let host = System::host_name().unwrap_or_else(|| "localhost".to_string());
     std::env::var("MULTI_AGENT_SECRET")
-        .unwrap_or_else(|_| format!("firefly-{}-default", host))
+        .unwrap_or_else(|_| format!("bad-apple-{}-default", host))
         .into_bytes()
 }
 

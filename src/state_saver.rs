@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn bench_state_save_500_nodes_10_weights() {
         let tmp =
-            std::env::temp_dir().join(format!("edgeos_state_bench_{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("badapple_state_bench_{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp).unwrap();
         let base = tmp.join("state");
 
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn bench_state_save_100_nodes_no_weights() {
         let tmp = std::env::temp_dir().join(format!(
-            "edgeos_state_bench_small_{}",
+            "badapple_state_bench_small_{}",
             rand::random::<u64>()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn bench_state_save_before_vs_after() {
         let tmp =
-            std::env::temp_dir().join(format!("edgeos_state_compare_{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("badapple_state_compare_{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp).unwrap();
         let base = tmp.join("state");
 
@@ -316,6 +316,10 @@ mod tests {
             .as_ref()
             .and_then(|b| b.snapshot_weights().ok())
             .expect("real Candle brain should yield weights");
+        assert!(weights.values().all(|tensor| {
+            crate::metal_uma::tensor_residency(tensor) == crate::metal_uma::TensorResidency::Shared
+        }));
+        let staging_bytes_before = crate::metal_uma::staging_blit_bytes();
 
         // Benchmark the *total* state-save cost: payload construction
         // (connectome snapshot / mmap persist + handoff) + the background write.
@@ -357,6 +361,7 @@ mod tests {
         let (_, new_handoff) = new_handoff.split_at(WARMUP);
         let (_, new_write) = new_write.split_at(WARMUP);
         let (_, new_total) = new_total.split_at(WARMUP);
+        assert_eq!(crate::metal_uma::staging_blit_bytes(), staging_bytes_before);
 
         // The legacy payload uses the old full-clone snapshot and the legacy
         // write path that copies weights and re-persists the connectome.

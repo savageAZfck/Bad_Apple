@@ -1,6 +1,6 @@
-# Firefly EdgeOS Architecture
+# Bad Apple Architecture
 
-This document describes the structure, data flow, and invariants of the Firefly EdgeOS runtime. It is intended for acquisition due diligence and for engineers extending the system.
+This document describes the structure, data flow, and invariants of the Bad Apple runtime. It is intended for acquisition due diligence and for engineers extending the system.
 
 ## Design principles
 
@@ -16,14 +16,14 @@ This document describes the structure, data flow, and invariants of the Firefly 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Interfaces                                                                 │
 │  ├── HTTP server at http://127.0.0.1:8080                                   │
-│  ├── C FFI bridge (libfirefly_edgeos.dylib / firefly_core.h)               │
+│  ├── C FFI bridge (libbad_apple.dylib / bad_apple_core.h)               │
 │  ├── Swarm fabric (TCP / UDP / WebSocket)                                   │
 │  └── Filesystem watchers (wild_workspace/, curriculum/)                     │
 └───────────────────────┬─────────────────────────────────────────────────────┘
                         │
                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  Firefly EdgeOS runtime                                                      │
+│  Bad Apple runtime                                                      │
 │  ├── main.rs — cognitive loop, planning, identity, multi-agent wiring       │
 │  ├── tensor_brain.rs — 576-D Candle transformer, BPE tokenizer, three heads │
 │  ├── conscience_oracle.rs — LLM oracle + semantic cosine fallback           │
@@ -39,8 +39,8 @@ This document describes the structure, data flow, and invariants of the Firefly 
 │  ├── metrics.rs — metrics logger, SVG dashboard, MemoryProfiler             │
 │  ├── benchmark.rs — transfer evaluator and PILOT report writer              │
 │  ├── data_feed.rs — sensor aggregation (CPU, RAM, battery, photons, etc.)   │
-│  ├── config.rs — centralized FIREFLY_* environment configuration            │
-│  └── lib.rs + build.rs — C FFI + generated firefly_core.h                   │
+│  ├── config.rs — centralized BADAPPLE_* environment configuration            │
+│  └── lib.rs + build.rs — C FFI + generated bad_apple_core.h                   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 

@@ -1,7 +1,7 @@
 //! Apple Intelligence / Foundation Models integration layer.
 //!
 //! Provides a thread-safe, global C-callback registration primitive and a
-//! small runtime loader that can `dlopen` the optional `FireflySiriBridge`
+//! small runtime loader that can `dlopen` the optional `BadAppleBridge`
 //! Swift dylib.  The design keeps the main async runtime unblocked by
 //! running all model calls inside `tokio::task::spawn_blocking`.
 //!
@@ -67,7 +67,7 @@ fn spawn_actor() -> Sender<ActorRequest> {
 #[no_mangle]
 pub extern "C" fn register_apple_intelligence_oracle(callback: AppleIntelligenceCallback) {
     let _ = CALLBACK.set(callback);
-    tracing::info!("🍎 Apple Intelligence oracle callback registered");
+    tracing::info!("🏴‍☠️  BAD APPLE // Apple Intelligence oracle callback registered");
 }
 
 /// True when a callback has been registered and is available for use.
@@ -149,8 +149,8 @@ pub async fn call(prompt: &str) -> Option<String> {
         .ok()?
 }
 
-/// Attempt to load the optional `libFireflySiriBridge.dylib` from a set of
-/// common locations and call its `init_firefly_siri_bridge` symbol.  This
+/// Attempt to load the optional `libBadAppleBridge.dylib` from a set of
+/// common locations and call its `init_bad_apple_bridge` symbol.  This
 /// is the runtime path for the in-process Swift bridge.
 pub fn try_load_bridge() -> Result<(), String> {
     use libloading::{Library, Symbol};
@@ -160,8 +160,8 @@ pub fn try_load_bridge() -> Result<(), String> {
     type NotifyFn = extern "C" fn(*const c_char, *const c_char);
 
     let mut paths: Vec<String> = vec![
-        "libFireflySiriBridge.dylib".to_string(),
-        "./libFireflySiriBridge.dylib".to_string(),
+        "libBadAppleBridge.dylib".to_string(),
+        "./libBadAppleBridge.dylib".to_string(),
     ];
 
     // Prefer the bridge sitting next to the running executable, then the
@@ -170,26 +170,21 @@ pub fn try_load_bridge() -> Result<(), String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(d) = dir.to_str() {
-                paths.push(format!("{}/libFireflySiriBridge.dylib", d));
+                paths.push(format!("{}/libBadAppleBridge.dylib", d));
             }
             if let Some(d) = dir.parent().and_then(|p| p.to_str()) {
-                paths.push(format!("{}/libFireflySiriBridge.dylib", d));
+                paths.push(format!("{}/libBadAppleBridge.dylib", d));
             }
         }
     }
 
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        paths.push(format!("{}/release/libFireflySiriBridge.dylib", target_dir));
-        paths.push(format!("{}/debug/libFireflySiriBridge.dylib", target_dir));
+        paths.push(format!("{}/release/libBadAppleBridge.dylib", target_dir));
+        paths.push(format!("{}/debug/libBadAppleBridge.dylib", target_dir));
     }
 
-    paths.push("target/release/libFireflySiriBridge.dylib".to_string());
-    paths.push("target/debug/libFireflySiriBridge.dylib".to_string());
-
-    // Sibling-repo fallback: when EdgeOS is run from its own tree but the
-    // canonical bridge was installed into the firefly_inferno tree next door.
-    paths.push("../firefly_inferno/target/release/libFireflySiriBridge.dylib".to_string());
-    paths.push("../firefly_inferno/target/debug/libFireflySiriBridge.dylib".to_string());
+    paths.push("target/release/libBadAppleBridge.dylib".to_string());
+    paths.push("target/debug/libBadAppleBridge.dylib".to_string());
 
     for path in &paths {
         let lib = match unsafe { Library::new(path) } {
@@ -197,7 +192,7 @@ pub fn try_load_bridge() -> Result<(), String> {
             Err(_) => continue,
         };
 
-        let init: Symbol<InitFn> = unsafe { lib.get(b"init_firefly_siri_bridge\0") }
+        let init: Symbol<InitFn> = unsafe { lib.get(b"init_bad_apple_bridge\0") }
             .map_err(|e| format!("Swift bridge lacks init symbol: {}", e))?;
 
         init();
@@ -207,12 +202,12 @@ pub fn try_load_bridge() -> Result<(), String> {
         // allocated them, avoiding cross-runtime allocator drift.
         if let Ok(free) = unsafe { lib.get::<FreeFn>(b"free_swift_string\0") } {
             let _ = FREE_CB.set(*free);
-            tracing::info!("🍎 Swift string deallocator registered");
+            tracing::info!("🏴‍☠️  BAD APPLE // Swift string deallocator registered");
         }
 
         if let Ok(dispatch) = unsafe { lib.get::<NotifyFn>(b"dispatch_desktop_notification\0") } {
             let _ = NOTIFY_CB.set(*dispatch);
-            tracing::info!("🍎 Desktop notification dispatcher registered");
+            tracing::info!("🏴‍☠️  BAD APPLE // Desktop notification dispatcher registered");
         }
 
         // Intentionally leak the library handle so the callback remains
@@ -223,14 +218,14 @@ pub fn try_load_bridge() -> Result<(), String> {
         return Ok(());
     }
 
-    Err("FireflySiriBridge dylib not found in any search path".to_string())
+    Err("BadAppleBridge dylib not found in any search path".to_string())
 }
 
 /// Try to load the bridge once on startup, logging success or a warning.
 pub fn initialize() {
     match try_load_bridge() {
-        Ok(()) => tracing::info!("🍎 FireflySiriBridge loaded and initialized"),
-        Err(e) => tracing::warn!("🍎 FireflySiriBridge not available: {}", e),
+        Ok(()) => tracing::info!("🏴‍☠️  BAD APPLE // Bad Apple bridge loaded and initialized"),
+        Err(e) => tracing::warn!("🏴‍☠️  BAD APPLE // Bad Apple bridge not available: {}", e),
     }
 }
 

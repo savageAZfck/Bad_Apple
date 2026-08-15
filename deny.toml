@@ -1,4 +1,4 @@
-# cargo-deny configuration for Firefly EdgeOS.
+# cargo-deny configuration for Bad Apple.
 # Run: cargo deny check
 
 [graph]
@@ -39,7 +39,7 @@ allow = [
 confidence-threshold = 0.8
 
 [licenses.private]
-# Firefly EdgeOS is not published; skip private-registry license checks.
+# Bad Apple is not published; skip private-registry license checks.
 ignore = true
 registries = []
 

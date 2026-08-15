@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use crate::tensor_brain::{self, BRAIN_DIM};
 
-const CONNECTOME_MAGIC: u64 = 0x46495245464C5921; // "FIREFLY!"
+const CONNECTOME_MAGIC: u64 = 0x46495245464C5921; // Legacy v1 marker retained for file compatibility.
 const CONNECTOME_VERSION: u64 = 1;
 
 /// Dimensionality of the grounded multimodal engram embedding.
@@ -290,7 +290,7 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "firefly_connectome_{}_{}.bin",
+            "bad_apple_connectome_{}_{}.bin",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));

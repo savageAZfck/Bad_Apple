@@ -1,8 +1,8 @@
-//! Runtime configuration for the firefly_edgeos agent.
+//! Runtime configuration for the bad_apple agent.
 //!
-//! Values are loaded from environment variables (prefixed with `FIREFLY_`) and
+//! Values are loaded from environment variables (prefixed with `BADAPPLE_`) and
 //! fall back to sensible defaults for local development. A JSON config file
-//! pointed at by `FIREFLY_CONFIG_FILE` is overlaid on top of those defaults.
+//! pointed at by `BADAPPLE_CONFIG_FILE` is overlaid on top of those defaults.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -58,37 +58,37 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let config_file = std::env::var("FIREFLY_CONFIG_FILE")
+        let config_file = std::env::var("BADAPPLE_CONFIG_FILE")
             .ok()
             .map(PathBuf::from)
             .filter(|p| p.exists());
 
         let mut cfg = Self {
-            telemetry_port: env_u16("FIREFLY_TELEMETRY_PORT", 8080),
-            multi_agent_port_start: env_u16("FIREFLY_MULTI_AGENT_PORT_START", 5001),
-            multi_agent_port_end: env_u16("FIREFLY_MULTI_AGENT_PORT_END", 5010),
+            telemetry_port: env_u16("BADAPPLE_TELEMETRY_PORT", 8080),
+            multi_agent_port_start: env_u16("BADAPPLE_MULTI_AGENT_PORT_START", 5001),
+            multi_agent_port_end: env_u16("BADAPPLE_MULTI_AGENT_PORT_END", 5010),
             apple_intelligence_model: env_or(
-                "FIREFLY_APPLE_INTELLIGENCE_MODEL",
+                "BADAPPLE_APPLE_INTELLIGENCE_MODEL",
                 "apple-intelligence",
             ),
-            state_file: env_path("FIREFLY_STATE_FILE", "state.json"),
-            curriculum_dir: env_path("FIREFLY_CURRICULUM_DIR", "curriculum"),
-            wild_workspace_dir: env_path("FIREFLY_WILD_WORKSPACE_DIR", "wild_workspace"),
-            sled_db_path: env_path("FIREFLY_SLED_DB_PATH", "strategy_db"),
-            metrics_log: env_path("FIREFLY_METRICS_LOG", "metrics.jsonl"),
-            skills_dir: env_path("FIREFLY_SKILLS_DIR", "skills"),
-            tools_dir: env_path("FIREFLY_TOOLS_DIR", "tools"),
-            clock_interval_secs: env_u64("FIREFLY_CLOCK_INTERVAL_SECS", 6),
-            max_engram_batch: env_usize("FIREFLY_MAX_ENGRAM_BATCH", 64),
-            engram_timeout_ms: env_u64("FIREFLY_ENGRAM_TIMEOUT_MS", 5),
-            multi_agent_secret: std::env::var("FIREFLY_MULTI_AGENT_SECRET").ok(),
-            peer_nodes: parse_peer_list(&env_or("FIREFLY_PEERS", "")),
+            state_file: env_path("BADAPPLE_STATE_FILE", "state.json"),
+            curriculum_dir: env_path("BADAPPLE_CURRICULUM_DIR", "curriculum"),
+            wild_workspace_dir: env_path("BADAPPLE_WILD_WORKSPACE_DIR", "wild_workspace"),
+            sled_db_path: env_path("BADAPPLE_SLED_DB_PATH", "strategy_db"),
+            metrics_log: env_path("BADAPPLE_METRICS_LOG", "metrics.jsonl"),
+            skills_dir: env_path("BADAPPLE_SKILLS_DIR", "skills"),
+            tools_dir: env_path("BADAPPLE_TOOLS_DIR", "tools"),
+            clock_interval_secs: env_u64("BADAPPLE_CLOCK_INTERVAL_SECS", 6),
+            max_engram_batch: env_usize("BADAPPLE_MAX_ENGRAM_BATCH", 64),
+            engram_timeout_ms: env_u64("BADAPPLE_ENGRAM_TIMEOUT_MS", 5),
+            multi_agent_secret: std::env::var("BADAPPLE_MULTI_AGENT_SECRET").ok(),
+            peer_nodes: parse_peer_list(&env_or("BADAPPLE_PEERS", "")),
             config_file,
-            wan_tcp_port: env_u16("FIREFLY_WAN_TCP_PORT", 6001),
-            wan_ws_port: env_u16("FIREFLY_WAN_WS_PORT", 6002),
-            max_wan_peers: env_usize("FIREFLY_MAX_WAN_PEERS", 64),
-            peer_retry_base_ms: env_u64("FIREFLY_PEER_RETRY_BASE_MS", 250),
-            peer_retry_max_ms: env_u64("FIREFLY_PEER_RETRY_MAX_MS", 30_000),
+            wan_tcp_port: env_u16("BADAPPLE_WAN_TCP_PORT", 6001),
+            wan_ws_port: env_u16("BADAPPLE_WAN_WS_PORT", 6002),
+            max_wan_peers: env_usize("BADAPPLE_MAX_WAN_PEERS", 64),
+            peer_retry_base_ms: env_u64("BADAPPLE_PEER_RETRY_BASE_MS", 250),
+            peer_retry_max_ms: env_u64("BADAPPLE_PEER_RETRY_MAX_MS", 30_000),
         };
 
         // Overlay an active JSON configuration file if one is provided.

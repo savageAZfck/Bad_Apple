@@ -20,7 +20,7 @@ fn main() {
         .join(env::var("PROFILE").unwrap_or_else(|_| "debug".into()));
     std::fs::create_dir_all(&target_dir).ok();
 
-    let header_path = target_dir.join("firefly_core.h");
+    let header_path = target_dir.join("bad_apple_core.h");
 
     cbindgen::Builder::new()
         .with_crate(crate_dir)

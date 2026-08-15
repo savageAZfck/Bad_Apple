@@ -40,21 +40,26 @@ SDK_PATH=$(resolve_sdk)
 FRAMEWORK_SEARCH="${SDK_PATH}/System/Library/Frameworks"
 
 echo "Using SDK: ${SDK_PATH}"
-echo "Building libFireflySiriBridge.dylib..."
+echo "Building libBadAppleBridge.dylib..."
 
 swiftc \
     -emit-library \
     -sdk "${SDK_PATH}" \
-    -o "${BUILD_DIR}/libFireflySiriBridge.dylib" \
-    "${REPO_ROOT}/src/platform/apple_bridge/FireflySiriBridge.swift" \
-    -module-name FireflySiriBridge \
+    -o "${BUILD_DIR}/libBadAppleBridge.dylib" \
+    "${REPO_ROOT}/src/platform/apple_bridge/BadAppleBridge.swift" \
+    "${REPO_ROOT}/src/platform/apple_bridge/BadAppleIntent.swift" \
+    -module-name BadAppleBridge \
     -framework Foundation \
     -F "${FRAMEWORK_SEARCH}" \
+    -framework AppIntents \
+    -framework CoreML \
+    -framework CryptoKit \
     -framework FoundationModels \
+    -framework Security \
     -target arm64-apple-macos26.0 \
     -Xlinker -undefined \
     -Xlinker dynamic_lookup \
     -Xlinker -install_name \
-    -Xlinker "@rpath/libFireflySiriBridge.dylib"
+    -Xlinker "@rpath/libBadAppleBridge.dylib"
 
-echo "Built: ${BUILD_DIR}/libFireflySiriBridge.dylib"
+echo "Built: ${BUILD_DIR}/libBadAppleBridge.dylib"

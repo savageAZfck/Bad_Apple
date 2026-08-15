@@ -198,6 +198,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "bad_apple"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.0",
+ "bytemuck",
+ "candle-core",
+ "candle-nn",
+ "cbindgen",
+ "chrono",
+ "crossbeam-channel",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "dashmap",
+ "futures-util",
+ "hf-chat-template",
+ "hmac",
+ "libc",
+ "libloading",
+ "md-5",
+ "memmap2",
+ "metal",
+ "ndarray",
+ "notify",
+ "objc2-metal",
+ "rand 0.8.7",
+ "safetensors 0.7.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sled",
+ "starship-battery",
+ "sysinfo",
+ "tokenizers 0.15.2",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "wasmi",
+ "wasmparser-nostd",
+]
+
+[[package]]
 name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -978,49 +1023,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "firefly_edgeos"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.23.0",
- "bytemuck",
- "candle-core",
- "candle-nn",
- "cbindgen",
- "chrono",
- "crossbeam-channel",
- "crossbeam-queue",
- "crossbeam-utils",
- "dashmap",
- "futures-util",
- "hmac",
- "libc",
- "libloading",
- "md-5",
- "memmap2",
- "metal",
- "ndarray",
- "notify",
- "rand 0.8.7",
- "safetensors 0.7.0",
- "serde",
- "serde_json",
- "sha2",
- "sled",
- "starship-battery",
- "sysinfo",
- "tokenizers 0.15.2",
- "tokio",
- "tokio-tungstenite",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "wasmi",
- "wasmparser-nostd",
-]
-
-[[package]]
 name = "float8"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1519,6 +1521,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hf-chat-template"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed4c5f2a8f34e7371a60a73bf129b13f698db5f9e0ba4cd583ff25bae285e166"
+dependencies = [
+ "minijinja",
+ "minijinja-contrib",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hmac"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1925,6 +1939,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "memo-map"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
 name = "metal"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1944,6 +1964,28 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minijinja"
+version = "2.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
+dependencies = [
+ "indexmap 2.14.0",
+ "memo-map",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "minijinja-contrib"
+version = "2.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd3e5f077bc2379f0f7d911e7cfdd921114ed99fc884533dca502944cb355b11"
+dependencies = [
+ "minijinja",
+ "serde",
+]
 
 [[package]]
 name = "minimal-lexical"
@@ -2753,6 +2795,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",

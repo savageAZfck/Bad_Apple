@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Firefly EdgeOS is a **cloudless, on-device** cognitive runtime. This policy explains what data is processed and where.
+Bad Apple is a **cloudless, on-device** cognitive runtime. This policy explains what data is processed and where.
 
 ## No cloud dependency
 
@@ -15,11 +15,11 @@ Firefly EdgeOS is a **cloudless, on-device** cognitive runtime. This policy expl
 |------|----------|-------|
 | Transformer weights | `state.safetensors`, `sapient_agi_soul_*.safetensors` | Loaded into process memory at runtime. |
 | Connectome / memory graph | `state.connectome`, `state.json` | Persisted memory-mapped structures. |
-| Identity journal | `firefly_soul.json`, `sapient_agi_soul*.json` | 10,000-entry durable narrative identity. |
+| Identity journal | `bad_apple_state.json`, `bad_apple_state*.json` | 10,000-entry durable narrative identity. |
 | Learned skills & strategies | `strategy_db/` Sled store | Caches proven tool blueprints and reliability scores. |
 | Curriculum | `curriculum/*.txt` | User-provided training text. |
 | Wild workspace | `wild_workspace/` | Watched directory for unsupervised ingestion. |
-| Telemetry / metrics | `metrics.jsonl`, `firefly.log` | Local logs and dashboard feed. |
+| Telemetry / metrics | `metrics.jsonl`, `bad_apple.log` | Local logs and dashboard feed. |
 
 ## What may leave the machine
 
@@ -37,7 +37,7 @@ The `PILOT_EVALUATION_METRICS.md` report and `metrics.jsonl` files are written t
 
 ## Data retention
 
-State files, logs, and the strategy database are retained until the user deletes them. Firefly EdgeOS does not phone home or perform automatic cleanup.
+State files, logs, and the strategy database are retained until the user deletes them. Bad Apple does not phone home or perform automatic cleanup.
 
 ## Third-party dependencies
 

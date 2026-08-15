@@ -1,17 +1,23 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 import PackageDescription
 
 let package = Package(
-    name: "FireflyMenuBar",
-    platforms: [.macOS(.v14)],
+    name: "BadAppleMenuBar",
+    platforms: [.macOS(.v26)],
     products: [
-        .executable(name: "FireflyMenuBar", targets: ["FireflyMenuBar"]),
+        .executable(name: "BadAppleMenuBar", targets: ["BadAppleMenuBar"]),
+    ],
+    dependencies: [
+        .package(path: "../apple_bridge"),
     ],
     targets: [
         .executableTarget(
-            name: "FireflyMenuBar",
+            name: "BadAppleMenuBar",
+            dependencies: [
+                .product(name: "BadAppleBridge", package: "apple_bridge"),
+            ],
             path: ".",
-            exclude: ["Package.swift", "build_firefly_menu_bar.sh"],
+            exclude: ["Package.swift", "build_bad_apple_menu_bar.sh"],
             swiftSettings: [
                 .enableExperimentalFeature("AccessLevelOnImport"),
             ],
@@ -20,5 +26,6 @@ let package = Package(
                 .linkedLibrary("dl"),
             ]
         ),
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )

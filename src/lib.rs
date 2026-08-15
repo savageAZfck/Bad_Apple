@@ -1,6 +1,6 @@
 #![allow(dead_code, clippy::new_without_default)]
 
-//! Public C-compatible library interface for the `firefly_edgeos` runtime.
+//! Public C-compatible library interface for the `bad_apple` runtime.
 //!
 //! This is an **Evaluation Kit** scaffold. It exposes a small, thread-safe FFI
 //! surface so macOS native code (Swift / C++ / Objective-C) can initialize the
@@ -8,13 +8,15 @@
 //!
 //! Safety: every function that accepts raw pointers is `unsafe extern "C"`. The
 //! caller is responsible for passing only valid pointers obtained from
-//! `firefly_init` and for calling `firefly_free` to release the context.
+//! `bad_apple_init` and for calling `bad_apple_free` to release the context.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
 
+pub mod ane_core;
 pub mod apple_intelligence;
 pub mod arena;
+pub mod bad_apple_ipc;
 pub mod benchmark;
 pub mod config;
 pub mod hyperdimensional_core;
@@ -35,26 +37,26 @@ pub use apple_intelligence::{
 use config::Config;
 use hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
 
-/// Opaque handle to an initialized Firefly EdgeOS evaluation context.
+/// Opaque handle to an initialized Bad Apple evaluation context.
 ///
 /// The internals are intentionally hidden from C. Only the pointer is exposed;
 /// the Rust side owns and synchronizes the state with a `std::sync::Mutex`.
 #[repr(C)]
-pub struct FireflyContext {
+pub struct BadAppleContext {
     _private: *mut c_void,
 }
 
-unsafe impl Send for FireflyContext {}
-unsafe impl Sync for FireflyContext {}
+unsafe impl Send for BadAppleContext {}
+unsafe impl Sync for BadAppleContext {}
 
-struct FireflyState {
+struct BadAppleState {
     #[allow(dead_code)]
     config: Config,
     mastery_index: f32,
     active_pursuits: Vec<String>,
 }
 
-impl FireflyState {
+impl BadAppleState {
     fn new(config: Config) -> Self {
         Self {
             config,
@@ -64,18 +66,18 @@ impl FireflyState {
     }
 }
 
-/// Initialize a Firefly EdgeOS evaluation context.
+/// Initialize a Bad Apple evaluation context.
 ///
 /// `config_path` may be a null pointer, in which case configuration is loaded
-/// from `FIREFLY_*` environment variables. The returned pointer must be freed
-/// with `firefly_free`.
+/// from `BADAPPLE_*` environment variables. The returned pointer must be freed
+/// with `bad_apple_free`.
 ///
 /// # Safety
 ///
 /// The caller must ensure `config_path` is either null or a valid,
 /// null-terminated C string.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_init(config_path: *const c_char) -> *mut FireflyContext {
+pub unsafe extern "C" fn bad_apple_init(config_path: *const c_char) -> *mut BadAppleContext {
     let config = if config_path.is_null() {
         Config::from_env()
     } else {
@@ -86,9 +88,9 @@ pub unsafe extern "C" fn firefly_init(config_path: *const c_char) -> *mut Firefl
         cstr
     };
 
-    let state = FireflyState::new(config);
+    let state = BadAppleState::new(config);
     let boxed = Box::new(Mutex::new(state));
-    let ctx = Box::new(FireflyContext {
+    let ctx = Box::new(BadAppleContext {
         _private: Box::into_raw(boxed) as *mut c_void,
     });
     Box::into_raw(ctx)
@@ -103,22 +105,22 @@ pub unsafe extern "C" fn firefly_init(config_path: *const c_char) -> *mut Firefl
 ///
 /// # Safety
 ///
-/// `context` must be a valid pointer returned by `firefly_init` and not yet
+/// `context` must be a valid pointer returned by `bad_apple_init` and not yet
 /// freed. `input_buffer` must point to at least `length` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_process_stream(
-    context: *mut FireflyContext,
+pub unsafe extern "C" fn bad_apple_process_stream(
+    context: *mut BadAppleContext,
     input_buffer: *const u8,
     length: usize,
 ) -> *mut c_char {
     if context.is_null() || input_buffer.is_null() {
-        return firefly_cstring("null pointer");
+        return bad_apple_cstring("null pointer");
     }
 
     let bytes = std::slice::from_raw_parts(input_buffer, length);
     let text = match std::str::from_utf8(bytes) {
         Ok(s) => s,
-        Err(_) => return firefly_cstring("invalid utf-8"),
+        Err(_) => return bad_apple_cstring("invalid utf-8"),
     };
 
     let (profile, diagnosis) = {
@@ -132,7 +134,7 @@ pub unsafe extern "C" fn firefly_process_stream(
     // Update a coarse mastery index based on how clean the profile is.
     {
         let ctx = &*context;
-        let state = &*(ctx._private as *const Mutex<FireflyState>);
+        let state = &*(ctx._private as *const Mutex<BadAppleState>);
         if let Ok(mut guard) = state.lock() {
             guard.mastery_index = (1.0 - profile.overhead_score) as f32;
         }
@@ -142,47 +144,47 @@ pub unsafe extern "C" fn firefly_process_stream(
         "diagnosis: {}; overhead: {:.3}",
         diagnosis, profile.overhead_score
     );
-    firefly_cstring(&summary)
+    bad_apple_cstring(&summary)
 }
 
 /// Return the current coarse mastery index for this context, clamped to [0, 1].
 ///
 /// # Safety
 ///
-/// `context` must be a valid pointer returned by `firefly_init` and not yet freed.
+/// `context` must be a valid pointer returned by `bad_apple_init` and not yet freed.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_get_mastery_index(context: *mut FireflyContext) -> f32 {
+pub unsafe extern "C" fn bad_apple_get_mastery_index(context: *mut BadAppleContext) -> f32 {
     if context.is_null() {
         return 0.0;
     }
     let ctx = &*context;
-    let state = &*(ctx._private as *const Mutex<FireflyState>);
+    let state = &*(ctx._private as *const Mutex<BadAppleState>);
     state
         .lock()
         .map(|g| g.mastery_index.clamp(0.0, 1.0))
         .unwrap_or(0.0)
 }
 
-/// Release a context previously allocated by `firefly_init`.
+/// Release a context previously allocated by `bad_apple_init`.
 ///
 /// After this call the pointer is invalid and must not be used again.
 ///
 /// # Safety
 ///
-/// `context` must be a valid pointer returned by `firefly_init` and not yet
+/// `context` must be a valid pointer returned by `bad_apple_init` and not yet
 /// freed. After this call, the pointer must not be used again.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_free(context: *mut FireflyContext) {
+pub unsafe extern "C" fn bad_apple_free(context: *mut BadAppleContext) {
     if context.is_null() {
         return;
     }
     let ctx = Box::from_raw(context);
-    let state = Box::from_raw(ctx._private as *mut Mutex<FireflyState>);
+    let state = Box::from_raw(ctx._private as *mut Mutex<BadAppleState>);
     drop(state);
     drop(ctx);
 }
 
-fn firefly_cstring(s: &str) -> *mut c_char {
+fn bad_apple_cstring(s: &str) -> *mut c_char {
     CString::new(s).unwrap_or_default().into_raw()
 }
 
@@ -190,30 +192,32 @@ fn firefly_cstring(s: &str) -> *mut c_char {
 /// in microseconds.  This reads the shared atomic counter maintained by the
 /// Apple Intelligence bridge; it is safe to call from any thread.
 #[no_mangle]
-pub extern "C" fn firefly_get_apple_latency_us() -> u64 {
+pub extern "C" fn bad_apple_get_apple_latency_us() -> u64 {
     apple_intelligence::last_latency_us()
 }
 
 /// Return the active pursuits for a context as a JSON array C string.
-/// The caller must free the returned pointer with `firefly_free_string`.
+/// The caller must free the returned pointer with `bad_apple_free_string`.
 ///
 /// # Safety
 ///
-/// `context` must be a valid pointer returned by `firefly_init` and not yet freed.
+/// `context` must be a valid pointer returned by `bad_apple_init` and not yet freed.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_get_active_pursuits(context: *mut FireflyContext) -> *mut c_char {
+pub unsafe extern "C" fn bad_apple_get_active_pursuits(
+    context: *mut BadAppleContext,
+) -> *mut c_char {
     if context.is_null() {
-        return firefly_cstring("[]");
+        return bad_apple_cstring("[]");
     }
     let ctx = &*context;
-    let state = &*(ctx._private as *const Mutex<FireflyState>);
+    let state = &*(ctx._private as *const Mutex<BadAppleState>);
     match state.lock() {
         Ok(guard) => {
             let json =
                 serde_json::to_string(&guard.active_pursuits).unwrap_or_else(|_| "[]".to_string());
-            firefly_cstring(&json)
+            bad_apple_cstring(&json)
         }
-        Err(_) => firefly_cstring("[]"),
+        Err(_) => bad_apple_cstring("[]"),
     }
 }
 
@@ -221,11 +225,11 @@ pub unsafe extern "C" fn firefly_get_active_pursuits(context: *mut FireflyContex
 ///
 /// # Safety
 ///
-/// `context` must be a valid pointer returned by `firefly_init` and not yet freed.
+/// `context` must be a valid pointer returned by `bad_apple_init` and not yet freed.
 /// `text` must be a valid, null-terminated UTF-8 C string.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_push_pursuit(
-    context: *mut FireflyContext,
+pub unsafe extern "C" fn bad_apple_push_pursuit(
+    context: *mut BadAppleContext,
     text: *const c_char,
 ) -> bool {
     if context.is_null() || text.is_null() {
@@ -236,7 +240,7 @@ pub unsafe extern "C" fn firefly_push_pursuit(
         _ => return false,
     };
     let ctx = &*context;
-    let state = &*(ctx._private as *const Mutex<FireflyState>);
+    let state = &*(ctx._private as *const Mutex<BadAppleState>);
     match state.lock() {
         Ok(mut guard) => {
             guard.active_pursuits.push(text);
@@ -254,62 +258,67 @@ pub unsafe extern "C" fn firefly_push_pursuit(
 ///
 /// # Safety
 ///
-/// `s` must be a pointer previously returned by a Firefly EdgeOS FFI function that
+/// `s` must be a pointer previously returned by a Bad Apple FFI function that
 /// returns ownership of a C string, and it must not have been freed before.
 /// Both Rust-allocated (`CString`) and bridge-allocated (`strdup`) strings
 /// are released through the C library `free()` path used by the global
 /// allocator, so this is safe for all C string exchanges.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_free_string(s: *mut c_char) {
+pub unsafe extern "C" fn bad_apple_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
     libc::free(s as *mut c_void);
 }
 
-/// Alias for `firefly_free_string` that explicitly signals to the host
+/// Alias for `bad_apple_free_string` that explicitly signals to the host
 /// environment that a Swift-allocated string is being released.
 ///
 /// # Safety
 ///
-/// Same as `firefly_free_string`.
+/// Same as `bad_apple_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn free_swift_string(s: *mut c_char) {
-    firefly_free_string(s);
+    bad_apple_free_string(s);
 }
 
 /// Run a prompt through the registered Apple Intelligence callback and return
 /// the response as a C string.  This is a blocking, synchronous call so the
 /// menu-bar app can drive it from the main thread without starting a Tokio
-/// runtime.  The caller must free the returned pointer with `firefly_free_string`.
+/// runtime.  The caller must free the returned pointer with `bad_apple_free_string`.
 ///
 /// # Safety
 ///
 /// `prompt` must be a valid, null-terminated UTF-8 C string.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_generate_text(prompt: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn bad_apple_generate_text(prompt: *const c_char) -> *mut c_char {
     if prompt.is_null() {
-        return firefly_cstring("null prompt");
+        return bad_apple_cstring("null prompt");
     }
     let text = match CStr::from_ptr(prompt).to_str() {
         Ok(s) if !s.is_empty() => s,
-        _ => return firefly_cstring("invalid prompt"),
+        _ => return bad_apple_cstring("invalid prompt"),
     };
+    if ane_core::is_available() {
+        if let Ok(resp) = ane_core::generate_sync(text, 256, ane_core::context_limit()) {
+            return bad_apple_cstring(&resp);
+        }
+    }
     match apple_intelligence::call_sync(text) {
-        Some(resp) => firefly_cstring(&resp),
-        None => firefly_cstring("Apple Intelligence not available"),
+        Some(resp) => bad_apple_cstring(&resp),
+        None => bad_apple_cstring("Apple Intelligence not available"),
     }
 }
 
 /// Dispatch a native macOS desktop notification through the loaded
-/// FireflySiriBridge.  If the bridge is not loaded or notification
+/// BadAppleBridge.  If the bridge is not loaded or notification
 /// authorization was not granted, the call is a silent no-op.
 ///
 /// # Safety
 ///
 /// `title` and `body` must be valid, null-terminated UTF-8 C strings.
 #[no_mangle]
-pub unsafe extern "C" fn firefly_dispatch_desktop_notification(
+pub unsafe extern "C" fn bad_apple_dispatch_desktop_notification(
     title: *const c_char,
     body: *const c_char,
 ) {
@@ -333,19 +342,19 @@ mod tests {
 
     #[test]
     fn ffi_roundtrip() {
-        let ctx = unsafe { firefly_init(std::ptr::null()) };
+        let ctx = unsafe { bad_apple_init(std::ptr::null()) };
         assert!(!ctx.is_null());
 
         let input = b"print hello world sum total";
-        let out = unsafe { firefly_process_stream(ctx, input.as_ptr(), input.len()) };
+        let out = unsafe { bad_apple_process_stream(ctx, input.as_ptr(), input.len()) };
         assert!(!out.is_null());
         let _ = unsafe { CStr::from_ptr(out) };
-        unsafe { firefly_free_string(out) };
+        unsafe { bad_apple_free_string(out) };
 
-        let idx = unsafe { firefly_get_mastery_index(ctx) };
+        let idx = unsafe { bad_apple_get_mastery_index(ctx) };
         assert!((0.0..=1.0).contains(&idx));
 
-        unsafe { firefly_free(ctx) };
+        unsafe { bad_apple_free(ctx) };
     }
 
     #[test]

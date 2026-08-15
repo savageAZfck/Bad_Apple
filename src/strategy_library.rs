@@ -1,4 +1,4 @@
-//! Durable strategy cache for the Firefly agent.
+//! Durable strategy cache for the Bad Apple agent.
 //!
 //! A strategy is a proven tool template keyed by a problem signature (typically
 //! a goal string or a domain). The library is backed by Sled so strategies
@@ -64,7 +64,7 @@ impl StrategyLibrary {
         let db = sled::open(path)?;
         Ok(Self {
             db: Arc::new(db),
-            causal_graph: Arc::new(Mutex::new(CausalGraph::firefly_default())),
+            causal_graph: Arc::new(Mutex::new(CausalGraph::bad_apple_default())),
         })
     }
 
@@ -397,7 +397,7 @@ use serde_json::Value;
 
 #[tokio::main]
 async fn main() {
-    let data = r#"{"name":"firefly","value":42}"#;
+    let data = r#"{"name":"bad apple","value":42}"#;
     let v: Value = serde_json::from_str(data).unwrap();
     println!("{}", v["value"]);
 }"##
@@ -700,7 +700,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let tid = std::thread::current().id();
-        let base = std::env::temp_dir().join(format!("firefly_edgeos_test_{:?}_{}", tid, ts));
+        let base = std::env::temp_dir().join(format!("bad_apple_test_{:?}_{}", tid, ts));
         std::fs::create_dir_all(&base).unwrap();
         StrategyLibrary::open(&base).unwrap()
     }

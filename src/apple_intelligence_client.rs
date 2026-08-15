@@ -1,11 +1,16 @@
-use crate::apple_intelligence;
+use crate::{ane_core, apple_intelligence};
 
-/// Native Apple Intelligence oracle wrapper.
+const ANE_DEFAULT_MAX_TOKENS: usize = 256;
+
+/// Native Apple Intelligence / in-process ANE oracle wrapper.
 ///
-/// All generation methods route through the registered native Apple
-/// Intelligence callback (`apple_intelligence::call`).  If the bridge is not
-/// loaded, generation fails cleanly; the higher-level `ConscienceOracle`
-/// falls back to its 2048-D cosine semantic matcher.
+/// Generation methods prefer the in-process ANE core (`ane_core`) when it is
+/// configured, because it runs entirely inside the process with no network
+/// socket and no external runtime.  If the ANE core is unavailable, they fall
+/// back to the registered native Apple Intelligence callback
+/// (`apple_intelligence::call`).  If neither is loaded, generation fails
+/// cleanly; the higher-level `ConscienceOracle` falls back to its 2048-D
+/// cosine semantic matcher.
 #[derive(Clone)]
 pub struct AppleIntelligenceClient;
 
@@ -20,11 +25,15 @@ impl AppleIntelligenceClient {
         prompt: &str,
         system: Option<&str>,
     ) -> Result<String, String> {
+        if let Some(resp) = try_ane_generate(system, prompt, ANE_DEFAULT_MAX_TOKENS).await {
+            return Ok(strip_code_fence(&resp));
+        }
+
         let full_prompt = build_prompt(system, prompt, None, None);
         if let Some(resp) = apple_intelligence::call(&full_prompt).await {
             return Ok(strip_code_fence(&resp));
         }
-        Err("Apple Intelligence bridge not available".to_string())
+        Err("Apple Intelligence and ANE cores are both unavailable".to_string())
     }
 
     pub async fn generate_constrained(
@@ -35,11 +44,21 @@ impl AppleIntelligenceClient {
         max_tokens: i32,
         temperature: f32,
     ) -> Result<String, String> {
+        let max_new_tokens = if max_tokens > 0 {
+            max_tokens as usize
+        } else {
+            ANE_DEFAULT_MAX_TOKENS
+        };
+
+        if let Some(resp) = try_ane_generate(system, prompt, max_new_tokens).await {
+            return Ok(strip_code_fence(&resp));
+        }
+
         let full_prompt = build_prompt(system, prompt, Some(max_tokens), Some(temperature));
         if let Some(resp) = apple_intelligence::call(&full_prompt).await {
             return Ok(strip_code_fence(&resp));
         }
-        Err("Apple Intelligence bridge not available".to_string())
+        Err("Apple Intelligence and ANE cores are both unavailable".to_string())
     }
 
     pub async fn generate_structured(
@@ -52,8 +71,14 @@ impl AppleIntelligenceClient {
         let combined_system = system
             .map(|s| format!("{} {}", json_system, s))
             .unwrap_or_else(|| json_system.to_string());
-        let full_prompt = build_prompt(Some(&combined_system), prompt, None, None);
 
+        if let Some(resp) = try_ane_generate(Some(&combined_system), prompt, 256).await {
+            let text = strip_code_fence(&resp);
+            return parse_or_repair_json(&text)
+                .map_err(|e| format!("Failed to parse ANE output as JSON: {}\nRaw: {}", e, text));
+        }
+
+        let full_prompt = build_prompt(Some(&combined_system), prompt, None, None);
         if let Some(resp) = apple_intelligence::call(&full_prompt).await {
             let text = strip_code_fence(&resp);
             return parse_or_repair_json(&text).map_err(|e| {
@@ -64,12 +89,35 @@ impl AppleIntelligenceClient {
             });
         }
 
-        Err("Apple Intelligence bridge not available".to_string())
+        Err("Apple Intelligence and ANE cores are both unavailable".to_string())
     }
 
     pub async fn is_available(&self) -> bool {
-        apple_intelligence::is_available()
+        ane_core::is_available() || apple_intelligence::is_available()
     }
+}
+
+/// Try the in-process ANE core first.  ANE generation is fully synchronous
+/// inside the model, so it runs in a `spawn_blocking` task to avoid blocking
+/// the async runtime.
+async fn try_ane_generate(
+    system: Option<&str>,
+    prompt: &str,
+    max_new_tokens: usize,
+) -> Option<String> {
+    if !ane_core::is_available() {
+        return None;
+    }
+    let prompt = prompt.to_string();
+    let system = system.map(String::from);
+    let context_limit = ane_core::context_limit();
+    tokio::task::spawn_blocking(move || {
+        ane_core::generate_with_system(&prompt, system.as_deref(), max_new_tokens, context_limit)
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn build_prompt(

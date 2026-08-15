@@ -372,8 +372,8 @@ impl CausalGraph {
             .map(|s| s.as_str())
     }
 
-    /// Built-in causal map for the Firefly agent architecture.
-    pub fn firefly_default() -> Self {
+    /// Built-in causal map for the Bad Apple architecture.
+    pub fn bad_apple_default() -> Self {
         let mut g = Self::new();
         g.add_relation(
             "apple_intelligence_bridge",

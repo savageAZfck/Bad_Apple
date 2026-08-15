@@ -1,4 +1,4 @@
-//! Hyperdimensional Computing (HDC) substrate for Firefly.
+//! Hyperdimensional Computing (HDC) substrate for Bad Apple.
 //!
 //! Implements a 10,000-dimensional Vector Symbolic Architecture (VSA) using
 //! bipolar (-1, +1) vectors. Supports bundling (superposition), binding

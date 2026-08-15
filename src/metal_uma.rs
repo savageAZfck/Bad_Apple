@@ -7,14 +7,18 @@
 //! Metal compute kernels can operate on the same allocation.
 
 use candle_core::backend::BackendStorage;
-use candle_core::{DType, Device as CandleDevice, MetalStorage, Storage, Tensor};
+use candle_core::{DType, Device as CandleDevice, MetalStorage, Shape, Storage, Tensor, Var};
+use candle_nn::var_builder::SimpleBackend;
+use candle_nn::{Init, VarBuilder, VarMap};
 use metal::{Buffer, Device as MetalDevice, MTLResourceOptions};
+use objc2_metal::{MTLResource as _, MTLStorageMode};
 use safetensors::tensor::{serialize_to_file, Dtype, View};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A typed CPU/GPU shared buffer backed by a `MTLBuffer`.
 ///
@@ -106,6 +110,115 @@ impl<T: Copy + Send + Sync + 'static> DerefMut for UmaBuffer<T> {
     }
 }
 
+#[derive(Clone)]
+struct SharedVarMapBackend {
+    varmap: VarMap,
+}
+
+impl SimpleBackend for SharedVarMapBackend {
+    fn get(
+        &self,
+        shape: Shape,
+        name: &str,
+        init: Init,
+        dtype: DType,
+        device: &CandleDevice,
+    ) -> candle_core::Result<Tensor> {
+        {
+            let data = self.varmap.data().lock().unwrap();
+            if let Some(var) = data.get(name) {
+                if var.shape() != &shape {
+                    return Err(candle_core::Error::Msg(format!(
+                        "shape mismatch on {name}: {shape:?} <> {:?}",
+                        var.shape()
+                    )));
+                }
+                return Ok(var.as_tensor().clone());
+            }
+        }
+
+        let var = if device.is_metal() {
+            if dtype != DType::F32 {
+                return Err(candle_core::Error::Msg(format!(
+                    "shared Metal VarMap only supports F32, got {dtype:?} for {name}"
+                )));
+            }
+            let initialized = init.var(shape.clone(), dtype, &CandleDevice::Cpu)?;
+            let values = initialized.as_tensor().flatten_all()?.to_vec1::<f32>()?;
+            Var::from_vec(values, shape.clone(), device)?
+        } else {
+            init.var(shape.clone(), dtype, device)?
+        };
+
+        let mut data = self.varmap.data().lock().unwrap();
+        if let Some(existing) = data.get(name) {
+            return Ok(existing.as_tensor().clone());
+        }
+        let tensor = var.as_tensor().clone();
+        data.insert(name.to_string(), var);
+        Ok(tensor)
+    }
+
+    fn get_unchecked(
+        &self,
+        name: &str,
+        _dtype: DType,
+        _device: &CandleDevice,
+    ) -> candle_core::Result<Tensor> {
+        self.varmap
+            .data()
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|var| var.as_tensor().clone())
+            .ok_or_else(|| candle_core::Error::Msg(format!("cannot find tensor {name}")))
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.varmap.data().lock().unwrap().contains_key(name)
+    }
+}
+
+pub fn shared_var_builder(
+    varmap: &VarMap,
+    dtype: DType,
+    device: &CandleDevice,
+) -> VarBuilder<'static> {
+    VarBuilder::from_backend(
+        Box::new(SharedVarMapBackend {
+            varmap: varmap.clone(),
+        }),
+        dtype,
+        device.clone(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TensorResidency {
+    NonMetal,
+    Shared,
+    Private,
+    Other,
+}
+
+pub fn tensor_residency(tensor: &Tensor) -> TensorResidency {
+    let (storage, _) = tensor.storage_and_layout();
+    let Storage::Metal(storage) = &*storage else {
+        return TensorResidency::NonMetal;
+    };
+    match storage.buffer().as_ref().storageMode() {
+        MTLStorageMode::Shared => TensorResidency::Shared,
+        MTLStorageMode::Private => TensorResidency::Private,
+        _ => TensorResidency::Other,
+    }
+}
+
+static STAGING_BLIT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub fn staging_blit_bytes() -> u64 {
+    STAGING_BLIT_BYTES.load(Ordering::Relaxed)
+}
+
 /// Zero-copy `safetensors::View` that reads directly from a `MTLResourceStorageModeShared`
 /// `MetalStorage` buffer.  Because the CPU and GPU already share the same
 /// physical pages, the safetensors serializer can write the file straight from
@@ -181,6 +294,7 @@ fn blit_to_shared(
     blit.copy_from_buffer(src.buffer(), start, &shared, 0, len);
     blit.end_encoding();
     device.wait_until_completed()?;
+    STAGING_BLIT_BYTES.fetch_add(len as u64, Ordering::Relaxed);
     Ok(MetalStorage::new(shared, device.clone(), elem_count, dtype))
 }
 
@@ -208,20 +322,19 @@ pub fn save_metal_tensors<P: AsRef<Path>>(
                 let buffer_len = m.buffer().length();
 
                 if t.is_contiguous() && start + len <= buffer_len {
-                    // Candle allocates most compute buffers as
-                    // `StorageModePrivate` on macOS, and even `StorageModeShared`
-                    // pages may not be wired for `write(2)`.  Blit the tensor
-                    // into a fresh shared staging buffer and serialize from
-                    // there.
-                    let staging = blit_to_shared(m, start, len, elem_count, t.dtype())?;
+                    let (storage, offset) = if tensor_residency(t) == TensorResidency::Shared {
+                        (m.clone(), start)
+                    } else {
+                        (blit_to_shared(m, start, len, elem_count, t.dtype())?, 0)
+                    };
 
                     views.push((
                         name.clone(),
                         UmaSafetensorView {
-                            storage: staging,
+                            storage,
                             dtype: safetensors_dtype_from_candle(t.dtype()),
                             shape: t.dims().to_vec(),
-                            offset: 0,
+                            offset,
                             len,
                         },
                     ));
@@ -247,7 +360,7 @@ pub fn save_metal_tensors<P: AsRef<Path>>(
         let mut merged: HashMap<String, Tensor> = HashMap::with_capacity(tensors.len());
 
         let tmp = std::env::temp_dir().join(format!(
-            "firefly_uma_save_{}.safetensors",
+            "bad_apple_uma_save_{}.safetensors",
             rand::random::<u64>()
         ));
         for (_, view) in &views {
@@ -309,6 +422,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_var_residency_survives_update_and_save() {
+        use candle_nn::Init;
+
+        let device = CandleDevice::new_metal(0).expect("Metal device needed for this test");
+        let varmap = VarMap::new();
+        let vb = shared_var_builder(&varmap, DType::F32, &device);
+        let tensor = vb
+            .get_with_hints((64, 64), "weight", Init::Uniform { lo: -0.1, up: 0.1 })
+            .unwrap();
+        assert_eq!(tensor_residency(&tensor), TensorResidency::Shared);
+
+        let var = varmap.data().lock().unwrap()["weight"].clone();
+        let updated = tensor.affine(1.0, 0.25).unwrap();
+        var.set(&updated).unwrap();
+        assert_eq!(tensor_residency(var.as_tensor()), TensorResidency::Shared);
+
+        let path = std::env::temp_dir().join(format!(
+            "bad_apple_shared_residency_{}.safetensors",
+            rand::random::<u64>()
+        ));
+        let before = staging_blit_bytes();
+        let tensors = HashMap::from([("weight".to_string(), var.as_tensor().clone())]);
+        save_metal_tensors(&tensors, &path).unwrap();
+        assert_eq!(staging_blit_bytes(), before);
+
+        let loaded = candle_core::safetensors::load(&path, &CandleDevice::Cpu).unwrap();
+        let expected = var
+            .as_tensor()
+            .to_device(&CandleDevice::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let actual = loaded["weight"]
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(actual, expected);
+        std::fs::remove_file(path).unwrap();
+    }
+
     /// Measure how long it takes to write a connectome-sized UMA buffer from
     /// the CPU.  On UMA this is a host memory write and requires no PCIe copy.
     #[test]
@@ -351,7 +508,7 @@ mod tests {
         map.insert("test".to_string(), t.clone());
 
         let tmp = std::env::temp_dir().join(format!(
-            "firefly_uma_roundtrip_{}.safetensors",
+            "bad_apple_uma_roundtrip_{}.safetensors",
             rand::random::<u64>()
         ));
         save_metal_tensors(&map, &tmp).unwrap();
@@ -381,7 +538,7 @@ mod tests {
         map.insert("c".to_string(), c.clone());
 
         let tmp = std::env::temp_dir().join(format!(
-            "firefly_uma_multi_{}.safetensors",
+            "bad_apple_uma_multi_{}.safetensors",
             rand::random::<u64>()
         ));
         save_metal_tensors(&map, &tmp).unwrap();

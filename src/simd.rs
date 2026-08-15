@@ -1,4 +1,4 @@
-//! Hardware-fused vector math for the Firefly hot paths.
+//! Hardware-fused vector math for the Bad Apple hot paths.
 //!
 //! This module is the home for the manual ARM64 NEON paths that replace scalar
 //! dot products and cosine-similarity loops in the transformer, firewall, and

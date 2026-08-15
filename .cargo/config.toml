@@ -3,3 +3,8 @@ rustflags = [
     "-C", "target-cpu=native",
     "-C", "link-arg=-Wl,-export_dynamic",
 ]
+
+[env]
+# The Metal UMA tests share a single GPU device and a global staging-blits
+# counter, so the full suite must run serially to be deterministic.
+RUST_TEST_THREADS = "1"

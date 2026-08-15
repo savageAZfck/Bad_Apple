@@ -1,4 +1,6 @@
-use crate::{apple_intelligence, calculate_cosine_similarity, generate_2048_grounded_embedding};
+use crate::{
+    ane_core, apple_intelligence, calculate_cosine_similarity, generate_2048_grounded_embedding,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -62,7 +64,7 @@ impl ConscienceOracle {
         // Under memory pressure we skip the bridge entirely and route straight
         // into the 2048-D cosine semantic matcher.
         if !under_memory_pressure() {
-            if let Some(response) = apple_intelligence::call(&prompt).await {
+            if let Some(response) = call_oracle(&prompt, 16).await {
                 let summary = response
                     .trim()
                     .to_lowercase()
@@ -140,7 +142,7 @@ impl ConscienceOracle {
         );
 
         if !under_memory_pressure() {
-            if let Some(resp) = apple_intelligence::call(&prompt).await {
+            if let Some(resp) = call_oracle(&prompt, 16).await {
                 if let Some(score) = resp
                     .split_whitespace()
                     .next()
@@ -184,7 +186,7 @@ impl ConscienceOracle {
         );
 
         if !under_memory_pressure() {
-            if let Some(resp) = apple_intelligence::call(&prompt).await {
+            if let Some(resp) = call_oracle(&prompt, 64).await {
                 let text = resp
                     .trim()
                     .replace(['"', '\'', '\n'], " ")
@@ -218,7 +220,7 @@ impl ConscienceOracle {
         );
 
         if !under_memory_pressure() {
-            if let Some(resp) = apple_intelligence::call(&prompt).await {
+            if let Some(resp) = call_oracle(&prompt, 64).await {
                 let insight = resp
                     .trim()
                     .replace(['"', '\'', '\n'], " ")
@@ -278,4 +280,23 @@ impl ConscienceOracle {
             .position(|t| t.eq_ignore_ascii_case(token))
             .map(|i| &self.token_embeddings[i])
     }
+}
+
+/// Try the in-process ANE core first, then the Apple Intelligence bridge.
+///
+/// ANE generation is synchronous and CPU-heavy (it blocks on the NPU), so it
+/// is wrapped in `spawn_blocking` to keep the async runtime healthy.
+async fn call_oracle(prompt: &str, max_new_tokens: usize) -> Option<String> {
+    if ane_core::is_available() {
+        let prompt = prompt.to_string();
+        let context_limit = ane_core::context_limit();
+        if let Ok(Ok(text)) = tokio::task::spawn_blocking(move || {
+            ane_core::generate_sync(&prompt, max_new_tokens, context_limit)
+        })
+        .await
+        {
+            return Some(text);
+        }
+    }
+    apple_intelligence::call(prompt).await
 }

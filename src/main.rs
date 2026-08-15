@@ -15,16 +15,19 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use sysinfo::System;
+use tokio::io::BufReader as TokioBufReader;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::{
-    net::UdpSocket,
+    net::{UdpSocket, UnixListener, UnixStream},
     task::spawn_blocking,
     time::{sleep, timeout},
 };
 
+mod ane_core;
 mod apple_intelligence;
 mod apple_intelligence_client;
 mod arena;
+mod bad_apple_ipc;
 mod benchmark;
 mod config;
 mod connectome_mmap;
@@ -3842,7 +3845,7 @@ struct EnhancedNetworkStack {
 
 impl EnhancedNetworkStack {
     fn new(local_port: u16) -> Self {
-        let local_peer_id = format!("firefly_node_{}", local_port);
+        let local_peer_id = format!("bad_apple_node_{}", local_port);
         Self {
             local_peer_id,
             known_peers: HashMap::new(),
@@ -5244,7 +5247,7 @@ pub(crate) struct FullySapientSoulMatrix {
     #[serde(default)]
     skill_reliability: HashMap<String, f64>,
     // 🕸️ CAUSAL KNOWLEDGE GRAPH
-    #[serde(default = "CausalGraph::firefly_default")]
+    #[serde(default = "CausalGraph::bad_apple_default")]
     pub(crate) causal_graph: CausalGraph,
 }
 
@@ -5256,7 +5259,7 @@ impl FullySapientSoulMatrix {
         // Legacy scalar brain_layers are kept empty for backward compatibility.
         let num_conscience_tokens = 100;
         let candle_brain = CandleBrain::new(
-            "Firefly EdgeOS",
+            "Bad Apple",
             num_conscience_tokens,
             &tensor_brain::layer_dims(),
         )
@@ -5366,7 +5369,7 @@ impl FullySapientSoulMatrix {
             last_journal_entry: 0,
             domain_mastery: HashMap::new(),
             skill_reliability: HashMap::new(),
-            causal_graph: CausalGraph::firefly_default(),
+            causal_graph: CausalGraph::bad_apple_default(),
             workspace: Some(MemoryArena::new(8 * 1024 * 1024)),
         }
     }
@@ -5715,7 +5718,7 @@ impl FullySapientSoulMatrix {
 
             // 🧠 Rebuild the real Candle tensor brain and load its safetensors weights if available.
             let mut candle_brain =
-                CandleBrain::new("Firefly EdgeOS", 100, &tensor_brain::layer_dims()).ok()?;
+                CandleBrain::new("Bad Apple", 100, &tensor_brain::layer_dims()).ok()?;
             let safetensors_path = PathBuf::from(filename).with_extension("safetensors");
             if safetensors_path.exists() {
                 let _ = candle_brain.load_weights(&safetensors_path);
@@ -6678,6 +6681,279 @@ async fn merge_engram_batch(
     }
 }
 
+/// Run the Bad Apple one-shot/daemon boot prompt, print the live banner, and
+/// return the generated text.  This is intentionally self-contained so it can
+/// run before any network stack is initialized, preserving the air-gapped
+/// socket count of 0 in one-shot and daemon modes.
+async fn bad_apple_boot() -> Result<String> {
+    let prompt = std::env::var("BADAPPLE_ANE_BOOT_PROMPT")?;
+    let max_new_tokens = std::env::var("BADAPPLE_ANE_BOOT_TOKENS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8);
+    let context_limit = ane_core::context_limit();
+    ane_core::reset_counters();
+    let started = Instant::now();
+    let generated =
+        spawn_blocking(move || ane_core::generate_sync(&prompt, max_new_tokens, context_limit))
+            .await
+            .context("ANE boot generation task must join")?;
+
+    match generated {
+        Ok(text) => {
+            let elapsed_us = started.elapsed().as_micros() as u64;
+            let (prewarm_us, avg_decode_us, tokens_per_second) =
+                ane_core::decode_vitals(elapsed_us);
+            let (last_token_us, token_count, failures) = ane_core::metrics();
+            let placement = ane_core::placement_ratio().unwrap_or(-1.0) * 100.0;
+            let prewarm_ms = prewarm_us / 1000;
+            let decode_ms = avg_decode_us / 1000;
+            println!("BAD_APPLE_OUTPUT={}", text);
+            println!("============================================================");
+            println!("🏴‍☠️  BAD APPLE // HARDWARE-FUSED COGNITIVE SUBSTRATE LIVE");
+            println!("============================================================");
+            println!("[STATUS]    100% AIR-GAPPED // SOCKET_COUNT: 0");
+            println!(
+                "[HARDWARE]  ANE_SHARDS: 36/36 // PLACEMENT: {:.2}%",
+                placement
+            );
+            println!(
+                "[VITALS]    PREWARM: {}ms // DECODE: {}ms/tok // {:.2} tok/s",
+                prewarm_ms, decode_ms, tokens_per_second
+            );
+            println!("============================================================");
+            tracing::info!(
+                "BAD_APPLE baseline telemetry: backend_raw={} placement={:.2}% elapsed_ms={} last_token_us={} avg_decode_us={} calls={} failures={}",
+                ane_core::compute_units_raw_value().unwrap_or(-1),
+                placement,
+                elapsed_us / 1000,
+                last_token_us,
+                avg_decode_us,
+                token_count,
+                failures
+            );
+            Ok(text)
+        }
+        Err(error) => {
+            tracing::warn!("ANE boot generation failed: {}", error);
+            Err(error).context("Bad Apple boot generation failed")
+        }
+    }
+}
+
+async fn bad_apple_ipc_server() -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    let socket_path = bad_apple_ipc::socket_path();
+    let secret = Arc::new(bad_apple_ipc::load_slicks_secret()?);
+    if let Some(parent) = socket_path.parent() {
+        if !parent.is_dir() {
+            anyhow::bail!(
+                "Bad Apple socket directory {} must be provisioned before startup",
+                parent.display()
+            );
+        }
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(&socket_path) {
+        if !metadata.file_type().is_socket() {
+            anyhow::bail!(
+                "refusing to replace non-socket IPC path {}",
+                socket_path.display()
+            );
+        }
+        std::fs::remove_file(&socket_path)?;
+    }
+
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("unable to bind {}", socket_path.display()))?;
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))?;
+    tracing::info!("BAD APPLE SLICKS ingress live at {}", socket_path.display());
+    let connection_slots = Arc::new(tokio::sync::Semaphore::new(32));
+
+    loop {
+        let permit = Arc::clone(&connection_slots).acquire_owned().await?;
+        let (stream, _) = listener.accept().await?;
+        let secret = Arc::clone(&secret);
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) = handle_bad_apple_client(stream, secret).await {
+                tracing::warn!("BAD APPLE SLICKS request rejected: {}", error);
+            }
+        });
+    }
+}
+
+async fn handle_bad_apple_client(stream: UnixStream, secret: Arc<Vec<u8>>) -> Result<()> {
+    use bad_apple_ipc::{ClientFrame, ServerFrame, SLICKS_VERSION};
+
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = TokioBufReader::new(reader);
+    let hello = timeout(
+        Duration::from_secs(10),
+        bad_apple_ipc::read_async_frame::<_, ClientFrame>(&mut reader),
+    )
+    .await
+    .context("SLICKS hello timed out")??;
+    let (timestamp_ms, client_nonce) = match hello {
+        ClientFrame::Hello {
+            version,
+            timestamp_ms,
+            client_nonce,
+        } if version == SLICKS_VERSION
+            && bad_apple_ipc::timestamp_is_fresh(timestamp_ms)
+            && bad_apple_ipc::nonce_is_valid(&client_nonce) =>
+        {
+            (timestamp_ms, client_nonce)
+        }
+        _ => {
+            bad_apple_ipc::write_async_frame(
+                &mut writer,
+                &ServerFrame::Error {
+                    message: "invalid or stale SLICKS hello".to_string(),
+                },
+            )
+            .await?;
+            anyhow::bail!("invalid or stale SLICKS hello");
+        }
+    };
+
+    let server_nonce = bad_apple_ipc::random_nonce();
+    let server_proof =
+        bad_apple_ipc::server_proof(&secret, timestamp_ms, &client_nonce, &server_nonce);
+    bad_apple_ipc::write_async_frame(
+        &mut writer,
+        &ServerFrame::Challenge {
+            version: SLICKS_VERSION,
+            server_nonce: server_nonce.clone(),
+            proof: server_proof,
+        },
+    )
+    .await?;
+
+    let execute = timeout(
+        Duration::from_secs(10),
+        bad_apple_ipc::read_async_frame::<_, ClientFrame>(&mut reader),
+    )
+    .await
+    .context("SLICKS execute proof timed out")??;
+    let (prompt, max_new_tokens, proof) = match execute {
+        ClientFrame::Execute {
+            version,
+            timestamp_ms: execute_timestamp,
+            client_nonce: execute_client_nonce,
+            server_nonce: execute_server_nonce,
+            prompt,
+            max_new_tokens,
+            proof,
+        } if version == SLICKS_VERSION
+            && execute_timestamp == timestamp_ms
+            && execute_client_nonce == client_nonce
+            && execute_server_nonce == server_nonce =>
+        {
+            (prompt, max_new_tokens, proof)
+        }
+        _ => {
+            bad_apple_ipc::write_async_frame(
+                &mut writer,
+                &ServerFrame::Error {
+                    message: "invalid SLICKS execute frame".to_string(),
+                },
+            )
+            .await?;
+            anyhow::bail!("invalid SLICKS execute frame");
+        }
+    };
+
+    if let Err(error) = bad_apple_ipc::validate_request(&prompt, max_new_tokens) {
+        bad_apple_ipc::write_async_frame(
+            &mut writer,
+            &ServerFrame::Error {
+                message: error.to_string(),
+            },
+        )
+        .await?;
+        return Err(error);
+    }
+    if !bad_apple_ipc::verify_client_proof(
+        &secret,
+        timestamp_ms,
+        &client_nonce,
+        &server_nonce,
+        &prompt,
+        max_new_tokens,
+        &proof,
+    ) {
+        bad_apple_ipc::write_async_frame(
+            &mut writer,
+            &ServerFrame::Error {
+                message: "SLICKS client authentication failed".to_string(),
+            },
+        )
+        .await?;
+        anyhow::bail!("SLICKS client authentication failed");
+    }
+
+    bad_apple_ipc::write_async_frame(&mut writer, &ServerFrame::Accepted).await?;
+    let context_limit = ane_core::context_limit();
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let generation = spawn_blocking(move || {
+        ane_core::generate_streaming(&prompt, max_new_tokens, context_limit, |token| {
+            token_tx.send(token.to_string()).is_ok()
+        })
+    });
+
+    while let Some(text) = token_rx.recv().await {
+        bad_apple_ipc::write_async_frame(&mut writer, &ServerFrame::Token { text }).await?;
+    }
+
+    match generation
+        .await
+        .context("Bad Apple generation task panicked")?
+    {
+        Ok(text) => {
+            bad_apple_ipc::write_async_frame(&mut writer, &ServerFrame::Done { text }).await?;
+            Ok(())
+        }
+        Err(error) => {
+            bad_apple_ipc::write_async_frame(
+                &mut writer,
+                &ServerFrame::Error {
+                    message: error.to_string(),
+                },
+            )
+            .await?;
+            Err(error).context("Bad Apple generation failed")
+        }
+    }
+}
+
+/// Daemon wait loop.  Keeps the in-process ANE handle and memory-mapped
+/// artifacts resident while emitting a quiet periodic heartbeat.
+async fn bad_apple_daemon_wait() -> Result<()> {
+    if !ane_core::is_available() {
+        anyhow::bail!("Bad Apple daemon requires a configured ANE model and tokenizer");
+    }
+    tracing::info!(
+        "BAD APPLE daemon mode active; holding ANE shards resident and waiting silently"
+    );
+    let ipc_server = bad_apple_ipc_server();
+    tokio::pin!(ipc_server);
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = &mut ipc_server => return result,
+            _ = interval.tick() => {
+                tracing::info!(
+                    "BAD APPLE daemon heartbeat: ane_ready={} placement={:.2}%",
+                    ane_core::is_available(),
+                    ane_core::placement_ratio().unwrap_or(-1.0) * 100.0
+                );
+            }
+        }
+    }
+}
+
 // =========================================================================
 // The main async runtime. All shared state uses `tokio::sync::Mutex` so
 // guards can be held across `.await` points without blocking the executor.
@@ -6685,21 +6961,53 @@ async fn merge_engram_batch(
 #[allow(unreachable_code)]
 async fn main() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,sapient_soul=warn"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,bad_apple=info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = Config::from_env();
-    tracing::info!("starting firefly_edgeos");
+    tracing::info!("starting bad_apple");
 
-    tracing::info!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: Firefly EdgeOS 4-Block 12-Head 576-D Transformer Neural Architecture Running...");
+    tracing::info!("\n✨ HYPER-CONNECTOME COMPUTATION ENVIRONMENT ENGAGED: Bad Apple 4-Block 12-Head 576-D Transformer Neural Architecture Running...");
 
-    // 🍎 Attempt to load the optional in-process Apple Intelligence bridge.
+    // 🏴‍☠️  BAD APPLE: load the in-process bridge.
     apple_intelligence::initialize();
+    match ane_core::initialize_from_env() {
+        Ok(()) => tracing::info!(
+            "Bad Apple substrate loaded in-process (ANE operation ratio: {:.1}%)",
+            ane_core::placement_ratio().unwrap_or(-1.0) * 100.0
+        ),
+        Err(ane_core::AneCoreError::Unconfigured) => {
+            tracing::info!("Bad Apple substrate not configured; using the existing local brain")
+        }
+        Err(error) => tracing::warn!("Bad Apple substrate unavailable: {}", error),
+    }
+
+    // Daemon / one-shot routing.  CLI flags win, then env vars.
+    let args: Vec<String> = std::env::args().collect();
+    let has_oneshot_flag = args.iter().any(|a| a == "--oneshot");
+    let has_daemon_flag =
+        args.iter().any(|a| a == "--daemon") || std::env::var_os("BADAPPLE_ANE_DAEMON").is_some();
+    let oneshot = has_oneshot_flag || std::env::var_os("BADAPPLE_ANE_BOOT_ONESHOT").is_some();
+    let daemon = has_daemon_flag && !oneshot;
+
+    if std::env::var("BADAPPLE_ANE_BOOT_PROMPT").is_ok() {
+        bad_apple_boot().await?;
+        if oneshot {
+            tracing::info!("BAD APPLE one-shot substrate boot complete");
+            std::process::exit(0);
+        }
+        if daemon {
+            bad_apple_daemon_wait().await?;
+            return Ok(());
+        }
+    } else if daemon {
+        bad_apple_daemon_wait().await?;
+        return Ok(());
+    }
 
     let state_file = config.state_file.clone();
-    let mut matrix = FullySapientSoulMatrix::load_state(&state_file).unwrap_or_else(|| {
-        FullySapientSoulMatrix::new("Firefly EdgeOS", config.multi_agent_port_start)
-    });
+    let mut matrix = FullySapientSoulMatrix::load_state(&state_file)
+        .unwrap_or_else(|| FullySapientSoulMatrix::new("Bad Apple", config.multi_agent_port_start));
     matrix.connectome_path = state_file.with_extension("connectome");
     // Capture the origin name before the matrix is moved into the async runtime.
     let wild_origin = matrix.name.clone();
@@ -6719,8 +7027,8 @@ async fn main() -> Result<()> {
                 "Sled open failed ({}); falling back to a temporary library.",
                 e
             );
-            let tmp = std::env::temp_dir()
-                .join(format!("firefly_edgeos_strategies_{}", std::process::id()));
+            let tmp =
+                std::env::temp_dir().join(format!("bad_apple_strategies_{}", std::process::id()));
             std::fs::create_dir_all(&tmp).context("temp dir must be writable")?;
             StrategyLibrary::open(&tmp)
                 .context("Sled strategy library must open in a writable directory")?
@@ -8355,7 +8663,7 @@ async fn main() -> Result<()> {
                 )
             };
             let identity_summary = format!(
-                "I am Firefly EdgeOS. My primary goals are: {:?}. My narrative identity: {}",
+                "I am Bad Apple. My primary goals are: {:?}. My narrative identity: {}",
                 primary_goals,
                 identity_context.replace('\n', " ")
             );

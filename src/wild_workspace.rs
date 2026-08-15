@@ -1,6 +1,6 @@
 //! Asynchronous directory watcher for the "wild" local sandbox.
 //!
-//! The agent watches `~/Firefly-EdgeOS/wild_workspace`, ingests incoming text
+//! The agent watches `~/bad_apple/wild_workspace`, ingests incoming text
 //! payloads, and uses the local LLM to synthesize a read-only Python tool to
 //! parse/clean the file. Execution is sandboxed and metrics are logged to the
 //! SelfModel. No network access is permitted.
@@ -349,7 +349,7 @@ pub async fn run_wasm_tool(
 }
 
 /// Wrap a user-supplied `fn process(input: &[u8]) -> usize` body into a full
-/// `no_std` wasm32 cdylib source that links against the Firefly string ABI.
+/// `no_std` wasm32 cdylib source that links against the Bad Apple string ABI.
 ///
 /// The function is expected to write its UTF-8 summary into the global `OUT`
 /// buffer and return the number of bytes written.
@@ -358,7 +358,7 @@ pub fn wrap_rust_tool_snippet(process_body: &str) -> String {
         r#"#![no_std]
 #![no_main]
 
-#[link(wasm_import_module = "firefly")]
+#[link(wasm_import_module = "bad_apple")]
 extern "C" {{
     fn input_size() -> i32;
     fn input_read(dst: i32);
@@ -396,7 +396,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {{
 /// system `rustc`.  Returns the raw `.wasm` bytes on success, or `rustc` stderr
 /// as a string on failure.
 pub fn compile_rust_to_wasm(source: &str) -> Result<Vec<u8>, String> {
-    let tmp = std::env::temp_dir().join(format!("firefly_wasm_{}", rand::random::<u64>()));
+    let tmp = std::env::temp_dir().join(format!("bad_apple_wasm_{}", rand::random::<u64>()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("create temp dir: {}", e))?;
     let rs_path = tmp.join("tool.rs");
     let wasm_path = tmp.join("tool.wasm");
@@ -525,7 +525,7 @@ pub async fn process_script(
         let causal = strategy_library
             .explain_failure(&strategy.problem)
             .unwrap_or_else(|| "skill_memory -> DependsOn -> certified_strategy".to_string());
-        let title = "Firefly: Rust synthesis certified".to_string();
+        let title = "Bad Apple: Rust synthesis certified".to_string();
         let body = format!(
             "{}\nCompetence: {:.2}\nLatency: {:.2} ms\nCausal: {}",
             strategy.problem, validation.competence, validation.wall_time_ms, causal

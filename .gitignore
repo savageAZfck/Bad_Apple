@@ -5,7 +5,13 @@
 /target-release-mods
 /target-clippy
 /target-rebrand
+/.venv-ane
+/.venv
+__pycache__/
+*.pyc
+/tests/ane_brain_perf/artifacts
 src/platform/apple_desktop/.build
+src/platform/apple_bridge/.build
 
 # Cargo lock is intentionally committed for this binary
 # Cargo.lock
@@ -18,9 +24,8 @@ src/platform/apple_desktop/.build
 *.safetensors
 *.weights
 metrics.jsonl
-firefly_soul.json
-sapient_agi_soul.json
-sapient_agi_soul_5001.*
+bad_apple_state.json
+bad_apple_state_5001.*
 
 # Generated tool sandbox files
 /tools
@@ -44,6 +49,6 @@ sapient_agi_soul_5001.*
 # Runtime databases and reports
 /strategy_db/
 /PILOT_EVALUATION_METRICS.md
-/firefly_core.h
-firefly.log
+/*_core.h
+*.log
 *.connectome
