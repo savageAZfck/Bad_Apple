@@ -60,9 +60,10 @@ install -d -o root -g staff -m 750 "${DATA_DIR}"
 install -d -o root -g staff -m 770 "${SOCKET_DIR}"
 chmod 770 "${SOCKET_DIR}"
 chown root:staff "${SOCKET_DIR}"
-for subdir in skills tools strategy_db; do
+for subdir in skills tools; do
     install -d -o root -g staff -m 700 "${DATA_DIR}/${subdir}"
 done
+install -d -o root -g staff -m 750 "${DATA_DIR}/strategy_db"
 install -d -o root -g staff -m 770 "${DATA_DIR}/wild_workspace"
 install -d -o root -g staff -m 770 "${DATA_DIR}/curriculum"
 
@@ -82,7 +83,7 @@ chown root:staff "${KEY_FILE}"
 chmod 640 "${KEY_FILE}"
 
 touch "${LOG_FILE}"
-chown root:wheel "${LOG_FILE}"
+chown root:staff "${LOG_FILE}"
 chmod 640 "${LOG_FILE}"
 
 cp "${PLIST_SOURCE}" "${PLIST_TARGET}"
