@@ -60,9 +60,11 @@ install -d -o root -g staff -m 750 "${DATA_DIR}"
 install -d -o root -g staff -m 770 "${SOCKET_DIR}"
 chmod 770 "${SOCKET_DIR}"
 chown root:staff "${SOCKET_DIR}"
-for subdir in wild_workspace skills tools curriculum strategy_db; do
-    install -d -o root -g wheel -m 700 "${DATA_DIR}/${subdir}"
+for subdir in skills tools strategy_db; do
+    install -d -o root -g staff -m 700 "${DATA_DIR}/${subdir}"
 done
+install -d -o root -g staff -m 770 "${DATA_DIR}/wild_workspace"
+install -d -o root -g staff -m 770 "${DATA_DIR}/curriculum"
 
 install -o root -g wheel -m 755 "${DAEMON_SOURCE}" "${INSTALL_DIR}/badappled"
 install -o root -g wheel -m 755 "${CLI_SOURCE}" "${CLI_TARGET}"

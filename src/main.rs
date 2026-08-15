@@ -39,6 +39,7 @@ mod metal_uma;
 mod metrics;
 mod production_blueprint;
 mod protocol;
+mod scavenger;
 mod simd;
 mod state_saver;
 mod strategy_library;
@@ -73,6 +74,7 @@ use protocol::{
     decode_payload, multi_agent_secret, sign_packet, verify_packet, CompactEngramPacket,
     ConnectionManager, LockFreeRing, SignedUdpPacket, SwarmMetrics,
 };
+use scavenger::{Scavenger, ScavengerConfig};
 use strategy_library::{Strategy, StrategyLibrary};
 use telemetry::{
     current_secs, run_telemetry_server, skill_key, update_sensor_snapshot, SensorSnapshot,
@@ -6933,7 +6935,8 @@ async fn handle_bad_apple_client(stream: UnixStream, secret: Arc<Vec<u8>>) -> Re
 }
 
 /// Daemon wait loop.  Keeps the in-process ANE handle and memory-mapped
-/// artifacts resident while emitting a quiet periodic heartbeat.
+/// artifacts resident while emitting a quiet periodic heartbeat and runs
+/// the background file scavenger on the wild workspace.
 async fn bad_apple_daemon_wait() -> Result<()> {
     if !ane_core::is_available() {
         anyhow::bail!("Bad Apple daemon requires a configured ANE model and tokenizer");
@@ -6941,19 +6944,56 @@ async fn bad_apple_daemon_wait() -> Result<()> {
     tracing::info!(
         "BAD APPLE daemon mode active; holding ANE shards resident and waiting silently"
     );
-    let ipc_server = bad_apple_ipc_server();
-    tokio::pin!(ipc_server);
+
+    let mut ipc_server = tokio::spawn(bad_apple_ipc_server());
+    let scavenger = match ScavengerConfig::from_env() {
+        Ok(config) => match Scavenger::open(config) {
+            Ok(scavenger) => Some(tokio::spawn(Arc::new(scavenger).run())),
+            Err(error) => {
+                tracing::warn!("scavenger disabled: {}", error);
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!("scavenger not configured: {}", error);
+            None
+        }
+    };
+
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            result = &mut ipc_server => return result,
-            _ = interval.tick() => {
-                tracing::info!(
-                    "BAD APPLE daemon heartbeat: ane_ready={} placement={:.2}%",
-                    ane_core::is_available(),
-                    ane_core::placement_ratio().unwrap_or(-1.0) * 100.0
-                );
+
+    if let Some(mut scavenger) = scavenger {
+        loop {
+            tokio::select! {
+                result = &mut ipc_server => {
+                    scavenger.abort();
+                    return result?;
+                }
+                result = &mut scavenger => {
+                    ipc_server.abort();
+                    return result?;
+                }
+                _ = interval.tick() => {
+                    tracing::info!(
+                        "BAD APPLE daemon heartbeat: ane_ready={} placement={:.2}%",
+                        ane_core::is_available(),
+                        ane_core::placement_ratio().unwrap_or(-1.0) * 100.0
+                    );
+                }
+            }
+        }
+    } else {
+        loop {
+            tokio::select! {
+                result = &mut ipc_server => return result?,
+                _ = interval.tick() => {
+                    tracing::info!(
+                        "BAD APPLE daemon heartbeat: ane_ready={} placement={:.2}%",
+                        ane_core::is_available(),
+                        ane_core::placement_ratio().unwrap_or(-1.0) * 100.0
+                    );
+                }
             }
         }
     }

@@ -214,6 +214,7 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "futures-util",
+ "half",
  "hf-chat-template",
  "hmac",
  "libc",
