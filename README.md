@@ -8,6 +8,25 @@ Text and voice requests share one path. The `badapple` terminal client and the n
 
 > Bad Apple is an experimental edge-AI runtime, not a claim of AGI or sentience.
 
+## What is Bad Apple?
+
+Bad Apple is an air-gapped, Apple-Silicon-native cognitive runtime. It runs a 3-billion-parameter Qwen-class language model entirely on-device, without cloud inference, telemetry, or external model services. At its core is a `launchd` daemon, `badappled`, that owns a 36-layer stateful INT8 CoreML pipeline and four LM-head shards over a unified-memory ANE backend. Requests arrive through either the `badapple` terminal client or a native Siri `BadAppleIntent`; both authenticate to the daemon through the SLICKS HMAC-SHA256 protocol before any token is generated.
+
+The repository also contains the broader experimental Bad Apple research runtime: a 576-D Candle transformer brain, a multi-agent signed engram fabric, a self-improving strategy library, a WASM sandbox for untrusted tools, and a telemetry dashboard for local inspection.
+
+## Key features
+
+- **On-device 3B language model.** A Qwen-class model compiled into 36 INT8 CoreML layer shards, four INT8 LM-head shards, and a ~622 MB mmap'd FP16 embedding table.
+- **Air-gapped by default.** Daemon mode uses only a Unix-domain socket; the daemon integration test asserts zero Internet sockets.
+- **Authenticated local ingress.** `badapple` CLI and `BadAppleIntent` Siri shortcut use the same SLICKS handshake with HMAC-SHA256 mutual proof, nonces, and prompt binding.
+- **Streaming local generation.** Token deltas stream to the client as they are decoded from the warm ANE pipeline.
+- **Stateful CoreML backend.** `MLState` KV caches persist across calls; the daemon stays warm for low-latency inference.
+- **Multi-modal cognitive runtime.** 576-D transformer, hyperdimensional memory, connectome, conscience oracle, strategy library, and wild-workspace watcher (non-daemon research mode).
+- **Signed multi-agent fabric.** TCP/UDP/WebSocket engrams with HMAC signatures and a 2048-D cosine-similarity firewall.
+- **WASM + Python sandboxes.** Untrusted Rust/WASM and Python tools run in isolated sandboxes.
+- **Durable sovereign state.** Memory, identity, strategies, and weights survive restarts through background incremental saves.
+- **Reproducible, optimized build.** `lto`, single codegen unit, `panic = "abort"`, and a deterministic `Cargo.lock`.
+
 ## Architecture
 
 ```text
