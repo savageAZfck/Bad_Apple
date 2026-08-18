@@ -1,0 +1,55 @@
+# cargo-deny configuration for Bad Apple.
+# Run: cargo deny check
+
+[graph]
+targets = [
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+]
+
+[advisories]
+# The pinned `candle-core`, `tokenizers`, `sled`, and `cbindgen` ecosystems
+# carry several transitive unmaintained crates that have no safe upgrade path
+# today. Ignored here with explicit reasons for acquisition transparency.
+ignore = [
+    { id = "RUSTSEC-2024-0375", reason = "atty is a transitive dep of cbindgen 0.26 build; no safe upgrade available" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is a transitive dep of sled 0.34; no safe upgrade available" },
+    { id = "RUSTSEC-2024-0384", reason = "instant is a transitive dep of sled 0.34 via parking_lot; no safe upgrade available" },
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix is a transitive dep of tokenizers 0.15 via indicatif; no safe upgrade available" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is a transitive proc-macro dep of candle-core 0.10.2 and tokenizers; no safe upgrade available" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MulanPSL-2.0",
+    "OpenSSL",
+    "MPL-2.0",
+    "CC0-1.0",
+    "LicenseRef-Proprietary",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# Bad Apple is not published; skip private-registry license checks.
+ignore = true
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

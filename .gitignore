@@ -1,0 +1,58 @@
+# Build artifacts
+.DS_Store
+*.tmp
+/qwen3b_ane_shards
+/qwen3b_ane_shards.bak_keep
+/target
+/target-clean
+/target-release
+/target-release-mods
+/target-clippy
+/target-rebrand
+/.venv-ane
+/.venv
+__pycache__/
+*.pyc
+/tests/ane_brain_perf/artifacts
+src/platform/apple_desktop/.build
+src/platform/apple_bridge/.build
+
+# Cargo lock is intentionally committed for this binary
+# Cargo.lock
+
+# Runtime state and generated files
+*.json
+!tokenizer.json
+*.defense
+*.network
+*.safetensors
+*.weights
+metrics.jsonl
+bad_apple_state.json
+bad_apple_state_5001.*
+
+# Generated tool sandbox files
+/tools
+
+# Auto-generated curriculum
+/curriculum/auto_curriculum.txt
+
+# IDE / editor backups
+.*.rs
+*.rs.bak
+
+# Manual state backups
+state-backup-*/
+
+# Wild workspace runtime data
+/wild_workspace
+!/wild_workspace/demo_scripts/
+!/wild_workspace/demo_scripts/*.txt
+!/wild_workspace/twin_node_setup.sh
+
+# Runtime databases and reports
+/strategy_db/
+/PILOT_EVALUATION_METRICS.md
+/*_core.h
+*.log
+*.connectome

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.badapple.substrate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/badapple/badappled</string>
+        <string>--daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>WorkingDirectory</key>
+    <string>/var/lib/bad_apple</string>
+
+    <key>Umask</key>
+    <integer>7</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BADAPPLE_ANE_DAEMON</key>
+        <string>1</string>
+        <key>BADAPPLE_ANE_MODEL</key>
+        <string>/var/lib/bad_apple/model/conversion_manifest.json</string>
+        <key>BADAPPLE_ANE_TOKENIZER</key>
+        <string>/var/lib/bad_apple/model/tokenizer.json</string>
+        <key>BADAPPLE_ANE_MAX_PREWARM_MS</key>
+        <string>5000</string>
+        <key>BADAPPLE_SOCKET_PATH</key>
+        <string>/var/run/badapple/substrate.sock</string>
+        <key>BADAPPLE_SLICKS_KEY_PATH</key>
+        <string>/var/lib/bad_apple/slicks.key</string>
+        <key>BADAPPLE_STATE_FILE</key>
+        <string>/var/lib/bad_apple/state.json</string>
+        <key>BADAPPLE_SLED_DB_PATH</key>
+        <string>/var/lib/bad_apple/strategy_db</string>
+        <key>BADAPPLE_WILD_WORKSPACE_DIR</key>
+        <string>/var/lib/bad_apple/wild_workspace</string>
+        <key>BADAPPLE_METRICS_LOG</key>
+        <string>/var/lib/bad_apple/metrics.jsonl</string>
+        <key>BADAPPLE_SKILLS_DIR</key>
+        <string>/var/lib/bad_apple/skills</string>
+        <key>BADAPPLE_TOOLS_DIR</key>
+        <string>/var/lib/bad_apple/tools</string>
+        <key>BADAPPLE_CURRICULUM_DIR</key>
+        <string>/var/lib/bad_apple/curriculum</string>
+        <key>RUST_LOG</key>
+        <string>info,bad_apple=info</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/bad_apple_daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/bad_apple_daemon.log</string>
+
+    <key>UserName</key>
+    <string>root</string>
+</dict>
+</plist>
