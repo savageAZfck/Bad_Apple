@@ -210,8 +210,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     private let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
     // Tolerant wake pattern: allows the on-device recognizer to insert filler words
     // such as "at", "my", "and" between "hey", "bad", and "apple".
+    // Wake pattern: optional "hey"-like prefix, then "bad apple".
+    // Case-insensitive and tolerant of filler words in between.
     private let wakePattern = try! NSRegularExpression(
-        pattern: "(?i)(?:^|\\b)(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+bad(?:\\s+\\w+){0,2}\\s+apple(?:\\b|$)"
+        pattern: "(?i)(?:^|\\b)(?:(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+)?bad(?:\\s+\\w+){0,2}\\s+apple(?:\\b|$)"
     )
     private var promptTimer: Timer?
     private var stablePrompt = ""
@@ -270,8 +272,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     private func configureOnDeviceRecognizer() {
         guard enabled else { return }
-        guard let localRecognizer = SFSpeechRecognizer(locale: Locale.current) else {
-            failClosed("recognizer unavailable for current locale")
+        // The wake phrase is English; keep recognition in en-US even if the system
+        // TTS/Siri locale is set to pt-BR.
+        guard let localRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
+            failClosed("recognizer unavailable for en-US")
             return
         }
         badAppleVoiceLog("configureOnDeviceRecognizer: locale=\(Locale.current.identifier) supportsOnDevice=\(localRecognizer.supportsOnDeviceRecognition) isAvailable=\(localRecognizer.isAvailable)")
