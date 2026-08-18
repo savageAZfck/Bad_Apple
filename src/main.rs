@@ -7065,18 +7065,29 @@ async fn main() -> Result<()> {
 
     // 📚 Strategy library (Sled-backed) for durable learned procedural templates.
     std::fs::create_dir_all(&config.wild_workspace_dir).ok();
+
+    // Try to open the Sled database. If it is corrupted, remove the tree and
+    // try once more before falling back to a temporary directory. This keeps
+    // the strategy library and scavenger on the same durable database.
     let strategy_library = Arc::new(match StrategyLibrary::open(&config.sled_db_path) {
         Ok(lib) => lib,
         Err(e) => {
-            tracing::warn!(
-                "Sled open failed ({}); falling back to a temporary library.",
-                e
-            );
-            let tmp =
-                std::env::temp_dir().join(format!("bad_apple_strategies_{}", std::process::id()));
-            std::fs::create_dir_all(&tmp).context("temp dir must be writable")?;
-            StrategyLibrary::open(&tmp)
-                .context("Sled strategy library must open in a writable directory")?
+            tracing::warn!("Sled open failed ({}); removing tree and retrying", e);
+            let _ = std::fs::remove_dir_all(&config.sled_db_path);
+            match StrategyLibrary::open(&config.sled_db_path) {
+                Ok(lib) => lib,
+                Err(e) => {
+                    tracing::warn!(
+                        "Sled retry failed ({}); falling back to a temporary library.",
+                        e
+                    );
+                    let tmp = std::env::temp_dir()
+                        .join(format!("bad_apple_strategies_{}", std::process::id()));
+                    std::fs::create_dir_all(&tmp).context("temp dir must be writable")?;
+                    StrategyLibrary::open(&tmp)
+                        .context("Sled strategy library must open in a writable directory")?
+                }
+            }
         }
     });
 

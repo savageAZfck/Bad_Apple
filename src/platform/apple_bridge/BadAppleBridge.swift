@@ -1,6 +1,13 @@
 import CoreML
+import Darwin
 import Foundation
 import UserNotifications
+
+/// QoS class for latency-sensitive, user-visible inference work.
+/// On macOS, `QOS_CLASS_USER_INTERACTIVE` (0x21) is the highest thread
+/// scheduling class. It gives the ANE prediction path the best chance of
+/// running on performance cores and keeping memory bus transactions unparked.
+private let badAppleInteractiveQos: qos_class_t = qos_class_t(0x21)
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -91,9 +98,9 @@ private func isRunningInAppBundle() -> Bool {
 private func requestNotificationAuthorization() {
     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
         if let error = error {
-            print("🏴‍☠️  BAD APPLE // Notification authorization error: \(error)")
+            NSLog("%@", "🏴‍☠️  BAD APPLE // Notification authorization error: \(error)")
         } else {
-            print("🏴‍☠️  BAD APPLE // Notification authorization granted: \(granted)")
+            NSLog("%@", "🏴‍☠️  BAD APPLE // Notification authorization granted: \(granted)")
         }
     }
 }
@@ -117,7 +124,7 @@ public func dispatchDesktopNotification(
     _ body: UnsafePointer<CChar>
 ) {
     guard isRunningInAppBundle() else {
-        print("🏴‍☠️  BAD APPLE // Desktop notifications require an app bundle; skipping.")
+        NSLog("%@", "🏴‍☠️  BAD APPLE // Desktop notifications require an app bundle; skipping.")
         return
     }
     let titleString = String(cString: title)
@@ -133,7 +140,7 @@ public func dispatchDesktopNotification(
     )
     UNUserNotificationCenter.current().add(request) { error in
         if let error = error {
-            print("🏴‍☠️  BAD APPLE // Failed to dispatch notification: \(error)")
+            NSLog("%@", "🏴‍☠️  BAD APPLE // Failed to dispatch notification: \(error)")
         }
     }
 }
@@ -163,14 +170,16 @@ private final class BadAppleANECore {
         let core: BadAppleANECore
         let loadLatency: TimeInterval
         let prewarmLatency: TimeInterval
+        let decodeLatency: TimeInterval
 
         var score: TimeInterval {
-            loadLatency + prewarmLatency * 4.0
+            // Optimize for steady-state tok/s; load and prewarm are one-time costs.
+            decodeLatency + prewarmLatency * 0.01 + loadLatency * 0.0001
         }
     }
 
-    /// Try each compute unit, in order of preference, and keep the first one
-    /// that both loads *and* prewarms successfully.
+    /// Try each compute unit, benchmark a few decode steps, and pick the one
+    /// with the lowest per-token decode latency while respecting load/prewarm budgets.
     static func load(modelURL: URL) throws -> BadAppleANECore {
         let environment = ProcessInfo.processInfo.environment
         let maxLoadLatency = latencyBudget(
@@ -183,8 +192,8 @@ private final class BadAppleANECore {
         )
         var lastError: Error?
         let candidateGroups: [[MLComputeUnits]] = [
-            [.cpuAndNeuralEngine, .cpuAndGPU],
-            [.all, .cpuOnly],
+            [.cpuAndNeuralEngine, .all, .cpuAndGPU],
+            [.cpuOnly],
         ]
 
         for computeUnitsGroup in candidateGroups {
@@ -203,7 +212,7 @@ private final class BadAppleANECore {
                             latency: loadLatency,
                             budget: maxLoadLatency
                         )
-                        print("🏴‍☠️  BAD APPLE // ANE candidate rejected: \(error.localizedDescription)")
+                        NSLog("%@", "🏴‍☠️  BAD APPLE // ANE candidate rejected: \(error.localizedDescription)")
                         lastError = error
                         continue
                     }
@@ -217,7 +226,7 @@ private final class BadAppleANECore {
                     let prewarmSucceeded = core.prewarm()
                     let prewarmLatency = ProcessInfo.processInfo.systemUptime - prewarmStart
                     if let error = core.lastPredictionError, isCompilerFailure(error) {
-                        print("🏴‍☠️  BAD APPLE // ANE candidate rejected after compiler failure with \(computeUnits): \(error)")
+                        NSLog("%@", "🏴‍☠️  BAD APPLE // ANE candidate rejected after compiler failure with \(computeUnits): \(error)")
                         lastError = error
                         continue
                     }
@@ -227,7 +236,7 @@ private final class BadAppleANECore {
                             code: 4,
                             userInfo: [NSLocalizedDescriptionKey: "prewarm failed for computeUnits rawValue \(computeUnits.rawValue)"]
                         )
-                        print("🏴‍☠️  BAD APPLE // ANE candidate rejected: \(error)")
+                        NSLog("%@", "🏴‍☠️  BAD APPLE // ANE candidate rejected: \(error)")
                         lastError = error
                         continue
                     }
@@ -238,40 +247,46 @@ private final class BadAppleANECore {
                             latency: prewarmLatency,
                             budget: maxPrewarmLatency
                         )
-                        print("🏴‍☠️  BAD APPLE // ANE candidate rejected: \(error.localizedDescription)")
+                        NSLog("%@", "🏴‍☠️  BAD APPLE // ANE candidate rejected: \(error.localizedDescription)")
                         lastError = error
                         continue
                     }
 
                     core.selectedLoadLatency = loadLatency
                     core.selectedPrewarmLatency = prewarmLatency
+                    let decodeLatency = benchmarkDecode(core)
                     let candidate = Candidate(
                         core: core,
                         loadLatency: loadLatency,
-                        prewarmLatency: prewarmLatency
+                        prewarmLatency: prewarmLatency,
+                        decodeLatency: decodeLatency
                     )
-                    print(String(
-                        format: "🏴‍☠️  BAD APPLE // ANE candidate rawValue %ld: load %.3fs, prewarm %.3fs, score %.3f",
+                    NSLog(
+                        "🏴‍☠️  BAD APPLE // ANE candidate rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok, score %.3f",
                         computeUnits.rawValue,
                         loadLatency,
                         prewarmLatency,
+                        decodeLatency,
                         candidate.score
-                    ))
+                    )
                     accepted.append(candidate)
                 } catch {
                     let signature = isCompilerFailure(error) ? " [compiler failure]" : ""
-                    print("🏴‍☠️  BAD APPLE // ANE candidate rawValue \(computeUnits.rawValue) failed\(signature): \(error)")
+                    NSLog("%@", "🏴‍☠️  BAD APPLE // ANE candidate rawValue \(computeUnits.rawValue) failed\(signature): \(error)")
                     lastError = error
                 }
             }
 
             if let selected = accepted.min(by: { $0.score < $1.score }) {
                 selected.core.auditPlacement()
-                print(String(
-                    format: "🏴‍☠️  BAD APPLE // ANE core selected computeUnits rawValue %ld (score %.3f)",
+                NSLog(
+                    "🏴‍☠️  BAD APPLE // ANE core selected computeUnits rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok (score %.3f)",
                     selected.core.configuration.computeUnits.rawValue,
+                    selected.loadLatency,
+                    selected.prewarmLatency,
+                    selected.decodeLatency,
                     selected.score
-                ))
+                )
                 return selected.core
             }
         }
@@ -326,6 +341,40 @@ private final class BadAppleANECore {
             "anefmodel",
             "on-device compiled macho",
         ].contains { details.contains($0) }
+    }
+
+    private static func benchmarkDecode(
+        _ core: BadAppleANECore,
+        iterations: Int = 5,
+        maxStepLatency: TimeInterval = 0.5
+    ) -> TimeInterval {
+        core.reset()
+        defer { core.reset() }
+
+        // A short, arbitrary prompt to get the stateful KV cache started.
+        let prompt: [Int32] = [128, 456]
+        _ = prompt.withUnsafeBufferPointer { core.predictNext($0.baseAddress!, count: 2) }
+
+        var next: Int32 = 1
+        // The first decode step after prefill can be atypically slow; discard it.
+        _ = core.predictNext(&next, count: 1)
+
+        var total: TimeInterval = 0
+        var measured = 0
+        for _ in 0..<iterations {
+            let stepStart = ProcessInfo.processInfo.systemUptime
+            guard let result = core.predictNext(&next, count: 1) else { break }
+            let stepLatency = ProcessInfo.processInfo.systemUptime - stepStart
+            if stepLatency > maxStepLatency {
+                // This candidate is too slow for decode; reject it with a huge score.
+                return 1_000_000.0
+            }
+            total += stepLatency
+            measured += 1
+            next = result
+        }
+        guard measured > 0 else { return 1_000_000.0 }
+        return total / TimeInterval(measured)
     }
 
     private init(model: MLModel, modelURL: URL, configuration: MLModelConfiguration) throws {
@@ -610,7 +659,7 @@ public func badAppleANEProbeShard(
         averageLatencyUs?.pointee = UInt64(elapsed * 1_000_000 / Double(iterations))
         return true
     } catch {
-        print("🏴‍☠️  BAD APPLE // ANE shard probe failed: \(error)")
+        NSLog("%@", "🏴‍☠️  BAD APPLE // ANE shard probe failed: \(error)")
         return false
     }
 }
@@ -831,12 +880,31 @@ private final class BadAppleANEShardCore {
     var selectedLoadLatency: TimeInterval = 0
     var selectedPrewarmLatency: TimeInterval = 0
 
+    private struct Candidate {
+        let core: BadAppleANEShardCore
+        let loadLatency: TimeInterval
+        let prewarmLatency: TimeInterval
+        let decodeLatency: TimeInterval
+
+        var score: TimeInterval {
+            // Optimize for steady-state tok/s; load and prewarm are one-time costs.
+            decodeLatency + prewarmLatency * 0.01 + loadLatency * 0.0001
+        }
+    }
+
     static func load(manifestURL: URL) throws -> BadAppleANEShardCore {
         let manifest = try BadAppleANEShardManifest.load(from: manifestURL)
         let maxPrewarmMilliseconds = ProcessInfo.processInfo.environment["BADAPPLE_ANE_MAX_PREWARM_MS"]
             .flatMap(Double.init) ?? 5_000
+        let maxLoadMilliseconds = ProcessInfo.processInfo.environment["BADAPPLE_ANE_MAX_LOAD_MS"]
+            .flatMap(Double.init) ?? 45_000
+        let fastEnoughDecodeMs = ProcessInfo.processInfo.environment["BADAPPLE_ANE_FAST_DECODE_MS"]
+            .flatMap(Double.init) ?? 250
+        let fastEnoughDecode = fastEnoughDecodeMs / 1_000.0
         var lastError: Error?
-        for computeUnits in [MLComputeUnits.cpuAndNeuralEngine, .all, .cpuAndGPU] {
+        var accepted: [Candidate] = []
+
+        for (index, computeUnits) in [MLComputeUnits.cpuAndNeuralEngine, .all, .cpuAndGPU].enumerated() {
             let configuration = MLModelConfiguration()
             configuration.computeUnits = computeUnits
             let loadStarted = ProcessInfo.processInfo.systemUptime
@@ -846,6 +914,9 @@ private final class BadAppleANEShardCore {
                     configuration: configuration
                 )
                 let loadLatency = ProcessInfo.processInfo.systemUptime - loadStarted
+                guard loadLatency * 1_000 <= maxLoadMilliseconds else {
+                    throw NSError(domain: "BadAppleANEShard", code: 18)
+                }
                 let prewarmStarted = ProcessInfo.processInfo.systemUptime
                 let prewarmed = core.prewarm()
                 let prewarmLatency = ProcessInfo.processInfo.systemUptime - prewarmStarted
@@ -858,19 +929,80 @@ private final class BadAppleANEShardCore {
                     modelURL: manifest.layers[0].path,
                     configuration: configuration
                 )
-                print(String(
-                    format: "🏴‍☠️  BAD APPLE // Sharded ANE core selected rawValue %ld: load %.3fs, prewarm %.3fs",
+                let decodeLatency = benchmarkDecode(core)
+                let candidate = Candidate(
+                    core: core,
+                    loadLatency: loadLatency,
+                    prewarmLatency: prewarmLatency,
+                    decodeLatency: decodeLatency
+                )
+                NSLog(
+                    "🏴‍☠️  BAD APPLE // Sharded ANE candidate rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok, score %.3f",
                     computeUnits.rawValue,
                     loadLatency,
-                    prewarmLatency
-                ))
-                return core
+                    prewarmLatency,
+                    decodeLatency,
+                    candidate.score
+                )
+                // If the first candidate is already fast enough, avoid the long compile
+                // times that GPU/ANE-unrestricted configs can incur on some machines.
+                if index == 0, decodeLatency <= fastEnoughDecode {
+                    NSLog("%@", "🏴‍☠️  BAD APPLE // Sharded ANE primary candidate fast enough; skipping remaining compute units")
+                    return core
+                }
+                accepted.append(candidate)
             } catch {
-                print("🏴‍☠️  BAD APPLE // Sharded ANE candidate rawValue \(computeUnits.rawValue) failed: \(error)")
+                NSLog("%@", "🏴‍☠️  BAD APPLE // Sharded ANE candidate rawValue \(computeUnits.rawValue) failed: \(error)")
                 lastError = error
             }
         }
+
+        if let selected = accepted.min(by: { $0.score < $1.score }) {
+            NSLog(
+                "🏴‍☠️  BAD APPLE // Sharded ANE core selected rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok (score %.3f)",
+                selected.core.configuration.computeUnits.rawValue,
+                selected.loadLatency,
+                selected.prewarmLatency,
+                selected.decodeLatency,
+                selected.score
+            )
+            return selected.core
+        }
+
         throw lastError ?? NSError(domain: "BadAppleANEShard", code: 14)
+    }
+
+    private static func benchmarkDecode(
+        _ core: BadAppleANEShardCore,
+        iterations: Int = 5,
+        maxStepLatency: TimeInterval = 0.5
+    ) -> TimeInterval {
+        core.reset()
+        defer { core.reset() }
+
+        // A short, arbitrary prompt to warm the stateful KV cache.
+        let prompt: [Int32] = [128, 456]
+        _ = prompt.withUnsafeBufferPointer { core.predictNext($0.baseAddress!, count: 2) }
+
+        var next: Int32 = 1
+        // The first decode step after prefill can be atypically slow; discard it.
+        _ = core.predictNext(&next, count: 1)
+
+        var total: TimeInterval = 0
+        var measured = 0
+        for _ in 0..<iterations {
+            let stepStart = ProcessInfo.processInfo.systemUptime
+            guard let result = core.predictNext(&next, count: 1) else { break }
+            let stepLatency = ProcessInfo.processInfo.systemUptime - stepStart
+            if stepLatency > maxStepLatency {
+                return 1_000_000.0
+            }
+            total += stepLatency
+            measured += 1
+            next = result
+        }
+        guard measured > 0 else { return 1_000_000.0 }
+        return total / TimeInterval(measured)
     }
 
     private init(
@@ -910,6 +1042,20 @@ private final class BadAppleANEShardCore {
         lock.lock()
         defer { lock.unlock() }
         guard count > 0, position + count <= manifest.sequenceLength else { return nil }
+
+        // Elevate the calling thread to user-interactive QoS once per generation.
+        // This influences scheduling and core placement but does not directly
+        // "lock" memory bus lines; it is the highest class available to the process.
+        if position == 0 {
+            let qosResult = pthread_set_qos_class_self_np(badAppleInteractiveQos, 0)
+            if qosResult != 0 {
+                NSLog("%@", "🏴‍☠️  BAD APPLE // pthread_set_qos_class_self_np failed: \(qosResult)")
+            } else {
+                let currentQos = qos_class_self()
+                NSLog("%@", "🏴‍☠️  BAD APPLE // QoS elevated to userInteractive (\(currentQos)) on \(Thread.current)")
+            }
+        }
+
         do {
             var next: Int32?
             for index in 0..<count {
@@ -917,7 +1063,7 @@ private final class BadAppleANEShardCore {
             }
             return next
         } catch {
-            print("🏴‍☠️  BAD APPLE // Sharded ANE prediction failed and reset state: \(error)")
+            NSLog("%@", "🏴‍☠️  BAD APPLE // Sharded ANE prediction failed and reset state: \(error)")
             resetUnlocked()
             return nil
         }
@@ -932,6 +1078,14 @@ private final class BadAppleANEShardCore {
     func prewarm() -> Bool {
         lock.lock()
         defer { lock.unlock() }
+
+        // Apply the same interactive QoS to prewarm so the compiler warms at
+        // the same priority class as real inference.
+        let qosResult = pthread_set_qos_class_self_np(badAppleInteractiveQos, 0)
+        if qosResult == 0 {
+            NSLog("%@", "🏴‍☠️  BAD APPLE // Prewarm QoS elevated to userInteractive")
+        }
+
         var token: Int32 = 0
         let result = withUnsafePointer(to: &token) { pointer in
             do {
@@ -973,18 +1127,28 @@ private final class BadAppleANEShardCore {
                 deallocator: nil
             )
             updatePositionInputs()
-            var hidden = embedding
-            for layer in layers {
-                hidden = try layer.predict(
-                    hidden: hidden,
-                    ropeCos: ropeCos,
-                    ropeSin: ropeSin,
-                    attentionMask: attentionMask,
-                    writeMask: writeMask
-                )
+
+            // Execute the multi-shard layer graph on the highest-priority global
+            // dispatch queue. This is a synchronous block, so the calling thread
+            // waits and no concurrent access to MLMultiArray / MLState occurs.
+            var next: Int32?
+            try DispatchQueue.global(qos: .userInteractive).sync { [self] in
+                var hidden = embedding
+                for layer in layers {
+                    hidden = try layer.predict(
+                        hidden: hidden,
+                        ropeCos: ropeCos,
+                        ropeSin: ropeSin,
+                        attentionMask: attentionMask,
+                        writeMask: writeMask
+                    )
+                }
+                position += 1
+                if project {
+                    next = try argmax(hidden: hidden)
+                }
             }
-            position += 1
-            return project ? try argmax(hidden: hidden) : nil
+            return next
         }
     }
 
@@ -1006,14 +1170,54 @@ private final class BadAppleANEShardCore {
 
     private func argmax(hidden: MLMultiArray) throws -> Int32 {
         var bestToken = -1
-        var bestValue = -Double.infinity
+        var bestValue = -Float.infinity
         for head in heads {
             let logits = try head.logits(hidden: hidden)
-            for index in 0..<logits.count {
-                let value = logits[index].doubleValue
-                if value > bestValue {
-                    bestValue = value
-                    bestToken = head.vocabStart + index
+            logits.withUnsafeMutableBytes { rawBuffer, strides in
+                guard let base = rawBuffer.baseAddress else { return }
+                let count = logits.count
+                let lastStride = strides.last ?? 1
+                if logits.dataType == .float16 {
+                    let typed = base.bindMemory(to: Float16.self, capacity: count * lastStride)
+                    var localBest = -Float16.infinity
+                    var localToken = -1
+                    for i in 0..<count {
+                        let v = typed[i * lastStride]
+                        if v > localBest {
+                            localBest = v
+                            localToken = head.vocabStart + i
+                        }
+                    }
+                    if localToken >= 0 {
+                        let v = Float(localBest)
+                        if v > bestValue {
+                            bestValue = v
+                            bestToken = localToken
+                        }
+                    }
+                } else if logits.dataType == .float32 {
+                    let typed = base.bindMemory(to: Float.self, capacity: count * lastStride)
+                    var localBest = -Float.infinity
+                    var localToken = -1
+                    for i in 0..<count {
+                        let v = typed[i * lastStride]
+                        if v > localBest {
+                            localBest = v
+                            localToken = head.vocabStart + i
+                        }
+                    }
+                    if localToken >= 0, localBest > bestValue {
+                        bestValue = localBest
+                        bestToken = localToken
+                    }
+                } else {
+                    for i in 0..<count {
+                        let v = Float(logits[i].doubleValue)
+                        if v > bestValue {
+                            bestValue = v
+                            bestToken = head.vocabStart + i
+                        }
+                    }
                 }
             }
         }
@@ -1094,7 +1298,7 @@ public func badAppleANECreate(_ path: UnsafePointer<CChar>?) -> UnsafeMutableRaw
         }
         return Unmanaged.passRetained(BadAppleANEHandle(backend: backend)).toOpaque()
     } catch {
-        print("🏴‍☠️  BAD APPLE // ANE backend creation failed: \(error)")
+        NSLog("%@", "🏴‍☠️  BAD APPLE // ANE backend creation failed: \(error)")
         return nil
     }
 }

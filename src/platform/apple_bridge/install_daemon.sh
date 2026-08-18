@@ -9,12 +9,14 @@ PLIST_SOURCE="${REPO_ROOT}/src/platform/apple_bridge/com.badapple.substrate.plis
 PLIST_TARGET="/Library/LaunchDaemons/com.badapple.substrate.plist"
 INSTALL_DIR="/usr/local/libexec/badapple"
 CLI_TARGET="/usr/local/bin/badapple"
+AUTOMATION_TARGET="/usr/local/bin/badapple-automation"
 DATA_DIR="/var/lib/bad_apple"
 SOCKET_DIR="/var/run/badapple"
 KEY_FILE="${DATA_DIR}/slicks.key"
 LOG_FILE="/var/log/bad_apple_daemon.log"
 DAEMON_SOURCE="${REPO_ROOT}/target/release/badappled"
 CLI_SOURCE="${REPO_ROOT}/target/release/badapple"
+AUTOMATION_SOURCE="${REPO_ROOT}/target/release/badapple_automation"
 BRIDGE_SOURCE="${REPO_ROOT}/target/release/libBadAppleBridge.dylib"
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -23,7 +25,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
-for artifact in "${DAEMON_SOURCE}" "${CLI_SOURCE}" "${BRIDGE_SOURCE}"; do
+for artifact in "${DAEMON_SOURCE}" "${CLI_SOURCE}" "${AUTOMATION_SOURCE}" "${BRIDGE_SOURCE}"; do
     if [[ ! -f "${artifact}" ]]; then
         echo "ERROR: Required release artifact not found: ${artifact}" >&2
         echo "       Build with cargo build --release and src/platform/apple_bridge/build_apple_bridge.sh" >&2
@@ -69,6 +71,7 @@ install -d -o root -g staff -m 770 "${DATA_DIR}/curriculum"
 
 install -o root -g wheel -m 755 "${DAEMON_SOURCE}" "${INSTALL_DIR}/badappled"
 install -o root -g wheel -m 755 "${CLI_SOURCE}" "${CLI_TARGET}"
+install -o root -g wheel -m 755 "${AUTOMATION_SOURCE}" "${AUTOMATION_TARGET}"
 install -o root -g wheel -m 755 "${BRIDGE_SOURCE}" "${INSTALL_DIR}/libBadAppleBridge.dylib"
 
 if [[ ! -f "${KEY_FILE}" ]]; then
@@ -110,6 +113,7 @@ echo "Bad Apple daemon installed and bootstrapped."
 echo "Label:     com.badapple.substrate"
 echo "Daemon:    ${INSTALL_DIR}/badappled"
 echo "CLI:       ${CLI_TARGET}"
+echo "Automation:${AUTOMATION_TARGET}"
 echo "Model:     ${MODEL_PATH}"
 echo "Tokenizer: ${TOKENIZER_PATH}"
 echo "Socket:    ${SOCKET_DIR}/substrate.sock"

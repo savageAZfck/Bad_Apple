@@ -1,4 +1,4 @@
-//! Bad Apple // in-process ANE 3B cognitive core benchmark.
+//! Bad Apple // in-process ANE Qwen3-4B cognitive core benchmark.
 //!
 //! This integration test loads a locally compiled CoreML `.mlmodelc` (placed
 //! under `tests/ane_brain_perf/artifacts`) and exercises the `ane_core`
@@ -76,7 +76,7 @@ fn ane_brain_perf() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let artifact_root = manifest.join("tests/ane_brain_perf/artifacts");
 
-    // Try the 3B artifacts first, then the 0.5B smoke artifacts.
+    // Try the Qwen3-4B sharded artifacts first, then legacy 3B/0.5B fallbacks.
     let candidates = [
         ("qwen3b_ane_shards", "conversion_manifest.json"),
         ("qwen3b_ane", "model.mlmodelc"),

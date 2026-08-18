@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GGUF → ANE-native CoreML converter for Qwen2.5 and Phi-family models.
+"""GGUF → ANE-native CoreML converter for Qwen3, Qwen2.5, and Phi-family models.
 
 All architecture-dependent sizes (d_model, n_heads, n_kv_heads, d_head, d_ff, …)
 are read from the GGUF metadata at runtime — nothing is hardcoded to 0.5B.
@@ -335,11 +335,28 @@ class GGUFModel:
             vocab_size = tensor_vocab
         else:
             vocab_size = meta_vocab
-        d_head = d_model // n_heads
+        # Qwen3 exposes per-head key/value lengths explicitly; older Qwen2 / Phi
+        # only expose embedding_length, so derive head dim from d_model//n_heads.
+        q_head_dim = self.meta(f"{arch}.attention.key_length", None)
+        if q_head_dim is None:
+            q_head_dim = self.meta(f"{arch}.attention.head_dim", None)
+        if q_head_dim is None:
+            q_head_dim = d_model // n_heads
+        kv_head_dim = self.meta(f"{arch}.attention.value_length", q_head_dim)
+        if kv_head_dim is None:
+            kv_head_dim = q_head_dim
+        kv_head_dim = int(kv_head_dim)
+        q_head_dim = int(q_head_dim)
+
+        d_head = q_head_dim
         rope_dim = self.meta(f"{arch}.rope.dimension_count", d_head)
         if rope_dim <= 0 or rope_dim > d_head or rope_dim % 2 != 0:
             print(f"  WARNING: invalid rope.dimension_count={rope_dim}; using d_head={d_head}")
             rope_dim = d_head
+
+        q_dim = n_heads * q_head_dim
+        kv_dim = self.meta(f"{arch}.attention.head_count_kv", 2) * kv_head_dim
+
         return {
             "arch": arch,
             "vocab_size": vocab_size,
@@ -348,53 +365,89 @@ class GGUFModel:
             "n_kv_heads": self.meta(f"{arch}.attention.head_count_kv", 2),
             "d_model": d_model,
             "d_head": d_head,
+            "q_head_dim": q_head_dim,
+            "kv_head_dim": kv_head_dim,
+            "q_dim": q_dim,
+            "kv_dim": kv_dim,
             "rope_dim": rope_dim,
             "d_ff": self.meta(f"{arch}.feed_forward_length", 4864),
             "rms_norm_eps": self.meta(f"{arch}.attention.layer_norm_rms_epsilon", 1e-6),
             "rope_freq_base": self.meta(f"{arch}.rope.freq_base", 1000000.0),
             "eos_token_id": self.meta("tokenizer.ggml.eos_token_id", 151645),
             "bos_token_id": self.meta("tokenizer.ggml.bos_token_id", 151643),
-            # Hunyuan-dense: per-head Q/K RMSNorm (blk.N.attn_q_norm / attn_k_norm weights)
+            # Hunyuan-dense / Qwen3: per-head Q/K RMSNorm
             "has_qk_norm": "blk.0.attn_q_norm.weight" in self.tensors,
         }
 
     # ── Architecture-agnostic tensor helpers ────────────────────────────
 
+    def _orient_2d(self, arr, out_features, in_features, name="weight"):
+        """Return a 2D tensor in (out_features, in_features) layout.
+
+        Different GGUF exporters store linear weights as either (out, in) or
+        (in, out).  We accept both and transpose when necessary so PyTorch
+        Conv2d weights come out in the correct (out_channels, in_channels)
+        order.
+        """
+        if arr.ndim != 2:
+            raise ValueError(f"{name}: expected 2D weight, got shape {arr.shape}")
+        if arr.shape == (out_features, in_features):
+            return arr
+        if arr.shape == (in_features, out_features):
+            return arr.T.copy()
+        raise ValueError(
+            f"{name}: shape {arr.shape} does not match expected "
+            f"(out={out_features}, in={in_features}) or its transpose"
+        )
+
     def get_qkv_weights(self, prefix, cfg):
-        """Return (q_w, k_w, v_w) as separate numpy arrays.
+        """Return (q_w, k_w, v_w) as separate numpy arrays in (out, in) layout.
         Handles both split (Qwen: attn_q/attn_k/attn_v) and fused (Phi: attn_qkv) layouts."""
+        d_model = cfg["d_model"]
+        q_dim = cfg.get("q_dim", d_model)
+        kv_dim = cfg.get("kv_dim", cfg["n_kv_heads"] * cfg["d_head"])
         if f"{prefix}.attn_q.weight" in self.tensors:
-            return (self.get_tensor(f"{prefix}.attn_q.weight"),
-                    self.get_tensor(f"{prefix}.attn_k.weight"),
-                    self.get_tensor(f"{prefix}.attn_v.weight"))
-        # Fused QKV (Phi-family): shape (d + 2*kv_dim, d_model)
-        qkv = self.get_tensor(f"{prefix}.attn_qkv.weight")
-        d = cfg["d_model"]
-        kv_dim = cfg["n_kv_heads"] * cfg["d_head"]
-        return qkv[:d], qkv[d:d + kv_dim], qkv[d + kv_dim:]
+            return (
+                self._orient_2d(self.get_tensor(f"{prefix}.attn_q.weight"), q_dim, d_model, f"{prefix}.attn_q.weight"),
+                self._orient_2d(self.get_tensor(f"{prefix}.attn_k.weight"), kv_dim, d_model, f"{prefix}.attn_k.weight"),
+                self._orient_2d(self.get_tensor(f"{prefix}.attn_v.weight"), kv_dim, d_model, f"{prefix}.attn_v.weight"),
+            )
+        # Fused QKV (Phi-family): shape (q_dim + 2*kv_dim, d_model)
+        qkv = self._orient_2d(
+            self.get_tensor(f"{prefix}.attn_qkv.weight"),
+            q_dim + 2 * kv_dim, d_model, f"{prefix}.attn_qkv.weight"
+        )
+        return qkv[:q_dim], qkv[q_dim:q_dim + kv_dim], qkv[q_dim + kv_dim:]
 
     def get_qkv_biases(self, prefix, cfg):
         """Return (q_b, k_b, v_b) or None if no biases exist."""
+        d_model = cfg["d_model"]
+        q_dim = cfg.get("q_dim", d_model)
+        kv_dim = cfg.get("kv_dim", cfg["n_kv_heads"] * cfg["d_head"])
         if f"{prefix}.attn_q.bias" in self.tensors:
             return (self.get_tensor(f"{prefix}.attn_q.bias"),
                     self.get_tensor(f"{prefix}.attn_k.bias"),
                     self.get_tensor(f"{prefix}.attn_v.bias"))
         if f"{prefix}.attn_qkv.bias" in self.tensors:
             qkv_b = self.get_tensor(f"{prefix}.attn_qkv.bias")
-            d = cfg["d_model"]
-            kv_dim = cfg["n_kv_heads"] * cfg["d_head"]
-            return qkv_b[:d], qkv_b[d:d + kv_dim], qkv_b[d + kv_dim:]
+            return qkv_b[:q_dim], qkv_b[q_dim:q_dim + kv_dim], qkv_b[q_dim + kv_dim:]
         return None
 
     def get_gate_up_weights(self, prefix, cfg):
-        """Return (gate_w, up_w) as separate numpy arrays.
+        """Return (gate_w, up_w) as separate numpy arrays in (out, in) layout.
         Handles both split (Qwen: ffn_gate + ffn_up) and fused (Phi: ffn_up=gate+up) layouts."""
-        if f"{prefix}.ffn_gate.weight" in self.tensors:
-            return (self.get_tensor(f"{prefix}.ffn_gate.weight"),
-                    self.get_tensor(f"{prefix}.ffn_up.weight"))
-        # Fused gate+up (Phi-family): ffn_up has shape (2*d_ff, d_model)
-        fused = self.get_tensor(f"{prefix}.ffn_up.weight")
+        d_model = cfg["d_model"]
         dff = cfg["d_ff"]
+        if f"{prefix}.ffn_gate.weight" in self.tensors:
+            return (
+                self._orient_2d(self.get_tensor(f"{prefix}.ffn_gate.weight"), dff, d_model, f"{prefix}.ffn_gate.weight"),
+                self._orient_2d(self.get_tensor(f"{prefix}.ffn_up.weight"), dff, d_model, f"{prefix}.ffn_up.weight"),
+            )
+        # Fused gate+up (Phi-family): shape (2*d_ff, d_model)
+        fused = self._orient_2d(
+            self.get_tensor(f"{prefix}.ffn_up.weight"),
+            2 * dff, d_model, f"{prefix}.ffn_up.weight"
+        )
         return fused[:dff], fused[dff:]
 
     def has_biases(self, prefix):
@@ -1441,6 +1494,16 @@ def build_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
     mlmodel.save(pkg_path)
     print(f"\n✓ Saved {pkg_path}")
 
+    # Free the conversion-time source package (often a /var/folders or TMPDIR temp)
+    # to stop layer-by-layer accumulation of mlprogram package copies.
+    _src_pkg = getattr(mlmodel, "package_path", None)
+    if _src_pkg and _src_pkg != pkg_path:
+        try:
+            import shutil
+            shutil.rmtree(_src_pkg, ignore_errors=True)
+        except Exception:
+            pass
+
     # ── Metadata ─────────────────────────────────────────────────────────
 
     meta = {
@@ -1842,6 +1905,16 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
     mlmodel.save(pkg_path)
     print(f"\n✓ Saved {pkg_path}")
 
+    # Free the conversion-time source package (often a /var/folders or TMPDIR temp)
+    # to stop layer-by-layer accumulation of mlprogram package copies.
+    _src_pkg = getattr(mlmodel, "package_path", None)
+    if _src_pkg and _src_pkg != pkg_path:
+        try:
+            import shutil
+            shutil.rmtree(_src_pkg, ignore_errors=True)
+        except Exception:
+            pass
+
     # ── Metadata ─────────────────────────────────────────────────────────
 
     meta = {
@@ -1904,7 +1977,8 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
                          group_size=32, strategy="uniform",
                          layer_start=None, layer_end=None,
                          output_dir=None, output_name=None,
-                         split_mode="full", compute_units="all"):
+                         split_mode="full", compute_units="all",
+                         debug_eval=None):
     """Build a stateful CoreML model with KV cache as MLState.
 
     Key differences from build_fixed_model():
@@ -2055,19 +2129,22 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
         """
         def __init__(self, layer_idx, gguf_model, cfg, split_mode="full"):
             super().__init__()
-            d = cfg["d_model"]
+            d_model = cfg["d_model"]
             dff = cfg["d_ff"]
-            kv_dim = cfg["n_kv_heads"] * cfg["d_head"]
-            qkv_dim = d + 2 * kv_dim
+            q_dim = cfg.get("q_dim", d_model)
+            kv_dim = cfg.get("kv_dim", cfg["n_kv_heads"] * cfg["d_head"])
+            qkv_dim = q_dim + 2 * kv_dim
             eps = cfg["rms_norm_eps"]
             prefix = f"blk.{layer_idx}"
 
-            self.d = d
-            self.dff = dff
+            self.d_model = d_model
+            self.q_dim = q_dim
             self.kv_dim = kv_dim
+            self.dff = dff
             self.nh = cfg["n_heads"]
             self.nkv = cfg["n_kv_heads"]
             self.dh = cfg["d_head"]
+            self.kv_dh = cfg.get("kv_head_dim", self.dh)
             self.rope_dim = cfg.get("rope_dim", self.dh)
             self.hpk = self.nh // self.nkv
             self.scale = 1.0 / (cfg["d_head"] ** 0.5)
@@ -2081,9 +2158,9 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
                 q_w, k_w, v_w = gguf_model.get_qkv_weights(prefix, cfg)
                 qkv_w = np.concatenate([q_w, k_w, v_w], axis=0)
                 has_bias = gguf_model.has_biases(prefix)
-                self.qkv_conv = nn.Conv2d(d, qkv_dim, 1, bias=has_bias)
+                self.qkv_conv = nn.Conv2d(d_model, qkv_dim, 1, bias=has_bias)
                 self.qkv_conv.weight = nn.Parameter(
-                    torch.tensor(qkv_w, dtype=torch.float16).reshape(qkv_dim, d, 1, 1),
+                    torch.tensor(qkv_w, dtype=torch.float16).reshape(qkv_dim, d_model, 1, 1),
                     requires_grad=False)
                 if has_bias:
                     biases = gguf_model.get_qkv_biases(prefix, cfg)
@@ -2091,19 +2168,21 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
                     self.qkv_conv.bias = nn.Parameter(
                         torch.tensor(qkv_b, dtype=torch.float16), requires_grad=False)
 
-                # Output projection
-                o_w = gguf_model.get_tensor(f"{prefix}.attn_output.weight")
-                self.out_conv = nn.Conv2d(d, d, 1, bias=False)
+                # Output projection: q_dim → d_model
+                o_w = gguf_model._orient_2d(
+                    gguf_model.get_tensor(f"{prefix}.attn_output.weight"),
+                    d_model, q_dim, f"{prefix}.attn_output.weight")
+                self.out_conv = nn.Conv2d(q_dim, d_model, 1, bias=False)
                 self.out_conv.weight = nn.Parameter(
-                    torch.tensor(o_w, dtype=torch.float16).reshape(d, d, 1, 1),
+                    torch.tensor(o_w, dtype=torch.float16).reshape(d_model, q_dim, 1, 1),
                     requires_grad=False)
 
-                # Optional per-head Q/K RMSNorm (Hunyuan-dense)
+                # Optional per-head Q/K RMSNorm (Hunyuan-dense / Qwen3)
                 if cfg.get("has_qk_norm", False):
                     q_norm_w = gguf_model.get_tensor(f"{prefix}.attn_q_norm.weight")
                     k_norm_w = gguf_model.get_tensor(f"{prefix}.attn_k_norm.weight")
                     self.q_norm = HeadRMSNormConv(q_norm_w, self.nh, self.dh, eps)
-                    self.k_norm = HeadRMSNormConv(k_norm_w, self.nkv, self.dh, eps)
+                    self.k_norm = HeadRMSNormConv(k_norm_w, self.nkv, self.kv_dh, eps)
                 else:
                     self.q_norm = None
                     self.k_norm = None
@@ -2115,15 +2194,17 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
 
                 gate_w, up_w = gguf_model.get_gate_up_weights(prefix, cfg)
                 gate_up_w = np.concatenate([gate_w, up_w], axis=0)
-                self.gate_up_conv = nn.Conv2d(d, 2 * dff, 1, bias=False)
+                self.gate_up_conv = nn.Conv2d(d_model, 2 * dff, 1, bias=False)
                 self.gate_up_conv.weight = nn.Parameter(
-                    torch.tensor(gate_up_w, dtype=torch.float16).reshape(2 * dff, d, 1, 1),
+                    torch.tensor(gate_up_w, dtype=torch.float16).reshape(2 * dff, d_model, 1, 1),
                     requires_grad=False)
 
-                down_w = gguf_model.get_tensor(f"{prefix}.ffn_down.weight")
-                self.down_conv = nn.Conv2d(dff, d, 1, bias=False)
+                down_w = gguf_model._orient_2d(
+                    gguf_model.get_tensor(f"{prefix}.ffn_down.weight"),
+                    d_model, dff, f"{prefix}.ffn_down.weight")
+                self.down_conv = nn.Conv2d(dff, d_model, 1, bias=False)
                 self.down_conv.weight = nn.Parameter(
-                    torch.tensor(down_w, dtype=torch.float16).reshape(d, dff, 1, 1),
+                    torch.tensor(down_w, dtype=torch.float16).reshape(d_model, dff, 1, 1),
                     requires_grad=False)
 
         def _forward_attn(self, x, k_cache, v_cache, rope_cos_pos, rope_sin_pos,
@@ -2132,18 +2213,18 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
             normed = self.attn_norm(x)
 
             qkv = self.qkv_conv(normed).squeeze(-1).squeeze(-1)
-            q = qkv[:, :self.d]
-            k = qkv[:, self.d:self.d + self.kv_dim]
-            v = qkv[:, self.d + self.kv_dim:]
+            q = qkv[:, :self.q_dim]
+            k = qkv[:, self.q_dim:self.q_dim + self.kv_dim]
+            v = qkv[:, self.q_dim + self.kv_dim:]
 
-            # Optional per-head Q/K RMSNorm (Hunyuan-dense), applied before RoPE
+            # Optional per-head Q/K RMSNorm (Hunyuan-dense / Qwen3), applied before RoPE
             if self.q_norm is not None:
-                q = self.q_norm(q.reshape(1, self.d, 1, 1)).reshape(1, self.d)
+                q = self.q_norm(q.reshape(1, self.q_dim, 1, 1)).reshape(1, self.q_dim)
                 k = self.k_norm(k.reshape(1, self.kv_dim, 1, 1)).reshape(1, self.kv_dim)
 
             rope_half = self.rope_dim // 2
-            def apply_rope(x_flat, n_heads):
-                x_r = x_flat.reshape(1, n_heads, self.dh)
+            def apply_rope(x_flat, n_heads, d_h):
+                x_r = x_flat.reshape(1, n_heads, d_h)
                 x_rot = x_r[:, :, :self.rope_dim]
                 x_pass = x_r[:, :, self.rope_dim:]
                 x_lo = x_rot[:, :, :rope_half]
@@ -2152,13 +2233,13 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
                 sin_b = rope_sin_pos.unsqueeze(1)
                 r_lo = x_lo * cos_b - x_hi * sin_b
                 r_hi = x_lo * sin_b + x_hi * cos_b
-                return torch.cat([r_lo, r_hi, x_pass], dim=-1).reshape(1, n_heads * self.dh)
+                return torch.cat([r_lo, r_hi, x_pass], dim=-1).reshape(1, n_heads * d_h)
 
-            q = apply_rope(q, self.nh)
-            k = apply_rope(k, self.nkv)
+            q = apply_rope(q, self.nh, self.dh)
+            k = apply_rope(k, self.nkv, self.kv_dh)
 
-            new_k = k.reshape(1, self.nkv, 1, self.dh)
-            new_v = v.reshape(1, self.nkv, 1, self.dh)
+            new_k = k.reshape(1, self.nkv, 1, self.kv_dh)
+            new_v = v.reshape(1, self.nkv, 1, self.kv_dh)
 
             k_updated = k_cache * (1.0 - kv_write_mask) + new_k * kv_write_mask
             v_updated = v_cache * (1.0 - kv_write_mask) + new_v * kv_write_mask
@@ -2180,7 +2261,7 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
                 attn_parts.append(head_out.squeeze(2))
 
             attn_out = torch.cat(attn_parts, dim=1)
-            attn_out = attn_out.reshape(1, self.d, 1, 1)
+            attn_out = attn_out.reshape(1, self.q_dim, 1, 1)
             attn_out = self.out_conv(attn_out)
             return residual + attn_out
 
@@ -2223,6 +2304,7 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
             self.d = cfg["d_model"]
             self.nkv = cfg["n_kv_heads"]
             self.dh = cfg["d_head"]
+            self.kv_dh = cfg.get("kv_head_dim", self.dh)
             self.max_seq_len = max_seq_len
             self.is_shard = is_shard
             self.split_mode = split_mode
@@ -2236,13 +2318,14 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
                                                      split_mode=split_mode))
 
             # KV caches only needed for full and attn modes
+            kv_dh = cfg.get("kv_head_dim", cfg["d_head"])
             if split_mode in ("full", "attn"):
                 for i in range(self.shard_n):
                     self.register_buffer(f"k_cache_{i}",
-                        torch.zeros(1, cfg["n_kv_heads"], max_seq_len, cfg["d_head"],
+                        torch.zeros(1, cfg["n_kv_heads"], max_seq_len, kv_dh,
                                     dtype=torch.float16))
                     self.register_buffer(f"v_cache_{i}",
-                        torch.zeros(1, cfg["n_kv_heads"], max_seq_len, cfg["d_head"],
+                        torch.zeros(1, cfg["n_kv_heads"], max_seq_len, kv_dh,
                                     dtype=torch.float16))
 
             if not is_shard and split_mode == "full":
@@ -2252,9 +2335,13 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
 
                 print("  LM head...")
                 if "output.weight" in gguf_model.tensors:
-                    lm_w = gguf_model.get_tensor("output.weight")
+                    lm_w = gguf_model._orient_2d(
+                        gguf_model.get_tensor("output.weight"),
+                        cfg["vocab_size"], cfg["d_model"], "output.weight")
                 else:
-                    lm_w = gguf_model.get_tensor("token_embd.weight")
+                    lm_w = gguf_model._orient_2d(
+                        gguf_model.get_tensor("token_embd.weight"),
+                        cfg["vocab_size"], cfg["d_model"], "token_embd.weight")
                 self.lm_head_conv = nn.Conv2d(cfg["d_model"], cfg["vocab_size"], 1, bias=False)
                 self.lm_head_conv.weight = nn.Parameter(
                     torch.tensor(lm_w, dtype=torch.float16).reshape(
@@ -2298,6 +2385,63 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
     model.eval()
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  {n_params:,} parameters (fp16)")
+
+    if debug_eval:
+        import torch.nn.functional as F
+
+        tokenizer_path = Path(debug_eval) if Path(debug_eval).is_file() else Path(gguf_path).parent / "tokenizer.json"
+        if not tokenizer_path.is_file():
+            raise FileNotFoundError(f"debug eval tokenizer not found at {tokenizer_path}")
+
+        try:
+            import tokenizers as toklib
+            tok = toklib.Tokenizer.from_file(str(tokenizer_path))
+            encoded = tok.encode(str(Path(gguf_path).name) if str(debug_eval) == str(Path(gguf_path)) else debug_eval)
+            prompt_ids = encoded.ids
+        except Exception as e:
+            raise RuntimeError(f"debug eval tokenization failed: {e}")
+
+        emb = torch.tensor(gguf.get_tensor("token_embd.weight"), dtype=torch.float16)
+        rope_half = rope_dim // 2
+        inv_freqs = 1.0 / (cfg["rope_freq_base"] ** (torch.arange(0, rope_half, dtype=torch.float32) / rope_half))
+
+        def rope_inputs(pos):
+            angles = torch.tensor(pos, dtype=torch.float32) * inv_freqs
+            cos = torch.cos(angles).unsqueeze(0).half()
+            sin = torch.sin(angles).unsqueeze(0).half()
+            return cos, sin
+
+        def make_masks(pos):
+            mask = torch.full((1, 1, 1, max_seq_len), -1.0e4, dtype=torch.float16)
+            mask[0, 0, 0, :pos + 1] = 0.0
+            wmask = torch.zeros((1, 1, max_seq_len, 1), dtype=torch.float16)
+            wmask[0, 0, pos, 0] = 1.0
+            return mask, wmask
+
+        with torch.no_grad():
+            x = None
+            for pos, tid in enumerate(prompt_ids):
+                x = emb[tid].reshape(1, d, 1, 1)
+                cos, sin = rope_inputs(pos)
+                mask, wmask = make_masks(pos)
+                x = model(x, cos, sin, mask, wmask)
+            if not (is_shard or split_mode == "attn"):
+                topk = torch.topk(x, 10, dim=-1)
+                print("\n=== PyTorch debug eval ===")
+                print(f"prompt: {debug_eval}")
+                print(f"prompt ids: {prompt_ids}")
+                print(f"next token top-10 ids: {topk.indices[0].tolist()}")
+                print(f"next token top-10 logits: {topk.values[0].tolist()}")
+                out_path = Path('/tmp/badapple_debug_logits.npy')
+                np.save(out_path, x.detach().cpu().float().numpy())
+                print(f"saved logits to {out_path}")
+            else:
+                print("\n=== PyTorch debug eval (shard) ===")
+                print(f"hidden output shape: {x.shape}")
+                out_path = Path('/tmp/badapple_debug_hidden.npy')
+                np.save(out_path, x.detach().cpu().float().numpy())
+                print(f"saved hidden to {out_path}")
+        return ""
 
     # ── Pre-conversion weight optimization (PyTorch level) ───────────────
 
@@ -2445,6 +2589,16 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
     mlmodel.save(pkg_path)
     print(f"\n✓ Saved {pkg_path}")
 
+    # Free the conversion-time source package (often a /var/folders or TMPDIR temp)
+    # to stop layer-by-layer accumulation of mlprogram package copies.
+    _src_pkg = getattr(mlmodel, "package_path", None)
+    if _src_pkg and _src_pkg != pkg_path:
+        try:
+            import shutil
+            shutil.rmtree(_src_pkg, ignore_errors=True)
+        except Exception:
+            pass
+
     # ── Metadata ─────────────────────────────────────────────────────────
 
     meta = {
@@ -2524,7 +2678,14 @@ def build_lm_head_shard(gguf_path, vocab_start, vocab_end, output_dir,
 
     norm_weight = gguf.get_tensor("output_norm.weight", dtype=np.float16)
     weight_name = "output.weight" if "output.weight" in gguf.tensors else "token_embd.weight"
-    lm_weight = gguf.get_tensor(weight_name, dtype=np.float16)[vocab_start:vocab_end]
+    raw_lm = gguf.get_tensor(weight_name, dtype=np.float16)
+    # LM head weight must be (vocab, d_model) so we can slice along the vocab axis.
+    if list(raw_lm.shape) == [vocab_size, d]:
+        lm_weight = raw_lm[vocab_start:vocab_end]
+    elif list(raw_lm.shape) == [d, vocab_size]:
+        lm_weight = raw_lm.T[vocab_start:vocab_end]
+    else:
+        raise RuntimeError(f"LM head weight {weight_name} has unexpected shape {raw_lm.shape}")
 
     class LMHeadShard(nn.Module):
         def __init__(self):
@@ -2632,6 +2793,8 @@ def _stage_tokenizer(gguf_path, output_dir):
 
 def _compile_package(package_path, compiled_path, compute_units, timeout, log_path):
     worker = """
+import glob
+import os
 import pathlib
 import shutil
 import sys
@@ -2642,10 +2805,26 @@ mapping = {
     'cpu-ne': ct.ComputeUnit.CPU_AND_NE,
     'cpu': ct.ComputeUnit.CPU_ONLY,
 }
-model = ct.models.MLModel(sys.argv[1], compute_units=mapping[sys.argv[3]])
-source = pathlib.Path(model.get_compiled_model_path())
-destination = pathlib.Path(sys.argv[2])
-shutil.copytree(source, destination)
+source = None
+try:
+    model = ct.models.MLModel(sys.argv[1], compute_units=mapping[sys.argv[3]])
+    source = pathlib.Path(model.get_compiled_model_path())
+    destination = pathlib.Path(sys.argv[2])
+    shutil.copytree(source, destination)
+finally:
+    if source is not None:
+        try:
+            shutil.rmtree(source, ignore_errors=True)
+        except Exception:
+            pass
+    # ANE compilation leaves temporary .mlmodelc directories in /var/folders/T.
+    # Remove them so layer-by-layer compile does not exhaust the boot disk.
+    for _tmp in glob.glob('/var/folders/*/*/T/*.mlmodelc') + glob.glob('/var/folders/*/*/T/TemporaryItems/NSIRD_*'):
+        try:
+            if os.path.isdir(_tmp):
+                shutil.rmtree(_tmp, ignore_errors=True)
+        except Exception:
+            pass
 """
     with Path(log_path).open("a") as log:
         log.write(f"compile {package_path} -> {compiled_path}\n")
@@ -2814,9 +2993,16 @@ def _export_embedding_table(gguf, manifest, manifest_path):
         raise RuntimeError(f"embedding artifact has unexpected size: {path}")
     embedding["status"] = "exporting"
     _atomic_write_json(manifest_path, manifest)
-    table = np.ascontiguousarray(gguf.get_tensor("token_embd.weight", dtype=np.float16))
-    if list(table.shape) != embedding["shape"]:
-        raise RuntimeError(f"embedding tensor shape mismatch: {table.shape}")
+    raw_embd = gguf.get_tensor("token_embd.weight", dtype=np.float16)
+    # GGUF may store token embeddings as either (vocab, d_model) or (d_model, vocab).
+    # The manifest always expects (vocab, d_model) for host-side lookup.
+    if list(raw_embd.shape) == embedding["shape"]:
+        table = raw_embd
+    elif list(raw_embd.shape) == list(reversed(embedding["shape"])):
+        table = raw_embd.T
+    else:
+        raise RuntimeError(f"embedding tensor shape mismatch: {raw_embd.shape}")
+    table = np.ascontiguousarray(table)
     temporary = path.with_suffix(path.suffix + ".partial")
     table.tofile(temporary)
     os.replace(temporary, path)
@@ -3030,6 +3216,10 @@ def _run_sharded_pipeline(args):
             shard["compiled_path"] = str(compiled_path)
             shard["compiled_size_bytes"] = _tree_size(compiled_path)
             shard["sha256"] = _tree_sha256(compiled_path)
+            # Free disk: the compiled mlmodelc is the only runtime artifact needed.
+            if package_path.is_dir():
+                shutil.rmtree(package_path)
+                shard["package_path"] = None
         converted_this_run += 1
         manifest["updated_at_unix"] = time.time()
         _atomic_write_json(manifest_path, manifest)
@@ -3058,6 +3248,10 @@ def main():
                         help="Number of layers (default: all)")
     parser.add_argument("--seq-len", type=int, default=512,
                         help="Max sequence length (default: 512)")
+    parser.add_argument("--seq-lens", type=int, nargs="+", default=None, dest="seq_lens",
+                        help="Multiple max sequence lengths to build as separate buckets "
+                             "(e.g. 512 1024 2048). Each bucket is written to a "
+                             "separate directory so future runs can switch contexts.")
     parser.add_argument("--quant-bits", type=int, choices=[0, 4, 8], default=0,
                         dest="quant_bits",
                         help="Weight quantization bits (0=fp16, 4=int4 grouped, 8=int8). Default 0.")
@@ -3092,6 +3286,8 @@ def main():
                         help="Output directory (default: current directory)")
     parser.add_argument("--output-name", default=None, dest="output_name",
                         help="Output prefix name (default: auto-generated)")
+    parser.add_argument("--debug-eval", default=None, dest="debug_eval",
+                        help="Evaluate the PyTorch model on a prompt before CoreML conversion")
     parser.add_argument("--compute-units", choices=["all", "cpu-gpu", "cpu-ne", "cpu"],
                         default="all", dest="compute_units",
                         help="CoreML conversion/compilation compute units (default: all)")
@@ -3117,61 +3313,83 @@ def main():
                         help="Exclusive final vocabulary ID for a standalone LM head conversion")
     args = parser.parse_args()
 
-    if args.lm_head_start is not None or args.lm_head_end is not None:
-        if args.lm_head_start is None or args.lm_head_end is None:
-            parser.error("--lm-head-start and --lm-head-end must be used together")
-        if not args.output_dir or not args.output_name:
-            parser.error("LM head conversion requires --output-dir and --output-name")
-        build_lm_head_shard(
-            args.gguf,
-            args.lm_head_start,
-            args.lm_head_end,
-            args.output_dir,
-            args.output_name,
-            quant_bits=args.quant_bits,
-            compute_units=args.compute_units,
-        )
-        return
-
-    if args.shard_size is not None:
-        if not args.output_dir:
-            parser.error("--shard-size requires --output-dir")
-        raise SystemExit(_run_sharded_pipeline(args))
-
-    if args.stateful:
-        if args.split_layer:
-            # Split mode: build attn and FFN sub-shards separately
-            common = dict(
-                n_layers=args.layers, max_seq_len=args.seq_len,
-                quant_bits=args.quant_bits, group_size=args.group_size,
-                strategy=args.quant_strategy,
-                layer_start=args.layer_start, layer_end=args.layer_end,
-                output_dir=args.output_dir, compute_units=args.compute_units,
+    def _run_conversion(a):
+        """Run one conversion pass for a single seq_len / output_dir."""
+        if a.lm_head_start is not None or a.lm_head_end is not None:
+            if a.lm_head_start is None or a.lm_head_end is None:
+                parser.error("--lm-head-start and --lm-head-end must be used together")
+            if not a.output_dir or not a.output_name:
+                parser.error("LM head conversion requires --output-dir and --output-name")
+            build_lm_head_shard(
+                a.gguf,
+                a.lm_head_start,
+                a.lm_head_end,
+                a.output_dir,
+                a.output_name,
+                quant_bits=a.quant_bits,
+                compute_units=a.compute_units,
             )
-            attn_name = f"{args.output_name}_attn" if args.output_name else None
-            ffn_name = f"{args.output_name}_ffn" if args.output_name else None
-            print("═" * 60)
-            print("  SPLIT-LAYER MODE: building attn + FFN sub-shards")
-            print("═" * 60)
-            build_stateful_model(args.gguf, **common, output_name=attn_name,
-                                 split_mode="attn")
-            build_stateful_model(args.gguf, **common, output_name=ffn_name,
-                                 split_mode="ffn")
+            return
+
+        if a.shard_size is not None:
+            if not a.output_dir:
+                parser.error("--shard-size requires --output-dir")
+            raise SystemExit(_run_sharded_pipeline(a))
+
+        if a.stateful:
+            if a.split_layer:
+                # Split mode: build attn and FFN sub-shards separately
+                common = dict(
+                    n_layers=a.layers, max_seq_len=a.seq_len,
+                    quant_bits=a.quant_bits, group_size=a.group_size,
+                    strategy=a.quant_strategy,
+                    layer_start=a.layer_start, layer_end=a.layer_end,
+                    output_dir=a.output_dir, compute_units=a.compute_units,
+                )
+                attn_name = f"{a.output_name}_attn" if a.output_name else None
+                ffn_name = f"{a.output_name}_ffn" if a.output_name else None
+                print("═" * 60)
+                print("  SPLIT-LAYER MODE: building attn + FFN sub-shards")
+                print("═" * 60)
+                build_stateful_model(a.gguf, **common, output_name=attn_name,
+                                     split_mode="attn")
+                build_stateful_model(a.gguf, **common, output_name=ffn_name,
+                                     split_mode="ffn")
+            else:
+                build_stateful_model(a.gguf, n_layers=a.layers, max_seq_len=a.seq_len,
+                                     quant_bits=a.quant_bits, group_size=a.group_size,
+                                     strategy=a.quant_strategy,
+                                     layer_start=a.layer_start, layer_end=a.layer_end,
+                                     output_dir=a.output_dir, output_name=a.output_name,
+                                     compute_units=a.compute_units,
+                                     debug_eval=a.debug_eval)
+        elif a.fixed:
+            build_fixed_model(a.gguf, n_layers=a.layers, max_seq_len=a.seq_len,
+                              quant_bits=a.quant_bits, group_size=a.group_size,
+                              strategy=a.quant_strategy, compute_units=a.compute_units)
         else:
-            build_stateful_model(args.gguf, n_layers=args.layers, max_seq_len=args.seq_len,
-                                 quant_bits=args.quant_bits, group_size=args.group_size,
-                                 strategy=args.quant_strategy,
-                                 layer_start=args.layer_start, layer_end=args.layer_end,
-                                 output_dir=args.output_dir, output_name=args.output_name,
-                                 compute_units=args.compute_units)
-    elif args.fixed:
-        build_fixed_model(args.gguf, n_layers=args.layers, max_seq_len=args.seq_len,
-                          quant_bits=args.quant_bits, group_size=args.group_size,
-                          strategy=args.quant_strategy, compute_units=args.compute_units)
+            build_model(a.gguf, n_layers=a.layers, max_seq_len=a.seq_len,
+                        quant_bits=a.quant_bits, group_size=a.group_size,
+                        strategy=a.quant_strategy, compute_units=a.compute_units)
+
+    if args.seq_lens:
+        # Multi-bucket mode: build each requested sequence length in its own
+        # directory, creating a future switchable context-window map without
+        # overwriting an existing single-bucket output.
+        base_output_dir = Path(args.output_dir).resolve() if args.output_dir else Path.cwd()
+        for seq_len in args.seq_lens:
+            bucket_args = argparse.Namespace(**vars(args))
+            bucket_args.seq_len = seq_len
+            bucket_args.seq_lens = None
+            bucket_args.output_dir = str(base_output_dir / f"qwen3b_ane_shards_seq{seq_len}")
+            bucket_args.manifest = None
+            print("\n" + "═" * 60)
+            print(f"  Context bucket: seq_len={seq_len}")
+            print(f"  Output dir: {bucket_args.output_dir}")
+            print("═" * 60)
+            _run_conversion(bucket_args)
     else:
-        build_model(args.gguf, n_layers=args.layers, max_seq_len=args.seq_len,
-                    quant_bits=args.quant_bits, group_size=args.group_size,
-                    strategy=args.quant_strategy, compute_units=args.compute_units)
+        _run_conversion(args)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Download pre-converted CoreML Qwen artifacts for the ANE brain benchmark.
+"""Download pre-converted CoreML Qwen2.5-3B artifacts for the ANE brain benchmark.
 
-This script fetches the smallest available 3B weight set (or the 0.5B smoke
-artifact) from Hugging Face and stages it under
-`tests/ane_brain_perf/artifacts`.  It does not convert or quantize models
-itself; that pipeline is documented in `convert_qwen_coreml.py` (the
-reproducible coremltools 9 recipe from the TokForge community artifact).
+This script fetches a small pre-converted Qwen2.5-3B weight set (or the 0.5B
+smoke artifact) from Hugging Face and stages it under
+`tests/ane_brain_perf/artifacts`.  The production Qwen3-4B substrate is
+produced by `convert_ane_coreml.py` from a local GGUF; this downloader is
+only for quick legacy benchmark artifacts.
 
 Usage:
     python3 tests/ane_brain_perf/download_models.py

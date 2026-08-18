@@ -916,7 +916,7 @@ impl BpeTokenizer {
             PostProcessorWrapper,
             DecoderWrapper,
         > = TokenizerImpl::new(BPE::default());
-        tokenizer.with_pre_tokenizer(WhitespaceSplit);
+        tokenizer.with_pre_tokenizer(Some(WhitespaceSplit));
 
         let files = vec!["curriculum/curriculum.txt".to_string()];
         tokenizer

@@ -15,11 +15,11 @@ use sha2::{Digest, Sha256};
 use sled::Db;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
+use sysinfo::Disks;
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 use tokio::task::spawn_blocking;
@@ -32,30 +32,58 @@ const TRACKED_EXTENSIONS: &[&str] = &[
     "txt", "md", "rs", "py", "c", "cpp", "h", "hpp", "swift", "js", "ts", "sh", "bash", "zsh",
     "json", "yaml", "yml", "toml", "xml", "csv", "log", "ini", "cfg",
 ];
+const SKIP_DIR_NAMES: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "qwen3b_ane_shards",
+    "compiled",
+    "logs",
+    ".cache",
+    "__pycache__",
+    "dist",
+    "build",
+    "state-backup",
+    "wild_workspace",
+    ".venv",
+    "sapient_agi_soul",
+];
 const METADATA_PREFIX: &[u8] = b"scavenger:meta:";
 const CHUNK_PREFIX: &str = "scavenger:chunk";
 
 /// Runtime configuration for the scavenger.
 #[derive(Clone, Debug)]
 pub struct ScavengerConfig {
-    pub watch_dir: PathBuf,
+    /// One or more directories to watch and index.
+    pub watch_dirs: Vec<PathBuf>,
     pub sled_db_path: PathBuf,
     pub tokenizer_path: PathBuf,
     pub embedding_path: PathBuf,
     pub hidden_size: usize,
     pub vocab_size: usize,
+    /// If true, remove an existing Sled database before opening it.
+    pub reset_db: bool,
 }
 
 impl ScavengerConfig {
     /// Build from environment with sensible fallbacks.
     pub fn from_env() -> Result<Self> {
-        let watch_dir = std::env::var_os("BADAPPLE_WILD_WORKSPACE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("wild_workspace"));
+        // Support multiple colon-separated watch roots. This lets the daemon
+        // index the Bad Apple repo plus adjacent local source folders. If no
+        // explicit list is set, auto-discover repositories under /Users/savag3.
+        let watch_dirs = if let Some(raw) = std::env::var_os("BADAPPLE_SCAVENGE_DIRS") {
+            std::env::split_paths(&raw).collect::<Vec<_>>()
+        } else {
+            Self::discover_source_dirs()
+        };
 
         let sled_db_path = std::env::var_os("BADAPPLE_SLED_DB_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("strategy_db"));
+
+        let reset_db = std::env::var("BADAPPLE_SLED_DB_RESET")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
         let model_path = std::env::var_os("BADAPPLE_ANE_MODEL")
             .map(PathBuf::from)
@@ -76,12 +104,13 @@ impl ScavengerConfig {
         let (hidden_size, vocab_size) = Self::parse_model_manifest(&model_path)?;
 
         Ok(Self {
-            watch_dir,
+            watch_dirs,
             sled_db_path,
             tokenizer_path,
             embedding_path,
             hidden_size,
             vocab_size,
+            reset_db,
         })
     }
 
@@ -102,6 +131,36 @@ impl ScavengerConfig {
             }
         }
         Ok((2048, 151_936))
+    }
+
+    /// Heuristic to identify adjacent local source-code repositories.
+    fn looks_like_source_repo(path: &Path) -> bool {
+        let markers = [
+            ".git",
+            "Cargo.toml",
+            "Package.swift",
+            "pyproject.toml",
+            "setup.py",
+            "go.mod",
+            "package.json",
+        ];
+        markers.iter().any(|marker| path.join(marker).exists())
+    }
+
+    /// Discover the Bad Apple repo and any adjacent local source folders.
+    fn discover_source_dirs() -> Vec<PathBuf> {
+        let home = PathBuf::from("/Users/savag3");
+        let primary = home.join("bad_apple");
+        let mut dirs = vec![primary.clone()];
+        if let Ok(entries) = fs::read_dir(&home) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() && path != primary && Self::looks_like_source_repo(&path) {
+                    dirs.push(path);
+                }
+            }
+        }
+        dirs
     }
 }
 
@@ -183,7 +242,22 @@ pub struct Scavenger {
 impl Scavenger {
     /// Open the tokenizer, embedding table, and Sled database.
     pub fn open(config: ScavengerConfig) -> Result<Self> {
-        fs::create_dir_all(&config.watch_dir).ok();
+        for dir in &config.watch_dirs {
+            if !dir.is_file() {
+                fs::create_dir_all(dir).ok();
+            }
+        }
+
+        // Reset a corrupted Sled tree on request. This is intended for initial
+        // installs where the strategy/scavenger DB has become unreadable.
+        if config.reset_db && config.sled_db_path.exists() {
+            tracing::info!(
+                "scavenger resetting Sled database at {}",
+                config.sled_db_path.display()
+            );
+            let _ = fs::remove_dir_all(&config.sled_db_path);
+        }
+
         let tokenizer = Arc::new(Tokenizer::from_file(&config.tokenizer_path).map_err(|e| {
             anyhow!(
                 "unable to load tokenizer {}: {}",
@@ -196,12 +270,41 @@ impl Scavenger {
             config.hidden_size,
             config.vocab_size,
         )?);
-        let db = Arc::new(sled::open(&config.sled_db_path)?);
+
+        // Open Sled, recovering from corruption if necessary by deleting the
+        // directory and trying once more. This prevents the daemon from giving
+        // up on the whole subsystem because of a stale corrupted tree.
+        let db = match sled::open(&config.sled_db_path) {
+            Ok(db) => db,
+            Err(error) => {
+                tracing::warn!(
+                    "scavenger Sled open failed ({}); removing and retrying",
+                    error
+                );
+                let _ = fs::remove_dir_all(&config.sled_db_path);
+                sled::open(&config.sled_db_path).with_context(|| {
+                    format!(
+                        "unable to open Sled database at {}",
+                        config.sled_db_path.display()
+                    )
+                })?
+            }
+        };
+
+        // Log disk headroom for the Sled database before we start writing.
+        if let Some((free_mb, total_mb)) = disk_headroom_mb(&config.sled_db_path) {
+            tracing::info!(
+                "scavenger disk headroom: {} MB free / {} MB total",
+                free_mb,
+                total_mb
+            );
+        }
+
         Ok(Self {
             config,
             tokenizer,
             embeddings,
-            db,
+            db: Arc::new(db),
         })
     }
 
@@ -210,7 +313,13 @@ impl Scavenger {
     /// `spawn_blocking` so the main executor stays responsive.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
-        let watch_dir = self.config.watch_dir.clone();
+        let watch_dirs: Vec<PathBuf> = self
+            .config
+            .watch_dirs
+            .iter()
+            .filter(|dir| dir.is_dir())
+            .cloned()
+            .collect();
 
         // Debounce map: path -> last seen mtime.
         let mut pending: HashMap<PathBuf, u64> = HashMap::new();
@@ -227,9 +336,13 @@ impl Scavenger {
                         }
                     })
                     .expect("unable to create scavenger filesystem watcher");
-                watcher
-                    .watch(&watch_dir, RecursiveMode::Recursive)
-                    .expect("unable to watch scavenger directory");
+                for dir in &watch_dirs {
+                    if let Err(error) = watcher.watch(dir, RecursiveMode::Recursive) {
+                        tracing::warn!("scavenger unable to watch {}: {}", dir.display(), error);
+                    } else {
+                        tracing::info!("scavenger watching {}", dir.display());
+                    }
+                }
                 // Keep the watcher alive until the process exits.
                 loop {
                     thread::park();
@@ -258,7 +371,15 @@ impl Scavenger {
                         pending.remove(path);
                         let self_ref = self.clone();
                         let path = path.clone();
-                        spawn_blocking(move || self_ref.purge_file(&path));
+                        spawn_blocking(move || {
+                            self_ref.purge_file(&path);
+                            if let Err(error) = self_ref.write_path_catalog() {
+                                tracing::warn!(
+                                    "scavenger failed to update path catalog: {}",
+                                    error
+                                );
+                            }
+                        });
                     }
                     _ => {}
                 }
@@ -284,7 +405,15 @@ impl Scavenger {
                             pending.remove(path);
                             let self_ref = self.clone();
                             let path = path.clone();
-                            spawn_blocking(move || self_ref.purge_file(&path));
+                            spawn_blocking(move || {
+                                self_ref.purge_file(&path);
+                                if let Err(error) = self_ref.write_path_catalog() {
+                                    tracing::warn!(
+                                        "scavenger failed to update path catalog: {}",
+                                        error
+                                    );
+                                }
+                            });
                         }
                         _ => {}
                     }
@@ -305,6 +434,9 @@ impl Scavenger {
                             );
                         }
                     }
+                    if let Err(error) = self_ref.write_path_catalog() {
+                        tracing::warn!("scavenger failed to update path catalog: {}", error);
+                    }
                 });
             }
         }
@@ -312,12 +444,31 @@ impl Scavenger {
         Ok(())
     }
 
-    /// Index existing files in the watch directory before live events arrive.
-    async fn seed_existing_files(self: &Arc<Self>) -> Result<()> {
+    /// Index existing files in the watch directories before live events arrive.
+    pub async fn seed_existing_files(self: &Arc<Self>) -> Result<()> {
         let mut files = Vec::new();
-        collect_files(&self.config.watch_dir, WATCH_DEPTH, &mut files);
+        for dir in &self.config.watch_dirs {
+            if dir.is_dir() {
+                collect_files(dir, WATCH_DEPTH, &mut files);
+            } else if dir.exists() {
+                tracing::warn!("scavenger watch path is not a directory: {}", dir.display());
+            } else {
+                tracing::warn!("scavenger watch path does not exist: {}", dir.display());
+            }
+        }
 
         if !files.is_empty() {
+            let file_count = files.len();
+            tracing::info!(
+                "scavenger starting first repository index pass: {} files across {} watch roots",
+                file_count,
+                self.config.watch_dirs.len()
+            );
+
+            if let Some((free_mb, _)) = disk_headroom_mb(&self.config.sled_db_path) {
+                tracing::info!("scavenger pre-index disk headroom: {} MB free", free_mb);
+            }
+
             let self_ref = self.clone();
             spawn_blocking(move || {
                 for (path, mtime) in files {
@@ -327,7 +478,44 @@ impl Scavenger {
                 }
             })
             .await?;
+
+            self.write_path_catalog()?;
+            let files_indexed = count_with_prefix(&self.db, METADATA_PREFIX);
+            let chunks_indexed = count_with_prefix(&self.db, CHUNK_PREFIX.as_bytes());
+            let (free_mb, total_mb) = disk_headroom_mb(&self.config.sled_db_path).unwrap_or((0, 0));
+            tracing::info!(
+                "scavenger first repository index pass cleared: {} files, {} chunks, {} MB free / {} MB total",
+                files_indexed,
+                chunks_indexed,
+                free_mb,
+                total_mb
+            );
+        } else {
+            tracing::info!("scavenger found no tracked files in watch directories");
         }
+        Ok(())
+    }
+
+    fn write_path_catalog(&self) -> Result<()> {
+        let mut paths = self
+            .db
+            .scan_prefix(METADATA_PREFIX)
+            .filter_map(|entry| entry.ok())
+            .filter_map(|(_, raw)| serde_json::from_slice::<FileMetadata>(&raw).ok())
+            .map(|metadata| metadata.path)
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+
+        let parent = self
+            .config
+            .sled_db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let catalog = parent.join("scavenger_paths.json");
+        let temporary = parent.join("scavenger_paths.json.tmp");
+        fs::write(&temporary, serde_json::to_vec(&paths)?)?;
+        fs::rename(&temporary, &catalog)?;
         Ok(())
     }
 
@@ -335,15 +523,18 @@ impl Scavenger {
     fn purge_file(&self, path: &Path) {
         let path_key = path_key(path);
         let meta_key = meta_key(&path_key);
-        if let Ok(Some(raw)) = self.db.get(&meta_key) {
-            if let Ok(meta) = serde_json::from_slice::<FileMetadata>(&raw) {
-                for i in 0..meta.chunk_count {
-                    let chunk_key = chunk_key(&path_key, i);
-                    let _ = self.db.remove(chunk_key);
+        {
+            if let Ok(Some(raw)) = self.db.get(&meta_key) {
+                if let Ok(meta) = serde_json::from_slice::<FileMetadata>(&raw) {
+                    for i in 0..meta.chunk_count {
+                        let chunk_key = chunk_key(&path_key, i);
+                        let _ = self.db.remove(chunk_key);
+                    }
                 }
             }
+            let _ = self.db.remove(&meta_key);
+            let _ = self.db.flush();
         }
-        let _ = self.db.remove(&meta_key);
         tracing::info!("scavenger purged {}", path.display());
     }
 
@@ -352,11 +543,27 @@ impl Scavenger {
         let path_key = path_key(path);
         let meta_key = meta_key(&path_key);
 
+        // Eagerly slurp the file into memory and drop the descriptor before
+        // any tokenization, embedding, or database work crosses a scheduling
+        // boundary.
+        let text = {
+            let mut text = fs::read_to_string(path)
+                .with_context(|| format!("scavenger unable to read {}", path.display()))?;
+            if text.len() > CHUNK_BYTE_LIMIT {
+                let mut byte_len = CHUNK_BYTE_LIMIT;
+                while !text.is_char_boundary(byte_len) && byte_len > 0 {
+                    byte_len -= 1;
+                }
+                text.truncate(byte_len);
+            }
+            text
+        };
+        let current_hash = content_hash_bytes(text.as_bytes());
+
         // Skip if unchanged.
         if let Ok(Some(raw)) = self.db.get(&meta_key) {
             if let Ok(meta) = serde_json::from_slice::<FileMetadata>(&raw) {
-                let current_hash = content_hash(path);
-                if !current_hash.is_empty() && meta.content_hash == current_hash {
+                if meta.content_hash == current_hash {
                     return Ok(());
                 }
             }
@@ -365,24 +572,27 @@ impl Scavenger {
         // Delete any previous version before writing the new one.
         self.purge_file(path);
 
-        let text = read_limited_text(path, CHUNK_BYTE_LIMIT)?;
-        let current_hash = content_hash_bytes(text.as_bytes());
         let chunks = self.chunk_text(&text);
         let chunk_count = chunks.len();
 
-        for (i, chunk_text) in chunks.iter().enumerate() {
-            let record = self.embed_chunk(path, mtime, i, chunk_text)?;
-            let key = chunk_key(&path_key, i);
-            let value = serde_json::to_vec(&record)?;
-            self.db.insert(key, value)?;
-        }
+        // Isolate all Sled writes in a block and force a flush before releasing
+        // the page locks back to the OS kernel.
+        {
+            for (i, chunk_text) in chunks.iter().enumerate() {
+                let record = self.embed_chunk(path, mtime, i, chunk_text)?;
+                let key = chunk_key(&path_key, i);
+                let value = serde_json::to_vec(&record)?;
+                self.db.insert(key, value)?;
+            }
 
-        let metadata = FileMetadata {
-            path: path.to_string_lossy().into_owned(),
-            content_hash: current_hash,
-            chunk_count,
-        };
-        self.db.insert(&meta_key, serde_json::to_vec(&metadata)?)?;
+            let metadata = FileMetadata {
+                path: path.to_string_lossy().into_owned(),
+                content_hash: current_hash,
+                chunk_count,
+            };
+            self.db.insert(&meta_key, serde_json::to_vec(&metadata)?)?;
+            self.db.flush()?;
+        }
 
         tracing::info!(
             "scavenger indexed {} -> {} chunks",
@@ -513,6 +723,9 @@ fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
+            if is_ignored_path(&path) {
+                continue;
+            }
             if path.is_dir() {
                 collect_files(&path, depth - 1, out);
             } else if is_tracked_file(&path) {
@@ -530,8 +743,20 @@ fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
     }
 }
 
+fn is_ignored_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        if let Some(name) = component.as_os_str().to_str() {
+            SKIP_DIR_NAMES
+                .iter()
+                .any(|skip| name.eq_ignore_ascii_case(skip) || name.starts_with(skip))
+        } else {
+            false
+        }
+    })
+}
+
 fn is_tracked_file(path: &Path) -> bool {
-    if !path.is_file() {
+    if !path.is_file() || is_ignored_path(path) {
         return false;
     }
     if let Some(ext) = path.extension() {
@@ -540,22 +765,6 @@ fn is_tracked_file(path: &Path) -> bool {
         }
     }
     false
-}
-
-fn read_limited_text(path: &Path, limit: usize) -> Result<String> {
-    let file = fs::File::open(path)?;
-    let mut buf = Vec::with_capacity(limit.min(1_048_576));
-    file.take(limit as u64).read_to_end(&mut buf)?;
-    // Drop invalid UTF-8 sequences silently.
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
-fn content_hash(path: &Path) -> String {
-    if let Ok(bytes) = fs::read(path) {
-        content_hash_bytes(&bytes)
-    } else {
-        String::new()
-    }
 }
 
 fn content_hash_bytes(bytes: &[u8]) -> String {
@@ -580,4 +789,30 @@ fn meta_key(path_key: &str) -> Vec<u8> {
 
 fn chunk_key(path_key: &str, index: usize) -> Vec<u8> {
     format!("{}:{}:{}", CHUNK_PREFIX, path_key, index).into_bytes()
+}
+
+/// Return the number of records whose keys start with `prefix`.
+fn count_with_prefix(db: &sled::Db, prefix: &[u8]) -> usize {
+    db.scan_prefix(prefix).count()
+}
+
+/// Return the free / total space in megabytes for the disk holding `path`.
+fn disk_headroom_mb(path: &Path) -> Option<(u64, u64)> {
+    // Normalize to an absolute path so we can find the containing mount point.
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let disks = Disks::new_with_refreshed_list();
+    let mut best: Option<(u64, u64)> = None;
+    let mut best_len = 0;
+    for disk in disks.list() {
+        if let Some(mount) = disk.mount_point().to_str() {
+            if canonical.starts_with(mount) && mount.len() >= best_len {
+                best = Some((
+                    disk.available_space() / 1_048_576,
+                    disk.total_space() / 1_048_576,
+                ));
+                best_len = mount.len();
+            }
+        }
+    }
+    best
 }

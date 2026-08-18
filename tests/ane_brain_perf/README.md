@@ -1,13 +1,13 @@
 # Bad Apple Architecture Substrate // ANE Brain Performance Benchmark
 
-This directory holds the in-process Apple Neural Engine (ANE) 3B CoreML
+This directory holds the in-process Apple Neural Engine (ANE) Qwen3-4B CoreML
 benchmark and the acquisition pipeline for the local model artifacts.  It
 implements the **Bad Apple** zero-copy, ANE-sharded cognitive substrate.
 
-## Bad Apple 36-shard stateful INT8 layer strategy
+## Bad Apple 36-shard stateful FP16 layer strategy
 
-The Bad Apple substrate shards the 3B model into 36 independently compiled,
-stateful INT8 layer blocks.  Each layer keeps its KV cache as opaque `MLState`
+The Bad Apple substrate shards the Qwen3-4B model into 36 independently compiled,
+stateful FP16 layer blocks.  Each layer keeps its KV cache as opaque `MLState`
 so no host/ANE KV data is moved per token, and the layer outputs are passed
 zero-copy from one compiled shard to the next.  The embedding table is a single
 memory-mapped FP16 tensor and the vocabulary is split across four contiguous
@@ -16,6 +16,11 @@ and the Swift runtime selects the sharded path automatically when the manifest
 is passed as `BADAPPLE_ANE_MODEL`.
 
 ## Quick start
+
+For the current Qwen3-4B substrate, convert a local GGUF through the
+repository-local pipeline (see Conversion pipeline below).
+
+For a quick legacy benchmark, download a pre-converted Qwen2.5-3B artifact:
 
 ```bash
 # 1. (Optional) create a Python venv with huggingface_hub.
@@ -36,11 +41,14 @@ cargo test --release --test ane_brain_perf -- --nocapture
 
 The benchmark discovers models in `artifacts/` in this priority order:
 
-1. `qwen3b_ane/` — `darkmaniac7/TokForge-Qwen2.5-3B-CoreML-ANE-INT8`
-   (stateful, per-block INT8, targeted at the Apple Neural Engine).
-2. `qwen3b/` — `finnvoorhees/coreml-Qwen2.5-3B-Instruct-4bit`
-   (precompiled 4-bit `.mlmodelc`).
-3. `qwen0.5b/` — `finnvoorhees/coreml-Qwen2.5-0.5B-Instruct-4bit`
+1. `qwen3b_ane_shards/` — locally converted Qwen3-4B FP16/INT8 sharded
+   artifacts (current production substrate: 36 FP16 layer shards, four INT8
+   LM-head shards, and a ~742 MB FP16 embedding table).
+2. `qwen3b_ane/` — `darkmaniac7/TokForge-Qwen2.5-3B-CoreML-ANE-INT8`
+   (legacy stateful, per-block INT8).
+3. `qwen3b/` — `finnvoorhees/coreml-Qwen2.5-3B-Instruct-4bit`
+   (legacy precompiled 4-bit `.mlmodelc`).
+4. `qwen0.5b/` — `finnvoorhees/coreml-Qwen2.5-0.5B-Instruct-4bit`
    (smoke-test 0.5B).
 
 Only one model is loaded per run; the first existing artifact is used.
@@ -51,13 +59,14 @@ The `ane_core` Swift bridge (`BadAppleANECore`) requests
 `MLComputeUnits.cpuAndNeuralEngine` and then audits the loaded
 `MLComputePlan` to report the fraction of operations that were actually placed
 on the ANE.  A 4-bit per-block/palettized model often fails ANE specialization
-and falls back to CPU/GPU, which is reflected in the report.  An INT8
-per-tensor or per-block (iOS 18 / macOS 15+) artifact is required for the ANE
-path.  The monolithic `darkmaniac7` INT8 artifact triggered an ANECompiler
-`EXC_BAD_ACCESS` on the validation host, so it is retained only as a reference.
-The per-layer INT8 pipeline below avoids that full-graph compiler fault. The
-`finnvoorhees` 4-bit artifact remains the generation fallback and is selected
-through measured compute-unit scoring.
+and falls back to CPU/GPU, which is reflected in the report.  The Qwen3-4B
+production substrate uses per-layer FP16 transformer blocks; the LM heads are
+quantized to INT8 per block.  The monolithic `darkmaniac7` INT8 artifact
+triggered an ANECompiler `EXC_BAD_ACCESS` on the validation host, so it is
+retained only as a reference.  The per-layer sharded pipeline below avoids that
+full-graph compiler fault. The `finnvoorhees` 4-bit artifact remains a
+legacy generation fallback and is selected through measured compute-unit
+scoring.
 
 ## Conversion pipeline
 
@@ -67,20 +76,20 @@ runs in its own subprocess, and `conversion_manifest.json` is updated after
 every successful stage without deleting prior attempts.
 
 ```bash
-.venv/bin/pip install coremltools==9.0 torch==2.5.1
+.venv/bin/pip install coremltools torch==2.7.1
 
 # First validate one layer without weight compression.
 .venv/bin/python tests/ane_brain_perf/convert_ane_coreml.py \
-  tests/ane_brain_perf/artifacts/qwen3b_ane_src/qwen2.5-3b-instruct-q4_k_m.gguf \
-  --layers 36 --seq-len 2048 --quant-bits 0 --compute-units all \
-  --shard-size 1 --compile-shards --stop-after-shards 1 \
+  tests/ane_brain_perf/artifacts/qwen3b_ane_src/Qwen3-4B-Q8_0.gguf \
+  --layers 36 --seq-len 512 --quant-bits 0 --compute-units all \
+  --shard-size 1 --stop-after-shards 1 \
   --output-dir tests/ane_brain_perf/artifacts/qwen3b_ane_validation
 
-# Convert/compile all 36 stateful per-layer INT8 shards. Re-running this exact
+# Convert/compile all 36 stateful per-layer FP16 shards. Re-running this exact
 # command resumes the manifest and skips completed shards.
 .venv/bin/python tests/ane_brain_perf/convert_ane_coreml.py \
-  tests/ane_brain_perf/artifacts/qwen3b_ane_src/qwen2.5-3b-instruct-q4_k_m.gguf \
-  --layers 36 --seq-len 2048 --quant-bits 8 --quant-strategy uniform \
+  tests/ane_brain_perf/artifacts/qwen3b_ane_src/Qwen3-4B-Q8_0.gguf \
+  --layers 36 --seq-len 512 --quant-bits 0 --quant-strategy uniform \
   --compute-units all --shard-size 1 --compile-shards \
   --generation-artifacts --lm-head-shards 4 \
   --output-dir tests/ane_brain_perf/artifacts/qwen3b_ane_shards
@@ -90,12 +99,12 @@ cargo test --release --test ane_brain_perf ane_shard_residency \
   -- --ignored --nocapture
 ```
 
-On the validation host, all 36 layer shards compiled successfully at
-77,175,464 bytes each. The generation bundle adds a 622,329,856-byte FP16
-embedding table and four 77,876,249-byte INT8 vocabulary heads, for a
-3,712,151,556-byte runtime footprint. `MLComputePlan` placed 41.31% of layer
-operations on ANE. End-to-end greedy generation selected raw compute-unit 3,
-opened zero network sockets, and produced 9.27 tokens/second.
+On the current host, all 36 FP16 layer shards compiled successfully at
+approximately 193 MB each. The production bundle adds a 742 MB FP16 embedding
+table and four 93 MB INT8 vocabulary heads, for an approximately 7.9 GB runtime
+footprint. `MLComputePlan` placed 41.09% of layer operations on ANE.
+End-to-end greedy generation selected raw compute-unit 3, opened zero network
+sockets, and produced 5.7 tokens/second at approximately 174 ms/token.
 
 To boot the complete substrate, emit an offline continuation, report the BAD
 APPLE baseline, and exit without entering the autonomous daemon loop:
@@ -109,11 +118,12 @@ BADAPPLE_ANE_BOOT_TOKENS=20 BADAPPLE_ANE_BOOT_ONESHOT=1 cargo run --release
 
 ## Licensing
 
-- Base model **Qwen2.5-3B-Instruct** is released by Alibaba Cloud under the
-  Qwen RESEARCH LICENSE AGREEMENT (non-commercial research use with
-  attribution).  See `LICENSE.qwen` or the upstream
-  <https://huggingface.co/Qwen/Qwen2.5-3B-Instruct/blob/main/LICENSE>.
-- The **finnvoorhees** and **darkmaniac7** conversions inherit that license.
+- Base model **Qwen3-4B** is released by Alibaba Cloud under the Qwen
+  RESEARCH LICENSE AGREEMENT (non-commercial research use with attribution).
+  See `LICENSE.qwen` or the upstream
+  <https://huggingface.co/Qwen/Qwen3-4B/blob/main/LICENSE>.
+- The Qwen2.5-3B conversions (`darkmaniac7`, `finnvoorhees`) remain available
+  as legacy artifacts and inherit the same Qwen license.
 - Apple **coremltools** is BSD-3-Clause.
 
 ## No external runtimes guarantee

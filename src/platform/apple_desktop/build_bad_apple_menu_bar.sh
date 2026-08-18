@@ -32,25 +32,76 @@ resolve_sdk() {
 }
 
 SDK_PATH=$(resolve_sdk)
-mkdir -p "${BUILD_DIR}" "${MACOS_DIR}" "${FRAMEWORKS_DIR}"
+mkdir -p "${BUILD_DIR}" "${MACOS_DIR}" "${FRAMEWORKS_DIR}" "${SCRATCH_DIR}/native"
 
-cd "${REPO_ROOT}/src/platform/apple_desktop"
-SDKROOT="${SDK_PATH}" swift build \
-    -c release \
-    --scratch-path "${SCRATCH_DIR}" \
-    --triple arm64-apple-macosx26.0
-BIN_DIR=$(SDKROOT="${SDK_PATH}" swift build \
-    -c release \
-    --scratch-path "${SCRATCH_DIR}" \
-    --triple arm64-apple-macosx26.0 \
-    --show-bin-path)
+# Compile directly so this user-session host can be built even when the active
+# SwiftPM ManifestAPI predates macOS 26. The bridge module and dylib are emitted
+# together, ensuring the AppIntent and voice host use one SLICKS implementation.
+rm -rf "${SCRATCH_DIR}/native"
+mkdir -p "${SCRATCH_DIR}/native"
+SWIFTC=$(xcrun --find swiftc)
+TARGET="arm64-apple-macosx26.0"
+FRAMEWORK_SEARCH="${SDK_PATH}/System/Library/Frameworks"
 
-install -m 755 "${BIN_DIR}/BadAppleMenuBar" "${MACOS_DIR}/BadApple"
-install -m 755 "${BIN_DIR}/BadAppleMenuBar" "${BUILD_DIR}/BadAppleMenuBar"
-if [[ -f "${BUILD_DIR}/libBadAppleBridge.dylib" ]]; then
-    install -m 755 "${BUILD_DIR}/libBadAppleBridge.dylib" "${FRAMEWORKS_DIR}/libBadAppleBridge.dylib"
-elif [[ -f "${BIN_DIR}/libBadAppleBridge.dylib" ]]; then
-    install -m 755 "${BIN_DIR}/libBadAppleBridge.dylib" "${FRAMEWORKS_DIR}/libBadAppleBridge.dylib"
+"${SWIFTC}" \
+    -parse-as-library -swift-version 5 -O \
+    -target "${TARGET}" -sdk "${SDK_PATH}" \
+    -emit-library -emit-module \
+    -module-name BadAppleBridge \
+    -emit-module-path "${SCRATCH_DIR}/native/BadAppleBridge.swiftmodule" \
+    -o "${BUILD_DIR}/libBadAppleBridge.dylib" \
+    "${REPO_ROOT}/src/platform/apple_bridge/BadAppleBridge.swift" \
+    "${REPO_ROOT}/src/platform/apple_bridge/BadAppleIntent.swift" \
+    -F "${FRAMEWORK_SEARCH}" \
+    -framework AppIntents -framework CoreML -framework CryptoKit \
+    -framework Foundation -framework FoundationModels -framework Security \
+    -Xlinker -undefined -Xlinker dynamic_lookup \
+    -Xlinker -install_name -Xlinker "@rpath/libBadAppleBridge.dylib"
+
+# On macOS 26, TCC loads privacy usage descriptions from the binary's embedded
+# __info_plist section before the bundle's Info.plist is fully mounted. Embed a
+# minimal plist now so microphone/speech prompts fire reliably.
+EMBED_PLIST="${SCRATCH_DIR}/native/BadAppleMenuBar-Info.plist"
+cat > "${EMBED_PLIST}" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.badapple.app</string>
+    <key>CFBundleName</key>
+    <string>Bad Apple</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Bad Apple listens locally for “hey bad apple” and captures the following prompt.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Bad Apple uses only Apple’s on-device speech recognizer to transcribe local voice requests.</string>
+    <key>NSSiriUsageDescription</key>
+    <string>Bad Apple uses Siri to send spoken requests to its local cognitive substrate.</string>
+</dict>
+</plist>
+PLIST
+plutil -lint "${EMBED_PLIST}"
+
+"${SWIFTC}" \
+    -parse-as-library -swift-version 5 -O \
+    -target "${TARGET}" -sdk "${SDK_PATH}" \
+    -I "${SCRATCH_DIR}/native" -L "${BUILD_DIR}" \
+    -o "${SCRATCH_DIR}/native/BadAppleMenuBar" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
+    -lBadAppleBridge -ldl \
+    -framework AppKit -framework AVFoundation -framework Speech \
+    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "${EMBED_PLIST}"
+
+install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${MACOS_DIR}/BadApple"
+install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${BUILD_DIR}/BadAppleMenuBar"
+install -m 755 "${BUILD_DIR}/libBadAppleBridge.dylib" "${FRAMEWORKS_DIR}/libBadAppleBridge.dylib"
+install -d "${CONTENTS_DIR}/Helpers"
+install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev/null || true
+if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
+    install -m 755 "${BUILD_DIR}/libbad_apple.dylib" "${FRAMEWORKS_DIR}/libbad_apple.dylib"
+    install_name_tool -id "@rpath/libbad_apple.dylib" "${FRAMEWORKS_DIR}/libbad_apple.dylib" 2>/dev/null || true
 fi
 install_name_tool -add_rpath "@executable_path/../Frameworks" "${MACOS_DIR}/BadApple" 2>/dev/null || true
 
@@ -79,6 +130,10 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
     <string>26.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Bad Apple listens locally for “hey bad apple” and captures the following prompt.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Bad Apple uses only Apple’s on-device speech recognizer to transcribe local voice requests.</string>
     <key>NSSiriUsageDescription</key>
     <string>Bad Apple uses Siri to send spoken requests to its local cognitive substrate.</string>
 </dict>

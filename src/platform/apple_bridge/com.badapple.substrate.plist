@@ -18,7 +18,7 @@
     <true/>
 
     <key>ThrottleInterval</key>
-    <integer>0</integer>
+    <integer>60</integer>
 
     <key>ProcessType</key>
     <string>Background</string>

@@ -245,16 +245,40 @@ private enum BadAppleSlicks {
     }
 }
 
-private struct BadAppleDaemonClient: Sendable {
-    static let shared = BadAppleDaemonClient()
+/// Authenticated client for the local SLICKS Unix-domain socket.
+///
+/// The menu-bar voice host and AppIntent share this implementation so nonce
+/// generation, proofs, frame limits, and ordering checks cannot drift.
+public struct BadAppleDaemonClient: Sendable {
+    public static let shared = BadAppleDaemonClient()
 
-    func generate(prompt: String, maxNewTokens: Int = 256) async throws -> String {
-        try await Task.detached(priority: .userInitiated) {
-            try self.generateSynchronously(prompt: prompt, maxNewTokens: maxNewTokens)
+    public init() {}
+
+    public func generate(prompt: String, maxNewTokens: Int = 256) async throws -> String {
+        try await generate(prompt: prompt, maxNewTokens: maxNewTokens, onToken: { _ in })
+    }
+
+    /// Reports authenticated token deltas off the main actor as they arrive.
+    public func generate(
+        prompt: String,
+        maxNewTokens: Int = 256,
+        onToken: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        print("[BadAppleClient] generate called: \(prompt)")
+        return try await Task(priority: .userInitiated) {
+            try self.generateSynchronously(
+                prompt: prompt,
+                maxNewTokens: maxNewTokens,
+                onToken: onToken
+            )
         }.value
     }
 
-    private func generateSynchronously(prompt: String, maxNewTokens: Int) throws -> String {
+    private func generateSynchronously(
+        prompt: String,
+        maxNewTokens: Int,
+        onToken: @escaping @Sendable (String) -> Void
+    ) throws -> String {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BadAppleIntentError("Bad Apple requires spoken text")
         }
@@ -264,15 +288,21 @@ private struct BadAppleDaemonClient: Sendable {
         guard (1...4_096).contains(maxNewTokens) else {
             throw BadAppleIntentError("Bad Apple token limits must be between 1 and 4096")
         }
+        print("[BadAppleClient] start secret")
         let secret = try BadAppleSlicks.secret()
+        print("[BadAppleClient] got secret")
         let clientNonce = try BadAppleSlicks.nonce()
         let timestampMs = UInt64(Date().timeIntervalSince1970 * 1_000)
+        print("[BadAppleClient] create transport")
         let transport = try BadAppleLineTransport(socketPath: BadAppleSlicks.socketPath())
+        print("[BadAppleClient] write hello")
         try transport.write(
             BadAppleHello(timestampMs: timestampMs, clientNonce: clientNonce)
         )
 
+        print("[BadAppleClient] read challenge")
         let challenge = try transport.read()
+        print("[BadAppleClient] got challenge \(challenge.type)")
         guard challenge.type == "challenge",
               challenge.version == badAppleSlicksVersion,
               let serverNonce = challenge.serverNonce,
@@ -284,6 +314,7 @@ private struct BadAppleDaemonClient: Sendable {
         guard BadAppleSlicks.verify(proof: serverProof, secret: secret, material: material) else {
             throw BadAppleIntentError("Bad Apple failed SLICKS server authentication")
         }
+        print("[BadAppleClient] server proof ok")
 
         let clientProof = BadAppleSlicks.clientProof(
             secret: secret,
@@ -293,6 +324,7 @@ private struct BadAppleDaemonClient: Sendable {
             prompt: prompt,
             maxNewTokens: maxNewTokens
         )
+        print("[BadAppleClient] write execute")
         try transport.write(
             BadAppleExecute(
                 timestampMs: timestampMs,
@@ -303,17 +335,25 @@ private struct BadAppleDaemonClient: Sendable {
                 proof: clientProof
             )
         )
+        print("[BadAppleClient] wrote execute")
 
         var accepted = false
         var streamed = ""
         while true {
+            print("[BadAppleClient] read frame")
             let frame = try transport.read()
+            print("[BadAppleClient] frame type: \(frame.type)")
             switch frame.type {
             case "accepted":
                 accepted = true
             case "token" where accepted:
-                streamed += frame.text ?? ""
+                let delta = frame.text ?? ""
+                streamed += delta
+                if !delta.isEmpty {
+                    onToken(delta)
+                }
             case "done" where accepted:
+                print("[BadAppleClient] done")
                 return frame.text ?? streamed
             case "error":
                 throw BadAppleIntentError(frame.message ?? "Bad Apple rejected the request")

@@ -1,38 +1,44 @@
 # Bad Apple
 
-**An air-gapped, hardware-fused cognitive substrate for Apple Silicon.**
+> **Your Mac. Your model. Your voice.**  
+> A local, Apple-Silicon-native AI that answers questions, runs actions, and never phones home.
 
-Bad Apple runs a 3-billion-parameter Qwen-class language model locally and in-process on macOS. Its production daemon keeps a 36-layer stateful INT8 CoreML pipeline, four INT8 language-model heads, and a memory-mapped FP16 embedding table warm for low-latency requests. No cloud model, remote inference service, or external model daemon is required.
+Bad Apple is an experimental, on-device cognitive runtime for macOS. It runs a 4-billion-parameter Qwen3-class language model entirely on your Apple Silicon Mac using the Apple Neural Engine (ANE) and unified memory. No cloud service, no subscription, and no data leaves your machine.
 
-Text and voice requests share one path. The `badapple` terminal client and the native `BadAppleIntent` AppIntent authenticate with the same SLICKS challenge-response protocol, connect through a local Unix-domain socket, and stream generation from the one ANE engine owned by `badappled`.
+- Ask open-ended questions: *"What is the capital of France?"*
+- Control your Mac with voice: *"open my bad_apple workspace"*
+- Use it from the terminal, the menu bar, or Siri
+- Keep a warm, stateful model resident for near-instant responses
 
 > Bad Apple is an experimental edge-AI runtime, not a claim of AGI or sentience.
 
-## What is Bad Apple?
+## Why Bad Apple?
 
-Bad Apple is an air-gapped, Apple-Silicon-native cognitive runtime. It runs a 3-billion-parameter Qwen-class language model entirely on-device, without cloud inference, telemetry, or external model services. At its core is a `launchd` daemon, `badappled`, that owns a 36-layer stateful INT8 CoreML pipeline and four LM-head shards over a unified-memory ANE backend. Requests arrive through either the `badapple` terminal client or a native Siri `BadAppleIntent`; both authenticate to the daemon through the SLICKS HMAC-SHA256 protocol before any token is generated.
+**Private by design.** Every prompt and every answer stays on your Mac. There is no network call, no telemetry, and no remote model.
 
-The repository also contains the broader experimental Bad Apple research runtime: a 576-D Candle transformer brain, a multi-agent signed engram fabric, a self-improving strategy library, a WASM sandbox for untrusted tools, and a telemetry dashboard for local inspection.
+**Native to Apple Silicon.** The model is compiled into 36 FP16 CoreML shards, four INT8 language-model heads, and a ~742 MB memory-mapped embedding table. It runs on the ANE, not the CPU or GPU, and keeps state warm across calls.
 
-## Key features
+**Voice-first.** A menu-bar app listens for *"hey bad apple"* and a native Siri `BadAppleIntent` lets you trigger it from anywhere in macOS. You can also type to the `badapple` terminal client.
 
-- **On-device 3B language model.** A Qwen-class model compiled into 36 INT8 CoreML layer shards, four INT8 LM-head shards, and a ~622 MB mmap'd FP16 embedding table.
-- **Air-gapped by default.** Daemon mode uses only a Unix-domain socket; the daemon integration test asserts zero Internet sockets.
-- **Authenticated local ingress.** `badapple` CLI and `BadAppleIntent` Siri shortcut use the same SLICKS handshake with HMAC-SHA256 mutual proof, nonces, and prompt binding.
-- **Streaming local generation.** Token deltas stream to the client as they are decoded from the warm ANE pipeline.
-- **Stateful CoreML backend.** `MLState` KV caches persist across calls; the daemon stays warm for low-latency inference.
-- **Multi-modal cognitive runtime.** 576-D transformer, hyperdimensional memory, connectome, conscience oracle, strategy library, and wild-workspace watcher (non-daemon research mode).
-- **Signed multi-agent fabric.** TCP/UDP/WebSocket engrams with HMAC signatures and a 2048-D cosine-similarity firewall.
-- **WASM + Python sandboxes.** Untrusted Rust/WASM and Python tools run in isolated sandboxes.
-- **Durable sovereign state.** Memory, identity, strategies, and weights survive restarts through background incremental saves.
-- **Reproducible, optimized build.** `lto`, single codegen unit, `panic = "abort"`, and a deterministic `Cargo.lock`.
+**Signed and authenticated.** Terminal and Siri clients complete a local SLICKS HMAC-SHA256 challenge-response handshake with the daemon before any token is generated, so only trusted callers can drive inference.
 
-## Architecture
+**Air-gapped by default.** The production daemon uses only a local Unix-domain socket. The integration test asserts it has zero Internet sockets while serving requests.
+
+## What can you do with it?
+
+- **Ask anything.** Open-ended questions, summaries, jokes, explanations.
+- **Open workspaces.** Say *"open my bad_apple workspace"* and Bad Apple finds and opens the right project folder.
+- **Launch apps.** Ask it to open an application by name.
+- **Automate files.** Create directories, move or copy files, and manage trash through spoken or typed commands.
+- **Stay hands-free.** Use the menu-bar hotword or the Siri shortcut **"Execute Bad Apple"**.
+
+## What is Bad Apple under the hood?
+
+Bad Apple runs as a `launchd` daemon, `badappled`, which owns the ANE model handle and KV cache. Clients connect through `/var/run/badapple/substrate.sock` and authenticate with SLICKS. The daemon streams token deltas back as they are generated.
 
 ```text
 badapple CLI ─────────────┐
-                          │  Unix-domain IPC + SLICKS HMAC-SHA256
-Siri / BadAppleIntent ────┤  mutual proof, nonce, timestamp, prompt binding
+Siri / BadAppleIntent ────┤  SLICKS HMAC-SHA256 over Unix socket
                           ▼
                   badappled launch daemon
                           │
@@ -40,86 +46,34 @@ Siri / BadAppleIntent ────┤  mutual proof, nonce, timestamp, prompt bi
                   in-process Rust/Swift FFI
                           │
             ┌─────────────┴─────────────┐
-            │ 36 stateful INT8 layers  │
-            │ mmap FP16 embeddings     │
-            │ 4 sharded INT8 LM heads  │
-            │ CoreML MLState KV cache  │
+            │ 36 stateful FP16 layers   │
+            │ mmap FP16 embeddings      │
+            │ 4 sharded INT8 LM heads   │
+            │ CoreML MLState KV cache   │
             └─────────────┬─────────────┘
                           ▼
                   streamed local text
 ```
 
-The CLI does not attempt to attach to a process ID or call FFI across a process boundary. Process IDs change after every restart, and FFI is in-process only. Instead, both ingress clients connect to the stable socket at `/var/run/badapple/substrate.sock`; the daemon alone owns and invokes the ANE FFI handle.
+The repository also contains the broader experimental Bad Apple research runtime: a 576-D Candle transformer brain, a multi-agent signed engram fabric, a self-improving strategy library, a WASM sandbox for untrusted tools, and a telemetry dashboard for local inspection.
 
-## Bad Apple model substrate
+## Recent updates
 
-- **36 stateful CoreML layer shards.** Each transformer layer is independently compiled as INT8 and retains KV cache through `MLState`.
-- **Four INT8 LM-head shards.** The heads jointly cover the model's 151,936-token vocabulary.
-- **Memory-mapped embeddings.** The approximately 622 MB FP16 embedding table is mapped rather than copied into a second host buffer.
-- **Unified-memory handoff.** Hidden states move between CoreML shards as `MLMultiArray` values over Apple unified memory.
-- **Compute-unit selection.** Startup measures candidate CoreML configurations and rejects compiler failures or pathological prewarm latency.
-- **Warm daemon lifetime.** The ANE model handle, shard graph, and mapped artifacts remain owned by the long-running daemon.
-- **Observable inference.** Placement ratio, prewarm time, first-token latency, decode latency, throughput, call count, and failure count are exposed in local logs and tests.
+- **ANE context-window bug fixed.** `ane_core.rs` now preserves prompt tokens and caps generation to the positions that actually fit in the compiled sequence length, eliminating `ANE prediction failed` errors and nonsensical output.
+- **Arbitrary prompts work.** Open-ended questions and workspace actions are now generated reliably with the default 256-token budget.
+- **Menu-bar parsing improved.** The menu bar parses both fenced ` ```badapple-action` blocks and bare JSON action objects.
+- **Daemon entitlements corrected.** `badappled` is signed with entitlements that let it load the existing `libBadAppleBridge.dylib` under macOS Hardened Runtime.
 
-A reference M4 Max run measured 41.31% CoreML ANE operation placement, approximately 101 ms/token decode latency, and approximately 9.9 tokens/second. These are measurements from one machine and model conversion, not guaranteed performance figures.
+## Quick start
 
-## Authenticated local ingress
-
-### SLICKS handshake
-
-Every request must complete a fail-closed local handshake before inference begins:
-
-1. The client sends a protocol version, timestamp, and 256-bit client nonce.
-2. The daemon returns a fresh 256-bit server nonce and an HMAC-SHA256 server proof.
-3. The client verifies the daemon and sends a client proof bound to both nonces, the timestamp, token limit, and SHA-256 hash of the prompt.
-4. The daemon rejects stale timestamps, malformed frames, invalid proofs, empty prompts, prompts over 64 KiB, and generation limits outside `1..=4096`.
-5. After authentication, the daemon emits `accepted`, `token`, and `done` frames.
-
-The production key is generated during installation at `/var/lib/bad_apple/slicks.key` with `root:staff` ownership and mode `0640`. The socket is created inside a setgid `root:staff` directory. No secret is compiled into either binary.
-
-### Terminal client
-
-```bash
-badapple "Explain quantum error correction"
-badapple --max-tokens 128 "Summarize the thermodynamic arrow of time"
-```
-
-`badapple` writes decoded token deltas to stdout as the warm daemon generates them. Configuration overrides:
-
-```text
-BADAPPLE_SOCKET_PATH
-BADAPPLE_SLICKS_KEY_PATH
-BADAPPLE_SLICKS_SECRET   # intended for tests and controlled development only
-```
-
-### Siri and AppIntents
-
-`BadAppleIntent` accepts a spoken-text array, joins it into one prompt, completes the same SLICKS handshake, and routes the request to the same daemon generation queue. `BadAppleShortcuts` publishes the shortcut title **Execute Bad Apple** and the Siri phrases **Execute Bad Apple** and **Ask Bad Apple** through the application-name token.
-
-Build the native bridge and AppIntent host:
-
-```bash
-src/platform/apple_bridge/build_apple_bridge.sh
-src/platform/apple_desktop/build_bad_apple_menu_bar.sh
-```
-
-The second command creates `target/release/Bad Apple.app`. Install it in `/Applications` and launch it once in a logged-in user session so macOS can index its AppIntents metadata:
-
-```bash
-sudo ditto "target/release/Bad Apple.app" "/Applications/Bad Apple.app"
-open "/Applications/Bad Apple.app"
-```
-
-Siri cannot be registered by a pre-login LaunchDaemon alone: AppIntents must be hosted by a signed application in a user session. Inference still occurs in the system daemon; the application is only the Siri ingress host. Siri returns the completed response as a dialog, while the underlying daemon protocol remains token-streamed.
-
-## Build
+### Build
 
 Requirements:
 
 - Apple Silicon Mac running macOS 26 or later
 - Rust toolchain with Cargo
 - macOS 26 SDK containing CoreML, FoundationModels, AppIntents, CryptoKit, and Security
-- Converted model artifacts under `tests/ane_brain_perf/artifacts/qwen3b_ane_shards/`, or equivalent paths supplied through the environment
+- Converted model artifacts under `tests/ane_brain_perf/artifacts/qwen3b_ane_shards/` (or equivalent paths supplied through the environment)
 
 ```bash
 cargo build --release
@@ -136,13 +90,11 @@ target/release/libBadAppleBridge.dylib
 target/release/bad_apple_core.h
 ```
 
-## Install the launch daemon
+### Install the daemon
 
 The installation script validates the release binaries and model artifacts, installs immutable executable copies under `/usr/local`, creates the SLICKS key and restricted runtime directories, installs the launchd plist, and bootstraps the system job.
 
 ```bash
-cargo build --release
-src/platform/apple_bridge/build_apple_bridge.sh
 sudo src/platform/apple_bridge/install_daemon.sh
 ```
 
@@ -154,27 +106,83 @@ sudo BADAPPLE_ANE_MODEL="/absolute/path/conversion_manifest.json" \
      src/platform/apple_bridge/install_daemon.sh
 ```
 
-Inspect the service and logs:
+### Run your first prompt
 
 ```bash
-sudo launchctl print system/com.badapple.substrate
-tail -f /var/log/bad_apple_daemon.log
-badapple "Report substrate status"
+badapple "What is the capital of France?"
 ```
 
-Installed paths:
+### Install the menu-bar app
+
+```bash
+src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+cp -R "target/release/Bad Apple.app" /Applications/
+open "/Applications/Bad Apple.app"
+```
+
+Launch it once in a logged-in user session so macOS can index its AppIntents metadata. Then trigger it with *"hey bad apple"* or through the Siri shortcut **"Execute Bad Apple"**.
+
+## Usage examples
+
+### Terminal
+
+```bash
+badapple "Explain quantum error correction"
+badapple --max-tokens 128 "Summarize the thermodynamic arrow of time"
+```
+
+Configuration overrides:
 
 ```text
-/usr/local/libexec/badapple/badappled
-/usr/local/libexec/badapple/libBadAppleBridge.dylib
-/usr/local/bin/badapple
-/Library/LaunchDaemons/com.badapple.substrate.plist
-/var/lib/bad_apple/
-/var/run/badapple/substrate.sock
-/var/log/bad_apple_daemon.log
+BADAPPLE_SOCKET_PATH
+BADAPPLE_SLICKS_KEY_PATH
+BADAPPLE_SLICKS_SECRET   # intended for tests and controlled development only
 ```
 
-The plist uses `RunAtLoad=true` and `KeepAlive=true`. `launchd` restarts crashes and unexpected exits, but an administrator can intentionally stop the service with `launchctl bootout`; no correctly administered macOS process is literally unkillable.
+### Voice actions
+
+- *"What is the capital of France?"* — general question, daemon streams the answer.
+- *"open my bad_apple workspace"* — emits a `badapple-action` that opens the matching workspace.
+- *"create a folder called meeting_notes on the Desktop"* — creates a directory through the automation helper.
+
+## Key features
+
+- **On-device 4B Qwen3 language model.** 36 FP16 CoreML layer shards, four INT8 LM-head shards, and a ~742 MB mmap'd FP16 embedding table.
+- **Air-gapped by default.** Daemon mode uses only a Unix-domain socket; the integration test asserts zero Internet sockets.
+- **Authenticated local ingress.** `badapple` CLI and `BadAppleIntent` Siri shortcut use the same SLICKS handshake with HMAC-SHA256 mutual proof, nonces, and prompt binding.
+- **Streaming local generation.** Token deltas stream to the client as they are decoded from the warm ANE pipeline.
+- **Stateful CoreML backend.** `MLState` KV caches persist across calls; the daemon stays warm for low-latency inference.
+- **Multi-modal cognitive runtime.** 576-D transformer, hyperdimensional memory, connectome, conscience oracle, strategy library, and wild-workspace watcher (non-daemon research mode).
+- **Signed multi-agent fabric.** TCP/UDP/WebSocket engrams with HMAC signatures and a 2048-D cosine-similarity firewall.
+- **WASM + Python sandboxes.** Untrusted Rust/WASM and Python tools run in isolated sandboxes.
+- **Durable sovereign state.** Memory, identity, strategies, and weights survive restarts through background incremental saves.
+- **Reproducible, optimized build.** `lto`, single codegen unit, `panic = "abort"`, and a deterministic `Cargo.lock`.
+
+## Bad Apple model substrate
+
+- **36 stateful CoreML layer shards.** Each transformer layer is independently compiled as FP16 and retains KV cache through `MLState`.
+- **Four INT8 LM-head shards.** The heads jointly cover the model's 151,936-token vocabulary.
+- **Memory-mapped embeddings.** The ~742 MB FP16 embedding table is mapped rather than copied into a second host buffer.
+- **Unified-memory handoff.** Hidden states move between CoreML shards as `MLMultiArray` values over Apple unified memory.
+- **Compute-unit selection.** Startup measures candidate CoreML configurations and rejects compiler failures or pathological prewarm latency.
+- **Warm daemon lifetime.** The ANE model handle, shard graph, and mapped artifacts remain owned by the long-running daemon.
+- **Observable inference.** Placement ratio, prewarm time, first-token latency, decode latency, throughput, call count, and failure count are exposed in local logs and tests.
+
+A reference run with the current Qwen3-4B FP16 layer shards measured 41.09% CoreML ANE operation placement, approximately 174 ms/token decode latency, and approximately 5.7 tokens/second. These are measurements from one machine and model conversion, not guaranteed performance figures.
+
+## Authenticated local ingress
+
+### SLICKS handshake
+
+Every request must complete a fail-closed local handshake before inference begins:
+
+1. The client sends a protocol version, timestamp, and 256-bit client nonce.
+2. The daemon returns a fresh 256-bit server nonce and an HMAC-SHA256 server proof.
+3. The client verifies the daemon and sends a client proof bound to both nonces, the timestamp, token limit, and SHA-256 hash of the prompt.
+4. The daemon rejects stale timestamps, malformed frames, invalid proofs, empty prompts, prompts over 64 KiB, and generation limits outside `1..=4096`.
+5. After authentication, the daemon emits `accepted`, `token`, and `done` frames.
+
+The production key is generated during installation at `/var/lib/bad_apple/slicks.key` with `root:staff` ownership and mode `0640`. The socket is created inside a setgid `root:staff` directory. No secret is compiled into either binary.
 
 ## Air-gap boundary
 
@@ -205,7 +213,7 @@ The resumable conversion pipeline is documented in `tests/ane_brain_perf/README.
 python3 tests/ane_brain_perf/convert_ane_coreml.py --help
 ```
 
-The generated `conversion_manifest.json` describes the embedding table, 36 stateful layer shards, LM-head ranges, context length, RoPE settings, and model metadata consumed by the Swift bridge.
+The generated `conversion_manifest.json` describes the Qwen3-4B embedding table, 36 stateful FP16 layer shards, INT8 LM-head ranges, context length, RoPE settings, and model metadata consumed by the Swift bridge.
 
 ## Main components
 
@@ -236,6 +244,20 @@ plutil -lint src/platform/apple_bridge/com.badapple.substrate.plist
 ```
 
 The daemon integration test starts `badappled` with an isolated socket and SLICKS secret, invokes the actual `badapple` binary, confirms generation succeeds, and asserts the daemon has zero Internet sockets.
+
+## Installed paths
+
+```text
+/usr/local/libexec/badapple/badappled
+/usr/local/libexec/badapple/libBadAppleBridge.dylib
+/usr/local/bin/badapple
+/Library/LaunchDaemons/com.badapple.substrate.plist
+/var/lib/bad_apple/
+/var/run/badapple/substrate.sock
+/var/log/bad_apple_daemon.log
+```
+
+The plist uses `RunAtLoad=true` and `KeepAlive=true`. `launchd` restarts crashes and unexpected exits, but an administrator can intentionally stop the service with `launchctl bootout`.
 
 ## Security and privacy
 

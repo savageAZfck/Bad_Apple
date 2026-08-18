@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "BadAppleMenuBar",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS("26.0")],
     products: [
         .executable(name: "BadAppleMenuBar", targets: ["BadAppleMenuBar"]),
     ],
@@ -23,6 +23,8 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("Speech"),
                 .linkedLibrary("dl"),
             ]
         ),

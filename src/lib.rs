@@ -16,6 +16,8 @@ use std::sync::Mutex;
 pub mod ane_core;
 pub mod apple_intelligence;
 pub mod arena;
+#[path = "automation_cage_impl.rs"]
+pub mod automation_cage;
 pub mod bad_apple_ipc;
 pub mod benchmark;
 pub mod config;
@@ -24,6 +26,7 @@ pub mod metal_uma;
 pub mod metrics;
 pub mod production_blueprint;
 pub mod protocol;
+pub mod scavenger;
 pub mod simd;
 pub mod strategy_library;
 pub mod tensor_brain;

@@ -1,4 +1,8 @@
 # Build artifacts
+.DS_Store
+*.tmp
+/qwen3b_ane_shards
+/qwen3b_ane_shards.bak_keep
 /target
 /target-clean
 /target-release
@@ -38,7 +42,7 @@ bad_apple_state_5001.*
 *.rs.bak
 
 # Manual state backups
-/state-backup-*/
+state-backup-*/
 
 # Wild workspace runtime data
 /wild_workspace
