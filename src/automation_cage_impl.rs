@@ -12,6 +12,9 @@ pub const MAX_COPY_BYTES: u64 = 100 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    CreateFile {
+        path: PathBuf,
+    },
     CreateDirectory {
         path: PathBuf,
     },
@@ -31,6 +34,7 @@ pub enum Action {
 impl Action {
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::CreateFile { .. } => "create_file",
             Self::CreateDirectory { .. } => "create_directory",
             Self::CopyFile { .. } => "copy_file",
             Self::MoveFile { .. } => "move_file",
@@ -40,7 +44,9 @@ impl Action {
 
     fn paths(&self) -> Vec<&Path> {
         match self {
-            Self::CreateDirectory { path } | Self::MoveToTrash { path } => vec![path],
+            Self::CreateFile { path }
+            | Self::CreateDirectory { path }
+            | Self::MoveToTrash { path } => vec![path],
             Self::CopyFile {
                 source,
                 destination,
@@ -173,7 +179,7 @@ impl AutomationCage {
             .map(|path| self.resolve_allowlisted(path))
             .collect::<Result<_>>()?;
         let trash_destination = match action {
-            Action::CreateDirectory { .. } => {
+            Action::CreateFile { .. } | Action::CreateDirectory { .. } => {
                 if paths[0].exists() {
                     bail!("destination exists; overwrite forbidden");
                 }
@@ -229,6 +235,7 @@ impl AutomationCage {
     fn execute_inner(&self, action: &Action) -> Result<()> {
         let plan = self.validate(action)?;
         match action {
+            Action::CreateFile { .. } => create_file_chain(&plan.resolved_paths[0], &self.roots),
             Action::CreateDirectory { .. } => {
                 create_directory_chain(&plan.resolved_paths[0], &self.roots)
             }
@@ -250,9 +257,10 @@ impl AutomationCage {
     }
 
     fn resolve_allowlisted(&self, path: &Path) -> Result<PathBuf> {
-        reject_lexical_path(path)?;
-        reject_forbidden_path(path, &self.home)?;
-        let resolved = canonicalize_existing_ancestor(path)?;
+        let path = substitute_path_placeholders(path, &self.home)?;
+        reject_lexical_path(&path)?;
+        reject_forbidden_path(&path, &self.home)?;
+        let resolved = canonicalize_existing_ancestor(&path)?;
         reject_forbidden_path(&resolved, &self.home)?;
         if !self.roots.iter().any(|root| resolved.starts_with(root)) {
             bail!("path escapes allowlisted roots");
@@ -472,6 +480,34 @@ fn create_directory_chain(path: &Path, roots: &[PathBuf]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn create_file_chain(path: &Path, roots: &[PathBuf]) -> Result<()> {
+    if path.exists() {
+        bail!("destination exists; overwrite forbidden");
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("file path has no parent"))?;
+    create_directory_chain(parent, roots)?;
+    fs::write(path, b"").context("create file failed")?;
+    Ok(())
+}
+
+fn substitute_path_placeholders(path: &Path, home: &Path) -> Result<PathBuf> {
+    if let Some(s) = path.to_str() {
+        if let Some(tail) = s.strip_prefix("~/") {
+            return Ok(home.join(tail));
+        }
+        // Replace /Users/<placeholder>/... with the real home directory.
+        if let Some(rest) = s.strip_prefix("/Users/") {
+            if let Some(slash) = rest.find('/') {
+                let after = &rest[slash + 1..];
+                return Ok(home.join(after));
+            }
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]

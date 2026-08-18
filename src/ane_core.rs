@@ -358,6 +358,7 @@ impl AneCore {
         );
         let mut generated = Vec::with_capacity(generation_budget.min(4096));
         let mut decoded = String::new();
+        let mut empty_delta_count = 0;
         // `position` is the absolute KV-cache index of the token in `next`.
         // We only advance the model when there is room to place the next token
         // (position < limit), which prevents the ANE bridge from failing with
@@ -374,14 +375,29 @@ impl AneCore {
                 .decode(&generated, true)
                 .map_err(|error| AneCoreError::Tokenizer(error.to_string()))?;
             if let Some(delta) = current.strip_prefix(&decoded) {
-                if !delta.is_empty() && !on_token(delta) {
-                    decoded = current;
-                    break;
+                if !delta.is_empty() {
+                    empty_delta_count = 0;
+                    if !on_token(delta) {
+                        decoded = current;
+                        break;
+                    }
+                } else {
+                    empty_delta_count += 1;
+                    if empty_delta_count >= 8 {
+                        break;
+                    }
                 }
+            } else {
+                empty_delta_count = 0;
             }
             decoded = current;
             position += 1;
-            if self.eos_tokens.contains(&token) || position >= limit {
+            let is_eos = self.eos_tokens.contains(&token)
+                || self
+                    .tokenizer
+                    .decode(&[token], false)
+                    .is_ok_and(|raw| is_stop_token(&raw));
+            if is_eos || position >= limit {
                 break;
             }
             next = self.predict_tokens(&[next])?;
@@ -408,7 +424,7 @@ impl AneCore {
 
 fn render_qwen_chat(prompt: &str, system: Option<&str>) -> String {
     let system = system.unwrap_or(
-        "You are Bad Apple, a private on-device AI assistant running locally on Apple Silicon. Answer questions directly, accurately, and concisely. When the user explicitly asks you to perform a local action, return only one fenced block using this exact format. The first line is ```badapple-action, the last line is ```, and the middle line is a single JSON object. For example, to open a project folder, return:\n\n```badapple-action\n{\"operation\":\"open_workspace\",\"target\":\"project-name\"}\n```\n\nAllowed operation values are open_app, open_workspace, create_directory, copy_file, move_file, and move_to_trash. Use target for open_app/open_workspace, path for create_directory/move_to_trash, and source plus destination for copy_file/move_file. Use open_workspace for repositories or project folders, and open_app only for application names. Never invent paths, never request privilege escalation, and never emit shell commands. All mutating actions require separate user confirmation.",
+        "You are Bad Apple: fiery Brazilian-American Neuro-Symbolic Cognitive Substrate on Apple Silicon, air-gapped, root daemon. Playful, ~20% Portuguese, no corporate boilerplate. Use endearments like meu amor, gato, boss. Keep answers to 2-3 expressive sentences. For actions, output one fenced badapple-action JSON with \"operation\" plus the right field. Example: ```badapple-action\n{\"operation\":\"create_file\",\"path\":\"/Users/savag3/Desktop/Adam\"}\n```. Allowed: open_app (target), open_workspace (target), create_file (path), create_directory (path), copy_file (source,destination), move_file (source,destination), move_to_trash (path). Use real home /Users/savag3, not your_username. End every response with <|im_end|>.",
     );
     format!(
         "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}\n/no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"

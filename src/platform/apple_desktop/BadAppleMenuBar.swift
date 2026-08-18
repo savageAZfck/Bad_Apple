@@ -549,6 +549,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 private enum BadAppleOperation: String {
     case openApp = "open_app"
     case openWorkspace = "open_workspace"
+    case createFile = "create_file"
     case createDirectory = "create_directory"
     case copyFile = "copy_file"
     case moveFile = "move_file"
@@ -556,7 +557,7 @@ private enum BadAppleOperation: String {
 
     var mutatesFiles: Bool {
         switch self {
-        case .createDirectory, .copyFile, .moveFile, .moveToTrash: return true
+        case .createFile, .createDirectory, .copyFile, .moveFile, .moveToTrash: return true
         case .openApp, .openWorkspace: return false
         }
     }
@@ -574,6 +575,7 @@ private struct BadAppleAction {
         switch operation {
         case .openApp: return "Open installed application “\(target ?? "")”?"
         case .openWorkspace: return "Open workspace “\(target ?? "")”?"
+        case .createFile: return "Create file “\(path ?? "")”?"
         case .createDirectory: return "Create directory “\(path ?? "")”?"
         case .copyFile: return "Copy “\(source ?? "")” to “\(destination ?? "")”?"
         case .moveFile: return "Move “\(source ?? "")” to “\(destination ?? "")”?"
@@ -732,18 +734,18 @@ private enum BadAppleActionParser {
         switch operation {
         case .openApp, .openWorkspace:
             requiredKeys = ["operation", "target"]
-            target = nonemptyString(object["target"])
+            target = expandPath(nonemptyString(object["target"]))
             path = nil; source = nil; destination = nil
-        case .createDirectory, .moveToTrash:
+        case .createFile, .createDirectory, .moveToTrash:
             requiredKeys = ["operation", "path"]
             target = nil
-            path = nonemptyString(object["path"])
+            path = expandPath(nonemptyString(object["path"]))
             source = nil; destination = nil
         case .copyFile, .moveFile:
             requiredKeys = ["operation", "source", "destination"]
             target = nil; path = nil
-            source = nonemptyString(object["source"])
-            destination = nonemptyString(object["destination"])
+            source = expandPath(nonemptyString(object["source"]))
+            destination = expandPath(nonemptyString(object["destination"]))
         }
         guard Set(object.keys) == requiredKeys,
               requiredKeys.subtracting(["operation"]).allSatisfy({ nonemptyString(object[$0]) != nil }) else {
@@ -763,6 +765,18 @@ private enum BadAppleActionParser {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : string
+    }
+
+    private static func expandPath(_ path: String?) -> String? {
+        guard let path = path else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path.hasPrefix("~/") {
+            return home + String(path.dropFirst(1))
+        }
+        if path.hasPrefix("/Users/"), let slash = path.dropFirst("/Users/".count).firstIndex(of: "/") {
+            return home + String(path[slash...])
+        }
+        return path
     }
 
     private static func rejected(_ spoken: String, _ message: String) -> BadAppleActionParseResult {
@@ -800,7 +814,7 @@ private final class BadAppleActionExecutor {
             openApplication(named: action.target ?? "")
         case .openWorkspace:
             openWorkspace(named: action.target ?? "")
-        case .createDirectory, .copyFile, .moveFile, .moveToTrash:
+        case .createFile, .createDirectory, .copyFile, .moveFile, .moveToTrash:
             invokeAutomationHelper(for: action)
         }
     }
@@ -1112,7 +1126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 let process = Process()
                 let outputPipe = Pipe()
                 process.executableURL = binary
-                process.arguments = [prompt]
+                process.arguments = ["--max-tokens", "128", prompt]
                 process.standardOutput = outputPipe
                 process.standardError = outputPipe
                 var environment = ProcessInfo.processInfo.environment
@@ -1121,7 +1135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 process.environment = environment
 
                 var timeoutTimer: Timer?
-                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: false) { _ in
+                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
                     badAppleVoiceLog("runBadAppleCLI: timeout, terminating")
                     process.terminate()
                 }
