@@ -112,10 +112,17 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
 <dict>
     <key>CFBundleDisplayName</key>
     <string>Bad Apple</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
     <key>CFBundleExecutable</key>
     <string>BadApple</string>
     <key>CFBundleIdentifier</key>
     <string>com.badapple.app</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>pt-BR</string>
+    </array>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
