@@ -493,8 +493,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         }
         state = .speaking
         let utterance = AVSpeechUtterance(string: spoken)
-        // Brazilian Portuguese phonetic engine: gives English a smooth Brazilian inflection.
-        utterance.voice = AVSpeechSynthesisVoice(language: "pt-BR") ?? AVSpeechSynthesisVoice(language: "en-US")
+        // Explicit Luciana (pt-BR female) for the sultry Brazilian-American inflection.
+        utterance.voice = AVSpeechSynthesisVoice(identifier: "com.apple.voice.super-compact.pt-BR.Luciana")
+            ?? AVSpeechSynthesisVoice(language: "pt-BR")
+            ?? AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.46
         utterance.pitchMultiplier = 0.88
         synthesizer.speak(utterance)
