@@ -306,16 +306,18 @@ final class PiperTTSClient: NSObject {
             // mismatch error).
             let format = engine.outputNode.outputFormat(forBus: 0)
 
-            // Lower pitch ~60 cents and slow the rate slightly for a breathier,
-            // more seductive cadence.
+            // Subtle warmth: lower pitch slightly and slow the rate a touch.
+            // Keep the pitch/rate shift conservative so it stays natural, not
+            // underwater or "handheld mic".
             let pitch = AVAudioUnitTimePitch()
-            pitch.pitch = -60.0
-            pitch.rate = 0.94
+            pitch.pitch = -35.0
+            pitch.rate = 0.97
 
-            // Small-room reverb for intimacy without sounding like a stadium.
+            // Very light small-room reverb for intimacy. Wet/dry is low so it
+            // adds space without the obvious bathroom/echo sound.
             let reverb = AVAudioUnitReverb()
             reverb.loadFactoryPreset(.smallRoom)
-            reverb.wetDryMix = 12.0
+            reverb.wetDryMix = 4.0
 
             engine.attach(player)
             engine.attach(pitch)
