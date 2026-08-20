@@ -506,6 +506,90 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         onPrompt?(prompt)
     }
 
+    private struct ProsodyChunk {
+        let text: String
+        let rate: Float
+        let pitch: Float
+        let postDelay: TimeInterval
+    }
+
+    /// Pick the highest-quality installed Spanish/Mexican voice. Prefer
+    /// premium/enhanced Paulina, then Siri-quality, then compact, then any
+    /// es-MX voice. This single change removes most of the "robot" sheen.
+    private func bestVoice() -> AVSpeechSynthesisVoice {
+        let candidateIds = [
+            "com.apple.voice.premium.es-MX.Paulina",
+            "com.apple.voice.enhanced.es-MX.Paulina",
+            "com.apple.voice.superpremium.es-MX.Paulina",
+            "com.apple.voice.premium.es-ES.Monica",
+            "com.apple.voice.enhanced.es-ES.Monica",
+            "com.apple.voice.siri.es-MX",
+            "com.apple.voice.compact.es-MX.Paulina",
+        ]
+        for id in candidateIds {
+            if let voice = AVSpeechSynthesisVoice(identifier: id) {
+                return voice
+            }
+        }
+        return AVSpeechSynthesisVoice(language: "es-MX")
+            ?? AVSpeechSynthesisVoice(identifier: "com.apple.speech.synthesis.voice.Fred")
+            ?? AVSpeechSynthesisVoice(language: "en-US")!
+    }
+
+    /// Split the response into prosodic chunks and add post-utterance delays
+    /// where the Salma prompt uses ellipses, em-dashes, and sentence endings.
+    /// Varying pitch and rate makes the 8B output sound like a person, not a
+    /// flat sentence scanner.
+    private func prosodyChunks(from text: String) -> [ProsodyChunk] {
+        var chunks: [ProsodyChunk] = []
+        var current = ""
+
+        func flush(_ postDelay: TimeInterval = 0.0, rate: Float = 0.46, pitch: Float = 0.96) {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                current = ""
+                return
+            }
+            // sign-off "—besos" gets extra warmth and a long trailing breath
+            let isSignOff = trimmed.lowercased().contains("besos")
+            let finalRate: Float = isSignOff ? 0.42 : rate
+            let finalPitch: Float = isSignOff ? 0.94 : pitch
+            let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.4) : postDelay
+            chunks.append(ProsodyChunk(text: trimmed, rate: finalRate, pitch: finalPitch, postDelay: finalDelay))
+            current = ""
+        }
+
+        let chars = Array(text)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            current.append(c)
+
+            if c == "…" || (c == "." && i + 1 < chars.count && chars[i + 1] == "." && i + 2 < chars.count && chars[i + 2] == ".") {
+                // ellipsis: slower, trailing breath
+                flush(0.30, rate: 0.44, pitch: 0.95)
+                if c == "." { i += 2 }
+            } else if c == "—" {
+                flush(0.18, rate: 0.45, pitch: 0.96)
+            } else if c == "?" {
+                flush(0.20, rate: 0.46, pitch: 1.02)
+            } else if c == "!" {
+                flush(0.20, rate: 0.48, pitch: 1.00)
+            } else if c == "." || c == "\n" {
+                // only end a sentence if the next char is whitespace or we are at the end
+                let next = i + 1 < chars.count ? chars[i + 1] : nil
+                if next == nil || next!.isWhitespace || next! == "\n" {
+                    flush(0.15)
+                }
+            }
+
+            i += 1
+        }
+
+        flush(0.10)
+        return chunks.isEmpty ? [ProsodyChunk(text: text, rate: 0.46, pitch: 0.96, postDelay: 0.10)] : chunks
+    }
+
     func speak(_ text: String) {
         let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard enabled else { return }
@@ -514,13 +598,22 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             return
         }
         state = .speaking
-        let utterance = AVSpeechUtterance(string: spoken)
-        utterance.voice = AVSpeechSynthesisVoice(identifier: "com.apple.voice.compact.es-MX.Paulina")
-            ?? AVSpeechSynthesisVoice(language: "es-MX")
-        utterance.rate = 0.46
-        utterance.pitchMultiplier = 0.96
-        pendingSpeechUtterances = 1
-        synthesizer.speak(utterance)
+        synthesizer.stopSpeaking(at: .immediate)
+
+        let voice = bestVoice()
+        let chunks = prosodyChunks(from: spoken)
+        badAppleVoiceLog("speaking with \(chunks.count) chunk(s), voice: \(voice.identifier)")
+
+        for chunk in chunks {
+            let utterance = AVSpeechUtterance(string: chunk.text)
+            utterance.voice = voice
+            utterance.rate = chunk.rate
+            utterance.pitchMultiplier = chunk.pitch
+            utterance.postUtteranceDelay = chunk.postDelay
+            utterance.volume = 0.95
+            synthesizer.speak(utterance)
+        }
+        pendingSpeechUtterances = chunks.count
     }
 
     func resumeAfterFailure() {
