@@ -174,7 +174,7 @@ final class BadAppleFFI {
 
 // MARK: - Local neural TTS client (Piper)
 
-private final class PiperTTSClient: NSObject {
+final class PiperTTSClient: NSObject {
     static let shared = PiperTTSClient()
 
     private let socketPath = "/tmp/badapple_tts.sock"
@@ -193,10 +193,13 @@ private final class PiperTTSClient: NSObject {
         onDidFinish = nil
     }
 
+    static let defaultVoice = "es_MX-claude-high"
+    static let availableVoices = ["es_MX-claude-high", "es_MX-ald-medium"]
+
     /// Try to speak through the local Piper TTS server. Calls `completion(true)`
     /// when audio finishes, or `completion(false)` if the server is unreachable,
     /// synthesis fails, or playback fails.
-    func speak(_ text: String, completion: @escaping (Bool) -> Void) {
+    func speak(_ text: String, voice: String, completion: @escaping (Bool) -> Void) {
         requestID += 1
         let myID = requestID
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -205,7 +208,7 @@ private final class PiperTTSClient: NSObject {
                 return
             }
             do {
-                let wavURL = try self.synthesize(text)
+                let wavURL = try self.synthesize(text, voice: voice)
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self, self.requestID == myID else { return }
                     self.play(url: wavURL, completion: completion)
@@ -220,8 +223,8 @@ private final class PiperTTSClient: NSObject {
         }
     }
 
-    private func synthesize(_ text: String) throws -> URL {
-        let request: [String: Any] = ["text": text]
+    private func synthesize(_ text: String, voice: String) throws -> URL {
+        let request: [String: Any] = ["text": text, "voice": voice]
         let data = try JSONSerialization.data(withJSONObject: request, options: [])
         let response = try unixSocketRequest(data)
         guard let json = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
@@ -764,6 +767,11 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? true
     }
 
+    private var selectedPiperVoice: String {
+        let raw = UserDefaults.standard.string(forKey: "BadAppleTTSVoice") ?? PiperTTSClient.defaultVoice
+        return PiperTTSClient.availableVoices.contains(raw) ? raw : PiperTTSClient.defaultVoice
+    }
+
     /// Main entry point: try the local neural Piper TTS first, then fall back
     /// to the on-device Apple speech engine. The result is much more human at
     /// the cost of ~200-600 ms synthesis latency for the 8B response.
@@ -783,9 +791,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         PiperTTSClient.shared.stop()
 
         if usePiperTTS {
-            badAppleVoiceLog("speak using Piper TTS (id=\(id))")
+            let voice = selectedPiperVoice
+            badAppleVoiceLog("speak using Piper TTS (id=\(id), voice=\(voice))")
             state = .speaking
-            PiperTTSClient.shared.speak(spoken) { [weak self] success in
+            PiperTTSClient.shared.speak(spoken, voice: voice) { [weak self] success in
                 DispatchQueue.main.async {
                     guard let self = self, self.enabled, self.currentSpeakID == id else { return }
                     if success {
@@ -1558,6 +1567,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         menu.addItem(toggle)
         menu.addItem(NSMenuItem(title: "Restart Voice Recognition", action: #selector(restartVoice), keyEquivalent: "r"))
 
+        let voiceMenu = NSMenu(title: "Voice")
+        for voice in PiperTTSClient.availableVoices {
+            let display = voice
+                .replacingOccurrences(of: "es_MX-", with: "")
+                .replacingOccurrences(of: "-high", with: "")
+                .replacingOccurrences(of: "-medium", with: "")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+            let item = NSMenuItem(title: display, action: #selector(selectVoice(_:)), keyEquivalent: "")
+            item.representedObject = voice
+            let current = UserDefaults.standard.string(forKey: "BadAppleTTSVoice") ?? PiperTTSClient.defaultVoice
+            item.state = (current == voice) ? .on : .off
+            voiceMenu.addItem(item)
+        }
+        let voiceParent = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+        voiceParent.submenu = voiceMenu
+        menu.addItem(voiceParent)
+
         if !lastPrompt.isEmpty {
             let prompt = NSMenuItem(title: "Last prompt: \(lastPrompt.truncated(to: 65))", action: nil, keyEquivalent: "")
             prompt.isEnabled = false
@@ -1621,6 +1648,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         guard voiceEnabled else { return }
         voiceHost.setEnabled(false)
         voiceHost.setEnabled(true)
+    }
+
+    @objc private func selectVoice(_ sender: NSMenuItem) {
+        guard let voice = sender.representedObject as? String,
+              PiperTTSClient.availableVoices.contains(voice) else { return }
+        UserDefaults.standard.set(voice, forKey: "BadAppleTTSVoice")
+        badAppleVoiceLog("selected TTS voice: \(voice)")
+        rebuildMenu()
     }
 
     @objc private func pushPursuit() {
