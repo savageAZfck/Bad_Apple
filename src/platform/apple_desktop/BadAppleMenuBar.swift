@@ -294,9 +294,7 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
         do {
             player = try AVAudioPlayer(contentsOf: url)
             player?.delegate = self
-            player?.volume = 0.95
-            player?.enableRate = true
-            player?.rate = 0.95
+            player?.volume = 1.0
             player?.prepareToPlay()
             onDidFinish = { [weak self] in
                 self?.player = nil
