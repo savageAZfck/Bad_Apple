@@ -303,7 +303,9 @@ pub unsafe extern "C" fn bad_apple_generate_text(prompt: *const c_char) -> *mut 
         _ => return bad_apple_cstring("invalid prompt"),
     };
     if ane_core::is_available() {
-        if let Ok(resp) = ane_core::generate_sync(text, 256, ane_core::context_limit()) {
+        // Cap output to 64 tokens for speed; 2-3 sentences is all the
+        // concise persona needs.
+        if let Ok(resp) = ane_core::generate_sync(text, 64, ane_core::context_limit()) {
             return bad_apple_cstring(&resp);
         }
     }

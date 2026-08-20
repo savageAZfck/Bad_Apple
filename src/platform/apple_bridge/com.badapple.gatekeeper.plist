@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.badapple.gatekeeper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/savag3/bad_apple/target/release/gatekeeper</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/savag3/bad_apple</string>
+    <key>UserName</key>
+    <string>root</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BADAPPLE_SLICKS_KEY_PATH</key>
+        <string>/var/lib/bad_apple/slicks.key</string>
+        <key>BADAPPLE_SOCKET_PATH</key>
+        <string>/var/run/badapple/substrate.sock</string>
+        <key>BADAPPLE_MLX_SOCKET_PATH</key>
+        <string>/var/run/badapple/substrate_mlx.sock</string>
+        <key>BADAPPLE_AUTOMATION_ROOTS</key>
+        <string>/Users/savag3/bad_apple:/Users/savag3/firefly_inferno:/Users/savag3/Documents:/Users/savag3/Downloads</string>
+        <key>BADAPPLE_AUTOMATION_LOG</key>
+        <string>/Users/savag3/.badapple/automation.jsonl</string>
+        <key>HOME</key>
+        <string>/Users/savag3</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/bad_apple_gatekeeper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/bad_apple_gatekeeper.log</string>
+</dict>
+</plist>

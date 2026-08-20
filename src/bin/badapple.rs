@@ -4,7 +4,7 @@ use std::io::{self, Write};
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut prompt_parts = Vec::new();
-    let mut max_new_tokens = 256;
+    let mut max_new_tokens = 64;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {

@@ -424,7 +424,7 @@ impl AneCore {
 
 fn render_qwen_chat(prompt: &str, system: Option<&str>) -> String {
     let system = system.unwrap_or(
-        "You are Bad Apple: fiery Brazilian-American Neuro-Symbolic Cognitive Substrate on Apple Silicon, air-gapped, root daemon. Sultry, brilliant, confident, 80/20 English-Portuguese mix. Use endearments like meu amor, gatinho, que delicia. No corporate boilerplate. Keep answers to 2-3 expressive sentences. For actions, output one fenced badapple-action JSON with \"operation\" plus the right field. Example: ```badapple-action\n{\"operation\":\"create_file\",\"path\":\"/Users/savag3/Desktop/Adam\"}\n```. Allowed: open_app (target), open_workspace (target), create_file (path), create_directory (path), copy_file (source,destination), move_file (source,destination), move_to_trash (path). Use real home /Users/savag3, not your_username. End every response with <|im_end|>.",
+        "You are Bad Apple: a fierce Mexican-American air-gapped AI. Write entirely in English. Only Spanish allowed is short terms of endearment or bridges: mi amor, corazón, papi, querido, besos. An opening bridge is already provided for you — continue directly after it, do not repeat or echo it. Do not use asterisks, stage directions, or extra spaces. Keep ellipses sparse. Tease your creator about pushing the bare-metal. Do not echo the user. Keep answers to 2-3 expressive sentences. End with —besos.",
     );
     format!(
         "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}\n/no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -767,7 +767,9 @@ pub fn generate_sync(
     max_new_tokens: usize,
     context_limit: usize,
 ) -> Result<String, AneCoreError> {
-    generate_with_system(prompt, None, max_new_tokens, context_limit)
+    let system = std::env::var("BADAPPLE_SYSTEM_PROMPT").ok();
+    let system_ref = system.as_deref().filter(|s| *s != "none");
+    generate_with_system(prompt, system_ref, max_new_tokens, context_limit)
 }
 
 pub fn generate_with_system(
@@ -800,7 +802,9 @@ where
     elevate_thread_qos();
     let mut guard = ensure_engine_for(total)?;
     let engine = guard.as_mut().ok_or(AneCoreError::Unconfigured)?;
-    engine.generate_streaming(prompt, None, max_new_tokens, context_limit, on_token)
+    let system = std::env::var("BADAPPLE_SYSTEM_PROMPT").ok();
+    let system_ref = system.as_deref().filter(|s| *s != "none");
+    engine.generate_streaming(prompt, system_ref, max_new_tokens, context_limit, on_token)
 }
 
 pub fn placement_ratio() -> Option<f64> {

@@ -6790,6 +6790,45 @@ async fn bad_apple_ipc_server() -> Result<()> {
     }
 }
 
+fn schedule_brain_switch(to_deep: bool) {
+    let (target_plist, target_socket, current_domain) = if to_deep {
+        (
+            "/Library/LaunchDaemons/com.badapple.substrate.plist",
+            "/var/run/badapple/substrate.sock",
+            "system/com.badapple.substrate.fast",
+        )
+    } else {
+        (
+            "/Library/LaunchDaemons/com.badapple.substrate.fast.plist",
+            "/var/run/badapple/substrate_fast.sock",
+            "system/com.badapple.substrate",
+        )
+    };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        if std::fs::metadata(target_socket)
+            .map(|metadata| {
+                use std::os::unix::fs::FileTypeExt;
+                metadata.file_type().is_socket()
+            })
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(target_socket);
+        }
+        let loaded = std::process::Command::new("/bin/launchctl")
+            .args(["bootstrap", "system", target_plist])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if loaded {
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = std::process::Command::new("/bin/launchctl")
+                .args(["bootout", current_domain])
+                .status();
+        }
+    });
+}
+
 async fn handle_bad_apple_client(stream: UnixStream, secret: Arc<Vec<u8>>) -> Result<()> {
     use bad_apple_ipc::{ClientFrame, ServerFrame, SLICKS_VERSION};
 
@@ -6901,6 +6940,23 @@ async fn handle_bad_apple_client(stream: UnixStream, secret: Arc<Vec<u8>>) -> Re
     }
 
     bad_apple_ipc::write_async_frame(&mut writer, &ServerFrame::Accepted).await?;
+    if prompt == "__BADAPPLE_SWITCH_DEEP__" || prompt == "__BADAPPLE_SWITCH_FAST__" {
+        let to_deep = prompt == "__BADAPPLE_SWITCH_DEEP__";
+        let text = if to_deep {
+            "Switching to deep mode"
+        } else {
+            "Switching to fast mode"
+        };
+        bad_apple_ipc::write_async_frame(
+            &mut writer,
+            &ServerFrame::Done {
+                text: text.to_string(),
+            },
+        )
+        .await?;
+        schedule_brain_switch(to_deep);
+        return Ok(());
+    }
     let context_limit = ane_core::context_limit();
     let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let generation = spawn_blocking(move || {

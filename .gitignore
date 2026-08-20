@@ -20,9 +20,13 @@ src/platform/apple_bridge/.build
 # Cargo lock is intentionally committed for this binary
 # Cargo.lock
 
+# Training/runtime generated artifacts
+/data/
+
 # Runtime state and generated files
 *.json
 !tokenizer.json
+*.jsonl
 *.defense
 *.network
 *.safetensors
@@ -43,6 +47,11 @@ bad_apple_state_5001.*
 
 # Manual state backups
 state-backup-*/
+state-backup-*
+
+# Local test artifacts from development sessions
+/test_cage/
+/test_*.wasm
 
 # Wild workspace runtime data
 /wild_workspace

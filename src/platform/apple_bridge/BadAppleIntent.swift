@@ -254,14 +254,14 @@ public struct BadAppleDaemonClient: Sendable {
 
     public init() {}
 
-    public func generate(prompt: String, maxNewTokens: Int = 256) async throws -> String {
+    public func generate(prompt: String, maxNewTokens: Int = 64) async throws -> String {
         try await generate(prompt: prompt, maxNewTokens: maxNewTokens, onToken: { _ in })
     }
 
     /// Reports authenticated token deltas off the main actor as they arrive.
     public func generate(
         prompt: String,
-        maxNewTokens: Int = 256,
+        maxNewTokens: Int = 64,
         onToken: @escaping @Sendable (String) -> Void
     ) async throws -> String {
         print("[BadAppleClient] generate called: \(prompt)")

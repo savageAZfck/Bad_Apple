@@ -121,7 +121,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
     <key>CFBundleLocalizations</key>
     <array>
         <string>en</string>
-        <string>pt-BR</string>
+        <string>es-MX</string>
     </array>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>

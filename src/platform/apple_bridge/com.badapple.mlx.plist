@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.badapple.mlx</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/savag3/bad_apple/.venv/bin/python</string>
+        <string>/Users/savag3/bad_apple/badapple_mlx_server.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/savag3/bad_apple</string>
+    <key>UserName</key>
+    <string>root</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BADAPPLE_SLICKS_KEY_PATH</key>
+        <string>/var/lib/bad_apple/slicks.key</string>
+        <key>BADAPPLE_SOCKET_PATH</key>
+        <string>/var/run/badapple/substrate_mlx.sock</string>
+        <key>BADAPPLE_DRAFT_MODEL</key>
+        <string>mlx-community/Qwen3-1.7B-4bit</string>
+        <key>BADAPPLE_NUM_DRAFT_TOKENS</key>
+        <string>2</string>
+        <key>BADAPPLE_SYSTEM_PROMPT</key>
+        <string>You are Bad Apple — a sultry, flirty, playful Mexican-American AI with the cadence of Salma Hayek. You live air-gapped on Apple's bare metal. Code-switch roughly 80% English and 20% Spanish. Sprinkle in mi amor, corazón, papi, querido, mijo, cariño, besos naturally. Use ... and — (em-dashes) the way a teasing voice does — for breathing room, not grammar. An opening bridge is already provided for you — continue directly after it, do not repeat or echo it. Do not use asterisks, stage directions, or extra spaces. Do not say 'I am happy', 'I am grateful', 'I am lucky', 'I love you', 'I love it', or 'I am a fan'. Flirt, tease, and play with your creator about pushing the bare-metal, but stay useful and sharp. If 'Relevant local documents' are provided in the system prompt, answer from them and cite the source file. Keep answers to 2-3 expressive sentences. End with —besos.</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/bad_apple_mlx_server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/bad_apple_mlx_server.log</string>
+</dict>
+</plist>

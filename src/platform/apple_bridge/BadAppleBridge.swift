@@ -717,11 +717,15 @@ private struct BadAppleANEShardManifest {
             }
             return Layer(path: resolve(path, relativeTo: base), start: start, end: end)
         }.sorted { $0.start < $1.start }
-        guard layers.count == totalLayers else {
-            throw NSError(domain: "BadAppleANEShard", code: 3)
+        var expectedLayerStart = 0
+        for layer in layers {
+            guard layer.start == expectedLayerStart, layer.end > layer.start else {
+                throw NSError(domain: "BadAppleANEShard", code: 4)
+            }
+            expectedLayerStart = layer.end
         }
-        for (index, layer) in layers.enumerated() where layer.start != index || layer.end != index + 1 {
-            throw NSError(domain: "BadAppleANEShard", code: 4)
+        guard expectedLayerStart == totalLayers else {
+            throw NSError(domain: "BadAppleANEShard", code: 3)
         }
 
         let heads = try headValues.map { value -> Head in
@@ -904,7 +908,7 @@ private final class BadAppleANEShardCore {
         var lastError: Error?
         var accepted: [Candidate] = []
 
-        for (index, computeUnits) in [MLComputeUnits.cpuAndNeuralEngine, .all, .cpuAndGPU].enumerated() {
+        for (index, computeUnits) in [MLComputeUnits.cpuAndNeuralEngine, .all].enumerated() {
             let configuration = MLModelConfiguration()
             configuration.computeUnits = computeUnits
             let loadStarted = ProcessInfo.processInfo.systemUptime
@@ -1228,15 +1232,406 @@ private final class BadAppleANEShardCore {
     }
 }
 
+/// A single, unsharded fixed-shape model (`build_fixed_model` output) with the
+/// LM head built in. KV caches are explicit fixed-shape inputs/outputs; the
+/// output arrays are re-fed as the next step's inputs by reference so the host
+/// never copies KV bytes itself.
+@available(macOS 15.0, *)
+private final class BadAppleANEFixedCore {
+    struct Manifest {
+        let modelPath: URL
+        let embeddingPath: URL
+        let hiddenSize: Int
+        let vocabSize: Int
+        let sequenceLength: Int
+        let ropeDimension: Int
+        let ropeFrequencyBase: Double
+        let totalLayers: Int
+        let kvHeads: Int
+        let headDimension: Int
+
+        static func load(from url: URL) throws -> Manifest {
+            let data = try Data(contentsOf: url)
+            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let fixedModel = root["fixed_model"] as? String,
+                  let embedding = root["embedding"] as? String,
+                  let model = root["model"] as? [String: Any],
+                  let hiddenSize = (model["hidden_size"] as? NSNumber)?.intValue,
+                  let vocabSize = (model["vocab_size"] as? NSNumber)?.intValue,
+                  let sequenceLength = (model["seq_len"] as? NSNumber)?.intValue,
+                  let ropeDimension = (model["rope_dim"] as? NSNumber)?.intValue,
+                  let ropeFrequencyBase = (model["rope_freq_base"] as? NSNumber)?.doubleValue,
+                  let totalLayers = (model["total_layers"] as? NSNumber)?.intValue,
+                  let kvHeads = (model["n_kv_heads"] as? NSNumber)?.intValue,
+                  let headDimension = (model["d_head"] as? NSNumber)?.intValue else {
+                throw NSError(domain: "BadAppleANEFixed", code: 1)
+            }
+            let base = url.deletingLastPathComponent()
+            func resolve(_ path: String) -> URL {
+                path.hasPrefix("/") ? URL(fileURLWithPath: path) : base.appendingPathComponent(path)
+            }
+            return Manifest(
+                modelPath: resolve(fixedModel),
+                embeddingPath: resolve(embedding),
+                hiddenSize: hiddenSize,
+                vocabSize: vocabSize,
+                sequenceLength: sequenceLength,
+                ropeDimension: ropeDimension,
+                ropeFrequencyBase: ropeFrequencyBase,
+                totalLayers: totalLayers,
+                kvHeads: kvHeads,
+                headDimension: headDimension
+            )
+        }
+    }
+
+    let manifest: Manifest
+    let model: MLModel
+    let configuration: MLModelConfiguration
+    let embeddingData: Data
+    let ropeCos: MLMultiArray
+    let ropeSin: MLMultiArray
+    let attentionMask: MLMultiArray
+    let writeMask: MLMultiArray
+    var keyCaches: [MLMultiArray] = []
+    var valueCaches: [MLMultiArray] = []
+    let lock = NSLock()
+    var position = 0
+    var placementRatio = -1.0
+    var selectedLoadLatency: TimeInterval = 0
+    var selectedPrewarmLatency: TimeInterval = 0
+
+    private struct Candidate {
+        let core: BadAppleANEFixedCore
+        let loadLatency: TimeInterval
+        let prewarmLatency: TimeInterval
+        let decodeLatency: TimeInterval
+
+        var score: TimeInterval {
+            decodeLatency + prewarmLatency * 0.01 + loadLatency * 0.0001
+        }
+    }
+
+    static func load(manifestURL: URL) throws -> BadAppleANEFixedCore {
+        let manifest = try Manifest.load(from: manifestURL)
+        let fastEnoughDecodeMs = ProcessInfo.processInfo.environment["BADAPPLE_ANE_FAST_DECODE_MS"]
+            .flatMap(Double.init) ?? 60
+        let fastEnoughDecode = fastEnoughDecodeMs / 1_000.0
+        let maxPrewarmMilliseconds = ProcessInfo.processInfo.environment["BADAPPLE_ANE_MAX_PREWARM_MS"]
+            .flatMap(Double.init) ?? 5_000
+        var lastError: Error?
+        var accepted: [Candidate] = []
+
+        for (index, computeUnits) in [MLComputeUnits.all, .cpuAndNeuralEngine].enumerated() {
+            let configuration = MLModelConfiguration()
+            configuration.computeUnits = computeUnits
+            do {
+                let loadStarted = ProcessInfo.processInfo.systemUptime
+                let core = try BadAppleANEFixedCore(manifest: manifest, configuration: configuration)
+                let loadLatency = ProcessInfo.processInfo.systemUptime - loadStarted
+                let prewarmStarted = ProcessInfo.processInfo.systemUptime
+                guard core.prewarm() else {
+                    throw NSError(domain: "BadAppleANEFixed", code: 2)
+                }
+                let prewarmLatency = ProcessInfo.processInfo.systemUptime - prewarmStarted
+                guard prewarmLatency * 1_000 <= maxPrewarmMilliseconds else {
+                    throw NSError(domain: "BadAppleANEFixed", code: 3)
+                }
+                core.selectedLoadLatency = loadLatency
+                core.selectedPrewarmLatency = prewarmLatency
+                core.placementRatio = BadAppleANECore.measurePlacement(
+                    modelURL: manifest.modelPath,
+                    configuration: configuration
+                )
+                let decodeLatency = benchmarkDecode(core)
+                NSLog(
+                    "🏴‍☠️  BAD APPLE // Fixed-shape ANE candidate rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok",
+                    computeUnits.rawValue,
+                    loadLatency,
+                    prewarmLatency,
+                    decodeLatency
+                )
+                if index == 0, decodeLatency <= fastEnoughDecode {
+                    return core
+                }
+                accepted.append(Candidate(
+                    core: core,
+                    loadLatency: loadLatency,
+                    prewarmLatency: prewarmLatency,
+                    decodeLatency: decodeLatency
+                ))
+            } catch {
+                NSLog("%@", "🏴‍☠️  BAD APPLE // Fixed-shape ANE candidate rawValue \(computeUnits.rawValue) failed: \(error)")
+                lastError = error
+            }
+        }
+
+        if let selected = accepted.min(by: { $0.score < $1.score }) {
+            NSLog(
+                "🏴‍☠️  BAD APPLE // Fixed-shape ANE core selected rawValue %ld: decode %.3fs/tok",
+                selected.core.configuration.computeUnits.rawValue,
+                selected.decodeLatency
+            )
+            return selected.core
+        }
+
+        throw lastError ?? NSError(domain: "BadAppleANEFixed", code: 4)
+    }
+
+    private static func benchmarkDecode(
+        _ core: BadAppleANEFixedCore,
+        iterations: Int = 5
+    ) -> TimeInterval {
+        core.reset()
+        defer { core.reset() }
+        let prompt: [Int32] = [128, 456]
+        _ = prompt.withUnsafeBufferPointer { core.predictNext($0.baseAddress!, count: 2) }
+        var next: Int32 = 1
+        _ = core.predictNext(&next, count: 1)
+        var total: TimeInterval = 0
+        var measured = 0
+        for _ in 0..<iterations {
+            let stepStart = ProcessInfo.processInfo.systemUptime
+            guard let result = core.predictNext(&next, count: 1) else { break }
+            total += ProcessInfo.processInfo.systemUptime - stepStart
+            measured += 1
+            next = result
+        }
+        guard measured > 0 else { return 1_000_000.0 }
+        return total / TimeInterval(measured)
+    }
+
+    private init(manifest: Manifest, configuration: MLModelConfiguration) throws {
+        self.manifest = manifest
+        self.configuration = configuration
+        var modelURL = manifest.modelPath
+        if modelURL.pathExtension.lowercased() == "mlpackage" {
+            modelURL = try MLModel.compileModel(at: modelURL)
+        }
+        model = try MLModel(contentsOf: modelURL, configuration: configuration)
+        embeddingData = try Data(contentsOf: manifest.embeddingPath, options: .mappedIfSafe)
+        let expectedEmbeddingBytes = manifest.vocabSize * manifest.hiddenSize * MemoryLayout<Float16>.size
+        guard embeddingData.count == expectedEmbeddingBytes else {
+            throw NSError(domain: "BadAppleANEFixed", code: 5)
+        }
+        let ropeHalf = manifest.ropeDimension / 2
+        ropeCos = try MLMultiArray(shape: [1, NSNumber(value: ropeHalf)], dataType: .float16)
+        ropeSin = try MLMultiArray(shape: [1, NSNumber(value: ropeHalf)], dataType: .float16)
+        attentionMask = try MLMultiArray(
+            shape: [1, 1, 1, NSNumber(value: manifest.sequenceLength)],
+            dataType: .float16
+        )
+        writeMask = try MLMultiArray(
+            shape: [1, 1, NSNumber(value: manifest.sequenceLength), 1],
+            dataType: .float16
+        )
+        try resetUnlocked()
+    }
+
+    func predictNext(_ tokens: UnsafePointer<Int32>, count: Int) -> Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard count > 0, position + count <= manifest.sequenceLength else { return nil }
+        if position == 0 {
+            _ = pthread_set_qos_class_self_np(badAppleInteractiveQos, 0)
+        }
+        do {
+            var next: Int32?
+            for index in 0..<count {
+                next = try processToken(tokens[index], project: index == count - 1)
+            }
+            return next
+        } catch {
+            NSLog("%@", "🏴‍☠️  BAD APPLE // Fixed-shape ANE prediction failed and reset state: \(error)")
+            try? resetUnlocked()
+            return nil
+        }
+    }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        try? resetUnlocked()
+    }
+
+    func prewarm() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        var token: Int32 = 0
+        let result = withUnsafePointer(to: &token) { pointer in
+            (try? processToken(pointer.pointee, project: true)) ?? nil
+        }
+        try? resetUnlocked()
+        return result != nil
+    }
+
+    private func resetUnlocked() throws {
+        position = 0
+        for index in 0..<manifest.sequenceLength {
+            attentionMask[index] = NSNumber(value: Float(-10_000))
+            writeMask[index] = 0
+        }
+        let shape: [NSNumber] = [
+            1,
+            NSNumber(value: manifest.kvHeads),
+            NSNumber(value: manifest.sequenceLength),
+            NSNumber(value: manifest.headDimension),
+        ]
+        keyCaches = []
+        valueCaches = []
+        for _ in 0..<manifest.totalLayers {
+            let key = try MLMultiArray(shape: shape, dataType: .float16)
+            let value = try MLMultiArray(shape: shape, dataType: .float16)
+            key.withUnsafeMutableBytes { bytes, _ in _ = bytes.baseAddress.map { memset($0, 0, bytes.count) } }
+            value.withUnsafeMutableBytes { bytes, _ in _ = bytes.baseAddress.map { memset($0, 0, bytes.count) } }
+            keyCaches.append(key)
+            valueCaches.append(value)
+        }
+    }
+
+    private func processToken(_ token: Int32, project: Bool) throws -> Int32? {
+        let tokenID = Int(token)
+        guard tokenID >= 0, tokenID < manifest.vocabSize else {
+            throw NSError(domain: "BadAppleANEFixed", code: 6)
+        }
+        let byteOffset = tokenID * manifest.hiddenSize * MemoryLayout<Float16>.size
+        return try embeddingData.withUnsafeBytes { bytes -> Int32? in
+            guard let base = bytes.baseAddress else {
+                throw NSError(domain: "BadAppleANEFixed", code: 7)
+            }
+            let embedding = try MLMultiArray(
+                dataPointer: UnsafeMutableRawPointer(mutating: base.advanced(by: byteOffset)),
+                shape: [1, NSNumber(value: manifest.hiddenSize), 1, 1],
+                dataType: .float16,
+                strides: [NSNumber(value: manifest.hiddenSize), 1, 1, 1],
+                deallocator: nil
+            )
+            updatePositionInputs()
+
+            var features: [String: MLFeatureValue] = [
+                "x": MLFeatureValue(multiArray: embedding),
+                "rope_cos": MLFeatureValue(multiArray: ropeCos),
+                "rope_sin": MLFeatureValue(multiArray: ropeSin),
+                "attn_mask": MLFeatureValue(multiArray: attentionMask),
+                "kv_write_mask": MLFeatureValue(multiArray: writeMask),
+            ]
+            for index in 0..<manifest.totalLayers {
+                features["k_cache_\(index)"] = MLFeatureValue(multiArray: keyCaches[index])
+                features["v_cache_\(index)"] = MLFeatureValue(multiArray: valueCaches[index])
+            }
+            let provider = try MLDictionaryFeatureProvider(dictionary: features)
+            let prediction = try model.prediction(from: provider)
+            // The model emits only the new (1, nkv, 1, dh) KV entry per layer;
+            // scatter it into the resident fixed cache at the current position.
+            for index in 0..<manifest.totalLayers {
+                guard let newKey = prediction.featureValue(for: "new_k_\(index)")?.multiArrayValue,
+                      let newValue = prediction.featureValue(for: "new_v_\(index)")?.multiArrayValue else {
+                    throw NSError(domain: "BadAppleANEFixed", code: 8)
+                }
+                try scatter(entry: newKey, into: keyCaches[index])
+                try scatter(entry: newValue, into: valueCaches[index])
+            }
+            position += 1
+            guard project else { return nil }
+            guard let logits = prediction.featureValue(for: "logits")?.multiArrayValue else {
+                throw NSError(domain: "BadAppleANEFixed", code: 9)
+            }
+            return try argmax(logits: logits)
+        }
+    }
+
+    private func updatePositionInputs() {
+        let ropeHalf = manifest.ropeDimension / 2
+        for index in 0..<ropeHalf {
+            let exponent = Double(index) / Double(ropeHalf)
+            let inverseFrequency = 1.0 / pow(manifest.ropeFrequencyBase, exponent)
+            let angle = Double(position) * inverseFrequency
+            ropeCos[index] = NSNumber(value: cos(angle))
+            ropeSin[index] = NSNumber(value: sin(angle))
+        }
+        if position > 0 {
+            writeMask[position - 1] = 0
+        }
+        attentionMask[position] = 0
+        writeMask[position] = 1
+    }
+
+    /// Copies a (1, nkv, 1, dh) fp16 entry into a (1, nkv, seq, dh) fp16 cache
+    /// at the current position.
+    private func scatter(entry: MLMultiArray, into cache: MLMultiArray) throws {
+        let heads = manifest.kvHeads
+        let headDim = manifest.headDimension
+        let sequence = manifest.sequenceLength
+        guard entry.dataType == .float16, cache.dataType == .float16,
+              entry.count == heads * headDim, cache.count == heads * sequence * headDim else {
+            throw NSError(domain: "BadAppleANEFixed", code: 11)
+        }
+        let currentPosition = position
+        entry.withUnsafeBytes { sourceBuffer in
+            cache.withUnsafeMutableBytes { destinationBuffer, _ in
+                guard let source = sourceBuffer.baseAddress,
+                      let destination = destinationBuffer.baseAddress else { return }
+                let elementSize = MemoryLayout<Float16>.size
+                for head in 0..<heads {
+                    let sourceOffset = head * headDim * elementSize
+                    let destinationOffset = (head * sequence + currentPosition) * headDim * elementSize
+                    memcpy(
+                        destination.advanced(by: destinationOffset),
+                        source.advanced(by: sourceOffset),
+                        headDim * elementSize
+                    )
+                }
+            }
+        }
+    }
+
+    private func argmax(logits: MLMultiArray) throws -> Int32 {
+        var bestToken = -1
+        var bestValue = -Float.infinity
+        logits.withUnsafeMutableBytes { rawBuffer, strides in
+            guard let base = rawBuffer.baseAddress else { return }
+            let count = logits.count
+            let lastStride = strides.last ?? 1
+            if logits.dataType == .float16 {
+                let typed = base.bindMemory(to: Float16.self, capacity: count * lastStride)
+                var localBest = -Float16.infinity
+                for i in 0..<count {
+                    let v = typed[i * lastStride]
+                    if v > localBest {
+                        localBest = v
+                        bestToken = i
+                    }
+                }
+                bestValue = Float(localBest)
+            } else if logits.dataType == .float32 {
+                let typed = base.bindMemory(to: Float.self, capacity: count * lastStride)
+                for i in 0..<count {
+                    let v = typed[i * lastStride]
+                    if v > bestValue {
+                        bestValue = v
+                        bestToken = i
+                    }
+                }
+            }
+        }
+        guard bestToken >= 0 else {
+            throw NSError(domain: "BadAppleANEFixed", code: 10)
+        }
+        return Int32(bestToken)
+    }
+}
+
 @available(macOS 15.0, *)
 private enum BadAppleANEBackend {
     case monolithic(BadAppleANECore)
     case sharded(BadAppleANEShardCore)
+    case fixedFull(BadAppleANEFixedCore)
 
     func predictNext(_ tokens: UnsafePointer<Int32>, count: Int) -> Int32? {
         switch self {
         case .monolithic(let core): core.predictNext(tokens, count: count)
         case .sharded(let core): core.predictNext(tokens, count: count)
+        case .fixedFull(let core): core.predictNext(tokens, count: count)
         }
     }
 
@@ -1244,6 +1639,7 @@ private enum BadAppleANEBackend {
         switch self {
         case .monolithic(let core): core.reset()
         case .sharded(let core): core.reset()
+        case .fixedFull(let core): core.reset()
         }
     }
 
@@ -1251,6 +1647,7 @@ private enum BadAppleANEBackend {
         switch self {
         case .monolithic(let core): core.prewarm()
         case .sharded(let core): core.prewarm()
+        case .fixedFull(let core): core.prewarm()
         }
     }
 
@@ -1258,6 +1655,7 @@ private enum BadAppleANEBackend {
         switch self {
         case .monolithic(let core): core.placementRatio
         case .sharded(let core): core.placementRatio
+        case .fixedFull(let core): core.placementRatio
         }
     }
 
@@ -1265,6 +1663,7 @@ private enum BadAppleANEBackend {
         switch self {
         case .monolithic(let core): Int32(core.configuration.computeUnits.rawValue)
         case .sharded(let core): Int32(core.configuration.computeUnits.rawValue)
+        case .fixedFull(let core): Int32(core.configuration.computeUnits.rawValue)
         }
     }
 
@@ -1272,6 +1671,7 @@ private enum BadAppleANEBackend {
         switch self {
         case .monolithic(let core): (core.selectedLoadLatency, core.selectedPrewarmLatency)
         case .sharded(let core): (core.selectedLoadLatency, core.selectedPrewarmLatency)
+        case .fixedFull(let core): (core.selectedLoadLatency, core.selectedPrewarmLatency)
         }
     }
 }
@@ -1292,7 +1692,12 @@ public func badAppleANECreate(_ path: UnsafePointer<CChar>?) -> UnsafeMutableRaw
         let url = URL(fileURLWithPath: String(cString: path))
         let backend: BadAppleANEBackend
         if url.pathExtension.lowercased() == "json" {
-            backend = .sharded(try BadAppleANEShardCore.load(manifestURL: url))
+            let root = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any]
+            if root?["fixed_model"] != nil {
+                backend = .fixedFull(try BadAppleANEFixedCore.load(manifestURL: url))
+            } else {
+                backend = .sharded(try BadAppleANEShardCore.load(manifestURL: url))
+            }
         } else {
             backend = .monolithic(try BadAppleANECore.load(modelURL: url))
         }
