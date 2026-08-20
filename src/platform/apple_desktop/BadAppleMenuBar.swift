@@ -172,6 +172,138 @@ final class BadAppleFFI {
     }
 }
 
+// MARK: - Local neural TTS client (Piper)
+
+private final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
+    static let shared = PiperTTSClient()
+
+    private let socketPath = "/tmp/badapple_tts.sock"
+    private let requestTimeout: TimeInterval = 2.0
+    private let responseTimeout: TimeInterval = 15.0
+    private var player: AVAudioPlayer?
+    private var onDidFinish: (() -> Void)?
+
+    func stop() {
+        player?.stop()
+        player = nil
+        onDidFinish = nil
+    }
+
+    /// Try to speak through the local Piper TTS server. Calls `completion(true)`
+    /// when audio finishes, or `completion(false)` if the server is unreachable,
+    /// synthesis fails, or playback fails.
+    func speak(_ text: String, completion: @escaping (Bool) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            do {
+                let wavURL = try self.synthesize(text)
+                DispatchQueue.main.async {
+                    self.play(url: wavURL, completion: completion)
+                }
+            } catch {
+                badAppleVoiceLog("PiperTTS synthesize error: \(error.localizedDescription)")
+                DispatchQueue.main.async { completion(false) }
+            }
+        }
+    }
+
+    private func synthesize(_ text: String) throws -> URL {
+        let request: [String: Any] = ["text": text]
+        let data = try JSONSerialization.data(withJSONObject: request, options: [])
+        let response = try unixSocketRequest(data)
+        guard let json = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
+            throw NSError(domain: "PiperTTS", code: 2, userInfo: [NSLocalizedDescriptionKey: "invalid JSON"])
+        }
+        guard (json["ok"] as? Bool) == true, let wavPath = json["wav_path"] as? String else {
+            let err = json["error"] as? String ?? "unknown"
+            throw NSError(domain: "PiperTTS", code: 3, userInfo: [NSLocalizedDescriptionKey: err])
+        }
+        return URL(fileURLWithPath: wavPath)
+    }
+
+    private func unixSocketRequest(_ data: Data) throws -> Data {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw NSError(domain: "PiperTTS", code: 11, userInfo: [NSLocalizedDescriptionKey: "socket() failed"])
+        }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(socketPath.utf8)
+        let maxPath = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        guard pathBytes.count < maxPath else {
+            throw NSError(domain: "PiperTTS", code: 12, userInfo: [NSLocalizedDescriptionKey: "socket path too long"])
+        }
+        pathBytes.withUnsafeBufferPointer { src in
+            _ = withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+                memcpy(dst, src.baseAddress!, pathBytes.count)
+            }
+        }
+        addr.sun_len = UInt8(2 + pathBytes.count + 1)
+
+        var tv = timeval(tv_sec: __darwin_time_t(requestTimeout), tv_usec: 0)
+        var tvRecv = timeval(tv_sec: __darwin_time_t(responseTimeout), tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tvRecv, socklen_t(MemoryLayout<timeval>.size))
+
+        let len = socklen_t(addr.sun_len)
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                connect(fd, sockaddrPtr, len)
+            }
+        }
+        guard connectResult == 0 else {
+            throw NSError(domain: "PiperTTS", code: 13, userInfo: [NSLocalizedDescriptionKey: "connect() failed: \(errno)"])
+        }
+
+        _ = data.withUnsafeBytes { write(fd, $0.baseAddress!, $0.count) }
+        var newline: UInt8 = 0x0A
+        _ = write(fd, &newline, 1)
+
+        var response = Data()
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
+        defer { buffer.deallocate() }
+        while true {
+            let n = read(fd, buffer, 4096)
+            if n <= 0 { break }
+            response.append(buffer, count: n)
+            if response.contains(0x0A) { break }
+        }
+        return response
+    }
+
+    private func play(url: URL, completion: @escaping (Bool) -> Void) {
+        do {
+            player = try AVAudioPlayer(contentsOf: url)
+            player?.delegate = self
+            player?.volume = 0.95
+            player?.prepareToPlay()
+            onDidFinish = { [weak self] in
+                self?.player = nil
+                completion(true)
+            }
+            guard player?.play() == true else {
+                throw NSError(domain: "PiperTTS", code: 5, userInfo: [NSLocalizedDescriptionKey: "play() returned false"])
+            }
+        } catch {
+            badAppleVoiceLog("PiperTTS play error: \(error.localizedDescription)")
+            completion(false)
+        }
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onDidFinish?()
+            self?.onDidFinish = nil
+            self?.player = nil
+        }
+    }
+}
+
 // MARK: - Native voice host
 
 private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
@@ -207,6 +339,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     private var restartWorkItem: DispatchWorkItem?
     private var awaitingNextUtterance = false
     private var enabled = false
+    private var currentSpeakID = 0
     private var converter: AVAudioConverter?
     private let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
     // Tolerant wake pattern: allows the on-device recognizer to insert filler words
@@ -590,7 +723,16 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         return chunks.isEmpty ? [ProsodyChunk(text: text, rate: 0.46, pitch: 0.96, postDelay: 0.10)] : chunks
     }
 
+    private var usePiperTTS: Bool {
+        UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? true
+    }
+
+    /// Main entry point: try the local neural Piper TTS first, then fall back
+    /// to the on-device Apple speech engine. The result is much more human at
+    /// the cost of ~200-600 ms synthesis latency for the 8B response.
     func speak(_ text: String) {
+        currentSpeakID += 1
+        let id = currentSpeakID
         let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard enabled else { return }
         guard !spoken.isEmpty else {
@@ -598,10 +740,35 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             return
         }
         state = .speaking
-        synthesizer.stopSpeaking(at: .immediate)
 
+        // Stop any in-flight audio so we do not stack responses.
+        synthesizer.stopSpeaking(at: .immediate)
+        PiperTTSClient.shared.stop()
+
+        if usePiperTTS {
+            badAppleVoiceLog("speak using Piper TTS (id=\(id))")
+            state = .speaking
+            PiperTTSClient.shared.speak(spoken) { [weak self] success in
+                DispatchQueue.main.async {
+                    guard let self = self, self.enabled, self.currentSpeakID == id else { return }
+                    if success {
+                        self.scheduleRestart(after: 0.25)
+                    } else {
+                        badAppleVoiceLog("Piper TTS failed, falling back to Apple TTS (id=\(id))")
+                        self.speakWithApple(spoken, id: id)
+                    }
+                }
+            }
+        } else {
+            badAppleVoiceLog("speak using Apple TTS (id=\(id))")
+            speakWithApple(spoken, id: id)
+        }
+    }
+
+    private func speakWithApple(_ text: String, id: Int) {
+        guard enabled, currentSpeakID == id else { return }
         let voice = bestVoice()
-        let chunks = prosodyChunks(from: spoken)
+        let chunks = prosodyChunks(from: text)
         badAppleVoiceLog("speaking with \(chunks.count) chunk(s), voice: \(voice.identifier)")
 
         for chunk in chunks {

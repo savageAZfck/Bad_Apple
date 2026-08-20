@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>BADAPPLE_TTS_SOCKET</key>
+		<string>/tmp/badapple_tts.sock</string>
+		<key>BADAPPLE_TTS_VOICES_DIR</key>
+		<string>/Users/savag3/bad_apple/voices</string>
+		<key>BADAPPLE_TTS_VOICE</key>
+		<string>es_MX-claude-high</string>
+		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
+		<string>1.05</string>
+		<key>BADAPPLE_TTS_NOISE_SCALE</key>
+		<string>0.80</string>
+		<key>BADAPPLE_TTS_NOISE_W_SCALE</key>
+		<string>0.80</string>
+		<key>BADAPPLE_TTS_VOLUME</key>
+		<string>0.95</string>
+		<key>HOME</key>
+		<string>/Users/savag3</string>
+		<key>PATH</key>
+		<string>/Users/savag3/bad_apple/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.badapple.tts</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/savag3/bad_apple/.venv/bin/python</string>
+		<string>/Users/savag3/bad_apple/badapple_tts_server.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/tmp/badapple_tts.log</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/badapple_tts.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/savag3/bad_apple</string>
+</dict>
+</plist>

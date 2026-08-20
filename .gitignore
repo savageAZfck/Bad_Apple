@@ -21,6 +21,7 @@ src/platform/apple_bridge/.build
 # Cargo.lock
 
 # Training/runtime generated artifacts
+/voices/
 /data/
 
 # Runtime state and generated files
