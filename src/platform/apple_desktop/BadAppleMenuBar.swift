@@ -191,7 +191,10 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
     }
 
     static let defaultVoice = "es_MX-claude-high"
-    static let availableVoices = ["es_MX-claude-high", "es_MX-ald-medium"]
+    static let availableVoices = [
+        "es_MX-claude-high",
+        "es_MX-cortana-19669-epoch-high",
+    ]
 
     /// Try to speak through the local Piper TTS server. Calls `completion(true)`
     /// when audio finishes, or `completion(false)` if the server is unreachable,
