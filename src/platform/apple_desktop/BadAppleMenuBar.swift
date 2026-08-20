@@ -686,15 +686,15 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 
-    /// Split the response into prosodic chunks and add post-utterance delays
-    /// where the Salma prompt uses ellipses, em-dashes, and sentence endings.
-    /// Varying pitch and rate makes the 8B output sound like a person, not a
-    /// flat sentence scanner.
+    /// Split the response into natural prosodic chunks on sentence/ellipsis
+    /// boundaries only. Paulina handles the inner cadence (em-dashes,
+    /// ellipses) better inside a single utterance; splitting every pause makes
+    /// it choppy. Short post-delays keep the flow connected but breathable.
     private func prosodyChunks(from text: String) -> [ProsodyChunk] {
         var chunks: [ProsodyChunk] = []
         var current = ""
 
-        func flush(_ postDelay: TimeInterval = 0.0, rate: Float = 0.46, pitch: Float = 0.96) {
+        func flush(_ postDelay: TimeInterval = 0.0, rate: Float = 0.50, pitch: Float = 0.98) {
             let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 current = ""
@@ -702,9 +702,9 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             }
             // sign-off "—besos" gets extra warmth and a long trailing breath
             let isSignOff = trimmed.lowercased().contains("besos")
-            let finalRate: Float = isSignOff ? 0.42 : rate
-            let finalPitch: Float = isSignOff ? 0.94 : pitch
-            let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.4) : postDelay
+            let finalRate: Float = isSignOff ? 0.46 : rate
+            let finalPitch: Float = isSignOff ? 0.96 : pitch
+            let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.35) : postDelay
             chunks.append(ProsodyChunk(text: trimmed, rate: finalRate, pitch: finalPitch, postDelay: finalDelay))
             current = ""
         }
@@ -716,32 +716,30 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             current.append(c)
 
             if c == "…" || (c == "." && i + 1 < chars.count && chars[i + 1] == "." && i + 2 < chars.count && chars[i + 2] == ".") {
-                // ellipsis: slower, trailing breath
-                flush(0.30, rate: 0.44, pitch: 0.95)
+                // ellipsis: tiny trailing breath, let the voice trail
+                flush(0.10, rate: 0.48, pitch: 0.97)
                 if c == "." { i += 2 }
-            } else if c == "—" {
-                flush(0.18, rate: 0.45, pitch: 0.96)
             } else if c == "?" {
-                flush(0.20, rate: 0.46, pitch: 1.02)
+                flush(0.12, rate: 0.50, pitch: 1.01)
             } else if c == "!" {
-                flush(0.20, rate: 0.48, pitch: 1.00)
+                flush(0.12, rate: 0.52, pitch: 1.00)
             } else if c == "." || c == "\n" {
                 // only end a sentence if the next char is whitespace or we are at the end
                 let next = i + 1 < chars.count ? chars[i + 1] : nil
                 if next == nil || next!.isWhitespace || next! == "\n" {
-                    flush(0.15)
+                    flush(0.08)
                 }
             }
 
             i += 1
         }
 
-        flush(0.10)
-        return chunks.isEmpty ? [ProsodyChunk(text: text, rate: 0.46, pitch: 0.96, postDelay: 0.10)] : chunks
+        flush(0.05)
+        return chunks.isEmpty ? [ProsodyChunk(text: text, rate: 0.50, pitch: 0.98, postDelay: 0.05)] : chunks
     }
 
     private var usePiperTTS: Bool {
-        UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
     }
 
     private var selectedPiperVoice: String {
@@ -1545,6 +1543,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         menu.addItem(NSMenuItem(title: "Restart Voice Recognition", action: #selector(restartVoice), keyEquivalent: "r"))
 
         let voiceMenu = NSMenu(title: "Voice")
+
+        let usePiper = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
+        let engineToggle = NSMenuItem(title: "Use Piper TTS (experimental)", action: #selector(togglePiperTTS), keyEquivalent: "")
+        engineToggle.state = usePiper ? .on : .off
+        voiceMenu.addItem(engineToggle)
+        voiceMenu.addItem(NSMenuItem.separator())
+
         for voice in PiperTTSClient.availableVoices {
             let display = voice
                 .replacingOccurrences(of: "es_MX-", with: "")
@@ -1556,9 +1561,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             item.representedObject = voice
             let current = UserDefaults.standard.string(forKey: "BadAppleTTSVoice") ?? PiperTTSClient.defaultVoice
             item.state = (current == voice) ? .on : .off
+            item.isEnabled = usePiper
             voiceMenu.addItem(item)
         }
-        let voiceParent = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+        let voiceParent = NSMenuItem(title: usePiper ? "Voice (Piper)" : "Voice (Paulina)", action: nil, keyEquivalent: "")
         voiceParent.submenu = voiceMenu
         menu.addItem(voiceParent)
 
@@ -1632,6 +1638,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
               PiperTTSClient.availableVoices.contains(voice) else { return }
         UserDefaults.standard.set(voice, forKey: "BadAppleTTSVoice")
         badAppleVoiceLog("selected TTS voice: \(voice)")
+        rebuildMenu()
+    }
+
+    @objc private func togglePiperTTS() {
+        let current = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
+        UserDefaults.standard.set(!current, forKey: "BadAppleUsePiperTTS")
+        badAppleVoiceLog("Piper TTS enabled: \(!current)")
         rebuildMenu()
     }
 
