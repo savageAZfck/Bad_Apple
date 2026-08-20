@@ -20,6 +20,22 @@ path = "src/main.rs"
 name = "badapple"
 path = "src/bin/badapple.rs"
 
+[[bin]]
+name = "bench_tensor_brain"
+path = "src/bin/bench_tensor_brain.rs"
+
+[[bin]]
+name = "diag_brain"
+path = "src/bin/diag_brain.rs"
+
+[[bin]]
+name = "train_gatekeeper"
+path = "src/bin/train_gatekeeper.rs"
+
+[[bin]]
+name = "gatekeeper"
+path = "src/bin/gatekeeper.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -40,7 +56,7 @@ sled = "0.34"
 notify = "6.1"
 hmac = "0.13.0"
 sha2 = "0.11.0"
-base64 = "0.23.0"
+base64 = "0.22"
 anyhow = "1.0.104"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -54,6 +70,8 @@ libc = "0.2"
 memmap2 = "0.9.11"
 half = "2"
 bytemuck = { version = "1.25.2", features = ["derive"] }
+regex = "1.10"
+dirs = "5"
 wasmi = "0.35.0"
 wasmparser = { version = "0.100.2", package = "wasmparser-nostd", default-features = false }
 metal = "0.29.0"

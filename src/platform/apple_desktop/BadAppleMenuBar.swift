@@ -199,6 +199,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     private let audioEngine = AVAudioEngine()
     private let synthesizer = AVSpeechSynthesizer()
+    private var pendingSpeechUtterances = 0
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -210,8 +211,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     private let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
     // Tolerant wake pattern: allows the on-device recognizer to insert filler words
     // such as "at", "my", "and" between "hey", "bad", and "apple".
+    // Wake pattern: optional "hey"-like prefix, then "bad apple".
+    // Case-insensitive and tolerant of filler words in between.
     private let wakePattern = try! NSRegularExpression(
-        pattern: "(?i)(?:^|\\b)(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+bad(?:\\s+\\w+){0,2}\\s+apple(?:\\b|$)"
+        pattern: "(?i)(?:^|\\b)(?:(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+)?bad(?:\\s+\\w+){0,2}\\s+apple(?:\\b|$)"
     )
     private var promptTimer: Timer?
     private var stablePrompt = ""
@@ -240,6 +243,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             awaitingNextUtterance = false
             stopRecognition()
             synthesizer.stopSpeaking(at: .immediate)
+            pendingSpeechUtterances = 0
             state = .disabled
             return
         }
@@ -270,8 +274,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     private func configureOnDeviceRecognizer() {
         guard enabled else { return }
-        guard let localRecognizer = SFSpeechRecognizer(locale: Locale.current) else {
-            failClosed("recognizer unavailable for current locale")
+        // The wake phrase is English; keep recognition in en-US even if the system
+        // TTS/Siri locale is set to pt-BR.
+        guard let localRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
+            failClosed("recognizer unavailable for en-US")
             return
         }
         badAppleVoiceLog("configureOnDeviceRecognizer: locale=\(Locale.current.identifier) supportsOnDevice=\(localRecognizer.supportsOnDeviceRecognition) isAvailable=\(localRecognizer.isAvailable)")
@@ -313,6 +319,14 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             return
         }
 
+        // Keep the audio engine running by wiring input -> mixer -> output, but
+        // mute the mixer so the user doesn't hear the microphone fed back.
+        let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 2, interleaved: false)!
+        audioEngine.connect(input, to: audioEngine.mainMixerNode, format: inputFormat)
+        audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: outputFormat)
+        audioEngine.mainMixerNode.volume = 0.0
+        audioEngine.mainMixerNode.outputVolume = 0.0
+
         converter = AVAudioConverter(from: inputFormat, to: targetFormat)
         guard let converter = converter else {
             failClosed("could not create audio converter")
@@ -320,20 +334,28 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         }
         badAppleVoiceLog("startRecognition: inputFormat sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount) target sampleRate=16000 channels=1")
 
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak recognitionRequest, weak self] buffer, _ in
-            guard let request = recognitionRequest, let target = self?.targetFormat else { return }
-            let frameCapacity = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / inputFormat.sampleRate) + 1024
-            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: frameCapacity) else { return }
-            NSLog("🏴‍☠️ BAD APPLE // Audio buffer intercepted: \(buffer.frameLength) frames")
+        let target = targetFormat
+        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak recognitionRequest] buffer, _ in
+            guard let request = recognitionRequest else { return }
+            let expectedFrames = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / inputFormat.sampleRate)
+            let outputFrames = expectedFrames + 1024
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outputFrames) else { return }
+            // The converter does not always reset frameLength; tell it the capacity and then clamp to actual.
+            outputBuffer.frameLength = outputBuffer.frameCapacity
             var error: NSError?
             let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
                 outStatus.pointee = .haveData
                 return buffer
             }
             let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            outputBuffer.frameLength = min(outputBuffer.frameLength, expectedFrames)
             if let err = error {
                 badAppleVoiceLog("converter error: \(err)")
-            } else if status != .error {
+            } else if status != .error, outputBuffer.frameLength > 0 {
+                let ptr = outputBuffer.int16ChannelData?[0]
+                let first = ptr.map { $0[0] } ?? 0
+                let last = ptr.map { $0[Int(outputBuffer.frameLength - 1)] } ?? 0
+                badAppleVoiceLog("audio tap: in=\(buffer.frameLength) out=\(outputBuffer.frameLength) expected=\(expectedFrames) first=\(first) last=\(last)")
                 request.append(outputBuffer)
             }
         }
@@ -493,7 +515,11 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         }
         state = .speaking
         let utterance = AVSpeechUtterance(string: spoken)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.voice = AVSpeechSynthesisVoice(identifier: "com.apple.voice.compact.es-MX.Paulina")
+            ?? AVSpeechSynthesisVoice(language: "es-MX")
+        utterance.rate = 0.46
+        utterance.pitchMultiplier = 0.96
+        pendingSpeechUtterances = 1
         synthesizer.speak(utterance)
     }
 
@@ -503,7 +529,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        scheduleRestart(after: 0.25)
+        pendingSpeechUtterances = max(0, pendingSpeechUtterances - 1)
+        if pendingSpeechUtterances == 0 {
+            scheduleRestart(after: 0.25)
+        }
     }
 
     private func scheduleRestart(after delay: TimeInterval) {
@@ -529,6 +558,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             audioEngine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
         }
+        audioEngine.disconnectNodeOutput(audioEngine.inputNode)
+        audioEngine.disconnectNodeOutput(audioEngine.mainMixerNode)
     }
 
     private func failClosed(_ reason: String) {
@@ -549,6 +580,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 private enum BadAppleOperation: String {
     case openApp = "open_app"
     case openWorkspace = "open_workspace"
+    case createFile = "create_file"
     case createDirectory = "create_directory"
     case copyFile = "copy_file"
     case moveFile = "move_file"
@@ -556,7 +588,7 @@ private enum BadAppleOperation: String {
 
     var mutatesFiles: Bool {
         switch self {
-        case .createDirectory, .copyFile, .moveFile, .moveToTrash: return true
+        case .createFile, .createDirectory, .copyFile, .moveFile, .moveToTrash: return true
         case .openApp, .openWorkspace: return false
         }
     }
@@ -574,6 +606,7 @@ private struct BadAppleAction {
         switch operation {
         case .openApp: return "Open installed application “\(target ?? "")”?"
         case .openWorkspace: return "Open workspace “\(target ?? "")”?"
+        case .createFile: return "Create file “\(path ?? "")”?"
         case .createDirectory: return "Create directory “\(path ?? "")”?"
         case .copyFile: return "Copy “\(source ?? "")” to “\(destination ?? "")”?"
         case .moveFile: return "Move “\(source ?? "")” to “\(destination ?? "")”?"
@@ -732,18 +765,18 @@ private enum BadAppleActionParser {
         switch operation {
         case .openApp, .openWorkspace:
             requiredKeys = ["operation", "target"]
-            target = nonemptyString(object["target"])
+            target = expandPath(nonemptyString(object["target"]))
             path = nil; source = nil; destination = nil
-        case .createDirectory, .moveToTrash:
+        case .createFile, .createDirectory, .moveToTrash:
             requiredKeys = ["operation", "path"]
             target = nil
-            path = nonemptyString(object["path"])
+            path = expandPath(nonemptyString(object["path"]))
             source = nil; destination = nil
         case .copyFile, .moveFile:
             requiredKeys = ["operation", "source", "destination"]
             target = nil; path = nil
-            source = nonemptyString(object["source"])
-            destination = nonemptyString(object["destination"])
+            source = expandPath(nonemptyString(object["source"]))
+            destination = expandPath(nonemptyString(object["destination"]))
         }
         guard Set(object.keys) == requiredKeys,
               requiredKeys.subtracting(["operation"]).allSatisfy({ nonemptyString(object[$0]) != nil }) else {
@@ -763,6 +796,18 @@ private enum BadAppleActionParser {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : string
+    }
+
+    private static func expandPath(_ path: String?) -> String? {
+        guard let path = path else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path.hasPrefix("~/") {
+            return home + String(path.dropFirst(1))
+        }
+        if path.hasPrefix("/Users/"), let slash = path.dropFirst("/Users/".count).firstIndex(of: "/") {
+            return home + String(path[slash...])
+        }
+        return path
     }
 
     private static func rejected(_ spoken: String, _ message: String) -> BadAppleActionParseResult {
@@ -800,7 +845,7 @@ private final class BadAppleActionExecutor {
             openApplication(named: action.target ?? "")
         case .openWorkspace:
             openWorkspace(named: action.target ?? "")
-        case .createDirectory, .copyFile, .moveFile, .moveToTrash:
+        case .createFile, .createDirectory, .copyFile, .moveFile, .moveToTrash:
             invokeAutomationHelper(for: action)
         }
     }
@@ -1030,6 +1075,12 @@ struct BadAppleMenuBarApp {
     }
 }
 
+private enum BadAppleBrain {
+    static let fastSocket = "/var/run/badapple/substrate_fast.sock"
+    static let deepSocket = "/var/run/badapple/substrate.sock"
+    static let keyPath = "/var/lib/bad_apple/slicks.key"
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var statusItem: NSStatusItem?
     private var menu: NSMenu?
@@ -1047,7 +1098,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     func applicationDidFinishLaunching(_ notification: Notification) {
         BadAppleFFI.shared.load()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.button?.title = "BA"
+        statusItem?.button?.title = "🍎"
         menu = NSMenu(title: "Bad Apple")
         statusItem?.menu = menu
 
@@ -1072,19 +1123,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         streamedTokenCount = 0
         rebuildMenu()
 
+        // Voice mode switch commands are handled without a daemon call.
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectivePrompt = trimmed
+
         // Fast local action resolver for common voice commands (open workspace,
         // launch app, create directory).  This keeps the assistant responsive
         // even when the cognitive substrate is slow or unavailable.
-        if let local = BadAppleActionResolver.resolve(prompt) {
+        if let local = BadAppleActionResolver.resolve(effectivePrompt) {
             badAppleVoiceLog("submitVoicePrompt resolved local action: \(local)")
             actionExecutor.confirmAndExecute(local)
             return
         }
 
         // Fallback: ask the on-device daemon via the bundled badapple CLI.
+        let socket = BadAppleBrain.deepSocket
+        let maxTokens = 120
         Task {
             do {
-                let response = try await runBadAppleCLI(prompt: prompt)
+                let response = try await runBadAppleCLI(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens)
                 await MainActor.run { self.completeVoiceResponse(response) }
             } catch {
                 badAppleVoiceLog("submitVoicePrompt error: \(error)")
@@ -1097,7 +1154,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
-    private func runBadAppleCLI(prompt: String) async throws -> String {
+    @objc private func newChat() {
+        Task {
+            do {
+                let response = try await runBadAppleCLI(prompt: "new chat", socketPath: BadAppleBrain.deepSocket, maxTokens: 80)
+                await MainActor.run {
+                    self.lastPrompt = "new chat"
+                    self.lastError = nil
+                    self.streamedTokenCount = 0
+                    self.voiceHost.speak(response)
+                    self.rebuildMenu()
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.rebuildMenu()
+                }
+            }
+        }
+    }
+
+    private func runBadAppleCLI(prompt: String, socketPath: String, maxTokens: Int) async throws -> String {
         let binary = Bundle.main.bundleURL
             .appendingPathComponent("Contents")
             .appendingPathComponent("Helpers")
@@ -1112,16 +1189,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 let process = Process()
                 let outputPipe = Pipe()
                 process.executableURL = binary
-                process.arguments = [prompt]
+                process.arguments = ["--max-tokens", String(maxTokens), prompt]
                 process.standardOutput = outputPipe
                 process.standardError = outputPipe
                 var environment = ProcessInfo.processInfo.environment
-                environment["BADAPPLE_SOCKET_PATH"] = "/var/run/badapple/substrate.sock"
-                environment["BADAPPLE_SLICKS_KEY_PATH"] = "/var/lib/bad_apple/slicks.key"
+                environment["BADAPPLE_SOCKET_PATH"] = socketPath
+                environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
                 process.environment = environment
 
                 var timeoutTimer: Timer?
-                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: false) { _ in
+                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
                     badAppleVoiceLog("runBadAppleCLI: timeout, terminating")
                     process.terminate()
                 }
@@ -1168,13 +1245,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     func rebuildMenu() {
         guard let menu = menu else { return }
         menu.removeAllItems()
-        let header = NSMenuItem(title: "Bad Apple Voice Host", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Bad Apple — 8B MLX + RAG", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
 
         let voiceStatus = NSMenuItem(title: voiceHost.state.label.truncated(to: 90), action: nil, keyEquivalent: "")
         voiceStatus.isEnabled = false
         menu.addItem(voiceStatus)
+        let mode = NSMenuItem(title: "Brain: 8B MLX + RAG", action: nil, keyEquivalent: "")
+        mode.isEnabled = false
+        menu.addItem(mode)
+        menu.addItem(NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n"))
         let toggle = NSMenuItem(title: "Voice Listening", action: #selector(toggleVoice), keyEquivalent: "v")
         toggle.state = voiceEnabled ? .on : .off
         menu.addItem(toggle)

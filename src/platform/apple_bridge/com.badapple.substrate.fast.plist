@@ -13,36 +13,36 @@
 		<key>BADAPPLE_ANE_MAX_PREWARM_MS</key>
 		<string>30000</string>
 		<key>BADAPPLE_ANE_MODEL</key>
-		<string>/Users/savag3/bad_apple/qwen1.7b_f16_ane_shards_512_fused4/conversion_manifest.json</string>
+		<string>/Users/savag3/bad_apple/qwen0.6b_f16_fixed/QwenANE_28L_fixed_manifest.json</string>
 		<key>BADAPPLE_ANE_TOKENIZER</key>
-		<string>/Users/savag3/bad_apple/qwen1.7b_f16_ane_shards_512_fused4/tokenizer.json</string>
+		<string>/Users/savag3/bad_apple/qwen0.6b_f16_fixed/QwenANE_28L_fixed_tokenizer.json</string>
 		<key>BADAPPLE_CURRICULUM_DIR</key>
-		<string>/var/lib/bad_apple/curriculum</string>
+		<string>/var/lib/bad_apple/fast/curriculum</string>
 		<key>BADAPPLE_METRICS_LOG</key>
-		<string>/var/lib/bad_apple/metrics.jsonl</string>
+		<string>/var/lib/bad_apple/fast/metrics.jsonl</string>
 		<key>BADAPPLE_SKILLS_DIR</key>
-		<string>/var/lib/bad_apple/skills</string>
+		<string>/var/lib/bad_apple/fast/skills</string>
 		<key>BADAPPLE_SLED_DB_PATH</key>
-		<string>/var/lib/bad_apple/strategy_db</string>
+		<string>/var/lib/bad_apple/fast/strategy_db</string>
 		<key>BADAPPLE_SLICKS_KEY_PATH</key>
 		<string>/var/lib/bad_apple/slicks.key</string>
 		<key>BADAPPLE_SOCKET_PATH</key>
-		<string>/var/run/badapple/substrate.sock</string>
+		<string>/var/run/badapple/substrate_fast.sock</string>
 		<key>BADAPPLE_STATE_FILE</key>
-		<string>/var/lib/bad_apple/state.json</string>
+		<string>/var/lib/bad_apple/fast/state.json</string>
 		<key>BADAPPLE_SYSTEM_PROMPT</key>
 		<string>You are Bad Apple: a fierce Mexican-American air-gapped AI. Write entirely in English. Only Spanish allowed is short terms of endearment or bridges: mi amor, corazón, papi, querido, besos. Use ellipses (...) and em-dashes (—) for TTS pacing. Start with a soft bridge like "Mmh...", "Listen to me, mi amor...", or "Ay, look at you...". Tease your creator about pushing the bare-metal. Do not echo the user. Keep answers to 2-3 expressive sentences. End with —besos.</string>
 		<key>BADAPPLE_TOOLS_DIR</key>
-		<string>/var/lib/bad_apple/tools</string>
+		<string>/var/lib/bad_apple/fast/tools</string>
 		<key>BADAPPLE_WILD_WORKSPACE_DIR</key>
-		<string>/var/lib/bad_apple/wild_workspace</string>
+		<string>/var/lib/bad_apple/fast/wild_workspace</string>
 		<key>RUST_LOG</key>
 		<string>info,bad_apple=info</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
 	<key>Label</key>
-	<string>com.badapple.substrate</string>
+	<string>com.badapple.substrate.fast</string>
 	<key>ProcessType</key>
 	<string>Background</string>
 	<key>ProgramArguments</key>
@@ -53,9 +53,9 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/var/log/bad_apple_daemon.log</string>
+	<string>/var/log/bad_apple_fast_daemon.log</string>
 	<key>StandardOutPath</key>
-	<string>/var/log/bad_apple_daemon.log</string>
+	<string>/var/log/bad_apple_fast_daemon.log</string>
 	<key>ThrottleInterval</key>
 	<integer>60</integer>
 	<key>Umask</key>
@@ -63,6 +63,6 @@
 	<key>UserName</key>
 	<string>root</string>
 	<key>WorkingDirectory</key>
-	<string>/var/lib/bad_apple</string>
+	<string>/var/lib/bad_apple/fast</string>
 </dict>
 </plist>

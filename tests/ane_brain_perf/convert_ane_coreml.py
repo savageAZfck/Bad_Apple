@@ -1279,7 +1279,9 @@ def build_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
                 torch.tensor(gate_up_w, dtype=torch.float16).reshape(2 * dff, d, 1, 1),
                 requires_grad=False)
 
-            down_w = gguf_model.get_tensor(f"{prefix}.ffn_down.weight")
+            down_w = gguf_model._orient_2d(
+                gguf_model.get_tensor(f"{prefix}.ffn_down.weight"),
+                d, dff, f"{prefix}.ffn_down.weight")
             self.down_conv = nn.Conv2d(dff, d, 1, bias=False)
             self.down_conv.weight = nn.Parameter(
                 torch.tensor(down_w, dtype=torch.float16).reshape(d, dff, 1, 1),
@@ -1594,8 +1596,9 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
     token_embd = gguf.get_tensor("token_embd.weight", dtype=np.float32)
 
     # ── RoPE tables ──
-    d_half = dh // 2
-    freqs = 1.0 / (cfg["rope_freq_base"] ** (np.arange(0, d_half, dtype=np.float32) / d_half))
+    rope_dim = cfg["rope_dim"]
+    rope_half = rope_dim // 2
+    freqs = 1.0 / (cfg["rope_freq_base"] ** (np.arange(0, rope_half, dtype=np.float32) / rope_half))
     positions = np.arange(max_seq_len, dtype=np.float32)
     angles = np.outer(positions, freqs)
     rope_cos = np.cos(angles).astype(np.float32)
@@ -1619,18 +1622,43 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
             x_normed = x_scaled * torch.rsqrt(variance + self.eps / (K * K))
             return (x_normed * self.weight).half()
 
+    class HeadRMSNormConv(nn.Module):
+        """Per-head RMSNorm (Hunyuan-dense / Qwen3) over (1, n_heads*d_head, 1, 1)."""
+        def __init__(self, weight, n_heads, d_head, eps):
+            super().__init__()
+            self.eps = eps
+            self.n_heads = n_heads
+            self.d_head = d_head
+            w = np.asarray(weight, dtype=np.float16).flatten()
+            w_tiled = np.tile(w, n_heads)
+            self.weight = nn.Parameter(
+                torch.tensor(w_tiled, dtype=torch.float16).reshape(-1, 1, 1),
+                requires_grad=False)
+
+        def forward(self, x):
+            nh, dh = self.n_heads, self.d_head
+            x_heads = x.reshape(nh, dh, 1, 1)
+            K = dh ** 0.5
+            x_scaled = x_heads * (1.0 / K)
+            variance = x_scaled.pow(2).mean(dim=1, keepdim=True)
+            x_normed = x_scaled * torch.rsqrt(variance + self.eps / (K * K))
+            x_back = x_normed.reshape(1, nh * dh, 1, 1)
+            return (x_back * self.weight).to(x.dtype)
+
     class FixedLayerConv(nn.Module):
         """Transformer layer — fixed KV shapes, batched GQA, masked attention."""
         def __init__(self, layer_idx, gguf_model, cfg):
             super().__init__()
             d = cfg["d_model"]
             dff = cfg["d_ff"]
-            kv_dim = cfg["n_kv_heads"] * cfg["d_head"]
-            qkv_dim = d + 2 * kv_dim
+            q_dim = cfg.get("q_dim", cfg["n_heads"] * cfg["d_head"])
+            kv_dim = cfg.get("kv_dim", cfg["n_kv_heads"] * cfg["d_head"])
+            qkv_dim = q_dim + 2 * kv_dim
             eps = cfg["rms_norm_eps"]
             prefix = f"blk.{layer_idx}"
 
             self.d = d
+            self.q_dim = q_dim
             self.dff = dff
             self.kv_dim = kv_dim
             self.nh = cfg["n_heads"]
@@ -1657,12 +1685,24 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
                 self.qkv_conv.bias = nn.Parameter(
                     torch.tensor(qkv_b, dtype=torch.float16), requires_grad=False)
 
-            # Output projection
-            o_w = gguf_model.get_tensor(f"{prefix}.attn_output.weight")
-            self.out_conv = nn.Conv2d(d, d, 1, bias=False)
+            # Output projection: q_dim → d_model
+            o_w = gguf_model._orient_2d(
+                gguf_model.get_tensor(f"{prefix}.attn_output.weight"),
+                d, q_dim, f"{prefix}.attn_output.weight")
+            self.out_conv = nn.Conv2d(q_dim, d, 1, bias=False)
             self.out_conv.weight = nn.Parameter(
-                torch.tensor(o_w, dtype=torch.float16).reshape(d, d, 1, 1),
+                torch.tensor(o_w, dtype=torch.float16).reshape(d, q_dim, 1, 1),
                 requires_grad=False)
+
+            # Optional per-head Q/K RMSNorm (Hunyuan-dense / Qwen3)
+            if cfg.get("has_qk_norm", False):
+                q_norm_w = gguf_model.get_tensor(f"{prefix}.attn_q_norm.weight")
+                k_norm_w = gguf_model.get_tensor(f"{prefix}.attn_k_norm.weight")
+                self.q_norm = HeadRMSNormConv(q_norm_w, self.nh, self.dh, eps)
+                self.k_norm = HeadRMSNormConv(k_norm_w, self.nkv, self.dh, eps)
+            else:
+                self.q_norm = None
+                self.k_norm = None
 
             # FFN (handles both split Qwen and fused Phi layouts)
             self.ffn_norm = RMSNormConv(
@@ -1675,7 +1715,9 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
                 torch.tensor(gate_up_w, dtype=torch.float16).reshape(2 * dff, d, 1, 1),
                 requires_grad=False)
 
-            down_w = gguf_model.get_tensor(f"{prefix}.ffn_down.weight")
+            down_w = gguf_model._orient_2d(
+                gguf_model.get_tensor(f"{prefix}.ffn_down.weight"),
+                d, dff, f"{prefix}.ffn_down.weight")
             self.down_conv = nn.Conv2d(dff, d, 1, bias=False)
             self.down_conv.weight = nn.Parameter(
                 torch.tensor(down_w, dtype=torch.float16).reshape(d, dff, 1, 1),
@@ -1699,9 +1741,14 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
 
             # QKV projection
             qkv = self.qkv_conv(normed).squeeze(-1).squeeze(-1)
-            q = qkv[:, :self.d]
-            k = qkv[:, self.d:self.d + self.kv_dim]
-            v = qkv[:, self.d + self.kv_dim:]
+            q = qkv[:, :self.q_dim]
+            k = qkv[:, self.q_dim:self.q_dim + self.kv_dim]
+            v = qkv[:, self.q_dim + self.kv_dim:]
+
+            # Optional per-head Q/K RMSNorm (Hunyuan-dense / Qwen3), applied before RoPE
+            if self.q_norm is not None:
+                q = self.q_norm(q.reshape(1, self.q_dim, 1, 1)).reshape(1, self.q_dim)
+                k = self.k_norm(k.reshape(1, self.kv_dim, 1, 1)).reshape(1, self.kv_dim)
 
             # RoPE
             rope_half = self.rope_dim // 2
@@ -1753,9 +1800,9 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
                 head_out = torch.matmul(attn_w, v_head)  # (1, 7, 1, 64)
                 attn_parts.append(head_out.squeeze(2))     # (1, 7, 64)
 
-            # Concat all heads: (1, 14, 64) → (1, 896, 1, 1)
-            attn_out = torch.cat(attn_parts, dim=1)  # (1, 14, 64)
-            attn_out = attn_out.reshape(1, self.d, 1, 1)
+            # Concat all heads: (1, nh, dh) → (1, q_dim, 1, 1)
+            attn_out = torch.cat(attn_parts, dim=1)  # (1, nh, dh)
+            attn_out = attn_out.reshape(1, self.q_dim, 1, 1)
             attn_out = self.out_conv(attn_out)
             x = residual + attn_out
 
@@ -1948,6 +1995,29 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
         json.dump(tok_data, f)
     print(f"  Tokenizer: {tok_path}")
 
+    # ── Fixed-model manifest (used by BadAppleANEFixedCore) ─────────────
+
+    manifest = {
+        "fixed_model": pkg_path,
+        "embedding": embd_path,
+        "tokenizer": tok_path,
+        "model": {
+            **cfg,
+            "hidden_size": d,
+            "vocab_size": vocab,
+            "seq_len": max_seq_len,
+            "rope_dim": rope_dim,
+            "rope_freq_base": cfg["rope_freq_base"],
+            "total_layers": n_layers,
+            "n_kv_heads": nkv,
+            "d_head": dh,
+        },
+    }
+    manifest_path = f"{prefix}_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    print(f"  Manifest: {manifest_path}")
+
     print(f"\n{'='*60}")
     print(f"  Model:      {gguf.meta('general.name', cfg['arch'])} ({n_layers}L, d={d}, nh={nh}, nkv={nkv})")
     print(f"  Format:     CoreML mlprogram (iOS18+)")
@@ -1959,7 +2029,7 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
     print(f"  Target:     CoreML ({compute_units})")
     print(f"{'='*60}")
 
-    return pkg_path
+    return manifest_path
 
 
 # ─── Stateful Model (KV cache as on-device state, zero host↔ANE copy) ───────
