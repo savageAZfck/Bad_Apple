@@ -182,6 +182,7 @@ private final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
     private let responseTimeout: TimeInterval = 15.0
     private var player: AVAudioPlayer?
     private var onDidFinish: (() -> Void)?
+    private var requestID = 0
 
     func stop() {
         player?.stop()
@@ -193,6 +194,8 @@ private final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
     /// when audio finishes, or `completion(false)` if the server is unreachable,
     /// synthesis fails, or playback fails.
     func speak(_ text: String, completion: @escaping (Bool) -> Void) {
+        requestID += 1
+        let myID = requestID
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else {
                 DispatchQueue.main.async { completion(false) }
@@ -200,12 +203,16 @@ private final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
             }
             do {
                 let wavURL = try self.synthesize(text)
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.requestID == myID else { return }
                     self.play(url: wavURL, completion: completion)
                 }
             } catch {
                 badAppleVoiceLog("PiperTTS synthesize error: \(error.localizedDescription)")
-                DispatchQueue.main.async { completion(false) }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.requestID == myID else { return }
+                    completion(false)
+                }
             }
         }
     }
