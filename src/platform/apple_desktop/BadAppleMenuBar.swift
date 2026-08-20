@@ -663,66 +663,68 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         let postDelay: TimeInterval
     }
 
-    /// Pick the highest-quality installed voice for the selected accent.
-    /// Default is Mexican (Paulina), but Ukrainian (Lesya) is available too.
+    /// Pick the highest-quality installed female voice for the selected
+    /// Eastern European accent. Russian (Milena), Ukrainian (Lesya), and
+    /// Slovak (Laura) are supported; Mexican (Paulina) is the legacy option.
     private func bestVoice() -> AVSpeechSynthesisVoice {
-        let accent = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
+        let accent = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "ru-RU"
 
-        if accent == "uk-UA" {
-            let ukrainianIds = [
+        switch accent {
+        case "uk-UA":
+            for id in [
                 "com.apple.voice.premium.uk-UA.Lesya",
                 "com.apple.voice.enhanced.uk-UA.Lesya",
                 "com.apple.voice.superpremium.uk-UA.Lesya",
                 "com.apple.voice.compact.uk-UA.Lesya",
-            ]
-            for id in ukrainianIds {
-                if let voice = AVSpeechSynthesisVoice(identifier: id) {
-                    return voice
-                }
-            }
-            if let voice = AVSpeechSynthesisVoice(language: "uk-UA") {
-                return voice
-            }
+            ] { if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice } }
+            if let voice = AVSpeechSynthesisVoice(language: "uk-UA") { return voice }
+        case "sk-SK":
+            for id in [
+                "com.apple.voice.premium.sk-SK.Laura",
+                "com.apple.voice.enhanced.sk-SK.Laura",
+                "com.apple.voice.superpremium.sk-SK.Laura",
+                "com.apple.voice.compact.sk-SK.Laura",
+            ] { if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice } }
+            if let voice = AVSpeechSynthesisVoice(language: "sk-SK") { return voice }
+        case "ru-RU":
+            for id in [
+                "com.apple.voice.premium.ru-RU.Milena",
+                "com.apple.voice.enhanced.ru-RU.Milena",
+                "com.apple.voice.superpremium.ru-RU.Milena",
+                "com.apple.voice.compact.ru-RU.Milena",
+            ] { if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice } }
+            if let voice = AVSpeechSynthesisVoice(language: "ru-RU") { return voice }
+        default:
+            for id in [
+                "com.apple.voice.premium.es-MX.Paulina",
+                "com.apple.voice.enhanced.es-MX.Paulina",
+                "com.apple.voice.superpremium.es-MX.Paulina",
+                "com.apple.voice.compact.es-MX.Paulina",
+            ] { if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice } }
+            if let voice = AVSpeechSynthesisVoice(language: "es-MX") { return voice }
         }
 
-        let candidateIds = [
-            "com.apple.voice.premium.es-MX.Paulina",
-            "com.apple.voice.enhanced.es-MX.Paulina",
-            "com.apple.voice.superpremium.es-MX.Paulina",
-            "com.apple.voice.premium.es-ES.Monica",
-            "com.apple.voice.enhanced.es-ES.Monica",
-            "com.apple.voice.siri.es-MX",
-            "com.apple.voice.compact.es-MX.Paulina",
-        ]
-        for id in candidateIds {
-            if let voice = AVSpeechSynthesisVoice(identifier: id) {
-                return voice
-            }
-        }
-        return AVSpeechSynthesisVoice(language: "es-MX")
-            ?? AVSpeechSynthesisVoice(identifier: "com.apple.speech.synthesis.voice.Fred")
+        return AVSpeechSynthesisVoice(identifier: "com.apple.speech.synthesis.voice.Fred")
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 
-    /// Split the response into natural prosodic chunks on sentence/ellipsis
-    /// boundaries only. Paulina handles the inner cadence (em-dashes,
-    /// ellipses) better inside a single utterance; splitting every pause makes
-    /// it choppy. Short post-delays keep the flow connected but breathable.
+    /// Split the response into slow, breathy, sultry chunks. Eastern European
+    /// voices sound more seductive at a slower rate with a slightly lower pitch.
     private func prosodyChunks(from text: String) -> [ProsodyChunk] {
         var chunks: [ProsodyChunk] = []
         var current = ""
 
-        func flush(_ postDelay: TimeInterval = 0.0, rate: Float = 0.50, pitch: Float = 0.98) {
+        func flush(_ postDelay: TimeInterval = 0.0, rate: Float = 0.46, pitch: Float = 0.96) {
             let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 current = ""
                 return
             }
-            // sign-off "—besos" gets extra warmth and a long trailing breath
-            let isSignOff = trimmed.lowercased().contains("besos")
-            let finalRate: Float = isSignOff ? 0.46 : rate
-            let finalPitch: Float = isSignOff ? 0.96 : pitch
-            let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.35) : postDelay
+            // sign-off "—kisses" gets extra warmth and a long trailing breath
+            let isSignOff = trimmed.lowercased().contains("kisses")
+            let finalRate: Float = isSignOff ? 0.42 : rate
+            let finalPitch: Float = isSignOff ? 0.94 : pitch
+            let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.5) : postDelay
             chunks.append(ProsodyChunk(text: trimmed, rate: finalRate, pitch: finalPitch, postDelay: finalDelay))
             current = ""
         }
@@ -734,26 +736,26 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             current.append(c)
 
             if c == "…" || (c == "." && i + 1 < chars.count && chars[i + 1] == "." && i + 2 < chars.count && chars[i + 2] == ".") {
-                // ellipsis: tiny trailing breath, let the voice trail
-                flush(0.10, rate: 0.48, pitch: 0.97)
+                // ellipsis: slow trailing breath
+                flush(0.15, rate: 0.44, pitch: 0.95)
                 if c == "." { i += 2 }
             } else if c == "?" {
-                flush(0.12, rate: 0.50, pitch: 1.01)
+                flush(0.15, rate: 0.46, pitch: 1.00)
             } else if c == "!" {
-                flush(0.12, rate: 0.52, pitch: 1.00)
+                flush(0.15, rate: 0.48, pitch: 1.00)
             } else if c == "." || c == "\n" {
                 // only end a sentence if the next char is whitespace or we are at the end
                 let next = i + 1 < chars.count ? chars[i + 1] : nil
                 if next == nil || next!.isWhitespace || next! == "\n" {
-                    flush(0.08)
+                    flush(0.12)
                 }
             }
 
             i += 1
         }
 
-        flush(0.05)
-        return chunks.isEmpty ? [ProsodyChunk(text: text, rate: 0.50, pitch: 0.98, postDelay: 0.05)] : chunks
+        flush(0.10)
+        return chunks.isEmpty ? [ProsodyChunk(text: text, rate: 0.46, pitch: 0.96, postDelay: 0.10)] : chunks
     }
 
     private var usePiperTTS: Bool {
@@ -1587,10 +1589,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         menu.addItem(voiceParent)
 
         let accentMenu = NSMenu(title: "Accent")
-        for accent in [("es-MX", "Mexican (Paulina)"), ("uk-UA", "Ukrainian (Lesya)")] {
+        for accent in [
+            ("ru-RU", "Russian (Milena)"),
+            ("uk-UA", "Ukrainian (Lesya)"),
+            ("sk-SK", "Slovak (Laura)"),
+            ("es-MX", "Mexican (Paulina)"),
+        ] {
             let item = NSMenuItem(title: accent.1, action: #selector(selectAccent(_:)), keyEquivalent: "")
             item.representedObject = accent.0
-            let current = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
+            let current = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "ru-RU"
             item.state = (current == accent.0) ? .on : .off
             item.isEnabled = !usePiper
             accentMenu.addItem(item)
