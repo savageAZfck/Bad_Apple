@@ -663,10 +663,28 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         let postDelay: TimeInterval
     }
 
-    /// Pick the highest-quality installed Spanish/Mexican voice. Prefer
-    /// premium/enhanced Paulina, then Siri-quality, then compact, then any
-    /// es-MX voice. This single change removes most of the "robot" sheen.
+    /// Pick the highest-quality installed voice for the selected accent.
+    /// Default is Mexican (Paulina), but Ukrainian (Lesya) is available too.
     private func bestVoice() -> AVSpeechSynthesisVoice {
+        let accent = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
+
+        if accent == "uk-UA" {
+            let ukrainianIds = [
+                "com.apple.voice.premium.uk-UA.Lesya",
+                "com.apple.voice.enhanced.uk-UA.Lesya",
+                "com.apple.voice.superpremium.uk-UA.Lesya",
+                "com.apple.voice.compact.uk-UA.Lesya",
+            ]
+            for id in ukrainianIds {
+                if let voice = AVSpeechSynthesisVoice(identifier: id) {
+                    return voice
+                }
+            }
+            if let voice = AVSpeechSynthesisVoice(language: "uk-UA") {
+                return voice
+            }
+        }
+
         let candidateIds = [
             "com.apple.voice.premium.es-MX.Paulina",
             "com.apple.voice.enhanced.es-MX.Paulina",
@@ -1564,9 +1582,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             item.isEnabled = usePiper
             voiceMenu.addItem(item)
         }
-        let voiceParent = NSMenuItem(title: usePiper ? "Voice (Piper)" : "Voice (Paulina)", action: nil, keyEquivalent: "")
+        let voiceParent = NSMenuItem(title: usePiper ? "Voice (Piper)" : "Voice (Apple)", action: nil, keyEquivalent: "")
         voiceParent.submenu = voiceMenu
         menu.addItem(voiceParent)
+
+        let accentMenu = NSMenu(title: "Accent")
+        for accent in [("es-MX", "Mexican (Paulina)"), ("uk-UA", "Ukrainian (Lesya)")] {
+            let item = NSMenuItem(title: accent.1, action: #selector(selectAccent(_:)), keyEquivalent: "")
+            item.representedObject = accent.0
+            let current = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
+            item.state = (current == accent.0) ? .on : .off
+            item.isEnabled = !usePiper
+            accentMenu.addItem(item)
+        }
+        let accentParent = NSMenuItem(title: "Accent", action: nil, keyEquivalent: "")
+        accentParent.submenu = accentMenu
+        menu.addItem(accentParent)
 
         if !lastPrompt.isEmpty {
             let prompt = NSMenuItem(title: "Last prompt: \(lastPrompt.truncated(to: 65))", action: nil, keyEquivalent: "")
@@ -1645,6 +1676,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let current = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
         UserDefaults.standard.set(!current, forKey: "BadAppleUsePiperTTS")
         badAppleVoiceLog("Piper TTS enabled: \(!current)")
+        rebuildMenu()
+    }
+
+    @objc private func selectAccent(_ sender: NSMenuItem) {
+        guard let accent = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(accent, forKey: "BadAppleTTSAccent")
+        badAppleVoiceLog("selected TTS accent: \(accent)")
         rebuildMenu()
     }
 
