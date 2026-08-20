@@ -174,22 +174,19 @@ final class BadAppleFFI {
 
 // MARK: - Local neural TTS client (Piper)
 
-final class PiperTTSClient: NSObject {
+final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
     static let shared = PiperTTSClient()
 
     private let socketPath = "/tmp/badapple_tts.sock"
     private let requestTimeout: TimeInterval = 2.0
     private let responseTimeout: TimeInterval = 15.0
-    private var audioEngine: AVAudioEngine?
-    private var playerNode: AVAudioPlayerNode?
+    private var player: AVAudioPlayer?
     private var onDidFinish: (() -> Void)?
     private var requestID = 0
 
     func stop() {
-        playerNode?.stop()
-        audioEngine?.stop()
-        audioEngine = nil
-        playerNode = nil
+        player?.stop()
+        player = nil
         onDidFinish = nil
     }
 
@@ -289,64 +286,36 @@ final class PiperTTSClient: NSObject {
         return response
     }
 
-    /// Play the synthesized WAV through an AVAudioEngine chain that warms up
-    /// the voice: slightly slower, a little lower in pitch, and a touch of
-    /// reverb. This makes the robotic Piper output feel more intimate and
-    /// "latina tease" without needing a custom model.
+    /// Play the synthesized WAV as raw as possible. The Piper model already has
+    /// warmth and cadence baked in; extra pitch/reverb effects make it sound
+    /// processed. We just use a slightly slower playback rate to give it a
+    /// little more breath and weight.
     private func play(url: URL, completion: @escaping (Bool) -> Void) {
         do {
-            let file = try AVAudioFile(forReading: url)
-
-            let engine = AVAudioEngine()
-            let player = AVAudioPlayerNode()
-
-            // Piper outputs 22050 Hz mono. Use the hardware format for the engine
-            // graph so resampling happens at the player and the final connection
-            // matches the output device (otherwise AVAudioEngine throws a format
-            // mismatch error).
-            let format = engine.outputNode.outputFormat(forBus: 0)
-
-            // Subtle warmth: lower pitch slightly and slow the rate a touch.
-            // Keep the pitch/rate shift conservative so it stays natural, not
-            // underwater or "handheld mic".
-            let pitch = AVAudioUnitTimePitch()
-            pitch.pitch = -35.0
-            pitch.rate = 0.97
-
-            // Very light small-room reverb for intimacy. Wet/dry is low so it
-            // adds space without the obvious bathroom/echo sound.
-            let reverb = AVAudioUnitReverb()
-            reverb.loadFactoryPreset(.smallRoom)
-            reverb.wetDryMix = 4.0
-
-            engine.attach(player)
-            engine.attach(pitch)
-            engine.attach(reverb)
-            engine.connect(player, to: pitch, format: format)
-            engine.connect(pitch, to: reverb, format: format)
-            engine.connect(reverb, to: engine.mainMixerNode, format: format)
-
-            try engine.start()
-
-            audioEngine = engine
-            playerNode = player
+            player = try AVAudioPlayer(contentsOf: url)
+            player?.delegate = self
+            player?.volume = 0.95
+            player?.enableRate = true
+            player?.rate = 0.95
+            player?.prepareToPlay()
             onDidFinish = { [weak self] in
-                self?.audioEngine?.stop()
-                self?.audioEngine = nil
-                self?.playerNode = nil
+                self?.player = nil
                 completion(true)
             }
-
-            player.scheduleFile(file, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.onDidFinish?()
-                    self?.onDidFinish = nil
-                }
+            guard player?.play() == true else {
+                throw NSError(domain: "PiperTTS", code: 5, userInfo: [NSLocalizedDescriptionKey: "play() returned false"])
             }
-            player.play()
         } catch {
             badAppleVoiceLog("PiperTTS play error: \(error.localizedDescription)")
             completion(false)
+        }
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onDidFinish?()
+            self?.onDidFinish = nil
+            self?.player = nil
         }
     }
 }

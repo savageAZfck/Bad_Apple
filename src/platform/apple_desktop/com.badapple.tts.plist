@@ -11,13 +11,13 @@
 		<key>BADAPPLE_TTS_VOICE</key>
 		<string>es_MX-claude-high</string>
 		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
-		<string>1.05</string>
+		<string>1.08</string>
 		<key>BADAPPLE_TTS_NOISE_SCALE</key>
-		<string>0.80</string>
+		<string>0.85</string>
 		<key>BADAPPLE_TTS_NOISE_W_SCALE</key>
-		<string>0.80</string>
+		<string>0.75</string>
 		<key>BADAPPLE_TTS_VOLUME</key>
-		<string>0.95</string>
+		<string>1.0</string>
 		<key>HOME</key>
 		<string>/Users/savag3</string>
 		<key>PATH</key>
