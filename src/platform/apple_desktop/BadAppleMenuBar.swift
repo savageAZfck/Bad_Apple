@@ -296,10 +296,15 @@ final class PiperTTSClient: NSObject {
     private func play(url: URL, completion: @escaping (Bool) -> Void) {
         do {
             let file = try AVAudioFile(forReading: url)
-            let format = file.processingFormat
 
             let engine = AVAudioEngine()
             let player = AVAudioPlayerNode()
+
+            // Piper outputs 22050 Hz mono. Use the hardware format for the engine
+            // graph so resampling happens at the player and the final connection
+            // matches the output device (otherwise AVAudioEngine throws a format
+            // mismatch error).
+            let format = engine.outputNode.outputFormat(forBus: 0)
 
             // Lower pitch ~60 cents and slow the rate slightly for a breathier,
             // more seductive cadence.
