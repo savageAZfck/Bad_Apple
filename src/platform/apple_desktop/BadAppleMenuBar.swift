@@ -184,7 +184,21 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
     private var onDidFinish: (() -> Void)?
     private var requestID = 0
 
+    // Simple queue for streaming TTS chunks in order.
+    private struct QueueItem {
+        let text: String
+        let voice: String
+        let id: Int
+    }
+    private var queue: [QueueItem] = []
+    private let queueLock = NSLock()
+    private var isProcessing = false
+
     func stop() {
+        queueLock.lock()
+        queue.removeAll()
+        isProcessing = false
+        queueLock.unlock()
         player?.stop()
         player = nil
         onDidFinish = nil
@@ -196,28 +210,45 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
         "es_MX-cortana-19669-epoch-high",
     ]
 
-    /// Try to speak through the local Piper TTS server. Calls `completion(true)`
-    /// when audio finishes, or `completion(false)` if the server is unreachable,
-    /// synthesis fails, or playback fails.
-    func speak(_ text: String, voice: String, completion: @escaping (Bool) -> Void) {
+    /// Enqueue a chunk for synthesis. Chunks play in order so streaming stays smooth.
+    func speak(_ text: String, voice: String, completion: ((Bool) -> Void)? = nil) {
         requestID += 1
         let myID = requestID
+        queueLock.lock()
+        queue.append(QueueItem(text: text, voice: voice, id: myID))
+        let shouldStart = !isProcessing
+        if shouldStart { isProcessing = true }
+        queueLock.unlock()
+        if shouldStart {
+            processNext()
+        }
+        // Fire-and-forget for streaming; real completion is handled by AVAudioPlayerDelegate.
+        completion?(true)
+    }
+
+    private func processNext() {
+        queueLock.lock()
+        guard !queue.isEmpty else {
+            isProcessing = false
+            queueLock.unlock()
+            return
+        }
+        let item = queue.removeFirst()
+        queueLock.unlock()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else {
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
+            guard let self = self else { return }
             do {
-                let wavURL = try self.synthesize(text, voice: voice)
+                let wavURL = try self.synthesize(item.text, voice: item.voice)
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.requestID == myID else { return }
-                    self.play(url: wavURL, completion: completion)
+                    guard let self = self, item.id >= self.requestID - 1 else { return }
+                    self.play(url: wavURL) { [weak self] _ in
+                        self?.processNext()
+                    }
                 }
             } catch {
                 badAppleVoiceLog("PiperTTS synthesize error: \(error.localizedDescription)")
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.requestID == myID else { return }
-                    completion(false)
+                    self?.processNext()
                 }
             }
         }
@@ -764,6 +795,40 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     private var selectedPiperVoice: String {
         let raw = UserDefaults.standard.string(forKey: "BadAppleTTSVoice") ?? PiperTTSClient.defaultVoice
         return PiperTTSClient.availableVoices.contains(raw) ? raw : PiperTTSClient.defaultVoice
+    }
+
+    /// Queue a single streamed sentence chunk without stopping any in-flight audio.
+    /// This keeps responses smooth while the model is still generating the next chunk.
+    func speakChunk(_ text: String) {
+        let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard enabled else { return }
+        guard !spoken.isEmpty else { return }
+        state = .speaking
+
+        if usePiperTTS {
+            let voice = selectedPiperVoice
+            badAppleVoiceLog("speakChunk using Piper TTS (voice=\(voice))")
+            PiperTTSClient.shared.speak(spoken, voice: voice)
+        } else {
+            badAppleVoiceLog("speakChunk using Apple TTS")
+            speakWithAppleChunk(spoken)
+        }
+    }
+
+    private func speakWithAppleChunk(_ text: String) {
+        guard enabled else { return }
+        let voice = bestVoice()
+        let chunks = prosodyChunks(from: text)
+        for chunk in chunks {
+            let utterance = AVSpeechUtterance(string: chunk.text)
+            utterance.voice = voice
+            utterance.rate = chunk.rate
+            utterance.pitchMultiplier = chunk.pitch
+            utterance.postUtteranceDelay = chunk.postDelay
+            utterance.volume = 0.95
+            synthesizer.speak(utterance)
+        }
+        pendingSpeechUtterances += chunks.count
     }
 
     /// Main entry point: try the local neural Piper TTS first, then fall back
@@ -1441,12 +1506,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         // The CLI streams sentence chunks as they are generated, so TTS starts
         // while the 8B model is still finishing the rest of the response.
         let socket = BadAppleBrain.deepSocket
-        let maxTokens = 220
+        let maxTokens = 64
         Task {
             do {
                 let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens) { chunk in
                     DispatchQueue.main.async {
-                        self.voiceHost.speak(chunk)
+                        self.voiceHost.speakChunk(chunk)
                     }
                 }
                 await MainActor.run { self.completeVoiceResponse(finalText, skipSpeak: true) }
@@ -1468,7 +1533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     @objc private func newChat() {
         Task {
             do {
-                let response = try await runBadAppleCLI(prompt: "new chat", socketPath: BadAppleBrain.deepSocket, maxTokens: 180)
+                let response = try await runBadAppleCLI(prompt: "new chat", socketPath: BadAppleBrain.deepSocket, maxTokens: 80)
                 await MainActor.run {
                     self.lastPrompt = "new chat"
                     self.lastError = nil
@@ -1512,6 +1577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 environment["BADAPPLE_SOCKET_PATH"] = socketPath
                 environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
                 environment["BADAPPLE_STREAM_JSON"] = "1"
+                environment["BADAPPLE_VOICE"] = "1"
                 process.environment = environment
 
                 var timeoutTimer: Timer?
@@ -1591,6 +1657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 var environment = ProcessInfo.processInfo.environment
                 environment["BADAPPLE_SOCKET_PATH"] = socketPath
                 environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
+                environment["BADAPPLE_VOICE"] = "1"
                 process.environment = environment
 
                 var timeoutTimer: Timer?

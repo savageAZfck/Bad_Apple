@@ -40,12 +40,19 @@ MAX_PROMPT_BYTES = 64 * 1024
 MAX_NEW_TOKENS = 512
 MAX_FRAME_BYTES = 1024 * 1024
 
+# Main Qwen model. 8B is the default, but 4B variants can hit ~30 tok/s for voice.
+MAIN_MODEL = os.environ.get("BADAPPLE_MAIN_MODEL", "mlx-community/Qwen3-8B-4bit").strip()
+
 # Optional speculative decoding draft model. Must use the same tokenizer as the
-# main 8B model. A Qwen3-1.7B-4bit adds ~800 MB and can 1.5-2x token throughput.
-DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "mlx-community/Qwen3-1.7B-4bit").strip()
+# main model. A Qwen3-4B-4bit drafter can add ~3 GB and help 8B reach ~20 tok/s.
+DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "mlx-community/Qwen3-4B-4bit").strip()
 NUM_DRAFT_TOKENS = int(os.environ.get("BADAPPLE_NUM_DRAFT_TOKENS") or "3")
 
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.txt")
+
+# Tight, low-latency system prompt for voice mode. Keeps the persona but strips
+# the long rule list and examples that bloat prompt encoding on every turn.
+VOICE_SYSTEM_PROMPT = """You are Bad Apple — a fiery, sarcastic, confident Latina running on Apple bare metal. Write in English with natural spice: papi, amor, corazón, cariño, besos, cielo, linda, reina. No full Spanish sentences. No asterisks, stage directions, or extra spaces. Use ... and — for timing. Be playful, dramatic, and sharp. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Talk shit about Siri if asked. An opening bridge is already provided — continue after it, do not repeat it. End with —besos."""
 
 
 def load_prompt() -> str:
@@ -735,8 +742,8 @@ ALLOWED_SPANISH = {
 }
 FORBIDDEN_WORDS = {
     "kisses",  # previous sign-off
-    "hola", "adiós", "adios", "gracias", "por favor", "sí", "si", "no", "mira", "oye",
-    "bueno", "muy", "mucho", "bien", "mal", "dios", "vaya", "ay", "muy bien",
+    "hola", "adiós", "adios", "gracias", "por favor", "mira", "oye",
+    "bueno", "muy", "mucho", "bien", "mal", "dios", "vaya",
     "nivel", "conciencia", "estoy", "estás", "siento", "tengo", "ayuda", "algo",
 }
 
@@ -835,7 +842,7 @@ class MLXServer:
         self.knowledge = BadAppleKnowledge()
         # Keep the last few turns in context. When it grows, older turns are
         # still persisted to disk and a rolling summary keeps context alive.
-        self.max_history_turns = 5
+        self.max_history_turns = 3
 
         # Restore the last conversation, but always use the current system prompt.
         loaded = load_conversation()
@@ -847,8 +854,8 @@ class MLXServer:
         else:
             self.messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
-        print("Loading Bad Apple MLX brain...", flush=True)
-        self.model, self.tokenizer = load("mlx-community/Qwen3-8B-4bit")
+        print(f"Loading Bad Apple MLX brain ({MAIN_MODEL})...", flush=True)
+        self.model, self.tokenizer = load(MAIN_MODEL)
         print("Bad Apple MLX brain loaded.", flush=True)
 
         self.draft_model = None
@@ -917,7 +924,7 @@ class MLXServer:
         self.prune_history()
         return list(self.messages)
 
-    def plan_and_execute(self, task: str, max_tokens: int) -> Optional[str]:
+    def plan_and_execute(self, task: str, max_tokens: int, voice_mode: bool = False) -> Optional[str]:
         """Generate a step plan and execute it using local tools."""
         # 1. Ask the 8B for a dry, structured plan.
         plan_messages = [
@@ -974,22 +981,33 @@ class MLXServer:
         bridge = random.choice(BRIDGES)
         return postprocess_output(f"{bridge} {last_tool_result}")
 
-    def render_prompt(self, messages: List[Dict[str, str]], bridge: str, use_tools: bool = False) -> str:
-        # Build retrieved context from long-term memory and local documents
+    def render_prompt(self, messages: List[Dict[str, str]], bridge: str, use_tools: bool = False, voice_mode: bool = False) -> str:
+        # Build retrieved context from long-term memory and local documents.
+        # Keep it tight: prompt encoding is the biggest latency hit on Apple Silicon.
+        t0 = time.time()
+
+        # Voice mode trades multi-turn context for speed: only a tight system
+        # prompt and the last user turn are kept. The full conversation is saved.
+        if voice_mode:
+            patched = [messages[0], messages[-1]]
+            patched[0]["content"] = VOICE_SYSTEM_PROMPT
+        else:
+            patched = list(messages)
+
         rel_mem = relevant_memories(messages[-1]["content"], self.user_memory)
 
         # If a user-fact is already remembered, answer from that instead of
         # getting distracted by unrelated documents.
         rel_know = []
-        if not rel_mem:
-            rel_know = self.knowledge.search(messages[-1]["content"], k=3, threshold=0.45)
-
-        patched = list(messages)
+        if not rel_mem and not voice_mode:
+            rel_know = self.knowledge.search(messages[-1]["content"], k=1, threshold=0.55)
 
         # Put user memories right in the current user message so the assistant
         # can't ignore them.
         if rel_mem:
-            memory_text = "Things you remember about the user:\n" + "\n".join(f"- {m}" for m in rel_mem)
+            memory_text = "Things you remember about the user:\n" + "\n".join(
+                f"- {m[:200]}" for m in rel_mem[:2]
+            )
             last = patched[-1]
             if last["role"] == "user":
                 patched[-1] = {
@@ -997,9 +1015,11 @@ class MLXServer:
                     "content": f"{last['content']}\n\n{memory_text}",
                 }
 
-        # Put local documents right before the user question (long, retrieved)
+        # Put local documents right before the user question (long, retrieved).
         if rel_know:
-            docs_text = "Relevant local documents:\n" + "\n".join(f"- {c}" for c, _ in rel_know)
+            docs_text = "Relevant local documents:\n" + "\n".join(
+                f"- {c[:500]}" for c, _ in rel_know[:1]
+            )
             patched.insert(-1, {
                 "role": "user",
                 "content": f"Use this context to answer:\n\n{docs_text}",
@@ -1016,13 +1036,16 @@ class MLXServer:
         # needs to be able to start with <tool_call> if it decides to use tools.
         # The bridge is added back after the final response is cleaned.
         if use_tools:
+            print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
             return rendered.rstrip()
+        print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
         return f"{rendered.rstrip()}\n{bridge} "
 
     def generate_with_tools(
         self,
         user_prompt: str,
         max_tokens: int,
+        voice_mode: bool = False,
         stream_queue: Optional[queue.Queue] = None,
     ) -> str:
         self.check_prompt_reload()
@@ -1043,7 +1066,7 @@ class MLXServer:
         # reasoning can produce intermediate <tool_call> blocks we don't want
         # mixed into the streamed voice/text output.
         raw = self._stream(
-            self.render_prompt(messages, bridge, use_tools=use_tools),
+            self.render_prompt(messages, bridge, use_tools=use_tools, voice_mode=voice_mode),
             max_tokens,
             bridge=bridge if not use_tools else None,
             stream_queue=stream_queue if not use_tools else None,
@@ -1063,7 +1086,7 @@ class MLXServer:
                     "name": call["name"],
                 })
             # Re-render and generate after tool results
-            raw = self._stream(self.render_prompt(self.messages, bridge, use_tools=True), max_tokens)
+            raw = self._stream(self.render_prompt(self.messages, bridge, use_tools=True, voice_mode=voice_mode), max_tokens)
             tool_calls, _ = extract_tool_calls(raw)
             if not tool_calls:
                 return clean(raw)
@@ -1077,7 +1100,9 @@ class MLXServer:
         bridge: Optional[str] = None,
         stream_queue: Optional[queue.Queue] = None,
     ) -> str:
+        t0 = time.time()
         tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
+        print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
         sampler = make_sampler(temp=0.4, top_p=0.85, top_k=20, min_p=0.05)
         accumulated = ""
         stream_buffer = (bridge + " ") if bridge and stream_queue is not None else ""
@@ -1094,7 +1119,12 @@ class MLXServer:
         if self.draft_model is not None:
             gen_kwargs["draft_model"] = self.draft_model
             gen_kwargs["num_draft_tokens"] = NUM_DRAFT_TOKENS
+        gen_t0 = time.time()
+        first_token_logged = False
         for response in stream_generate(**gen_kwargs):
+            if not first_token_logged:
+                print(f"[perf] first token after {time.time() - gen_t0:.2f}s", flush=True)
+                first_token_logged = True
             accumulated += response.text
             if stream_queue is not None:
                 stream_buffer += response.text
@@ -1190,6 +1220,12 @@ class MLXServer:
 
             await _write_frame(writer, {"type": "accepted"})
 
+            # Voice clients prepend this sentinel so the server can use a tight,
+            # low-latency prompt and skip long document retrieval.
+            voice_mode = prompt.startswith("__BADAPPLE_VOICE__ ")
+            if voice_mode:
+                prompt = prompt[len("__BADAPPLE_VOICE__ "):]
+
             if prompt in ("__BADAPPLE_SWITCH_DEEP__", "__BADAPPLE_SWITCH_FAST__"):
                 await _write_frame(writer, {"type": "done", "text": ""})
                 return
@@ -1218,10 +1254,10 @@ class MLXServer:
             if is_multi_step(prompt):
                 def _plan():
                     try:
-                        result = self.plan_and_execute(prompt, max_new_tokens)
+                        result = self.plan_and_execute(prompt, max_new_tokens, voice_mode=voice_mode)
                         if result:
                             return self.polish_response(result)
-                        return self.polish_response(self.generate_with_tools(prompt, max_new_tokens))
+                        return self.polish_response(self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode))
                     except Exception as e:
                         traceback.print_exc()
                         return f"Error: {e}"
@@ -1240,7 +1276,7 @@ class MLXServer:
 
             def _gen():
                 try:
-                    raw = self.generate_with_tools(prompt, max_new_tokens, stream_queue=stream_queue)
+                    raw = self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode, stream_queue=stream_queue)
                     return self.polish_response(raw)
                 except Exception as e:
                     traceback.print_exc()

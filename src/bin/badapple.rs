@@ -38,6 +38,12 @@ fn main() -> Result<()> {
 
     let prompt = prompt_parts.join(" ");
     let json_stream = std::env::var("BADAPPLE_STREAM_JSON").is_ok();
+    let voice_mode = std::env::var("BADAPPLE_VOICE").is_ok() || speak_stream;
+    let prompt = if voice_mode && !prompt.starts_with("__BADAPPLE_VOICE__ ") {
+        format!("__BADAPPLE_VOICE__ {}", prompt)
+    } else {
+        prompt
+    };
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     let mut emitted = String::new();
