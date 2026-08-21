@@ -15,6 +15,7 @@ import hmac
 import hashlib
 import json
 import os
+import queue
 import random
 import re
 import shlex
@@ -694,6 +695,39 @@ def extract_tool_calls(text: str):
     return calls, cleaned
 
 
+def polish_text(text: str) -> str:
+    """Light cleanup for streaming chunks; does not add or force a sign-off."""
+    # Strip Qwen3 thinking blocks if they leak into the stream.
+    text = re.sub(r"\n?\s*<thinking>.*?\s*\n?", "", text, flags=re.DOTALL)
+    text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
+    text = text.replace("— —", "—")
+    text = text.replace("*", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" ?— ?", "—", text)
+    text = re.sub(r"\.\.\.", "…", text)
+    text = re.sub(r"\s+([.,!?;:])", r"\1", text)
+    # Ensure a space after sentence punctuation when the next token runs together.
+    text = re.sub(r"([.!?…])([A-Za-z])", r"\1 \2", text)
+    return text.strip()
+
+
+def _is_sentence_end(text: str) -> bool:
+    """Heuristic to flush a streaming chunk when a sentence or utterance is done."""
+    t = text.strip()
+    if not t or len(t) <= 40:
+        return False
+    if t.lower().endswith("—besos") or t.lower().endswith("besos"):
+        return True
+    if t.endswith((".", "!", "?", "…")):
+        return True
+    if "\n\n" in t:
+        return True
+    # Force a flush on very long runs without punctuation so the client doesn't stall.
+    if len(t) > 200:
+        return True
+    return False
+
+
 # Spicy Latina English. Strip any foreign-language leakage and force one clean sign-off.
 ALLOWED_SPANISH = {
     "papi", "mami", "mi", "amor", "corazón", "corazon", "cariño", "carino",
@@ -732,6 +766,13 @@ def _filter_english_sentences(text: str) -> str:
         if lang in {"en", "ca", "tl"}:  # ca/tl can be confused with short spicy English
             cleaned.append(part)
     return " ".join(cleaned).strip()
+
+
+def _queue_get(q: queue.Queue, timeout: float = 0.1) -> Optional[Any]:
+    try:
+        return q.get(block=True, timeout=timeout)
+    except queue.Empty:
+        return None
 
 
 def postprocess_output(text: str, sign_off: str = "—besos") -> str:
@@ -978,7 +1019,12 @@ class MLXServer:
             return rendered.rstrip()
         return f"{rendered.rstrip()}\n{bridge} "
 
-    def generate_with_tools(self, user_prompt: str, max_tokens: int) -> str:
+    def generate_with_tools(
+        self,
+        user_prompt: str,
+        max_tokens: int,
+        stream_queue: Optional[queue.Queue] = None,
+    ) -> str:
         self.check_prompt_reload()
         bridge = random.choice(BRIDGES)
         if user_prompt.strip().lower() == "new chat":
@@ -993,8 +1039,15 @@ class MLXServer:
             _, text = extract_tool_calls(raw)
             return postprocess_output(f"{bridge} {text}")
 
-        # First generation
-        raw = self._stream(self.render_prompt(messages, bridge, use_tools=use_tools), max_tokens)
+        # First generation. Only stream when tools are not offered, because tool
+        # reasoning can produce intermediate <tool_call> blocks we don't want
+        # mixed into the streamed voice/text output.
+        raw = self._stream(
+            self.render_prompt(messages, bridge, use_tools=use_tools),
+            max_tokens,
+            bridge=bridge if not use_tools else None,
+            stream_queue=stream_queue if not use_tools else None,
+        )
         tool_calls, _ = extract_tool_calls(raw)
 
         if not tool_calls:
@@ -1017,10 +1070,17 @@ class MLXServer:
 
         return clean(raw)
 
-    def _stream(self, prompt: str, max_tokens: int) -> str:
+    def _stream(
+        self,
+        prompt: str,
+        max_tokens: int,
+        bridge: Optional[str] = None,
+        stream_queue: Optional[queue.Queue] = None,
+    ) -> str:
         tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         sampler = make_sampler(temp=0.4, top_p=0.85, top_k=20, min_p=0.05)
         accumulated = ""
+        stream_buffer = (bridge + " ") if bridge and stream_queue is not None else ""
         final_metrics = None
         draft_tokens = 0
         total_tokens = 0
@@ -1036,11 +1096,28 @@ class MLXServer:
             gen_kwargs["num_draft_tokens"] = NUM_DRAFT_TOKENS
         for response in stream_generate(**gen_kwargs):
             accumulated += response.text
+            if stream_queue is not None:
+                stream_buffer += response.text
+                if _is_sentence_end(stream_buffer):
+                    chunk = polish_text(stream_buffer)
+                    if chunk:
+                        # Add a trailing space after sentence-ending punctuation so the
+                        # next streamed chunk doesn't run into this one.
+                        if chunk.endswith((".", "!", "?", "…")):
+                            chunk += " "
+                        stream_queue.put(chunk)
+                    stream_buffer = ""
             total_tokens += 1
             if response.from_draft:
                 draft_tokens += 1
             if response.finish_reason is not None:
                 final_metrics = response
+        if stream_queue is not None and stream_buffer.strip():
+            chunk = polish_text(stream_buffer)
+            if chunk:
+                if chunk.endswith((".", "!", "?", "…")):
+                    chunk += " "
+                stream_queue.put(chunk)
         if final_metrics is not None:
             pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
             print(
@@ -1159,15 +1236,25 @@ class MLXServer:
                 await _write_frame(writer, {"type": "done", "text": text})
                 return
 
+            stream_queue = queue.Queue()
+
             def _gen():
                 try:
-                    raw = self.generate_with_tools(prompt, max_new_tokens)
+                    raw = self.generate_with_tools(prompt, max_new_tokens, stream_queue=stream_queue)
                     return self.polish_response(raw)
                 except Exception as e:
                     traceback.print_exc()
                     return f"Error generating response: {e}"
 
-            text = await loop.run_in_executor(None, _gen)
+            future = loop.run_in_executor(None, _gen)
+
+            # Stream sentence chunks as the 8B model generates.
+            while not future.done() or not stream_queue.empty():
+                chunk = await loop.run_in_executor(None, _queue_get, stream_queue, 0.2)
+                if chunk:
+                    await _write_frame(writer, {"type": "token", "text": chunk})
+
+            text = future.result()
 
             if not text:
                 text = "Mmh, mi amor... I'm here. —besos"
@@ -1181,6 +1268,7 @@ class MLXServer:
             await _write_frame(writer, {"type": "done", "text": text})
 
         except Exception as e:
+            traceback.print_exc()
             try:
                 await _write_frame(writer, {"type": "error", "message": f"MLX server error: {e}"})
             except Exception:

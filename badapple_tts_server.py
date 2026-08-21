@@ -176,18 +176,23 @@ def _send_json(conn: socket.socket, obj: dict):
 def _serve_client(conn: socket.socket):
     chunks = []
     conn.settimeout(None)
-    while True:
-        data = conn.recv(4096)
-        if not data:
-            break
-        chunks.append(data)
-        if b"\n" in data:
-            break
-    raw = b"".join(chunks)
-    if not raw:
-        return
-    response = _handle_request(raw)
-    _send_json(conn, response)
+    try:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+            if b"\n" in data:
+                break
+        raw = b"".join(chunks)
+        if raw:
+            response = _handle_request(raw)
+            _send_json(conn, response)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _warm_voice():
