@@ -1438,12 +1438,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
 
         // Fallback: ask the on-device daemon via the bundled badapple CLI.
+        // The CLI streams sentence chunks as they are generated, so TTS starts
+        // while the 8B model is still finishing the rest of the response.
         let socket = BadAppleBrain.deepSocket
         let maxTokens = 220
         Task {
             do {
-                let response = try await runBadAppleCLI(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens)
-                await MainActor.run { self.completeVoiceResponse(response) }
+                let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens) { chunk in
+                    DispatchQueue.main.async {
+                        self.voiceHost.speak(chunk)
+                    }
+                }
+                await MainActor.run { self.completeVoiceResponse(finalText, skipSpeak: true) }
             } catch {
                 badAppleVoiceLog("submitVoicePrompt error: \(error)")
                 await MainActor.run {
@@ -1474,6 +1480,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 await MainActor.run {
                     self.lastError = error.localizedDescription
                     self.rebuildMenu()
+                }
+            }
+        }
+    }
+
+    private func runBadAppleCLIStreaming(
+        prompt: String,
+        socketPath: String,
+        maxTokens: Int,
+        onChunk: @escaping (String) -> Void
+    ) async throws -> String {
+        let binary = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Helpers")
+            .appendingPathComponent("badapple")
+        let command = binary.path
+        guard FileManager.default.fileExists(atPath: command) else {
+            throw BadAppleMenuBarError("The badapple helper binary is missing from the app bundle.")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let outputPipe = Pipe()
+                process.executableURL = binary
+                process.arguments = ["--max-tokens", String(maxTokens), prompt]
+                process.standardOutput = outputPipe
+                process.standardError = outputPipe
+                var environment = ProcessInfo.processInfo.environment
+                environment["BADAPPLE_SOCKET_PATH"] = socketPath
+                environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
+                environment["BADAPPLE_STREAM_JSON"] = "1"
+                process.environment = environment
+
+                var timeoutTimer: Timer?
+                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
+                    badAppleVoiceLog("runBadAppleCLIStreaming: timeout, terminating")
+                    process.terminate()
+                }
+
+                var buffer = ""
+                var fullText = ""
+                var resumed = false
+
+                outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                    guard let str = String(data: handle.availableData, encoding: .utf8) else { return }
+                    buffer += str
+                    while let newlineIndex = buffer.firstIndex(of: "\n") {
+                        let line = String(buffer[..<newlineIndex])
+                        buffer = String(buffer[buffer.index(after: newlineIndex)...])
+                        guard let data = line.data(using: .utf8) else { continue }
+                        do {
+                            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                                if let type = json["type"] as? String, type == "token", let text = json["text"] as? String {
+                                    fullText += text
+                                    onChunk(text)
+                                } else if let type = json["type"] as? String, type == "done", let text = json["text"] as? String {
+                                    fullText = text
+                                }
+                            }
+                        } catch {
+                            badAppleVoiceLog("runBadAppleCLIStreaming: ignoring non-JSON line: \(line.prefix(100))")
+                        }
+                    }
+                }
+
+                process.terminationHandler = { _ in
+                    guard !resumed else { return }
+                    resumed = true
+                    timeoutTimer?.invalidate()
+                    outputPipe.fileHandleForReading.readabilityHandler = nil
+                    if process.terminationStatus != 0, fullText.isEmpty {
+                        continuation.resume(throwing: BadAppleMenuBarError("The Bad Apple helper exited with code \(process.terminationStatus)."))
+                    } else {
+                        continuation.resume(returning: fullText)
+                    }
+                }
+
+                do {
+                    try process.run()
+                } catch {
+                    guard !resumed else { return }
+                    resumed = true
+                    timeoutTimer?.invalidate()
+                    continuation.resume(throwing: error)
                 }
             }
         }
@@ -1532,11 +1623,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         init(_ message: String) { self.errorDescription = message }
     }
 
-    private func completeVoiceResponse(_ response: String) {
+    private func completeVoiceResponse(_ response: String, skipSpeak: Bool = false) {
         badAppleVoiceLog("completeVoiceResponse: \(response.prefix(200))")
         let parsed = BadAppleActionParser.parse(response)
         badAppleVoiceLog("parsed actions: \(parsed.actions.count) error: \(parsed.error ?? "nil") spoken: \(parsed.spoken)")
-        voiceHost.speak(parsed.spoken)
+        if !skipSpeak {
+            voiceHost.speak(parsed.spoken)
+        }
         if let parseError = parsed.error {
             actionExecutor.showParsingFailure(parseError)
         } else {
