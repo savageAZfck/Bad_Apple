@@ -1105,10 +1105,8 @@ class MLXServer:
         print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
         sampler = make_sampler(temp=0.4, top_p=0.85, top_k=20, min_p=0.05)
         logits_processors = make_logits_processors(
-            repetition_penalty=1.25,
-            repetition_context_size=48,
-            presence_penalty=0.2,
-            presence_context_size=48,
+            repetition_penalty=1.1,
+            repetition_context_size=24,
         )
         accumulated = ""
         stream_buffer = (bridge + " ") if bridge and stream_queue is not None else ""
