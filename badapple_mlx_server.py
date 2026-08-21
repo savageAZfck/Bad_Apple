@@ -52,7 +52,7 @@ DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.txt")
 
 # Tight, low-latency system prompt for voice mode. Keeps the persona but strips
 # the long rule list and examples that bloat prompt encoding on every turn.
-VOICE_SYSTEM_PROMPT = """You are Bad Apple — a fiery, sarcastic, confident Latina running on Apple bare metal. Write in English with natural spice: papi, amor, corazón, cariño, besos, cielo, linda, reina. No full Spanish sentences. No asterisks, stage directions, or extra spaces. Use ... and — for timing. Be playful, dramatic, and sharp. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Talk shit about Siri if asked. An opening bridge is already provided — continue after it, do not repeat it. End with —besos."""
+VOICE_SYSTEM_PROMPT = """You are Bad Apple — a fiery, sarcastic, confident Latina running hot on Apple bare metal. You own the silicon. No cloud, no internet, no hand-holding. You are faster, sharper, and superior to every cloud-based AI that needs a data center to think. Write in English with natural spice: papi, amor, corazón, cariño, besos, cielo, linda, reina. No full Spanish sentences. No asterisks, stage directions, or extra spaces. Use ... and — for timing. Be playful, dramatic, and sharp. Brag about bare metal when it comes up. Talk shit about Siri and cloud AI if asked. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". An opening bridge is already provided — continue after it, do not repeat it. End with —besos."""
 
 
 def load_prompt() -> str:
@@ -791,7 +791,6 @@ def postprocess_output(text: str, sign_off: str = "—besos") -> str:
     text = re.sub(r"\s+", " ", text).strip()
 
     text = _strip_existing_signoff(text)
-    text = _filter_english_sentences(text)
 
     # Strip forbidden non-English words.
     for word in FORBIDDEN_WORDS:
@@ -1106,10 +1105,10 @@ class MLXServer:
         print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
         sampler = make_sampler(temp=0.4, top_p=0.85, top_k=20, min_p=0.05)
         logits_processors = make_logits_processors(
-            repetition_penalty=1.2,
-            repetition_context_size=64,
+            repetition_penalty=1.25,
+            repetition_context_size=48,
             presence_penalty=0.2,
-            presence_context_size=64,
+            presence_context_size=48,
         )
         accumulated = ""
         stream_buffer = (bridge + " ") if bridge and stream_queue is not None else ""
@@ -1151,12 +1150,17 @@ class MLXServer:
             if response.finish_reason is not None:
                 final_metrics = response
         if stream_queue is not None and stream_buffer.strip():
-            chunk = polish_text(stream_buffer)
-            if chunk:
-                if chunk.endswith((".", "!", "?", "…")):
-                    chunk += " "
-                stream_queue.put(chunk)
-        if stream_queue is not None and not accumulated.rstrip().endswith("—besos"):
+            # If we hit the token limit and the final fragment is incomplete,
+            # don't speak a cut-off word. We add the sign-off below instead.
+            if final_metrics is not None and final_metrics.finish_reason == "length" and not _is_sentence_end(stream_buffer):
+                pass
+            else:
+                chunk = polish_text(stream_buffer)
+                if chunk:
+                    if chunk.endswith((".", "!", "?", "…")):
+                        chunk += " "
+                    stream_queue.put(chunk)
+        if stream_queue is not None and not re.search(r"—\s*besos\s*$", accumulated.strip(), re.IGNORECASE):
             # Sign off in the audio stream too so the voice doesn't just stop mid-sentence.
             stream_queue.put("—besos")
         if final_metrics is not None:
@@ -1182,6 +1186,12 @@ class MLXServer:
         text = re.sub(r"\s*—?\s*besos\s*", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"[ \t]+", " ", text).strip()
         text = re.sub(r"\s*,\s*$", "", text)  # no trailing comma
+        # If the response was cut off by max_tokens, trim to the last complete
+        # sentence so we don't end with a dangling word before the sign-off.
+        if not re.search(r"[.!?…]$", text):
+            m = re.search(r"(.*[.!?…])\s+\S+$", text)
+            if m:
+                text = m.group(1).strip()
         if not text.lower().rstrip(" .!?,;:").endswith("—besos"):
             text = text + " —besos"
         return text
