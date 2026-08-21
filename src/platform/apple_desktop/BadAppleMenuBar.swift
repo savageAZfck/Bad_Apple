@@ -1456,6 +1456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var streamedTokenCount = 0
     private var lastPrompt = ""
     private var lastError: String?
+    private var isSubmittingVoicePrompt = false
     private var voiceEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "BadAppleVoiceEnabled") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleVoiceEnabled") }
@@ -1483,6 +1484,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     private func submitVoicePrompt(_ prompt: String) {
+        guard !isSubmittingVoicePrompt else {
+            badAppleVoiceLog("submitVoicePrompt: ignoring duplicate submission")
+            return
+        }
+        isSubmittingVoicePrompt = true
         badAppleVoiceLog("submitVoicePrompt: \(prompt)")
         lastPrompt = prompt
         lastError = nil
@@ -1514,13 +1520,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                         self.voiceHost.speakChunk(chunk)
                     }
                 }
-                await MainActor.run { self.completeVoiceResponse(finalText, skipSpeak: true) }
+                await MainActor.run {
+                    self.completeVoiceResponse(finalText, skipSpeak: true)
+                    self.isSubmittingVoicePrompt = false
+                }
             } catch {
                 badAppleVoiceLog("submitVoicePrompt error: \(error)")
                 await MainActor.run {
                     self.lastError = error.localizedDescription
                     self.voiceHost.resumeAfterFailure()
                     self.rebuildMenu()
+                    self.isSubmittingVoicePrompt = false
                 }
             }
         }
