@@ -798,6 +798,11 @@ def postprocess_output(text: str, sign_off: str = "—besos") -> str:
 
     # Clean up repeated punctuation and spaces.
     text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s*,\s*([.!?])", r"\1", text)
+    text = re.sub(r"\s*,\s*,", ",", text)
+    text = re.sub(r"\s*,\s*—", "—", text)
+    text = re.sub(r"^,\s*", "", text)
+    text = re.sub(r"\s*,\s*$", "", text)
     text = re.sub(r"\s+([.!?])", r"\1", text)
     text = re.sub(r"([.!?])([—-])", r"\1 \2", text)
 

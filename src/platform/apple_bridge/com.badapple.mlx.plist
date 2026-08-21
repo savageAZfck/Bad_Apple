@@ -32,7 +32,7 @@
         <key>BADAPPLE_DRAFT_MODEL</key>
         <string>mlx-community/Qwen3-4B-4bit</string>
         <key>BADAPPLE_NUM_DRAFT_TOKENS</key>
-        <string>2</string>
+        <string>1</string>
         <key>BADAPPLE_PROMPT_FILE</key>
         <string>/Users/savag3/bad_apple/prompt.txt</string>
         <key>BADAPPLE_NOTES_DIR</key>
