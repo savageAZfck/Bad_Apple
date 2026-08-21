@@ -29,7 +29,7 @@ from badapple_knowledge import BadAppleKnowledge
 from langdetect import detect, LangDetectException
 from mlx_lm import load
 from mlx_lm.generate import stream_generate
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 # Protocol constants from bad_apple_ipc.rs
 SLICKS_VERSION = 1
@@ -757,7 +757,8 @@ def _strip_existing_signoff(text: str) -> str:
 def _filter_english_sentences(text: str) -> str:
     """Drop sentences that langdetect flags as mostly non-English."""
     # Split on sentence terminators while keeping the punctuation.
-    parts = re.split(r"(?<=[.!?…])\s+", text)
+    # Do not split on ellipses (...) because short fragments confuse langdetect.
+    parts = re.split(r"(?<=[.!?])\s+", text)
     cleaned = []
     for part in parts:
         if not part.strip():
@@ -1104,6 +1105,12 @@ class MLXServer:
         tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
         sampler = make_sampler(temp=0.4, top_p=0.85, top_k=20, min_p=0.05)
+        logits_processors = make_logits_processors(
+            repetition_penalty=1.2,
+            repetition_context_size=64,
+            presence_penalty=0.2,
+            presence_context_size=64,
+        )
         accumulated = ""
         stream_buffer = (bridge + " ") if bridge and stream_queue is not None else ""
         final_metrics = None
@@ -1115,6 +1122,7 @@ class MLXServer:
             "prompt": tokens,
             "max_tokens": max_tokens,
             "sampler": sampler,
+            "logits_processors": logits_processors,
         }
         if self.draft_model is not None:
             gen_kwargs["draft_model"] = self.draft_model
@@ -1148,6 +1156,9 @@ class MLXServer:
                 if chunk.endswith((".", "!", "?", "…")):
                     chunk += " "
                 stream_queue.put(chunk)
+        if stream_queue is not None and not accumulated.rstrip().endswith("—besos"):
+            # Sign off in the audio stream too so the voice doesn't just stop mid-sentence.
+            stream_queue.put("—besos")
         if final_metrics is not None:
             pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
             print(
