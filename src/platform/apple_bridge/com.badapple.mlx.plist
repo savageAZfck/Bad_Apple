@@ -33,6 +33,10 @@
         <string>2</string>
         <key>BADAPPLE_PROMPT_FILE</key>
         <string>/Users/savag3/bad_apple/prompt.txt</string>
+        <key>BADAPPLE_NOTES_DIR</key>
+        <string>/Users/savag3/.bad_apple/notes</string>
+        <key>HOME</key>
+        <string>/Users/savag3</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
     </dict>

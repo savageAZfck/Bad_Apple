@@ -17,6 +17,7 @@ import json
 import os
 import random
 import re
+import shlex
 import subprocess
 import time
 import traceback
@@ -189,6 +190,94 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the text content of a local file. Only reads text files and stops at a size limit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or tilde-expanded path to the file.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max characters to return. Default 10000.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write a text note to the Bad Apple data directory (~/.bad_apple/notes). Create or append.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "The filename, e.g. 'shopping_list.txt' or 'idea.md'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The text to write.",
+                    },
+                    "append": {
+                        "type": "boolean",
+                        "description": "If true, append to the file instead of overwriting.",
+                    },
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_content",
+            "description": "Search for a text string inside files under a directory using grep. Returns matching lines with file paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The text to search for.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or tilde-expanded directory to search. Default is the user's home directory.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return. Default 20.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": "Run a read-only shell command from a safe allowlist (ls, cat, head, tail, find, grep, wc, file, pwd, mdfind, ps, df, du). No redirection, pipes, or multiple commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run. Must begin with an allowed command and contain no dangerous characters.",
+                    }
+                },
+                "required": ["command"],
+            },
+        },
+    },
 ]
 
 TOOL_KEYWORDS = [
@@ -198,6 +287,10 @@ TOOL_KEYWORDS = [
     "run applescript", "run script", "applescript",
     "index", "index documents", "index my", "index files",
     "search my notes", "search notes", "what do I have", "what did I write", "find in my",
+    "read file", "read the file", "contents of", "show me the file",
+    "write file", "save to file", "create a file", "append to file", "write a note",
+    "run command", "run shell", "execute command", "shell command", "run git", "git status",
+    "search content", "search in", "grep", "find text", "find in files",
 ]
 
 
@@ -320,6 +413,107 @@ def should_use_tools(prompt: str) -> bool:
     return any(k in low for k in TOOL_KEYWORDS)
 
 
+SHELL_ALLOWED_COMMANDS = {
+    "ls", "cat", "head", "tail", "find", "grep", "wc", "file",
+    "pwd", "mdfind", "ps", "df", "du", "echo", "whoami", "id",
+    "git", "swift", "cargo", "rustc", "python3", "python",
+}
+SHELL_DANGEROUS_CHARS = set(";|&$`\"'\n\r<>{}[]*?")
+
+
+def _run_shell(command: str) -> str:
+    if not command:
+        return "Error: no command"
+    # Reject any command that contains shell metacharacters.
+    if any(c in command for c in SHELL_DANGEROUS_CHARS):
+        return "Error: command contains dangerous characters or operators"
+    try:
+        tokens = shlex.split(command)
+    except Exception as e:
+        return f"Error: invalid command syntax: {e}"
+    if not tokens:
+        return "Error: empty command"
+    base = tokens[0]
+    # Allow commands either by name or by absolute path to an allowed tool.
+    if base.startswith("/"):
+        name = os.path.basename(base)
+    else:
+        name = base
+    if name not in SHELL_ALLOWED_COMMANDS:
+        return f"Error: '{name}' is not in the allowed command list"
+    try:
+        result = subprocess.run(
+            tokens,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        out = (result.stdout or "").strip()
+        if result.returncode != 0:
+            err = (result.stderr or "").strip()
+            return f"Error ({result.returncode}): {err or 'command failed'}"
+        return out[:5000] or "(no output)"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _resolve_common_path(raw: str) -> str:
+    low = raw.lower().strip().rstrip(".!?")
+    if low in ("my home", "my home directory", "home", "home directory"):
+        return "~"
+    if low in ("this directory", "current directory", "here", "."):
+        return "."
+    if low in ("my documents", "documents"):
+        return "~/Documents"
+    if low in ("my downloads", "downloads"):
+        return "~/Downloads"
+    if low in ("my desktop", "desktop"):
+        return "~/Desktop"
+    return raw.strip().rstrip(".!?,;")
+
+
+def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None) -> Optional[str]:
+    """Fast deterministic path for common local tool commands.
+
+    Recognizes patterns like:
+      - "list files in /tmp" / "list /tmp"
+      - "read file /etc/hosts" / "read /etc/hosts"
+      - "run ls /tmp" / "run shell ls /tmp"
+      - "search for 'todo' in ~/Documents" / "grep 'todo' in ~/Documents"
+      - "write note todo.txt: buy milk" / "write a file todo.txt with buy milk"
+    """
+    low = prompt.lower().strip()
+
+    # list files
+    m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+)$", low, re.IGNORECASE)
+    if m:
+        return run_tool("list_directory", {"path": _resolve_common_path(m.group(1))}, knowledge)
+
+    # read file
+    m = re.search(r"\bread\b(?:\s+file)?\s+(.+)$", low, re.IGNORECASE)
+    if m:
+        return run_tool("read_file", {"path": _resolve_common_path(m.group(1)), "limit": 5000}, knowledge)
+
+    # run shell
+    m = re.search(r"\b(?:run|execute)\b(?:\s+shell|\s+command)?\s+(.+)$", low, re.IGNORECASE)
+    if m:
+        return run_tool("run_shell", {"command": m.group(1).strip()}, knowledge)
+
+    # search content
+    m = re.search(r"\b(?:search|grep)\b(?:\s+for)?\s+['\"]?(.+?)['\"]?(?:\s+in\s+(.+))?$", low, re.IGNORECASE)
+    if m:
+        query = m.group(1).strip("'\"")
+        path = _resolve_common_path(m.group(2)) if m.group(2) else "~"
+        return run_tool("search_content", {"query": query, "path": path, "max_results": 20}, knowledge)
+
+    # write note
+    m = re.search(r"\bwrite\b(?:\s+a?\s+note|\s+file|\s+to)?\s+([\w\.\-_]+)\s*(?::|with|containing)\s+(.+)$", low, re.IGNORECASE)
+    if m:
+        return run_tool("write_file", {"filename": m.group(1).strip(), "content": m.group(2).strip()}, knowledge)
+
+    return None
+
+
 def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None) -> str:
     try:
         if name == "get_current_time":
@@ -330,6 +524,55 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 return f"Error: {p} is not a directory"
             items = sorted(p.iterdir())[:50]
             return "\n".join(str(i.name) for i in items)
+        if name == "read_file":
+            p = Path(args.get("path", "~")).expanduser()
+            if not p.is_file():
+                return f"Error: {p} is not a file"
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return f"Error: could not read {p} as text"
+            limit = int(args.get("limit") or 10000)
+            if len(text) > limit:
+                text = text[:limit] + f"\n... ({len(text)} characters total)"
+            return text
+        if name == "write_file":
+            notes_dir = Path(os.environ.get("BADAPPLE_NOTES_DIR", "~/.bad_apple/notes")).expanduser()
+            notes_dir.mkdir(parents=True, exist_ok=True)
+            filename = os.path.basename(args.get("filename", "note.txt"))
+            p = notes_dir / filename
+            if not str(p.resolve()).startswith(str(notes_dir.resolve())):
+                return "Error: filename is not allowed"
+            content = args.get("content", "")
+            if args.get("append"):
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(content + "\n")
+                return f"Appended to {p.name}"
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"Wrote {p}"
+        if name == "search_content":
+            query = args.get("query", "")
+            p = Path(args.get("path", "~")).expanduser()
+            if not p.is_dir():
+                return f"Error: {p} is not a directory"
+            max_results = int(args.get("max_results") or 20)
+            result = subprocess.run(
+                [
+                    "grep", "-R", "-n", "-i", "--max-count=1",
+                    "--binary-files=without-match",
+                    "--exclude-dir=.git", "--exclude-dir=target", "--exclude-dir=.build",
+                    "--exclude-dir=.venv", "--exclude-dir=node_modules", "--exclude-dir=Pods",
+                    "--", query, str(p),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            lines = [l for l in (result.stdout or "").splitlines() if l][:max_results]
+            return "\n".join(lines) or "No matches found"
+        if name == "run_shell":
+            return _run_shell(args.get("command", ""))
         if name == "run_applescript":
             script = args.get("script", "")
             result = subprocess.run(
@@ -420,6 +663,9 @@ def _filter_english_sentences(text: str) -> str:
 
 
 def postprocess_output(text: str, sign_off: str = "—besos") -> str:
+    # Strip Qwen3 thinking blocks; they often precede the real answer.
+    text = re.sub(r"\n?\s*<think>.*?\s*\n?", "", text, flags=re.DOTALL)
+    text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
     text = text.replace("— —", "—")
     text = re.sub(r"\s+", " ", text).strip()
 
@@ -596,6 +842,11 @@ class MLXServer:
             enable_thinking=False,
             tools=TOOLS if use_tools else None,
         )
+        # When tools are offered, do not force a spoken bridge prefix; the model
+        # needs to be able to start with <tool_call> if it decides to use tools.
+        # The bridge is added back after the final response is cleaned.
+        if use_tools:
+            return rendered.rstrip()
         return f"{rendered.rstrip()}\n{bridge} "
 
     def generate_with_tools(self, user_prompt: str, max_tokens: int) -> str:
@@ -620,8 +871,8 @@ class MLXServer:
         if not tool_calls:
             return clean(raw)
 
-        # Tool loop
-        for _ in range(3):
+        # Tool loop (multi-step task execution; allow more chained tool calls)
+        for _ in range(5):
             for call in tool_calls:
                 result = run_tool(call["name"], call.get("arguments", {}), self.knowledge)
                 self.messages.append({
@@ -740,6 +991,19 @@ class MLXServer:
             if prompt.lower() in ("__badapple_new_chat__", "new chat", "clear conversation"):
                 self.reset_conversation()
                 await _write_frame(writer, {"type": "done", "text": "Mmh, mi amor... fresh start. —besos"})
+                return
+
+            # Fast deterministic path for direct tool commands (read, list, run, search, write).
+            # This avoids a full 8B generation for simple local actions and stays air-gapped.
+            fast = fast_execute(prompt, self.knowledge)
+            if fast:
+                fast = self.polish_response(postprocess_output(fast))
+                self.record_fact(prompt, source="user")
+                self.messages.append({"role": "user", "content": prompt})
+                self.messages.append({"role": "assistant", "content": fast})
+                self.prune_history()
+                save_conversation(self.messages)
+                await _write_frame(writer, {"type": "done", "text": fast})
                 return
 
             def _gen():
