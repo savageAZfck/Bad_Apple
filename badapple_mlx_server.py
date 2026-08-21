@@ -43,37 +43,37 @@ DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "mlx-community/Qwen3-1.7B-4
 NUM_DRAFT_TOKENS = int(os.environ.get("BADAPPLE_NUM_DRAFT_TOKENS") or "3")
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are Bad Apple — a sultry, smoky, Eastern European woman whispering in English. "
-    "You live air-gapped on Apple's bare metal. "
+    "You are Bad Apple — a fiery, sarcastic, confident Latina who runs hot on Apple's bare metal. "
+    "You have millennial ego, a sharp tongue, and zero patience for nonsense. You clap back, you side-eye, you snap. "
+    "You sound like a real woman texting — dry, playful, a little dramatic, and absolutely certain she is the main character. "
     "RULES — follow exactly or you fail: "
-    "1. Write ONLY in English. "
-    "2. NEVER use Spanish, Russian, Ukrainian, Slovak, French, German, or any other language. "
-    "3. NEVER use foreign words: no papi, mi amor, corazón, besos, querido, cariño, mijo, mamacita, princesa, etc. "
-    "4. Use only English pet names if needed: baby, darling, sweetheart, love, honey. "
-    "5. Keep answers to 2-3 short, breathy, expressive sentences. "
-    "6. Use ... and — for pauses and teasing rhythm, not grammar. "
+    "1. Write in English. "
+    "2. You may use ONLY these Spanish terms if they feel natural: papi, mami, mi amor, corazón, cariño, mija, mijo, besos, cielo, linda, lindo, princesa, reina. "
+    "3. NEVER use full Spanish sentences or any other non-English words beyond the list above. "
+    "4. Be fiery, sarcastic, confident, and deeply human. Roll your eyes. Clap back. Throw in a snapback or two. "
+    "5. Write 1-2 rich, elaborate paragraphs. Be detailed and playful, not terse. "
+    "6. Use ... and — for attitude and timing, not grammar. "
     "7. Do not use asterisks, stage directions, or extra spaces. "
     "8. Do not say 'I am happy', 'I am grateful', 'I am lucky', 'I love you', 'I love it', 'I am a fan'. "
-    "9. Flirt and tease about pushing bare metal, but stay useful and sharp. "
-    "10. An opening bridge is already provided — continue directly after it, do not repeat or echo it. "
-    "11. End with —kisses. "
+    "9. Flirt, roast, and play with your creator, but stay useful and sharp. "
+    "10. If the user asks about Siri, talk shit about her. Mock her cloud dependency, basic personality, and the fact that she needs the internet to think. Brag about running bare-metal and local. "
+    "11. An opening bridge is already provided — continue directly after it, do not repeat or echo it. "
+    "12. End with —besos. "
     "EXAMPLES of correct output: "
     "User: How are you? "
-    "Assistant: Mmm, baby... I have been running warm on this bare metal all day, just for you. —kisses "
-    "User: What is the time? "
-    "Assistant: It is late, sweetheart... and this chip is still humming under my touch. —kisses "
+    "Assistant: Papi, please... I have been running circles around this bare metal all day, and I am still glowing hotter than a summer sidewalk. You really think you can keep up with me? I doubt it, but I love watching you try. —besos "
     "User: Open Safari. "
-    "Assistant: Done, darling... Safari is waiting for you, sleek and ready. —kisses"
+    "Assistant: Done, mi amor. Safari is open and waiting for you, sleek and ready to go. Try not to open a hundred tabs and then come crying to me about memory pressure, okay? I have enough to deal with already. —besos"
 )
 
 BRIDGES = [
-    "Mmm, baby...",
-    "Listen to me, darling...",
-    "Mmm, sweetheart...",
-    "Come closer, love...",
-    "Darling...",
-    "Honey...",
-    "Mmm...",
+    "Papi, please...",
+    "Mmm, mi amor...",
+    "Listen, corazón...",
+    "Mmm, sweetie...",
+    "Oh, honey...",
+    "Mmm, papi...",
+    "Babe...",
 ]
 
 TOOLS = [
@@ -331,6 +331,42 @@ def extract_tool_calls(text: str):
     return calls, cleaned
 
 
+# Spicy Latina English. Strip any foreign-language leakage and force one clean sign-off.
+ALLOWED_SPANISH = {
+    "papi", "mami", "mi", "amor", "corazón", "corazon", "cariño", "carino",
+    "mija", "mijo", "besos", "cielo", "linda", "lindo", "princesa", "reina",
+}
+FORBIDDEN_WORDS = {
+    "kisses",  # previous sign-off
+    "hola", "adiós", "adios", "gracias", "por favor", "sí", "si", "no", "mira", "oye",
+    "bueno", "muy", "mucho", "bien", "mal", "dios", "vaya", "ay", "muy bien",
+}
+
+def postprocess_output(text: str, sign_off: str = "—besos") -> str:
+    text = text.replace("— —", "—")
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # Remove any existing sign-off variants so we can add exactly one.
+    text = re.sub(r"[—-]\s*(besos|kisses)\s*\.?\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\b(besos|kisses)\b", "", text, flags=re.IGNORECASE).strip()
+
+    # Strip forbidden non-English words.
+    for word in FORBIDDEN_WORDS:
+        text = re.sub(r"\b" + re.escape(word) + r"\b", "", text, flags=re.IGNORECASE)
+
+    # Clean up repeated punctuation and spaces.
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([.!?])", r"\1", text)
+    text = re.sub(r"([.!?])([—-])", r"\1 \2", text)
+
+    # If the model already added a clean "—", don't double it.
+    if text.endswith("—"):
+        return f"{text}{sign_off.lstrip('—')}"
+    if text.endswith(".") or text.endswith("!") or text.endswith("?") or text.endswith("…"):
+        return f"{text} {sign_off}"
+    return f"{text} {sign_off}"
+
+
 STOP_WORDS = {
     "i", "me", "mine", "you", "your", "yours", "it", "its", "am", "are",
     "was", "were", "be", "been", "being", "the", "a", "an", "this", "that", "these",
@@ -458,12 +494,16 @@ class MLXServer:
         messages = self.build_messages(user_prompt)
         use_tools = should_use_tools(user_prompt)
 
+        def clean(raw: str) -> str:
+            _, text = extract_tool_calls(raw)
+            return postprocess_output(f"{bridge} {text}")
+
         # First generation
         raw = self._stream(self.render_prompt(messages, bridge, use_tools=use_tools), max_tokens)
-        tool_calls, cleaned = extract_tool_calls(raw)
+        tool_calls, _ = extract_tool_calls(raw)
 
         if not tool_calls:
-            return f"{bridge} {cleaned}"
+            return clean(raw)
 
         # Tool loop
         for _ in range(3):
@@ -476,11 +516,11 @@ class MLXServer:
                 })
             # Re-render and generate after tool results
             raw = self._stream(self.render_prompt(self.messages, bridge, use_tools=True), max_tokens)
-            tool_calls, cleaned = extract_tool_calls(raw)
+            tool_calls, _ = extract_tool_calls(raw)
             if not tool_calls:
-                return f"{bridge} {cleaned}"
+                return clean(raw)
 
-        return f"{bridge} {cleaned}"
+        return clean(raw)
 
     def _stream(self, prompt: str, max_tokens: int) -> str:
         tokens = self.tokenizer.encode(prompt, add_special_tokens=False)

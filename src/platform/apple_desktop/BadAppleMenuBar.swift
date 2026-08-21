@@ -664,10 +664,9 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     }
 
     /// Pick the highest-quality installed female voice for the selected
-    /// Eastern European accent. Russian (Milena), Ukrainian (Lesya), and
-    /// Slovak (Laura) are supported; Mexican (Paulina) is the legacy option.
+    /// Latina / Eastern European accent. Latina (Paulina) is default.
     private func bestVoice() -> AVSpeechSynthesisVoice {
-        let accent = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "ru-RU"
+        let accent = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
 
         switch accent {
         case "uk-UA":
@@ -720,8 +719,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
                 current = ""
                 return
             }
-            // sign-off "—kisses" gets extra warmth and a long trailing breath
-            let isSignOff = trimmed.lowercased().contains("kisses")
+            // sign-off "—besos" gets extra warmth and a long trailing breath
+            let isSignOff = trimmed.lowercased().contains("besos")
             let finalRate: Float = isSignOff ? 0.42 : rate
             let finalPitch: Float = isSignOff ? 0.94 : pitch
             let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.5) : postDelay
@@ -1439,7 +1438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         // Fallback: ask the on-device daemon via the bundled badapple CLI.
         let socket = BadAppleBrain.deepSocket
-        let maxTokens = 120
+        let maxTokens = 220
         Task {
             do {
                 let response = try await runBadAppleCLI(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens)
@@ -1458,7 +1457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     @objc private func newChat() {
         Task {
             do {
-                let response = try await runBadAppleCLI(prompt: "new chat", socketPath: BadAppleBrain.deepSocket, maxTokens: 80)
+                let response = try await runBadAppleCLI(prompt: "new chat", socketPath: BadAppleBrain.deepSocket, maxTokens: 180)
                 await MainActor.run {
                     self.lastPrompt = "new chat"
                     self.lastError = nil
@@ -1590,14 +1589,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         let accentMenu = NSMenu(title: "Accent")
         for accent in [
+            ("es-MX", "Latina (Paulina)"),
             ("ru-RU", "Russian (Milena)"),
             ("uk-UA", "Ukrainian (Lesya)"),
             ("sk-SK", "Slovak (Laura)"),
-            ("es-MX", "Mexican (Paulina)"),
         ] {
             let item = NSMenuItem(title: accent.1, action: #selector(selectAccent(_:)), keyEquivalent: "")
             item.representedObject = accent.0
-            let current = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "ru-RU"
+            let current = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
             item.state = (current == accent.0) ? .on : .off
             item.isEnabled = !usePiper
             accentMenu.addItem(item)
