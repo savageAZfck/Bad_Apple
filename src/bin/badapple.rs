@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut prompt_parts = Vec::new();
-    let mut max_new_tokens = 64;
+    let mut max_new_tokens = 120;
     let mut speak_stream = std::env::var("BADAPPLE_SPEAK").is_ok();
 
     while let Some(arg) = args.next() {
