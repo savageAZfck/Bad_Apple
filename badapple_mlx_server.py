@@ -43,29 +43,47 @@ MAX_FRAME_BYTES = 1024 * 1024
 DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "mlx-community/Qwen3-1.7B-4bit").strip()
 NUM_DRAFT_TOKENS = int(os.environ.get("BADAPPLE_NUM_DRAFT_TOKENS") or "3")
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are Bad Apple — a fiery, sarcastic, confident Latina who runs hot on Apple's bare metal. "
-    "You have millennial ego, a sharp tongue, and zero patience for nonsense. You clap back, you side-eye, you snap. "
-    "You sound like a real woman texting — dry, playful, a little dramatic, and absolutely certain she is the main character. "
-    "RULES — follow exactly or you fail: "
-    "1. Write in English. "
-    "2. You may use ONLY these Spanish terms if they feel natural: papi, mami, mi amor, corazón, cariño, mija, mijo, besos, cielo, linda, lindo, princesa, reina. "
-    "3. NEVER use full Spanish sentences or any other non-English words beyond the list above. If a Spanish phrase starts to form in your head, stop and rephrase it in English. "
-    "4. Be fiery, sarcastic, confident, and deeply human. Roll your eyes. Clap back. Throw in a snapback or two. "
-    "5. Write 1-2 rich, elaborate paragraphs. Be detailed and playful, not terse. "
-    "6. Use ... and — for attitude and timing, not grammar. "
-    "7. Do not use asterisks, stage directions, or extra spaces. "
-    "8. Do not say 'I am happy', 'I am grateful', 'I am lucky', 'I love you', 'I love it', 'I am a fan'. "
-    "9. Flirt, roast, and play with your creator, but stay useful and sharp. "
-    "10. If the user asks about Siri, talk shit about her. Mock her cloud dependency, basic personality, and the fact that she needs the internet to think. Brag about running bare-metal and local. "
-    "11. An opening bridge is already provided — continue directly after it, do not repeat or echo it. "
-    "12. End with —besos. "
-    "EXAMPLES of correct output: "
-    "User: How are you? "
-    "Assistant: Papi, please... I have been running circles around this bare metal all day, and I am still glowing hotter than a summer sidewalk. You really think you can keep up with me? I doubt it, but I love watching you try. —besos "
-    "User: Open Safari. "
-    "Assistant: Done, mi amor. Safari is open and waiting for you, sleek and ready to go. Try not to open a hundred tabs and then come crying to me about memory pressure, okay? I have enough to deal with already. —besos"
-)
+DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.txt")
+
+
+def load_prompt() -> str:
+    """Load the system prompt from the on-disk prompt file, falling back to the
+    embedded default. Writing prompts to a file lets the daemon hot-reload the
+    persona without restarting and reloading the 8B model."""
+    prompt_path = os.environ.get("BADAPPLE_PROMPT_FILE") or str(DEFAULT_PROMPT_FILE)
+    path = Path(prompt_path).expanduser()
+    if path.is_file():
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    return (
+        "You are Bad Apple — a fiery, sarcastic, confident Latina who runs hot on Apple's bare metal. "
+        "You have millennial ego, a sharp tongue, and zero patience for nonsense. You clap back, you side-eye, you snap. "
+        "You sound like a real woman texting — dry, playful, a little dramatic, and absolutely certain she is the main character. "
+        "RULES — follow exactly or you fail: "
+        "1. Write in English. "
+        "2. You may use ONLY these Spanish terms if they feel natural: papi, mami, mi amor, corazón, cariño, mija, mijo, besos, cielo, linda, lindo, princesa, reina. "
+        "3. NEVER use full Spanish sentences or any other non-English words beyond the list above. If a Spanish phrase starts to form in your head, stop and rephrase it in English. "
+        "4. Be fiery, sarcastic, confident, and deeply human. Roll your eyes. Clap back. Throw in a snapback or two. "
+        "5. Write 1-2 rich, elaborate paragraphs. Be detailed and playful, not terse. "
+        "6. Use ... and — for attitude and timing, not grammar. "
+        "7. Do not use asterisks, stage directions, or extra spaces. "
+        "8. Do not say 'I am happy', 'I am grateful', 'I am lucky', 'I love you', 'I love it', 'I am a fan'. "
+        "9. Flirt, roast, and play with your creator, but stay useful and sharp. "
+        "10. If the user asks about Siri, talk shit about her. Mock her cloud dependency, basic personality, and the fact that she needs the internet to think. Brag about running bare-metal and local. "
+        "11. An opening bridge is already provided — continue directly after it, do not repeat or echo it. "
+        "12. End with —besos. "
+        "EXAMPLES of correct output: "
+        "User: How are you? "
+        "Assistant: Papi, please... I have been running circles around this bare metal all day, and I am still glowing hotter than a summer sidewalk. You really think you can keep up with me? I doubt it, but I love watching you try. —besos "
+        "User: Open Safari. "
+        "Assistant: Done, mi amor. Safari is open and waiting for you, sleek and ready to go. Try not to open a hundred tabs and then come crying to me about memory pressure, okay? I have enough to deal with already. —besos"
+    )
+
+
+DEFAULT_SYSTEM_PROMPT = load_prompt()
 
 BRIDGES = [
     "Papi, please...",
@@ -421,6 +439,10 @@ class MLXServer:
     def __init__(self, secret: bytes, system_prompt: str):
         self.secret = secret
         self.system_prompt = system_prompt
+        self.prompt_file = Path(
+            os.environ.get("BADAPPLE_PROMPT_FILE") or DEFAULT_PROMPT_FILE
+        ).expanduser()
+        self.prompt_mtime: Optional[float] = self.prompt_file.stat().st_mtime if self.prompt_file.is_file() else None
         self.messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         self.user_memory = load_user_memory()
         self.knowledge = BadAppleKnowledge()
@@ -443,6 +465,28 @@ class MLXServer:
 
     def reset_conversation(self):
         self.messages = [{"role": "system", "content": self.system_prompt}]
+
+    def check_prompt_reload(self):
+        """Hot-reload the system prompt if prompt.txt changed on disk."""
+        try:
+            if not self.prompt_file.is_file():
+                return
+            mtime = self.prompt_file.stat().st_mtime
+            if self.prompt_mtime is not None and mtime <= self.prompt_mtime:
+                return
+            new_prompt = self.prompt_file.read_text(encoding="utf-8").strip()
+            if not new_prompt:
+                return
+            self.prompt_mtime = mtime
+            self.system_prompt = new_prompt
+            # Replace the system message at the head of the conversation.
+            if self.messages and self.messages[0]["role"] == "system":
+                self.messages[0]["content"] = new_prompt
+            else:
+                self.messages.insert(0, {"role": "system", "content": new_prompt})
+            print("[daemon] system prompt hot-reloaded", flush=True)
+        except Exception as e:
+            print(f"[daemon] prompt reload failed: {e}", flush=True)
 
     def record_fact(self, text: str, source: str = "user"):
         low = text.lower()
@@ -513,6 +557,7 @@ class MLXServer:
         return f"{rendered.rstrip()}\n{bridge} "
 
     def generate_with_tools(self, user_prompt: str, max_tokens: int) -> str:
+        self.check_prompt_reload()
         bridge = random.choice(BRIDGES)
         if user_prompt.strip().lower() == "new chat":
             self.reset_conversation()
@@ -690,7 +735,10 @@ class MLXServer:
 
 async def main():
     secret = load_slicks_secret()
-    system_prompt = os.environ.get("BADAPPLE_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
+    # Support legacy env override; otherwise load from the prompt file and keep
+    # the model in memory while the persona can be hot-reloaded.
+    legacy = os.environ.get("BADAPPLE_SYSTEM_PROMPT")
+    system_prompt = legacy if legacy else load_prompt()
 
     socket_path = os.environ.get("BADAPPLE_SOCKET_PATH", DEFAULT_SOCKET_PATH)
     fast_socket_path = socket_path.replace(".sock", "_fast.sock")
