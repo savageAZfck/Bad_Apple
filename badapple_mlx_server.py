@@ -267,6 +267,12 @@ def memory_path() -> Path:
     return path
 
 
+def conversation_path() -> Path:
+    path = Path(os.environ.get("BADAPPLE_CONVERSATION_PATH", "/var/lib/bad_apple/conversation.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def load_user_memory() -> List[str]:
     try:
         with open(memory_path(), "r") as f:
@@ -282,6 +288,29 @@ def save_user_memory(facts: List[str]):
     try:
         with open(memory_path(), "w") as f:
             json.dump(facts[-50:], f, indent=2)
+    except Exception:
+        pass
+
+
+def load_conversation() -> List[Dict[str, str]]:
+    try:
+        with open(conversation_path(), "r") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return [m for m in data if isinstance(m, dict) and "role" in m and "content" in m]
+    except Exception:
+        pass
+    return []
+
+
+def save_conversation(messages: List[Dict[str, str]]):
+    try:
+        path = conversation_path()
+        # Persist last 40 messages max to keep file small and token count sane.
+        with open(path, "w") as f:
+            json.dump(messages[-40:], f, indent=2)
+        # Make it readable by the user and group so the menu bar can open it.
+        os.chmod(path, 0o644)
     except Exception:
         pass
 
@@ -443,12 +472,21 @@ class MLXServer:
             os.environ.get("BADAPPLE_PROMPT_FILE") or DEFAULT_PROMPT_FILE
         ).expanduser()
         self.prompt_mtime: Optional[float] = self.prompt_file.stat().st_mtime if self.prompt_file.is_file() else None
-        self.messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         self.user_memory = load_user_memory()
         self.knowledge = BadAppleKnowledge()
-        # Keep only the last turn plus system; 8B 4-bit tends to latch onto
-        # its own previous turns. Long-term memory and RAG handle the rest.
-        self.max_history_turns = 1
+        # Keep the last few turns in context. When it grows, older turns are
+        # still persisted to disk and a rolling summary keeps context alive.
+        self.max_history_turns = 5
+
+        # Restore the last conversation, but always use the current system prompt.
+        loaded = load_conversation()
+        if loaded and loaded[0]["role"] == "system":
+            loaded[0]["content"] = system_prompt
+            self.messages = loaded
+        elif loaded:
+            self.messages = [{"role": "system", "content": system_prompt}] + loaded
+        else:
+            self.messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
         print("Loading Bad Apple MLX brain...", flush=True)
         self.model, self.tokenizer = load("mlx-community/Qwen3-8B-4bit")
@@ -465,6 +503,10 @@ class MLXServer:
 
     def reset_conversation(self):
         self.messages = [{"role": "system", "content": self.system_prompt}]
+        try:
+            conversation_path().unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def check_prompt_reload(self):
         """Hot-reload the system prompt if prompt.txt changed on disk."""
@@ -717,6 +759,8 @@ class MLXServer:
             # Store final assistant response in conversation; only user statements
             # become long-term memory, not the assistant's own rephrasings.
             self.messages.append({"role": "assistant", "content": text})
+            self.prune_history()
+            save_conversation(self.messages)
 
             await _write_frame(writer, {"type": "done", "text": text})
 

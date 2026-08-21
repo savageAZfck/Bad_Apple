@@ -1387,6 +1387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var timer: Timer?
     private let voiceHost = BadAppleVoiceHost()
     private let actionExecutor = BadAppleActionExecutor()
+    private let chatHistoryWindow = ChatHistoryWindow()
     private var streamedTokenCount = 0
     private var lastPrompt = ""
     private var lastError: String?
@@ -1452,6 +1453,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    @objc private func showChatHistory() {
+        chatHistoryWindow.show()
     }
 
     @objc private func newChat() {
@@ -1556,6 +1561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         mode.isEnabled = false
         menu.addItem(mode)
         menu.addItem(NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n"))
+        menu.addItem(NSMenuItem(title: "Chat History", action: #selector(showChatHistory), keyEquivalent: "h"))
         let toggle = NSMenuItem(title: "Voice Listening", action: #selector(toggleVoice), keyEquivalent: "v")
         toggle.state = voiceEnabled ? .on : .off
         menu.addItem(toggle)
@@ -1709,6 +1715,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     @objc private func terminate() { NSApp.terminate(nil) }
+}
+
+// MARK: - Chat history window
+
+final class ChatHistoryWindow: NSObject {
+    private var window: NSWindow?
+    private var textView: NSTextView?
+    private var timer: Timer?
+    private let conversationPath = "/var/lib/bad_apple/conversation.json"
+
+    func show() {
+        if window == nil {
+            let contentSize = NSSize(width: 640, height: 480)
+            let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+            let origin = NSPoint(
+                x: screenFrame.midX - contentSize.width / 2,
+                y: screenFrame.midY - contentSize.height / 2
+            )
+            let text = NSTextView()
+            text.isEditable = false
+            text.isSelectable = true
+            text.font = NSFont.systemFont(ofSize: 13)
+            text.autoresizingMask = [.width, .height]
+            text.textContainer?.widthTracksTextView = true
+            text.textContainer?.containerSize = NSSize(width: contentSize.width, height: .greatestFiniteMagnitude)
+
+            let scroll = NSScrollView(frame: NSRect(origin: .zero, size: contentSize))
+            scroll.hasVerticalScroller = true
+            scroll.autoresizingMask = [.width, .height]
+            scroll.documentView = text
+
+            let wc = NSWindow(
+                contentRect: NSRect(origin: origin, size: contentSize),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            wc.title = "Bad Apple Chat History"
+            wc.contentView = scroll
+            wc.isReleasedWhenClosed = false
+            wc.makeKeyAndOrderFront(nil)
+
+            window = wc
+            textView = text
+            timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+                self?.reload()
+            }
+        }
+        window?.makeKeyAndOrderFront(nil)
+        reload()
+    }
+
+    private func reload() {
+        guard let textView = textView else { return }
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: conversationPath))
+            let messages = try JSONSerialization.jsonObject(with: data) as? [[String: String]] ?? []
+            let lines = messages.map { m -> String in
+                let role = m["role"] ?? "?"
+                let content = m["content"] ?? ""
+                switch role {
+                case "system": return "🍎 Bad Apple (system)\n\(content)"
+                case "user": return "You\n\(content)"
+                case "assistant": return "Bad Apple\n\(content)"
+                default: return "\(role)\n\(content)"
+                }
+            }
+            let transcript = lines.joined(separator: "\n\n---\n\n")
+            textView.string = transcript
+        } catch {
+            textView.string = "No chat history available yet."
+        }
+    }
 }
 
 private extension String {
