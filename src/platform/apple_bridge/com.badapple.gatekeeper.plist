@@ -29,7 +29,7 @@
         <key>BADAPPLE_MLX_SOCKET_PATH</key>
         <string>/var/run/badapple/substrate_mlx.sock</string>
         <key>BADAPPLE_AUTOMATION_ROOTS</key>
-        <string>/Users/savag3/bad_apple:/Users/savag3/firefly_inferno:/Users/savag3/Documents:/Users/savag3/Downloads</string>
+        <string>/Users/savag3:/Users/savag3/bad_apple:/Users/savag3/firefly_inferno:/Users/savag3/Documents:/Users/savag3/Downloads</string>
         <key>BADAPPLE_AUTOMATION_LOG</key>
         <string>/Users/savag3/.badapple/automation.jsonl</string>
         <key>HOME</key>

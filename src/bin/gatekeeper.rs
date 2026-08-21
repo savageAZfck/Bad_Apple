@@ -135,7 +135,7 @@ impl FastActionResolver {
             open_app: Regex::new(r"(?i)\b(open|launch)\b(?:\s+\w+){0,2}\s+(?:the\s+)?([a-z0-9_\-\.]+(?:\.app)?)").unwrap(),
             create_file: Regex::new(r"(?i)\bcreate\b(?:\s+\w+){0,3}\s+(?:file)\s+(?:at\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
             create_dir: Regex::new(r"(?i)\bcreate\b(?:\s+\w+){0,3}\s+(?:directory|folder)\s+(?:at\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
-            list_dir: Regex::new(r"(?i)\b(list|show)\b(?:\s+\w+){0,3}\s+(?:files|contents|in)?\s+(?:of\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
+            list_dir: Regex::new(r"(?i)\b(list|show)\b(?:\s+\w+){0,3}\s+(?:files|contents|in)?\s+(?:of\s+)?(.+?)(?:\s+(?:and|then|or)\b|$)").unwrap(),
             delete: Regex::new(r"(?i)\b(delete|remove|trash)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)").unwrap(),
             copy_file: Regex::new(r"(?i)\bcopy\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
             move_file: Regex::new(r"(?i)\b(move)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
@@ -596,13 +596,20 @@ fn handle_client(
 
     if score < LOW_COMPLEXITY_THRESHOLD {
         if let Some(action) = resolver.resolve(&prompt) {
-            let reply = execute_fast(action, cage)?;
-            if &reply == "new chat" {
-                // The deep core is responsible for clearing state; fall through.
-            } else {
-                write_frame(&mut stream, &ServerFrame::Accepted)?;
-                write_frame(&mut stream, &ServerFrame::Done { text: reply })?;
-                return Ok(());
+            match execute_fast(action, cage) {
+                Ok(reply) if reply == "new chat" => {
+                    // The deep core is responsible for clearing state; fall through.
+                }
+                Ok(reply) => {
+                    write_frame(&mut stream, &ServerFrame::Accepted)?;
+                    write_frame(&mut stream, &ServerFrame::Done { text: reply })?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Fast path failed (e.g. path not in automation roots). Let the
+                    // deep MLX core try to handle it with its own tool sandbox.
+                    eprintln!("[gatekeeper] fast action failed, falling through to MLX: {e:#}");
+                }
             }
         }
     }

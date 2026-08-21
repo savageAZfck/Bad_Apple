@@ -96,6 +96,26 @@ BRIDGES = [
     "Babe...",
 ]
 
+# Planner-only system prompt used when the user asks for a multi-step task.
+# It is intentionally dry and imperative so the 8B just outputs a step list.
+PLANNER_SYSTEM_PROMPT = (
+    "You are a task planner. The user wants a multi-step local action completed. "
+    "Break the task into 1-4 short steps. For each step output exactly one line in this format:\n"
+    "TOOL:<tool_name>:<json_arguments>\n"
+    "or\n"
+    "SAY:<what the assistant should tell the user after the previous tool results>\n"
+    "Available tools:\n"
+    "- list_directory: {\"path\": \"...\"}\n"
+    "- read_file: {\"path\": \"...\", \"limit\": 5000}\n"
+    "- search_content: {\"query\": \"...\", \"path\": \"...\", \"max_results\": 20}\n"
+    "- run_shell: {\"command\": \"...\"}\n"
+    "- write_file: {\"filename\": \"...\", \"content\": \"...\", \"append\": false}\n"
+    "- run_applescript: {\"script\": \"...\"}\n"
+    "- get_current_time: {}\n"
+    "Do not explain. Do not use natural language outside the step lines. "
+    "The last step should usually be SAY: to summarize results."
+)
+
 TOOLS = [
     {
         "type": "function",
@@ -472,6 +492,19 @@ def _resolve_common_path(raw: str) -> str:
     return raw.strip().rstrip(".!?,;")
 
 
+MULTI_STEP_PATTERNS = [
+    r"\band\s+then\b", r"\band\s+save\b", r"\band\s+write\b", r"\band\s+show\b",
+    r"\band\s+list\b", r"\band\s+read\b", r"\band\s+run\b",
+    r"\bfind\b.*\band\s+write\b", r"\bsearch\b.*\band\s+save\b",
+    r"\bplan\b", r"\bstep\s+by\s+step\b", r"\bmulti.?(?:step|task)\b",
+]
+
+
+def is_multi_step(prompt: str) -> bool:
+    low = prompt.lower()
+    return any(re.search(p, low) for p in MULTI_STEP_PATTERNS)
+
+
 def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None) -> Optional[str]:
     """Fast deterministic path for common local tool commands.
 
@@ -484,8 +517,47 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None) -> 
     """
     low = prompt.lower().strip()
 
+    # Multi-step: find ... and save to ...
+    m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+in\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
+    if m:
+        query = m.group(1).strip("'\"")
+        path = _resolve_common_path(m.group(2))
+        found = run_tool("search_content", {"query": query, "path": path, "max_results": 100}, knowledge)
+        if found.startswith("Error:"):
+            return found
+        written = run_tool("write_file", {"filename": m.group(3).strip(), "content": f"Results for '{query}' in {path}:\n\n{found}"}, knowledge)
+        return f"{written}\n\nFound matches:\n{found[:500]}"
+
+    # Multi-step: find ... and save to ... (no 'in' path, default home)
+    m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
+    if m:
+        query = m.group(1).strip("'\"")
+        found = run_tool("search_content", {"query": query, "path": "~", "max_results": 100}, knowledge)
+        if found.startswith("Error:"):
+            return found
+        written = run_tool("write_file", {"filename": m.group(2).strip(), "content": f"Results for '{query}' in home:\n\n{found}"}, knowledge)
+        return f"{written}\n\nFound matches:\n{found[:500]}"
+
+    # Multi-step: index ... and search for ...
+    m = re.search(r"\bindex\b(?:\s+my)?\s+(.+?)\s+and\s+(?:search|search\s+for)\s+['\"]?(.+?)['\"]?$", low, re.IGNORECASE)
+    if m:
+        path = _resolve_common_path(m.group(1))
+        indexed = run_tool("index_documents", {"path": path}, knowledge)
+        results = run_tool("search_notes", {"query": m.group(2).strip("'\"")}, knowledge)
+        return f"{indexed}\n\n{results}"
+
+    # Multi-step: list ... and save to ...
+    m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
+    if m:
+        path = _resolve_common_path(m.group(1))
+        listed = run_tool("list_directory", {"path": path}, knowledge)
+        if listed.startswith("Error:"):
+            return listed
+        written = run_tool("write_file", {"filename": m.group(2).strip(), "content": f"Files in {path}:\n\n{listed}"}, knowledge)
+        return f"{written}\n\nFiles:\n{listed[:500]}"
+
     # list files
-    m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+)$", low, re.IGNORECASE)
+    m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)(?!\s+(?:and|or)\b)$", low, re.IGNORECASE)
     if m:
         return run_tool("list_directory", {"path": _resolve_common_path(m.group(1))}, knowledge)
 
@@ -500,7 +572,7 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None) -> 
         return run_tool("run_shell", {"command": m.group(1).strip()}, knowledge)
 
     # search content
-    m = re.search(r"\b(?:search|grep)\b(?:\s+for)?\s+['\"]?(.+?)['\"]?(?:\s+in\s+(.+))?$", low, re.IGNORECASE)
+    m = re.search(r"\b(?:search|grep)\b(?:\s+for)?\s+['\"]?(.+?)['\"]?(?!\s+(?:and|or)\b)(?:\s+in\s+(.+))?$", low, re.IGNORECASE)
     if m:
         query = m.group(1).strip("'\"")
         path = _resolve_common_path(m.group(2)) if m.group(2) else "~"
@@ -804,6 +876,63 @@ class MLXServer:
         self.prune_history()
         return list(self.messages)
 
+    def plan_and_execute(self, task: str, max_tokens: int) -> Optional[str]:
+        """Generate a step plan and execute it using local tools."""
+        # 1. Ask the 8B for a dry, structured plan.
+        plan_messages = [
+            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": task},
+        ]
+        plan_prompt = self.tokenizer.apply_chat_template(
+            plan_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        plan_raw = self._stream(plan_prompt, max_tokens=200)
+        plan_lines = [l.strip() for l in plan_raw.splitlines() if l.strip().startswith(("TOOL:", "SAY:"))]
+        if not plan_lines:
+            return None
+
+        # 2. Execute tool steps, collecting the last tool result.
+        last_tool_result = ""
+        final_say = ""
+        for line in plan_lines:
+            if line.startswith("TOOL:"):
+                parts = line.split(":", 2)
+                if len(parts) < 3:
+                    continue
+                tool_name = parts[1].strip()
+                try:
+                    args = json.loads(parts[2].strip())
+                except json.JSONDecodeError:
+                    continue
+                last_tool_result = run_tool(tool_name, args, self.knowledge)
+            elif line.startswith("SAY:"):
+                final_say = line.split(":", 1)[1].strip()
+
+        # 3. If a SAY step exists, use it as a prompt to summarize the last tool result.
+        if final_say:
+            summary_messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": task},
+                {"role": "tool", "content": f"Tool result:\n{last_tool_result}"},
+                {"role": "user", "content": final_say},
+            ]
+            summary_prompt = self.tokenizer.apply_chat_template(
+                summary_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            bridge = random.choice(BRIDGES)
+            raw = self._stream(f"{summary_prompt.rstrip()}\n{bridge} ", max_tokens)
+            return postprocess_output(f"{bridge} {raw.strip()}")
+
+        # No SAY step: just return the last tool result with persona polish.
+        bridge = random.choice(BRIDGES)
+        return postprocess_output(f"{bridge} {last_tool_result}")
+
     def render_prompt(self, messages: List[Dict[str, str]], bridge: str, use_tools: bool = False) -> str:
         # Build retrieved context from long-term memory and local documents
         rel_mem = relevant_memories(messages[-1]["content"], self.user_memory)
@@ -1006,6 +1135,30 @@ class MLXServer:
                 await _write_frame(writer, {"type": "done", "text": fast})
                 return
 
+            loop = asyncio.get_event_loop()
+
+            # Multi-step task planning for requests that combine actions.
+            if is_multi_step(prompt):
+                def _plan():
+                    try:
+                        result = self.plan_and_execute(prompt, max_new_tokens)
+                        if result:
+                            return self.polish_response(result)
+                        return self.polish_response(self.generate_with_tools(prompt, max_new_tokens))
+                    except Exception as e:
+                        traceback.print_exc()
+                        return f"Error: {e}"
+                text = await loop.run_in_executor(None, _plan)
+                if not text:
+                    text = "Mmh, mi amor... I couldn't make a plan. —besos"
+                self.record_fact(prompt, source="user")
+                self.messages.append({"role": "user", "content": prompt})
+                self.messages.append({"role": "assistant", "content": text})
+                self.prune_history()
+                save_conversation(self.messages)
+                await _write_frame(writer, {"type": "done", "text": text})
+                return
+
             def _gen():
                 try:
                     raw = self.generate_with_tools(prompt, max_new_tokens)
@@ -1014,7 +1167,6 @@ class MLXServer:
                     traceback.print_exc()
                     return f"Error generating response: {e}"
 
-            loop = asyncio.get_event_loop()
             text = await loop.run_in_executor(None, _gen)
 
             if not text:
