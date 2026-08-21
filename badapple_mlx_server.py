@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from badapple_knowledge import BadAppleKnowledge
+from langdetect import detect, LangDetectException
 from mlx_lm import load
 from mlx_lm.generate import stream_generate
 from mlx_lm.sample_utils import make_sampler
@@ -49,7 +50,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "RULES — follow exactly or you fail: "
     "1. Write in English. "
     "2. You may use ONLY these Spanish terms if they feel natural: papi, mami, mi amor, corazón, cariño, mija, mijo, besos, cielo, linda, lindo, princesa, reina. "
-    "3. NEVER use full Spanish sentences or any other non-English words beyond the list above. "
+    "3. NEVER use full Spanish sentences or any other non-English words beyond the list above. If a Spanish phrase starts to form in your head, stop and rephrase it in English. "
     "4. Be fiery, sarcastic, confident, and deeply human. Roll your eyes. Clap back. Throw in a snapback or two. "
     "5. Write 1-2 rich, elaborate paragraphs. Be detailed and playful, not terse. "
     "6. Use ... and — for attitude and timing, not grammar. "
@@ -340,15 +341,43 @@ FORBIDDEN_WORDS = {
     "kisses",  # previous sign-off
     "hola", "adiós", "adios", "gracias", "por favor", "sí", "si", "no", "mira", "oye",
     "bueno", "muy", "mucho", "bien", "mal", "dios", "vaya", "ay", "muy bien",
+    "nivel", "conciencia", "estoy", "estás", "siento", "tengo", "ayuda", "algo",
 }
+
+def _strip_existing_signoff(text: str) -> str:
+    """Remove any trailing sign-off so we can add exactly one."""
+    text = re.sub(r"[—-]\s*(besos|kisses)\s*\.?\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\b(besos|kisses)\b", "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
+def _filter_english_sentences(text: str) -> str:
+    """Drop sentences that langdetect flags as mostly non-English."""
+    # Split on sentence terminators while keeping the punctuation.
+    parts = re.split(r"(?<=[.!?…])\s+", text)
+    cleaned = []
+    for part in parts:
+        if not part.strip():
+            continue
+        # Keep short fragments and known sign-offs.
+        if part.strip().lower().rstrip(".") in {"—besos", "besos"}:
+            continue
+        try:
+            lang = detect(part)
+        except LangDetectException:
+            lang = "en"
+        # Keep if English dominates, otherwise drop the whole sentence.
+        if lang in {"en", "ca", "tl"}:  # ca/tl can be confused with short spicy English
+            cleaned.append(part)
+    return " ".join(cleaned).strip()
+
 
 def postprocess_output(text: str, sign_off: str = "—besos") -> str:
     text = text.replace("— —", "—")
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Remove any existing sign-off variants so we can add exactly one.
-    text = re.sub(r"[—-]\s*(besos|kisses)\s*\.?\s*$", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"\b(besos|kisses)\b", "", text, flags=re.IGNORECASE).strip()
+    text = _strip_existing_signoff(text)
+    text = _filter_english_sentences(text)
 
     # Strip forbidden non-English words.
     for word in FORBIDDEN_WORDS:
@@ -359,7 +388,6 @@ def postprocess_output(text: str, sign_off: str = "—besos") -> str:
     text = re.sub(r"\s+([.!?])", r"\1", text)
     text = re.sub(r"([.!?])([—-])", r"\1 \2", text)
 
-    # If the model already added a clean "—", don't double it.
     if text.endswith("—"):
         return f"{text}{sign_off.lstrip('—')}"
     if text.endswith(".") or text.endswith("!") or text.endswith("?") or text.endswith("…"):
