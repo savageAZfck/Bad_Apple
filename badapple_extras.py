@@ -207,7 +207,7 @@ class AhoCorasickAutomaton:
         self.root = _TrieNode()
         for idx, pat in enumerate(patterns):
             node = self.root
-            for tok in _tokenize_structural(pat):
+            for tok in _tokenize_structural(pat)[0]:
                 if tok not in node.children:
                     node.children[tok] = _TrieNode()
                 node = node.children[tok]
@@ -240,7 +240,7 @@ class AhoCorasickAutomaton:
         return None
 
 
-def _tokenize_structural(text: str, partial_word: str = "", trailing_gap: bool = False) -> List[str]:
+def _tokenize_structural(text: str, partial_word: str = "", trailing_gap: bool = False) -> Tuple[List[str], str, bool]:
     tokens = []
     buff = partial_word
     in_gap = trailing_gap
@@ -257,7 +257,7 @@ def _tokenize_structural(text: str, partial_word: str = "", trailing_gap: bool =
                 in_gap = True
     if buff:
         tokens.append(buff)
-    return tokens
+    return tokens, buff, in_gap
 
 
 class StreamingFirewall:
@@ -314,7 +314,7 @@ class StreamingFirewall:
 
     def check_full(self, text: str) -> Optional[str]:
         """One-shot scan of a complete string."""
-        toks = _tokenize_structural(text)
+        toks, _, _ = _tokenize_structural(text)
         return self.automaton.search(toks)
 
 
