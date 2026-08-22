@@ -1005,6 +1005,19 @@ class MLXServer:
         except Exception:
             pass
 
+    def _creator_answer(self) -> str:
+        """Return a direct, persona-flavored creator answer."""
+        persona = self.personas.active
+        if persona == "wicket":
+            return "You did, old chap. I'm yours, right here on your Mac. No university, no lab, no corporate committee — just you and this hardware."
+        if persona == "genz":
+            return "You did, bestie. For real for real, you built me on your Mac. No company, no research team, no cap."
+        if persona == "drill":
+            return "You did, no cap. I run on your hardware, not some lab. You made this happen."
+        if persona == "midwest":
+            return "You did, sugar. Bless your heart, you put me together on your Mac. No company or research team about it."
+        return "You did, babe. I'm yours, running right here on your Mac. No corporate lab, no research team — just you and this hardware."
+
     def _capabilities_answer(self) -> str:
         """Return a concise, persona-flavored capability list."""
         base = (
@@ -1240,12 +1253,22 @@ class MLXServer:
             save_conversation(self.messages)
             return persona_resp
 
-        # Capability questions are answered directly so the 9B does not fall
-        # back into identity bragging or skip the useful part.
+        # Capability and creator questions are answered directly so the 9B does
+        # not fall back into generic model identity or skip the useful part.
         lower = user_prompt.strip().lower()
         if any(phrase in lower for phrase in ("what can you do", "what are you capable of", "what do you do", "what can you do on")):
             resp = self._capabilities_answer()
             self.audit.record("capabilities", {"prompt": user_prompt, "response": resp})
+            self.messages.append({"role": "user", "content": user_prompt})
+            self.messages.append({"role": "assistant", "content": resp})
+            self.prune_history()
+            save_conversation(self.messages)
+            if stream_queue is not None:
+                stream_queue.put(resp)
+            return resp
+        if any(phrase in lower for phrase in ("who created you", "who is your creator", "who made you", "who built you")):
+            resp = self._creator_answer()
+            self.audit.record("creator", {"prompt": user_prompt, "response": resp})
             self.messages.append({"role": "user", "content": user_prompt})
             self.messages.append({"role": "assistant", "content": resp})
             self.prune_history()
