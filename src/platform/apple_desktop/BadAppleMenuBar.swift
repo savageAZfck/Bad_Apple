@@ -207,8 +207,8 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
     static let defaultVoice = "en_US-libritts-high"
     static let availableVoices = [
         "en_US-libritts-high",
-        "en_US-lessac-high",
         "en_US-amy-medium",
+        "en_US-lessac-high",
         "es_MX-claude-high",
         "es_MX-cortana-19669-epoch-high",
     ]
