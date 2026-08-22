@@ -192,18 +192,20 @@ final class PiperTTSClient {
     private var queue: [QueueItem] = []
     private let queueLock = NSLock()
     private var isProcessing = false
+    private var runningTask: Process?
 
     func stop() {
         queueLock.lock()
         queue.removeAll()
         isProcessing = false
+        runningTask?.terminate()
         queueLock.unlock()
     }
 
-    static let defaultVoice = "en_US-libritts-high"
+    static let defaultVoice = "en_US-amy-medium"
     static let availableVoices = [
-        "en_US-libritts-high",
         "en_US-amy-medium",
+        "en_US-libritts-high",
         "en_US-lessac-high",
         "es_MX-claude-high",
         "es_MX-cortana-19669-epoch-high",
@@ -335,7 +337,9 @@ final class PiperTTSClient {
         task.standardOutput = nil
         task.standardError = nil
         badAppleVoiceLog("PiperTTS playing \(url.path)")
-        task.terminationHandler = { task in
+        runningTask = task
+        task.terminationHandler = { [weak self] task in
+            self?.runningTask = nil
             let code = task.terminationStatus
             if code != 0 {
                 badAppleVoiceLog("PiperTTS afplay exited with \(code)")
@@ -347,6 +351,7 @@ final class PiperTTSClient {
             badAppleVoiceLog("PiperTTS afplay launched for \(url.path)")
         } catch {
             badAppleVoiceLog("PiperTTS play error: \(error.localizedDescription)")
+            runningTask = nil
             completion(false)
         }
     }
@@ -1530,10 +1535,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                     DispatchQueue.main.async {
                         self.voiceBuffer += chunk
                         self.streamedTokenCount += chunk.count
-                        if self.shouldFlushVoiceBuffer() {
-                            self.voiceHost.speakChunk(self.voiceBuffer)
-                            self.voiceBuffer = ""
-                        }
                         self.rebuildMenu()
                     }
                 }
@@ -1712,27 +1713,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
-    /// Decide whether the accumulated voice buffer is a complete enough utterance
-    /// to send to TTS. We flush on sentence boundaries or on paragraph breaks,
-    /// but also cap the buffer so long run-on sentences don't stall audio forever.
-    private func shouldFlushVoiceBuffer() -> Bool {
-        let t = voiceBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return false }
-        if t.hasSuffix(".") || t.hasSuffix("!") || t.hasSuffix("?") || t.hasSuffix("…") {
-            return true
-        }
-        if t.hasSuffix("—") {
-            return true
-        }
-        if t.contains("\n\n") {
-            return true
-        }
-        if t.count > 120 {
-            return true
-        }
-        return false
-    }
-
     private struct BadAppleMenuBarError: LocalizedError {
         let errorDescription: String?
         init(_ message: String) { self.errorDescription = message }
@@ -1745,7 +1725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         if !skipSpeak {
             voiceHost.speak(parsed.spoken)
         } else if !voiceBuffer.isEmpty {
-            voiceHost.speakChunk(voiceBuffer)
+            voiceHost.speak(voiceBuffer)
             voiceBuffer = ""
         }
         if let parseError = parsed.error {

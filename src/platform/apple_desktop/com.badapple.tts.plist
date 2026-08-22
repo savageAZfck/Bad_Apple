@@ -9,9 +9,9 @@
 		<key>BADAPPLE_TTS_VOICES_DIR</key>
 		<string>/Users/savag3/bad_apple/voices</string>
 		<key>BADAPPLE_TTS_VOICE</key>
-		<string>en_US-libritts-high</string>
+		<string>en_US-amy-medium</string>
 		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
-		<string>1.05</string>
+		<string>1.00</string>
 		<key>BADAPPLE_TTS_NOISE_SCALE</key>
 		<string>0.80</string>
 		<key>BADAPPLE_TTS_NOISE_W_SCALE</key>

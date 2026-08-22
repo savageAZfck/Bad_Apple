@@ -35,7 +35,7 @@ from pathlib import Path
 from piper.config import SynthesisConfig
 from piper.voice import PiperVoice
 
-DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "en_US-libritts-high")
+DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "en_US-amy-medium")
 DEFAULT_SOCKET = os.environ.get("BADAPPLE_TTS_SOCKET", "/tmp/badapple_tts.sock")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -109,7 +109,7 @@ def _load_voice(name: str) -> PiperVoice:
 
 def _synth_config() -> SynthesisConfig:
     return SynthesisConfig(
-        length_scale=float(os.environ.get("BADAPPLE_TTS_LENGTH_SCALE", "1.05")),
+        length_scale=float(os.environ.get("BADAPPLE_TTS_LENGTH_SCALE", "1.00")),
         noise_scale=float(os.environ.get("BADAPPLE_TTS_NOISE_SCALE", "0.80")),
         noise_w_scale=float(os.environ.get("BADAPPLE_TTS_NOISE_W_SCALE", "0.80")),
         volume=float(os.environ.get("BADAPPLE_TTS_VOLUME", "0.95")),
