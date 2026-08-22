@@ -30,6 +30,13 @@ from typing import List, Dict, Any, Optional
 import mlx.core as mx
 
 from badapple_knowledge import BadAppleKnowledge
+from badapple_extras import (
+    ApprovalGate,
+    AuditLedger,
+    PersonaPack,
+    SemanticCache,
+    StreamingFirewall,
+)
 from langdetect import detect, LangDetectException
 from mlx_lm import load
 from mlx_lm.generate import stream_generate
@@ -555,7 +562,7 @@ def is_multi_step(prompt: str) -> bool:
     return any(re.search(p, low) for p in MULTI_STEP_PATTERNS)
 
 
-def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None) -> Optional[str]:
+def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None) -> Optional[str]:
     """Fast deterministic path for common local tool commands.
 
     Recognizes patterns like:
@@ -567,76 +574,86 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None) -> 
     """
     low = prompt.lower().strip()
 
+    def _rt(name, args):
+        return run_tool(name, args, knowledge, approval=approval)
+
     # Multi-step: find ... and save to ...
     m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+in\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
     if m:
         query = m.group(1).strip("'\"")
         path = _resolve_common_path(m.group(2))
-        found = run_tool("search_content", {"query": query, "path": path, "max_results": 100}, knowledge)
+        found = _rt("search_content", {"query": query, "path": path, "max_results": 100})
         if found.startswith("Error:"):
             return found
-        written = run_tool("write_file", {"filename": m.group(3).strip(), "content": f"Results for '{query}' in {path}:\n\n{found}"}, knowledge)
+        written = _rt("write_file", {"filename": m.group(3).strip(), "content": f"Results for '{query}' in {path}:\n\n{found}"})
         return f"{written}\n\nFound matches:\n{found[:500]}"
 
     # Multi-step: find ... and save to ... (no 'in' path, default home)
     m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
     if m:
         query = m.group(1).strip("'\"")
-        found = run_tool("search_content", {"query": query, "path": "~", "max_results": 100}, knowledge)
+        found = _rt("search_content", {"query": query, "path": "~", "max_results": 100})
         if found.startswith("Error:"):
             return found
-        written = run_tool("write_file", {"filename": m.group(2).strip(), "content": f"Results for '{query}' in home:\n\n{found}"}, knowledge)
+        written = _rt("write_file", {"filename": m.group(2).strip(), "content": f"Results for '{query}' in home:\n\n{found}"})
         return f"{written}\n\nFound matches:\n{found[:500]}"
 
     # Multi-step: index ... and search for ...
     m = re.search(r"\bindex\b(?:\s+my)?\s+(.+?)\s+and\s+(?:search|search\s+for)\s+['\"]?(.+?)['\"]?$", low, re.IGNORECASE)
     if m:
         path = _resolve_common_path(m.group(1))
-        indexed = run_tool("index_documents", {"path": path}, knowledge)
-        results = run_tool("search_notes", {"query": m.group(2).strip("'\"")}, knowledge)
+        indexed = _rt("index_documents", {"path": path})
+        results = _rt("search_notes", {"query": m.group(2).strip("'\"")})
         return f"{indexed}\n\n{results}"
 
     # Multi-step: list ... and save to ...
     m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
     if m:
         path = _resolve_common_path(m.group(1))
-        listed = run_tool("list_directory", {"path": path}, knowledge)
+        listed = _rt("list_directory", {"path": path})
         if listed.startswith("Error:"):
             return listed
-        written = run_tool("write_file", {"filename": m.group(2).strip(), "content": f"Files in {path}:\n\n{listed}"}, knowledge)
+        written = _rt("write_file", {"filename": m.group(2).strip(), "content": f"Files in {path}:\n\n{listed}"})
         return f"{written}\n\nFiles:\n{listed[:500]}"
 
     # list files
     m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)(?!\s+(?:and|or)\b)$", low, re.IGNORECASE)
     if m:
-        return run_tool("list_directory", {"path": _resolve_common_path(m.group(1))}, knowledge)
+        return _rt("list_directory", {"path": _resolve_common_path(m.group(1))})
 
     # read file
     m = re.search(r"\bread\b(?:\s+file)?\s+(.+)$", low, re.IGNORECASE)
     if m:
-        return run_tool("read_file", {"path": _resolve_common_path(m.group(1)), "limit": 5000}, knowledge)
+        return _rt("read_file", {"path": _resolve_common_path(m.group(1)), "limit": 5000})
 
     # run shell
     m = re.search(r"\b(?:run|execute)\b(?:\s+shell|\s+command)?\s+(.+)$", low, re.IGNORECASE)
     if m:
-        return run_tool("run_shell", {"command": m.group(1).strip()}, knowledge)
+        return _rt("run_shell", {"command": m.group(1).strip()})
 
     # search content
     m = re.search(r"\b(?:search|grep)\b(?:\s+for)?\s+['\"]?(.+?)['\"]?(?!\s+(?:and|or)\b)(?:\s+in\s+(.+))?$", low, re.IGNORECASE)
     if m:
         query = m.group(1).strip("'\"")
         path = _resolve_common_path(m.group(2)) if m.group(2) else "~"
-        return run_tool("search_content", {"query": query, "path": path, "max_results": 20}, knowledge)
+        return _rt("search_content", {"query": query, "path": path, "max_results": 20})
 
     # write note
     m = re.search(r"\bwrite\b(?:\s+a?\s+note|\s+file|\s+to)?\s+([\w\.\-_]+)\s*(?::|with|containing)\s+(.+)$", low, re.IGNORECASE)
     if m:
-        return run_tool("write_file", {"filename": m.group(1).strip(), "content": m.group(2).strip()}, knowledge)
+        return _rt("write_file", {"filename": m.group(1).strip(), "content": m.group(2).strip()})
 
     return None
 
 
-def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None) -> str:
+def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None) -> str:
+    if approval is not None and approval.needs_approval(name):
+        proposal_id = approval.propose(name, args)
+        return (
+            f"Approval required before I can run {name}. "
+            f"Reply with 'approve {proposal_id}' to proceed. "
+            f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
+        )
     try:
         if name == "get_current_time":
             return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -902,6 +919,19 @@ class MLXServer:
         self.user_memory = load_user_memory()
         self.knowledge = BadAppleKnowledge()
         self._roast_index = 0
+
+        # OS extras: persona packs, output firewall, audit ledger, semantic cache,
+        # and human-in-the-loop approvals.
+        self.data_dir = Path(
+            os.environ.get("BADAPPLE_DATA_DIR") or "/var/lib/bad_apple"
+        ).expanduser()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.personas = PersonaPack(self.data_dir, self.prompt_file)
+        self.firewall = StreamingFirewall(self.data_dir)
+        self.audit = AuditLedger(self.data_dir)
+        self.cache = SemanticCache(self.data_dir)
+        self.approval = ApprovalGate(self.data_dir)
+
         # Keep the last few turns in context. When it grows, older turns are
         # still persisted to disk and a rolling summary keeps context alive.
         self.max_history_turns = 3
@@ -965,7 +995,7 @@ class MLXServer:
         self.mlx_device = mx.default_device()
 
     def reset_conversation(self):
-        self.messages = [{"role": "system", "content": self.system_prompt}]
+        self.messages = [{"role": "system", "content": self.personas.get_system_prompt()}]
         try:
             conversation_path().unlink(missing_ok=True)
         except Exception:
@@ -1052,7 +1082,7 @@ class MLXServer:
                     args = json.loads(parts[2].strip())
                 except json.JSONDecodeError:
                     continue
-                last_tool_result = run_tool(tool_name, args, self.knowledge)
+                last_tool_result = self._run_approved_tool(tool_name, args, task)
             elif line.startswith("SAY:"):
                 final_say = line.split(":", 1)[1].strip()
 
@@ -1086,9 +1116,10 @@ class MLXServer:
         # Use the short, low-latency voice prompt to keep prefill fast.
         if voice_mode:
             patched = [messages[0], messages[-1]]
-            patched[0]["content"] = VOICE_SYSTEM_PROMPT
+            patched[0]["content"] = self.personas.get_system_prompt(voice_mode=True)
         else:
             patched = list(messages)
+            patched[0]["content"] = self.personas.get_system_prompt(voice_mode=False)
 
         # For identity/roast questions, rotate a subtle vibe hint so DFlash's
         # deterministic sampler picks a different cloud target/insult on repeats.
@@ -1096,7 +1127,12 @@ class MLXServer:
         if last["role"] == "user":
             lower = last["content"].lower()
             if any(t in lower for t in ROAST_TRIGGERS):
-                mood, target = ROAST_MOODS[self._roast_index % len(ROAST_MOODS)]
+                mood, _ = ROAST_MOODS[self._roast_index % len(ROAST_MOODS)]
+                roast_bank = self.personas.get_roast_bank()
+                if roast_bank:
+                    target = roast_bank[self._roast_index % len(roast_bank)]
+                else:
+                    target = _
                 self._roast_index += 1
                 patched[-1] = {
                     "role": "user",
@@ -1154,6 +1190,32 @@ class MLXServer:
         stream_queue: Optional[queue.Queue] = None,
     ) -> str:
         self.check_prompt_reload()
+
+        # Persona commands (switch, teach) are handled without the 9B model.
+        persona_resp = self.personas.handle_command(user_prompt)
+        if persona_resp is not None:
+            self.audit.record("persona_command", {
+                "prompt": user_prompt,
+                "active_persona": self.personas.active,
+                "response": persona_resp,
+            })
+            self.messages.append({"role": "user", "content": user_prompt})
+            self.messages.append({"role": "assistant", "content": persona_resp})
+            self.prune_history()
+            save_conversation(self.messages)
+            return persona_resp
+
+        # Semantic cache: bypass the 9B for repeated questions.
+        if not voice_mode and not should_use_tools(user_prompt):
+            cached = self.cache.lookup(user_prompt)
+            if cached:
+                self.audit.record("cache_hit", {"prompt": user_prompt, "response": cached[:500]})
+                self.messages.append({"role": "user", "content": user_prompt})
+                self.messages.append({"role": "assistant", "content": cached})
+                self.prune_history()
+                save_conversation(self.messages)
+                return cached
+
         if user_prompt.strip().lower() == "new chat":
             self.reset_conversation()
             # Ask the model for a fresh English greeting instead of treating it as a command.
@@ -1162,9 +1224,19 @@ class MLXServer:
         messages = self.build_messages(user_prompt)
         use_tools = should_use_tools(user_prompt)
 
+        self.audit.record("query", {
+            "prompt": user_prompt,
+            "persona": self.personas.active,
+            "voice_mode": voice_mode,
+            "use_tools": use_tools,
+        })
+
         def clean(raw: str) -> str:
             _, text = extract_tool_calls(raw)
-            return postprocess_output(text)
+            text = postprocess_output(text)
+            if self.firewall.check_full(text):
+                return "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
+            return text
 
         # First generation. Only stream when tools are not offered, because tool
         # reasoning can produce intermediate <tool_call> blocks we don't want
@@ -1178,24 +1250,47 @@ class MLXServer:
         tool_calls, _ = extract_tool_calls(raw)
 
         if not tool_calls:
-            return clean(raw)
+            final = clean(raw)
+            self.cache.store(user_prompt, final, intent=self.cache.classify_intent(user_prompt))
+            return final
 
         # Tool loop (multi-step task execution; allow more chained tool calls)
         for _ in range(5):
             for call in tool_calls:
-                result = run_tool(call["name"], call.get("arguments", {}), self.knowledge)
+                result = self._run_approved_tool(call["name"], call.get("arguments", {}), user_prompt)
                 self.messages.append({
                     "role": "tool",
                     "content": json.dumps({"name": call["name"], "result": result}),
                     "name": call["name"],
                 })
+                self.audit.record("tool_result", {
+                    "prompt": user_prompt,
+                    "tool": call["name"],
+                    "result": result[:500],
+                })
             # Re-render and generate after tool results
             raw = self._stream(self.render_prompt(self.messages, use_tools=True, voice_mode=voice_mode), max_tokens, voice_mode=voice_mode)
             tool_calls, _ = extract_tool_calls(raw)
             if not tool_calls:
-                return clean(raw)
+                final = clean(raw)
+                self.cache.store(user_prompt, final, intent=self.cache.classify_intent(user_prompt))
+                return final
 
-        return clean(raw)
+        final = clean(raw)
+        self.cache.store(user_prompt, final, intent=self.cache.classify_intent(user_prompt))
+        return final
+
+    def _run_approved_tool(self, name: str, args: Dict[str, Any], user_prompt: str) -> str:
+        """Run a tool, but gate destructive tools behind the approval workflow."""
+        if self.approval.needs_approval(name):
+            proposal_id = self.approval.propose(name, args, user_prompt)
+            return (
+                f"Approval required before I can run {name}. "
+                f"Reply with 'approve {proposal_id}' to proceed. "
+                f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
+            )
+        result = run_tool(name, args, self.knowledge)
+        return result
 
     def _stream(
         self,
@@ -1207,6 +1302,19 @@ class MLXServer:
         t0 = time.time()
         tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
+
+        self.firewall.reset()
+
+        def _emit(chunk: str) -> bool:
+            """Send a streaming chunk through the output firewall. Returns False if blocked."""
+            if self.firewall.push_and_check(chunk):
+                redacted = "[Output firewall: I caught a pattern I am not allowed to stream.]"
+                if stream_queue is not None:
+                    stream_queue.put(redacted)
+                return False
+            if stream_queue is not None:
+                stream_queue.put(chunk)
+            return True
 
         if self.dflash_bundle is not None:
             return self._stream_dflash(
@@ -1253,7 +1361,8 @@ class MLXServer:
                         # next streamed chunk doesn't run into this one.
                         if chunk.endswith((".", "!", "?", "…")):
                             chunk += " "
-                        stream_queue.put(chunk)
+                        if not _emit(chunk):
+                            return "[Output firewall: blocked streaming content]"
                     stream_buffer = ""
             total_tokens += 1
             if response.from_draft:
@@ -1261,7 +1370,8 @@ class MLXServer:
             # Hard stop on persona boundaries.
             if any(s in accumulated for s in ("\n\n", "—besos")):
                 if stream_queue is not None and stream_buffer.strip():
-                    stream_queue.put(polish_text(stream_buffer) + " ")
+                    if not _emit(polish_text(stream_buffer) + " "):
+                        return "[Output firewall: blocked streaming content]"
                 break
             if response.finish_reason is not None:
                 final_metrics = response
@@ -1275,7 +1385,8 @@ class MLXServer:
                 if chunk:
                     if chunk.endswith((".", "!", "?", "…")):
                         chunk += " "
-                    stream_queue.put(chunk)
+                    if not _emit(chunk):
+                        return "[Output firewall: blocked streaming content]"
         # No sign-off injection.
         if final_metrics is not None:
             pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
@@ -1314,6 +1425,18 @@ class MLXServer:
         # roasts / phrasing across turns. DFlash still verifies the target output,
         # but the sampling key is different on each call.
         mx.random.seed(int(time.time() * 1_000_000) % (2**32))
+
+        self.firewall.reset()
+
+        def _emit(chunk: str) -> bool:
+            if self.firewall.push_and_check(chunk):
+                redacted = "[Output firewall: I caught a pattern I am not allowed to stream.]"
+                if stream_queue is not None:
+                    stream_queue.put(redacted)
+                return False
+            if stream_queue is not None:
+                stream_queue.put(chunk)
+            return True
 
         accumulated = ""
         stream_buffer = ""
@@ -1358,7 +1481,8 @@ class MLXServer:
                         if chunk:
                             if chunk.endswith((".", "!", "?", "…")):
                                 chunk += " "
-                            stream_queue.put(chunk)
+                            if not _emit(chunk):
+                                return "[Output firewall: blocked streaming content]"
                         stream_buffer = ""
                     if hit_stop:
                         break
@@ -1381,7 +1505,8 @@ class MLXServer:
             if chunk:
                 if chunk.endswith((".", "!", "?", "…")):
                     chunk += " "
-                stream_queue.put(chunk)
+                if not _emit(chunk):
+                    return "[Output firewall: blocked streaming content]"
         if summary is not None:
             accept_pct = float(summary.acceptance_ratio) * 100.0
             # Total time includes prefill; if we have a first-token time, report
@@ -1499,9 +1624,28 @@ class MLXServer:
                 await _write_frame(writer, {"type": "done", "text": "Okay, so... fresh start."})
                 return
 
+            # Persona commands are intercepted before any model or tool work.
+            persona_resp = self.personas.handle_command(prompt)
+            if persona_resp is not None:
+                await _write_frame(writer, {"type": "done", "text": persona_resp})
+                return
+
+            # Approval command: execute a previously proposed destructive tool.
+            approval_action = self.approval.handle_approve_command(prompt)
+            if approval_action:
+                tool_name, args = approval_action
+                result = run_tool(tool_name, args, self.knowledge)
+                self.audit.record("approval_execute", {"tool": tool_name, "args": args, "result": result[:500]})
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+
+            if prompt.strip().lower() == "pending approvals":
+                await _write_frame(writer, {"type": "done", "text": self.approval.get_pending_summary()})
+                return
+
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
             # This avoids a full 8B generation for simple local actions and stays air-gapped.
-            fast = fast_execute(prompt, self.knowledge)
+            fast = fast_execute(prompt, self.knowledge, approval=self.approval)
             if fast:
                 fast = self.polish_response(postprocess_output(fast))
                 self.record_fact(prompt, source="user")
@@ -1509,6 +1653,12 @@ class MLXServer:
                 self.messages.append({"role": "assistant", "content": fast})
                 self.prune_history()
                 save_conversation(self.messages)
+                self.audit.record("response", {
+                    "prompt": prompt,
+                    "fast_path": True,
+                    "response": fast[:500],
+                    "persona": self.personas.active,
+                })
                 await _write_frame(writer, {"type": "done", "text": fast})
                 return
 
@@ -1535,6 +1685,12 @@ class MLXServer:
                 self.messages.append({"role": "assistant", "content": text})
                 self.prune_history()
                 save_conversation(self.messages)
+                self.audit.record("response", {
+                    "prompt": prompt,
+                    "multi_step": True,
+                    "response": text[:500],
+                    "persona": self.personas.active,
+                })
                 await _write_frame(writer, {"type": "done", "text": text})
                 return
 
@@ -1570,6 +1726,11 @@ class MLXServer:
             self.messages.append({"role": "assistant", "content": text})
             self.prune_history()
             save_conversation(self.messages)
+            self.audit.record("response", {
+                "prompt": prompt,
+                "response": text[:500],
+                "persona": self.personas.active,
+            })
 
             await _write_frame(writer, {"type": "done", "text": text})
 
