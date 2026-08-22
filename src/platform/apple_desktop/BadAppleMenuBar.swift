@@ -1475,6 +1475,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         get { UserDefaults.standard.object(forKey: "BadAppleVoiceEnabled") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleVoiceEnabled") }
     }
+    private var roastEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "BadAppleRoastEnabled") as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: "BadAppleRoastEnabled") }
+    }
+    private var selectedPersona: String {
+        get { UserDefaults.standard.object(forKey: "BadAppleSelectedPersona") as? String ?? "default" }
+        set { UserDefaults.standard.set(newValue, forKey: "BadAppleSelectedPersona") }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         BadAppleFFI.shared.load()
@@ -1527,11 +1535,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         // Fallback: ask the on-device daemon via the bundled badapple CLI.
         // The CLI streams sentence chunks as they are generated, so TTS starts
         // while the 9B model is still finishing the rest of the response.
+        var extraArgs: [String] = []
+        if selectedPersona != "default" { extraArgs += ["--persona", selectedPersona] }
+        if roastEnabled { extraArgs += ["--roast"] }
+
         let socket = BadAppleBrain.deepSocket
         let maxTokens = 140
         Task {
             do {
-                let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens) { chunk in
+                let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens, extraArgs: extraArgs) { chunk in
                     DispatchQueue.main.async {
                         self.voiceBuffer += chunk
                         self.streamedTokenCount += chunk.count
@@ -1578,10 +1590,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
+    @objc private func toggleRoast() {
+        roastEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func selectPersona(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        selectedPersona = name
+        rebuildMenu()
+    }
+
+    @objc private func runBenchmark() {
+        Task {
+            do {
+                let output = try await runBadAppleCLI(args: ["--benchmark"])
+                await MainActor.run {
+                    NSApp.activate(ignoringOtherApps: true)
+                    let alert = NSAlert()
+                    alert.messageText = "Bad Apple Benchmark"
+                    alert.informativeText = output
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.rebuildMenu()
+                }
+            }
+        }
+    }
+
     private func runBadAppleCLIStreaming(
         prompt: String,
         socketPath: String,
         maxTokens: Int,
+        extraArgs: [String] = [],
         onChunk: @escaping (String) -> Void
     ) async throws -> String {
         let binary = Bundle.main.bundleURL
@@ -1598,7 +1643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 let process = Process()
                 let outputPipe = Pipe()
                 process.executableURL = binary
-                process.arguments = ["--max-tokens", String(maxTokens), prompt]
+                process.arguments = extraArgs + ["--max-tokens", String(maxTokens), prompt]
                 process.standardOutput = outputPipe
                 process.standardError = outputPipe
                 var environment = ProcessInfo.processInfo.environment
@@ -1713,6 +1758,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
+    private func runBadAppleCLI(args: [String]) async throws -> String {
+        let binary = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Helpers")
+            .appendingPathComponent("badapple")
+        let command = binary.path
+        guard FileManager.default.fileExists(atPath: command) else {
+            throw BadAppleMenuBarError("The badapple helper binary is missing from the app bundle.")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let outputPipe = Pipe()
+                process.executableURL = binary
+                process.arguments = args
+                process.standardOutput = outputPipe
+                process.standardError = outputPipe
+                var environment = ProcessInfo.processInfo.environment
+                environment["BADAPPLE_SOCKET_PATH"] = BadAppleBrain.deepSocket
+                environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
+                process.environment = environment
+
+                var timeoutTimer: Timer?
+                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
+                    badAppleVoiceLog("runBadAppleCLI benchmark: timeout, terminating")
+                    process.terminate()
+                }
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    timeoutTimer?.invalidate()
+                    let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    let output = String(data: data, encoding: .utf8) ?? ""
+                    badAppleVoiceLog("runBadAppleCLI: exit=\(process.terminationStatus) output=\(output.prefix(200))")
+                    if process.terminationStatus != 0, output.isEmpty {
+                        throw BadAppleMenuBarError("The Bad Apple helper exited with code \(process.terminationStatus).")
+                    }
+                    continuation.resume(returning: output)
+                } catch {
+                    timeoutTimer?.invalidate()
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     private struct BadAppleMenuBarError: LocalizedError {
         let errorDescription: String?
         init(_ message: String) { self.errorDescription = message }
@@ -1756,7 +1849,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let toggle = NSMenuItem(title: "Voice Listening", action: #selector(toggleVoice), keyEquivalent: "v")
         toggle.state = voiceEnabled ? .on : .off
         menu.addItem(toggle)
+
+        let roastToggle = NSMenuItem(title: "Roast Mode", action: #selector(toggleRoast), keyEquivalent: "")
+        roastToggle.state = roastEnabled ? .on : .off
+        menu.addItem(roastToggle)
+
+        let personaMenu = NSMenu(title: "Persona")
+        for (name, display) in [("default", "Default"), ("wicket", "Wicket"), ("genz", "Gen Z"), ("drill", "Drill"), ("midwest", "Midwest Aunt")] {
+            let item = NSMenuItem(title: display, action: #selector(selectPersona(_:)), keyEquivalent: "")
+            item.representedObject = name
+            item.state = (selectedPersona == name) ? .on : .off
+            personaMenu.addItem(item)
+        }
+        let personaParent = NSMenuItem(title: "Persona", action: nil, keyEquivalent: "")
+        personaParent.submenu = personaMenu
+        menu.addItem(personaParent)
+
         menu.addItem(NSMenuItem(title: "Restart Voice Recognition", action: #selector(restartVoice), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "Benchmark", action: #selector(runBenchmark), keyEquivalent: "b"))
 
         let voiceMenu = NSMenu(title: "Voice")
 
