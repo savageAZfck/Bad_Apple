@@ -763,8 +763,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
                 current = ""
                 return
             }
-            // sign-off "—xoxo" gets a warm trailing breath
-            let isSignOff = trimmed.lowercased().contains("xoxo")
+            // sign-off "—mwah" gets a warm trailing breath
+            let isSignOff = trimmed.lowercased().contains("mwah")
             let finalRate: Float = isSignOff ? 0.42 : rate
             let finalPitch: Float = isSignOff ? 0.94 : pitch
             let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.5) : postDelay

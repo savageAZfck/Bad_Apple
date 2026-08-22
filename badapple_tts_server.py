@@ -58,14 +58,15 @@ def _voice_paths(name: str):
 
 def _download_url(name: str) -> tuple[str, str]:
     # Convert voice name like es_MX-claude-high or en_US-lessac-high
-    # to the HuggingFace path: es/es_MX/claude/high/es_MX-claude-high
+    # to the HuggingFace path: en/en_US/lessac/high/en_US-lessac-high
     parts = name.split("-")
     if len(parts) < 3:
         raise ValueError(f"voice name '{name}' does not match locale-speaker-quality pattern")
     locale = "-".join(parts[: len(parts) - 2])
     speaker = parts[-2]
     quality = parts[-1]
-    base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{locale}/{locale}/{speaker}/{quality}/{name}"
+    lang = locale.split("_")[0]
+    base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{locale}/{speaker}/{quality}/{name}"
     return f"{base}.onnx?download=true", f"{base}.onnx.json?download=true"
 
 
@@ -120,6 +121,7 @@ def _clean_text(text: str) -> str:
     # Keep only speakable characters; drop formatting and URLs.
     text = re.sub(r"https?://\S+", "", text)
     text = text.replace("*", "")
+    text = re.sub(r"[ʋʌɑɒɛɪʊɔəæ]", lambda m: {"ʋ":"v","ʌ":"v","ɑ":"a","ɒ":"o","ɛ":"e","ɪ":"i","ʊ":"u","ɔ":"o","ə":"a","æ":"a"}[m.group()], text)
     text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]", "", text)
     return text.strip()
 
