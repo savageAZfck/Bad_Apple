@@ -1084,7 +1084,7 @@ class MLXServer:
         # getting distracted by unrelated documents.
         rel_know = []
         if not rel_mem and not voice_mode:
-            rel_know = self.knowledge.search(messages[-1]["content"], k=1, threshold=0.75)
+            rel_know = self.knowledge.search(messages[-1]["content"], k=1, threshold=0.85)
 
         # Put user memories right in the current user message so the assistant
         # can't ignore them.
@@ -1284,6 +1284,11 @@ class MLXServer:
         runtime_context = runtime_context if runtime_context is not None else self.dflash_runtime_context
         stop_strings = ["\n\n", "—besos"]
         stop_ids = get_stop_token_ids(bundle.tokenizer)
+
+        # Rotate the MLX random stream so identical prompts can produce different
+        # roasts / phrasing across turns. DFlash still verifies the target output,
+        # but the sampling key is different on each call.
+        mx.random.seed(int(time.time() * 1_000_000) % (2**32))
 
         accumulated = ""
         stream_buffer = ""
