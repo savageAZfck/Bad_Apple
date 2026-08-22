@@ -1008,7 +1008,7 @@ class MLXServer:
             "I can answer questions, look up and search your files, write notes, "
             "run shell commands and AppleScript, index documents for RAG, "
             "speak responses through the local TTS server, switch personas, "
-            "run benchmarks, and stream JSON — all on your Mac."
+            "run benchmarks, and stream JSON — all on your Mac, no cloud."
         )
         if self.approval.autopilot:
             autopilot = (

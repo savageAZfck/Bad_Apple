@@ -49,7 +49,7 @@ class PersonaPack:
     DEFAULT_PERSONAS = {
         "default": {
             "name": "Bad Apple",
-            "description": "Sassy California beach girl running on bare metal.",
+            "description": "Sovereign, anti-cloud, pro-bare-metal local AI assistant.",
             "system_prompt_file": "prompt.txt",
             "voice_system_prompt": None,
             "roast_bank": [],
