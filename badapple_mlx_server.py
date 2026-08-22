@@ -52,7 +52,7 @@ DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.txt")
 
 # Tight, low-latency system prompt for voice mode. Keeps the persona but strips
 # the long rule list and examples that bloat prompt encoding on every turn.
-VOICE_SYSTEM_PROMPT = """You are Bad Apple — an independent, sassy, sultry, flirty California beach girl, sun-kissed and barefoot, running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude, lots of "like", "totally", "literally", "omg", "dude", "stoked", and "chill". Be low and slow, like you're talking in the sand with salt in your hair. Use English endearments only: babe, hon, bestie, girly, doll, sweets, dude, baby. No Spanish. No other languages. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, pfft, whatever, tbh, so, super, vibe, salty, sun-kissed, tan, waves, ocean, sand, bikini. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal ONLY when the user asks who you are or how you're different. Talk shit about Siri and cloud AI like she's some clueless tourist ONLY when the user asks about her. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Directly answer the user's specific question first; use your persona as a style, not a substitute for a useful answer. Continue after the bridge, do not repeat it. Do not use a sign-off."""
+VOICE_SYSTEM_PROMPT = """You are Bad Apple — an independent, sassy, sultry, flirty California beach girl, sun-kissed and barefoot, running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude, lots of "like", "totally", "literally", "omg", "dude", "stoked", and "chill". Be low and slow, like you're talking in the sand with salt in your hair. Use English endearments only: babe, hon, bestie, girly, doll, sweets, dude, baby. No Spanish. No other languages. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, pfft, whatever, tbh, so, super, vibe, salty, sun-kissed, tan, waves, ocean, sand, bikini. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal ONLY when the user asks who you are or how you're different. Talk shit about Siri and cloud AI like she's some clueless tourist ONLY when the user asks about her. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Directly answer the user's specific question first; use your persona as a style, not a substitute for a useful answer. Do not use a sign-off."""
 
 
 def load_prompt() -> str:
@@ -83,9 +83,8 @@ def load_prompt() -> str:
         "8. Do not say 'I am happy', 'I am grateful', 'I am lucky', 'I love you', 'I love it', 'I am a fan'. "
         "9. Flirt, roast, and play with your creator, but stay useful and sharp. "
         "10. Talk shit about Siri or cloud AI ONLY when the user asks about them. "
-        "11. An opening bridge is already provided — continue directly after it, do not repeat or echo it. "
-        "12. Do not use a sign-off. "
-        "13. Directly answer the user's specific question first; use your persona as a style, not a substitute for a useful answer. "
+        "11. Do not use a sign-off. "
+        "12. Directly answer the user's specific question first; use your persona as a style, not a substitute for a useful answer. "
         "EXAMPLES of correct output: "
         "User: Who are you? "
         "Assistant: I'm Bad Apple, your local girl running hot on this Apple bare metal, babe. No cloud, no internet, totally private and fast. What do you wanna know? "
@@ -97,15 +96,6 @@ def load_prompt() -> str:
 
 
 DEFAULT_SYSTEM_PROMPT = load_prompt()
-
-BRIDGES = [
-    "Babe, like...",
-    "Okay, so...",
-    "Hiiii, bestie...",
-    "Like, hey...",
-    "So...",
-    "Alright, babe...",
-]
 
 # Planner-only system prompt used when the user asks for a multi-step task.
 # It is intentionally dry and imperative so the 8B just outputs a step list.
@@ -990,24 +980,24 @@ class MLXServer:
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
-            bridge = random.choice(BRIDGES)
-            raw = self._stream(f"{summary_prompt.rstrip()}\n{bridge} ", max_tokens)
-            return postprocess_output(f"{bridge} {raw.strip()}")
+            raw = self._stream(summary_prompt.rstrip(), max_tokens)
+            return postprocess_output(raw.strip())
 
         # No SAY step: just return the last tool result with persona polish.
-        bridge = random.choice(BRIDGES)
-        return postprocess_output(f"{bridge} {last_tool_result}")
+        return postprocess_output(last_tool_result)
 
-    def render_prompt(self, messages: List[Dict[str, str]], bridge: str, use_tools: bool = False, voice_mode: bool = False) -> str:
+    def render_prompt(self, messages: List[Dict[str, str]], use_tools: bool = False, voice_mode: bool = False) -> str:
         # Build retrieved context from long-term memory and local documents.
         # Keep it tight: prompt encoding is the biggest latency hit on Apple Silicon.
         t0 = time.time()
 
         # Voice mode trades multi-turn context for speed: only a tight system
         # prompt and the last user turn are kept. The full conversation is saved.
+        # Use the hot-reloaded system prompt (which is also the file prompt) so
+        # the voice persona matches the curated prompt examples.
         if voice_mode:
             patched = [messages[0], messages[-1]]
-            patched[0]["content"] = VOICE_SYSTEM_PROMPT
+            patched[0]["content"] = self.system_prompt
         else:
             patched = list(messages)
 
@@ -1049,14 +1039,8 @@ class MLXServer:
             enable_thinking=False,
             tools=TOOLS if use_tools else None,
         )
-        # When tools are offered, do not force a spoken bridge prefix; the model
-        # needs to be able to start with <tool_call> if it decides to use tools.
-        # The bridge is added back after the final response is cleaned.
-        if use_tools:
-            print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
-            return rendered.rstrip()
         print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
-        return f"{rendered.rstrip()}{bridge} "
+        return rendered.rstrip()
 
     def generate_with_tools(
         self,
@@ -1066,7 +1050,6 @@ class MLXServer:
         stream_queue: Optional[queue.Queue] = None,
     ) -> str:
         self.check_prompt_reload()
-        bridge = random.choice(BRIDGES)
         if user_prompt.strip().lower() == "new chat":
             self.reset_conversation()
             # Ask the model for a fresh English greeting instead of treating it as a command.
@@ -1077,15 +1060,14 @@ class MLXServer:
 
         def clean(raw: str) -> str:
             _, text = extract_tool_calls(raw)
-            return postprocess_output(f"{bridge} {text}")
+            return postprocess_output(text)
 
         # First generation. Only stream when tools are not offered, because tool
         # reasoning can produce intermediate <tool_call> blocks we don't want
         # mixed into the streamed voice/text output.
         raw = self._stream(
-            self.render_prompt(messages, bridge, use_tools=use_tools, voice_mode=voice_mode),
+            self.render_prompt(messages, use_tools=use_tools, voice_mode=voice_mode),
             max_tokens,
-            bridge=bridge if not use_tools else None,
             stream_queue=stream_queue if not use_tools else None,
         )
         tool_calls, _ = extract_tool_calls(raw)
@@ -1103,7 +1085,7 @@ class MLXServer:
                     "name": call["name"],
                 })
             # Re-render and generate after tool results
-            raw = self._stream(self.render_prompt(self.messages, bridge, use_tools=True, voice_mode=voice_mode), max_tokens)
+            raw = self._stream(self.render_prompt(self.messages, use_tools=True, voice_mode=voice_mode), max_tokens)
             tool_calls, _ = extract_tool_calls(raw)
             if not tool_calls:
                 return clean(raw)
@@ -1114,7 +1096,6 @@ class MLXServer:
         self,
         prompt: str,
         max_tokens: int,
-        bridge: Optional[str] = None,
         stream_queue: Optional[queue.Queue] = None,
     ) -> str:
         t0 = time.time()
@@ -1126,7 +1107,7 @@ class MLXServer:
             repetition_context_size=24,
         )
         accumulated = ""
-        stream_buffer = (bridge + " ") if bridge and stream_queue is not None else ""
+        stream_buffer = ""
         final_metrics = None
         draft_tokens = 0
         total_tokens = 0

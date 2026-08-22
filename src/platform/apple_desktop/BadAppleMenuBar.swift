@@ -1528,7 +1528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         // The CLI streams sentence chunks as they are generated, so TTS starts
         // while the 9B model is still finishing the rest of the response.
         let socket = BadAppleBrain.deepSocket
-        let maxTokens = 100
+        let maxTokens = 140
         Task {
             do {
                 let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens) { chunk in
