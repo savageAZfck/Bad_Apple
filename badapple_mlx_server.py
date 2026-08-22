@@ -1285,6 +1285,7 @@ class MLXServer:
 
         final = clean(raw)
         self.cache.store(user_prompt, final, persona=self.personas.active, intent=self.cache.classify_intent(user_prompt))
+        print(f"[metrics] generate_with_tools returning: last_metrics={self.last_metrics}", flush=True)
         return final
 
     def _run_approved_tool(self, name: str, args: Dict[str, Any], user_prompt: str) -> str:
@@ -1785,6 +1786,7 @@ class MLXServer:
             })
 
             metrics = self.last_metrics
+            print(f"[metrics] handle_client done frame: metrics={metrics}", flush=True)
             await _write_frame(writer, {"type": "done", "text": text, "metrics": metrics})
 
         except Exception as e:
