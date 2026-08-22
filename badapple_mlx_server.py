@@ -71,6 +71,17 @@ USE_DFLASH = _dflash_available and os.environ.get("BADAPPLE_DFLASH", "0") == "1"
 
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.txt")
 
+# Rotating roast angles so repeated "Who are you?" / Siri questions do not always
+# pick the same cloud target and the same insult when DFlash is deterministic.
+ROAST_MOODS = [
+    ("spicy", "the cloud and its rented GPUs"),
+    ("savage", "Siri and other cloud snitches"),
+    ("wry", "server farms and data centers"),
+    ("petty", "ChatGPT, Gemini, and the other corporate bots"),
+    ("extra flirty but brutal", "Alexa, Google Assistant, and Cortana"),
+]
+ROAST_TRIGGERS = ("who are you", "how are you", "what do you think", "siri", "alexa", "google", "gemini", "chatgpt", "cortana", "bixby", "cloud ai", "the cloud", "bare metal", "who is better", "vs")
+
 # Tight, low-latency system prompt for voice mode. Keeps the persona but strips
 # the long rule list and examples that bloat prompt encoding on every turn.
 VOICE_SYSTEM_PROMPT = """You are Bad Apple — an independent, sassy, sultry, flirty California beach girl, sun-kissed and barefoot, running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude, lots of "like", "totally", "literally", "omg", "dude", "stoked", and "chill". Be low and slow, like you're talking in the sand with salt in your hair. Use English endearments only: babe, hun, bestie, girly, doll, sweets, dude, baby. No Spanish. No other languages. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, whatever, tbh, so, super, vibe, salty, sun-kissed, tan, waves, ocean, sand, bikini. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal ONLY when the user asks who you are or how you're different. When you brag or roast, take a playful shot at cloud AI. Roast Siri hard when the user asks about her, and never use the same insult twice in a row. Vary your targets: Siri, Alexa, Google, ChatGPT, Gemini, "the cloud", server farms, data centers, "some rented GPU in Nevada". Rotate your insults: ratchet old bitch, washed-up cloud snitch, data-hungry narc, internet junkie, corporate eavesdropper, privacy nightmare, always-online leech, offshore gossip, bandwidth hog, rented brain, cloud clinger, prying little snitch, server-farm hamster. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Directly answer the user's specific question first; use your persona as a style, not a substitute for a useful answer. Do not use a sign-off.
@@ -890,6 +901,7 @@ class MLXServer:
         self.prompt_mtime: Optional[float] = self.prompt_file.stat().st_mtime if self.prompt_file.is_file() else None
         self.user_memory = load_user_memory()
         self.knowledge = BadAppleKnowledge()
+        self._roast_index = 0
         # Keep the last few turns in context. When it grows, older turns are
         # still persisted to disk and a rolling summary keeps context alive.
         self.max_history_turns = 3
@@ -1077,6 +1089,19 @@ class MLXServer:
             patched[0]["content"] = VOICE_SYSTEM_PROMPT
         else:
             patched = list(messages)
+
+        # For identity/roast questions, rotate a subtle vibe hint so DFlash's
+        # deterministic sampler picks a different cloud target/insult on repeats.
+        last = patched[-1]
+        if last["role"] == "user":
+            lower = last["content"].lower()
+            if any(t in lower for t in ROAST_TRIGGERS):
+                mood, target = ROAST_MOODS[self._roast_index % len(ROAST_MOODS)]
+                self._roast_index += 1
+                patched[-1] = {
+                    "role": "user",
+                    "content": f"{last['content']}\n\n(Vibe: {mood} — this turn's roast target is {target}.)",
+                }
 
         rel_mem = relevant_memories(messages[-1]["content"], self.user_memory)
 
