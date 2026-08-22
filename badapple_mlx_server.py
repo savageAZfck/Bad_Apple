@@ -1558,7 +1558,6 @@ class MLXServer:
                 "draft_accept_pct": float(accept_pct),
                 "peak_memory_gb": float(summary.peak_memory_gb),
             }
-            print(f"[metrics] set dflash: {self.last_metrics}", flush=True)
         elif token_count > 0:
             # DFlash did not yield a SummaryEvent (e.g., stopped on a boundary token).
             # Derive a decode t/s from wall-clock time and token count.
@@ -1710,7 +1709,8 @@ class MLXServer:
                     "response": fast[:500],
                     "persona": self.personas.active,
                 })
-                await _write_frame(writer, {"type": "done", "text": fast, "metrics": self.last_metrics})
+                metrics = self.last_metrics
+                await _write_frame(writer, {"type": "done", "text": fast, "metrics": metrics})
                 return
 
             loop = asyncio.get_event_loop()
@@ -1742,7 +1742,8 @@ class MLXServer:
                     "response": text[:500],
                     "persona": self.personas.active,
                 })
-                await _write_frame(writer, {"type": "done", "text": text, "metrics": self.last_metrics})
+                metrics = self.last_metrics
+                await _write_frame(writer, {"type": "done", "text": text, "metrics": metrics})
                 return
 
             stream_queue = queue.Queue()
@@ -1783,8 +1784,8 @@ class MLXServer:
                 "persona": self.personas.active,
             })
 
-            print(f"[metrics] done frame: {self.last_metrics}", flush=True)
-            await _write_frame(writer, {"type": "done", "text": text, "metrics": self.last_metrics})
+            metrics = self.last_metrics
+            await _write_frame(writer, {"type": "done", "text": text, "metrics": metrics})
 
         except Exception as e:
             traceback.print_exc()
