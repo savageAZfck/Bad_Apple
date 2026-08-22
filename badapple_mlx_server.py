@@ -919,6 +919,7 @@ class MLXServer:
         self.user_memory = load_user_memory()
         self.knowledge = BadAppleKnowledge()
         self._roast_index = 0
+        self.last_metrics: Optional[Dict[str, Any]] = None
 
         # OS extras: persona packs, output firewall, audit ledger, semantic cache,
         # and human-in-the-loop approvals.
@@ -1410,6 +1411,13 @@ class MLXServer:
                 f"peak_memory={final_metrics.peak_memory:.2f} GB",
                 flush=True,
             )
+            self.last_metrics = {
+                "tokens": int(final_metrics.generation_tokens),
+                "decode_tps": float(final_metrics.generation_tps),
+                "total_tps": float(final_metrics.generation_tps),
+                "draft_accept_pct": float(pct),
+                "peak_memory_gb": float(final_metrics.peak_memory),
+            }
         _maybe_purge_metal_cache()
         return accumulated
 
@@ -1543,6 +1551,14 @@ class MLXServer:
                 f"peak_memory={summary.peak_memory_gb:.2f} GB",
                 flush=True,
             )
+            self.last_metrics = {
+                "tokens": int(summary.generation_tokens),
+                "decode_tps": float(decode_tps),
+                "total_tps": float(total_tps),
+                "draft_accept_pct": float(accept_pct),
+                "peak_memory_gb": float(summary.peak_memory_gb),
+            }
+            print(f"[metrics] set dflash: {self.last_metrics}", flush=True)
         elif token_count > 0:
             # DFlash did not yield a SummaryEvent (e.g., stopped on a boundary token).
             # Derive a decode t/s from wall-clock time and token count.
@@ -1556,6 +1572,13 @@ class MLXServer:
                 f"peak_memory={mx.get_peak_memory() / (1024 ** 3):.2f} GB",
                 flush=True,
             )
+            self.last_metrics = {
+                "tokens": int(token_count),
+                "decode_tps": float(decode_tps),
+                "total_tps": float(decode_tps),
+                "draft_accept_pct": 0.0,
+                "peak_memory_gb": float(mx.get_peak_memory() / (1024 ** 3)),
+            }
         # Purge Metal memory only when pressure is elevated.
         _maybe_purge_metal_cache()
         return accumulated
@@ -1633,6 +1656,16 @@ class MLXServer:
             if voice_mode:
                 prompt = prompt[len("__BADAPPLE_VOICE__ "):]
 
+            # Runtime persona selection sent by the CLI.
+            if prompt.startswith("__BADAPPLE_PERSONA__"):
+                rest = prompt[len("__BADAPPLE_PERSONA__"):]
+                if "__" in rest:
+                    name, prompt = rest.split("__", 1)
+                    prompt = prompt.lstrip()
+                    if not self.personas.switch(name):
+                        await _write_frame(writer, {"type": "done", "text": f"Unknown persona '{name}'."})
+                        return
+
             if prompt in ("__BADAPPLE_SWITCH_DEEP__", "__BADAPPLE_SWITCH_FAST__"):
                 await _write_frame(writer, {"type": "done", "text": ""})
                 return
@@ -1677,7 +1710,7 @@ class MLXServer:
                     "response": fast[:500],
                     "persona": self.personas.active,
                 })
-                await _write_frame(writer, {"type": "done", "text": fast})
+                await _write_frame(writer, {"type": "done", "text": fast, "metrics": self.last_metrics})
                 return
 
             loop = asyncio.get_event_loop()
@@ -1709,7 +1742,7 @@ class MLXServer:
                     "response": text[:500],
                     "persona": self.personas.active,
                 })
-                await _write_frame(writer, {"type": "done", "text": text})
+                await _write_frame(writer, {"type": "done", "text": text, "metrics": self.last_metrics})
                 return
 
             stream_queue = queue.Queue()
@@ -1750,7 +1783,8 @@ class MLXServer:
                 "persona": self.personas.active,
             })
 
-            await _write_frame(writer, {"type": "done", "text": text})
+            print(f"[metrics] done frame: {self.last_metrics}", flush=True)
+            await _write_frame(writer, {"type": "done", "text": text, "metrics": self.last_metrics})
 
         except Exception as e:
             traceback.print_exc()
