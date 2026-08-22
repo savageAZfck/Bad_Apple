@@ -174,14 +174,12 @@ final class BadAppleFFI {
 
 // MARK: - Local neural TTS client (Piper)
 
-final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
+final class PiperTTSClient {
     static let shared = PiperTTSClient()
 
     private let socketPath = "/tmp/badapple_tts.sock"
     private let requestTimeout: TimeInterval = 2.0
     private let responseTimeout: TimeInterval = 15.0
-    private var player: AVAudioPlayer?
-    private var onDidFinish: (() -> Void)?
     private var requestID = 0
 
     // Simple queue for streaming TTS chunks in order.
@@ -199,9 +197,6 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
         queue.removeAll()
         isProcessing = false
         queueLock.unlock()
-        player?.stop()
-        player = nil
-        onDidFinish = nil
     }
 
     static let defaultVoice = "en_US-libritts-high"
@@ -323,34 +318,20 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
         return response
     }
 
-    /// Play the synthesized WAV as raw as possible. The Piper model already has
-    /// warmth and cadence baked in; extra pitch/reverb effects make it sound
-    /// processed. We just use a slightly slower playback rate to give it a
-    /// little more breath and weight.
+    /// Play the synthesized WAV via afplay for reliability. The Piper model
+    /// already has warmth and cadence baked in; we keep the playback raw.
     private func play(url: URL, completion: @escaping (Bool) -> Void) {
+        let task = Process()
+        task.launchPath = "/usr/bin/afplay"
+        task.arguments = [url.path]
+        task.terminationHandler = { _ in
+            DispatchQueue.main.async { completion(true) }
+        }
         do {
-            player = try AVAudioPlayer(contentsOf: url)
-            player?.delegate = self
-            player?.volume = 1.0
-            player?.prepareToPlay()
-            onDidFinish = { [weak self] in
-                self?.player = nil
-                completion(true)
-            }
-            guard player?.play() == true else {
-                throw NSError(domain: "PiperTTS", code: 5, userInfo: [NSLocalizedDescriptionKey: "play() returned false"])
-            }
+            try task.run()
         } catch {
             badAppleVoiceLog("PiperTTS play error: \(error.localizedDescription)")
             completion(false)
-        }
-    }
-
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async { [weak self] in
-            self?.onDidFinish?()
-            self?.onDidFinish = nil
-            self?.player = nil
         }
     }
 }
