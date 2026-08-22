@@ -6951,6 +6951,7 @@ async fn handle_bad_apple_client(stream: UnixStream, secret: Arc<Vec<u8>>) -> Re
             &mut writer,
             &ServerFrame::Done {
                 text: text.to_string(),
+                metrics: None,
             },
         )
         .await?;
@@ -6974,7 +6975,7 @@ async fn handle_bad_apple_client(stream: UnixStream, secret: Arc<Vec<u8>>) -> Re
         .context("Bad Apple generation task panicked")?
     {
         Ok(text) => {
-            bad_apple_ipc::write_async_frame(&mut writer, &ServerFrame::Done { text }).await?;
+            bad_apple_ipc::write_async_frame(&mut writer, &ServerFrame::Done { text, metrics: None }).await?;
             Ok(())
         }
         Err(error) => {

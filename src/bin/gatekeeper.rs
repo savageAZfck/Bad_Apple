@@ -457,9 +457,9 @@ fn forward_to_mlx(
             ServerFrame::Token { text } if accepted => {
                 write_frame(writer, &ServerFrame::Token { text })?;
             }
-            ServerFrame::Done { text } if accepted => {
+            ServerFrame::Done { text, metrics } if accepted => {
                 let text = post_process_response(&text, cage);
-                write_frame(writer, &ServerFrame::Done { text })?;
+                write_frame(writer, &ServerFrame::Done { text, metrics })?;
                 return Ok(());
             }
             ServerFrame::Error { message } => {
@@ -602,7 +602,7 @@ fn handle_client(
                 }
                 Ok(reply) => {
                     write_frame(&mut stream, &ServerFrame::Accepted)?;
-                    write_frame(&mut stream, &ServerFrame::Done { text: reply })?;
+                    write_frame(&mut stream, &ServerFrame::Done { text: reply, metrics: None })?;
                     return Ok(());
                 }
                 Err(e) => {
