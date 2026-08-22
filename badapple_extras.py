@@ -59,9 +59,13 @@ class PersonaPack:
     def __init__(self, data_dir: Path, prompt_file: Path):
         self.data_dir = data_dir
         self.prompt_file = prompt_file
-        self.personas_file = Path(
-            os.environ.get("BADAPPLE_PERSONAS_FILE") or data_dir / "personas.json"
-        ).expanduser()
+        self.personas_file = (
+            Path(os.environ["BADAPPLE_PERSONAS_FILE"]).expanduser()
+            if os.environ.get("BADAPPLE_PERSONAS_FILE")
+            else (data_dir / "personas.json")
+            if (data_dir / "personas.json").is_file()
+            else Path(__file__).with_name("personas.json")
+        )
         self.personas = dict(self.DEFAULT_PERSONAS)
         self._load_personas()
         self.active = os.environ.get("BADAPPLE_PERSONA", "default").lower().strip()
