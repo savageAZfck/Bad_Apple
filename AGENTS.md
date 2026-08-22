@@ -10,6 +10,8 @@ This file captures the project-specific commands and conventions learned while w
 - `prompt.txt` — Hot-reloadable system prompt. Edits take effect on the next query without restarting the model.
 - `BAD_APPLE.md` — Technical overview and live performance numbers.
 - `BAD_APPLE_BUYERS.md` — Buyer-facing pitch doc.
+- `badapple_extras.py` — OS extras: persona packs, output firewall, audit ledger, semantic cache, approvals.
+- `personas.json` — Runtime persona packs (default, wicket, genz, drill, midwest).
 
 ## Build
 
@@ -48,6 +50,63 @@ target/release/badapple -n 120 "Write me a poem about bare metal"
 ## Edit the persona
 
 Edit `prompt.txt`. The daemon hot-reloads it on the next query. Voice mode uses `VOICE_SYSTEM_PROMPT` inside `badapple_mlx_server.py`, which requires a daemon restart to change.
+
+## Persona packs
+
+```bash
+# Switch persona at runtime
+target/release/badapple "switch to wicket"
+target/release/badapple "switch to drill"
+target/release/badapple "switch to midwest"
+target/release/badapple "switch to genz"
+
+# Teach a custom line
+target/release/badapple "teach The cloud is just hamsters on a wheel"
+```
+
+Personas live in `personas.json` (or `BADAPPLE_PERSONAS_FILE`).  The default
+pack falls back to `prompt.txt` and learns `~/.bad_apple/custom_banter.json`.
+
+## Output firewall
+
+Add patterns (one per line) to `/var/lib/bad_apple/blocklist.txt` or set
+`BADAPPLE_BLOCKLIST`.  Patterns are tokenized and matched with a streaming
+Aho-Corasick automaton.  When the model is about to emit a match, the response
+is replaced with `[Output firewall: ...]`.
+
+## Hash-chained audit ledger
+
+Every query, tool call, cache hit, and response is appended to
+`/var/lib/bad_apple/ledger.jsonl` with SHA-256 chaining.  Verify it from Python:
+
+```python
+from badapple_extras import AuditLedger
+AuditLedger(Path('/var/lib/bad_apple')).verify()
+```
+
+Secrets, emails, SSNs, phones, API keys, and long random tokens are redacted
+before writing.
+
+## Semantic cache
+
+The first response to a question is embedded with `BAAI/bge-small-en-v1.5` and
+stored.  Repeated semantically similar queries return the cached answer
+instantly, scoped by active persona.  Set `BADAPPLE_CACHE_THRESHOLD` (default
+0.92).  Cache file: `/var/lib/bad_apple/semantic_cache.json`.
+
+## Human-in-the-loop approvals
+
+Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_documents`)
+require approval by default.  The model returns a proposal ID instead of acting.
+
+```bash
+# Run a shell command (proposed, not executed)
+target/release/badapple "run shell ls /tmp"
+# Approve it
+target/release/badapple "approve <id>"
+# Skip approval for the session
+BADAPPLE_AUTOPILOT=1 target/release/badapple "run shell ls /tmp"
+```
 
 ## Check performance
 

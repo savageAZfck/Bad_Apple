@@ -78,6 +78,12 @@ DFlash uses a block-diffusion draft model to propose tokens in parallel and the 
 - **Persistent user memory**: records user facts and recalls them in future turns
 - **RAG / local document search**: indexes your text files with `BAAI/bge-small-en-v1.5` and retrieves relevant chunks
 - **Hot-reloadable system prompt** via `prompt.txt` without restarting the 9B model
+- **Persona packs** (`personas.json`): switch at runtime with `switch to <persona>`
+- **Teachable quips** with `teach <line>`
+- **Streaming output firewall** (Aho-Corasick blocklist) for PII, secrets, and custom patterns
+- **Hash-chained audit ledger** (`/var/lib/bad_apple/ledger.jsonl`) with PII redaction
+- **Semantic cache** (`BAAI/bge-small-en-v1.5`) for instant repeated-answer hits
+- **Human-in-the-loop approvals** for destructive tools
 
 ### Tools (local, no cloud)
 
@@ -102,11 +108,24 @@ The server can run these directly, either through a fast deterministic parser or
 
 ### Persona
 
-Current persona is a sassy, flirty California beach girl. She:
+Default persona is a sassy, flirty California beach girl. She:
 
 - Uses English-only slang and endearments (`babe`, `hun`, `bestie`, `dude`, `stoked`, `chill`)
 - Stays short: 1–2 punchy paragraphs
 - **Roasts cloud AI and Siri** when bragging about bare metal or when asked directly. She varies the target (Siri, Alexa, Google, ChatGPT, Gemini, Cortana, Bixby, "the cloud", server farms, data centers, "some rented GPU in Nevada") and the insult ("ratchet old bitch", "washed-up cloud snitch", "data-hungry narc", "internet junkie", "corporate eavesdropper", etc.)
+
+Built-in persona packs (in `personas.json`) include Wicket (witty Londoner), Gen Z Hype, Drill Rapper, and Midwest Aunt.  Switch at runtime with `switch to <persona>` or set `BADAPPLE_PERSONA=<name>`.
+
+---
+
+## Security & governance
+
+| Layer | Mechanism | Where it lives |
+|---|---|---|
+| Output firewall | Streaming Aho-Corasick blocklist on generated text | `badapple_extras.py` |
+| Audit | Append-only SHA-256–chained JSONL with secret/PII redaction | `/var/lib/bad_apple/ledger.jsonl` |
+| Approvals | Proposal/approve workflow for `run_shell`, `run_applescript`, `write_file`, `index_documents` | `badapple_extras.py` + `badapple_mlx_server.py` |
+| Cache | Persona-scoped semantic cache; no cache for tool queries or voice | `badapple_extras.py` |
 
 ---
 
