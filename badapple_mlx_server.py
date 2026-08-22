@@ -1002,6 +1002,37 @@ class MLXServer:
         except Exception:
             pass
 
+    def _capabilities_answer(self) -> str:
+        """Return a concise, persona-flavored capability list."""
+        base = (
+            "I can answer questions, look up and search your files, write notes, "
+            "run shell commands and AppleScript, index documents for RAG, "
+            "speak responses through the local TTS server, switch personas, "
+            "run benchmarks, and stream JSON — all on your Mac."
+        )
+        if self.approval.autopilot:
+            autopilot = (
+                " Autopilot is on, so I can run what you ask without bugging "
+                "you for approval. Just tell me what you want, babe."
+            )
+        else:
+            autopilot = (
+                " I'll ask before running anything destructive like shell or "
+                "AppleScript unless you turn on autopilot."
+            )
+        persona = self.personas.active
+        if persona == "wicket":
+            tail = " Right useful little local assistant, squire."
+        elif persona == "genz":
+            tail = " No cap, it's giving main character energy, bestie."
+        elif persona == "drill":
+            tail = " Straight up, I run what you ask, no cap."
+        elif persona == "midwest":
+            tail = " Bless your heart, sugar, I'm here to help."
+        else:
+            tail = " That's the vibe, babe."
+        return base + autopilot + tail
+
     def check_prompt_reload(self):
         """Hot-reload the system prompt if prompt.txt changed on disk."""
         try:
@@ -1205,6 +1236,18 @@ class MLXServer:
             self.prune_history()
             save_conversation(self.messages)
             return persona_resp
+
+        # Capability questions are answered directly so the 9B does not fall
+        # back into identity bragging or skip the useful part.
+        lower = user_prompt.strip().lower()
+        if any(phrase in lower for phrase in ("what can you do", "what are you capable of", "what do you do", "what can you do on")):
+            resp = self._capabilities_answer()
+            self.audit.record("capabilities", {"prompt": user_prompt, "response": resp})
+            self.messages.append({"role": "user", "content": user_prompt})
+            self.messages.append({"role": "assistant", "content": resp})
+            self.prune_history()
+            save_conversation(self.messages)
+            return resp
 
         # Semantic cache: bypass the 9B for repeated questions.
         if not voice_mode and not should_use_tools(user_prompt):
