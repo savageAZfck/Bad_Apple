@@ -1527,12 +1527,17 @@ class MLXServer:
                 if s in stream_buffer:
                     stream_buffer = stream_buffer.split(s, 1)[0]
                     break
-            chunk = polish_text(stream_buffer)
-            if chunk:
-                if chunk.endswith((".", "!", "?", "…")):
-                    chunk += " "
-                if not _emit(chunk):
-                    return "[Output firewall: blocked streaming content]"
+            # If the run hit the token ceiling and the final fragment is an
+            # incomplete sentence, don't stream a cut-off word.
+            if token_count >= max_tokens and not _is_sentence_end(stream_buffer):
+                pass
+            else:
+                chunk = polish_text(stream_buffer)
+                if chunk:
+                    if chunk.endswith((".", "!", "?", "…")):
+                        chunk += " "
+                    if not _emit(chunk):
+                        return "[Output firewall: blocked streaming content]"
         if summary is not None:
             accept_pct = float(summary.acceptance_ratio) * 100.0
             # Total time includes prefill; if we have a first-token time, report
@@ -1597,11 +1602,13 @@ class MLXServer:
         text = re.sub(r"[ \t]+", " ", text).strip()
         text = re.sub(r"\s*,\s*$", "", text)  # no trailing comma
         # If the response was cut off by max_tokens, trim to the last complete
-        # sentence so we don't end with a dangling word.
+        # sentence so we don't end with a dangling word or half-thought.
         if not re.search(r"[.!?…]$", text):
-            m = re.search(r"(.*[.!?…])\s+\S+$", text)
+            m = re.search(r"^.*[.!?…]", text, flags=re.DOTALL)
             if m:
-                text = m.group(1).strip()
+                text = m.group(0).strip()
+        # Tighten trailing whitespace around any final ellipsis.
+        text = re.sub(r"\s*…\s*$", "…", text)
         return text
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):

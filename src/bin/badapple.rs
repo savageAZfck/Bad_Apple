@@ -9,7 +9,7 @@ use std::time::Instant;
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut prompt_parts = Vec::new();
-    let mut max_new_tokens = 120;
+    let mut max_new_tokens = 240;
     let mut speak_stream = std::env::var("BADAPPLE_SPEAK").is_ok();
     let mut benchmark_mode = false;
     let mut json_stream = std::env::var("BADAPPLE_STREAM_JSON").is_ok();
@@ -268,7 +268,7 @@ fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
          Usage:\n  badapple [OPTIONS] \"query\"\n\n\
-         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 256)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
+         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)"
     );
 }

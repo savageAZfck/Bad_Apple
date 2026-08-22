@@ -1540,7 +1540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         if roastEnabled { extraArgs += ["--roast"] }
 
         let socket = BadAppleBrain.deepSocket
-        let maxTokens = 140
+        let maxTokens = 300
         Task {
             do {
                 let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens, extraArgs: extraArgs) { chunk in
