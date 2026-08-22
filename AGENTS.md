@@ -21,8 +21,10 @@ cargo build --release
 
 ## Start / restart the daemon
 
+The live setup also uses the Rust `gatekeeper` on `/var/run/badapple/substrate.sock` as the front proxy. Restart both after a CLI/Rust change; only the MLX daemon needs a restart after a Python change.
+
 ```bash
-osascript -e 'do shell script "cp /Users/savag3/bad_apple/src/platform/apple_bridge/com.badapple.mlx.plist /Library/LaunchDaemons/ && launchctl unload /Library/LaunchDaemons/com.badapple.mlx.plist 2>/dev/null; launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist" with administrator privileges'
+osascript -e 'do shell script "find /Users/savag3/bad_apple -name __pycache__ -exec rm -rf {} + 2>/dev/null; launchctl bootout system /Library/LaunchDaemons/com.badapple.mlx.plist 2>/dev/null; launchctl bootout system /Library/LaunchDaemons/com.badapple.gatekeeper.plist 2>/dev/null; sleep 2; launchctl bootstrap system /Library/LaunchDaemons/com.badapple.gatekeeper.plist; launchctl bootstrap system /Library/LaunchDaemons/com.badapple.mlx.plist" with administrator privileges'
 ```
 
 Wait ~45 s for the model bundle and embedding model to load. Check the tail of the log:
@@ -45,6 +47,19 @@ target/release/badapple --speak "What do you think of Siri?"
 
 # set max tokens
 target/release/badapple -n 120 "Write me a poem about bare metal"
+
+# benchmark the default prompt suite
+target/release/badapple --benchmark
+
+# benchmark a single prompt
+target/release/badapple --benchmark -n 120 "What is the capital of France?"
+
+# switch persona just for this query
+badapple --persona wicket "Who are you?"
+badapple --roast "What do you think of Siri?"  # alias for --persona drill
+
+# stream to TTS (background queue keeps generation uncoupled from afplay)
+badapple --speak "What do you think of Siri?"
 ```
 
 ## Edit the persona

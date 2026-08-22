@@ -129,6 +129,27 @@ Built-in persona packs (in `personas.json`) include Wicket (witty Londoner), Gen
 
 ---
 
+## `badapple` CLI
+
+`target/release/badapple` is the authenticated Rust client.
+
+```bash
+badapple --max-tokens 120 "What is the capital of France?"
+badapple --roast "What do you think of Siri?"            # --persona drill
+badapple --persona wicket "Who are you?"
+badapple --speak "Tell me a joke."                        # stream to TTS queue
+badapple --benchmark                                       # or: badapple --benchmark "prompt"
+badapple --json "Explain recursion."                       # token stream as JSON
+```
+
+New flags:
+- `--benchmark` — runs the default prompt suite and prints a table with TTFT, decode tok/s, total tok/s, and peak memory. Pass a prompt to benchmark a single query.
+- `--roast` / `--persona <name>` — injects the `__BADAPPLE_PERSONA__<name>__` sentinel so the server switches persona for that query.
+- `--speak` now queues chunks to a background TTS worker so the model is not blocked waiting for audio playback; audio plays sequentially without overlapping.
+- `--json` streams each token and the final `done` frame as JSON, including `metrics`.
+
+---
+
 ## Architecture
 
 ```text
