@@ -555,13 +555,15 @@ class SemanticCache:
         except Exception as e:
             print(f"[cache] could not save cache: {e}", flush=True)
 
-    def lookup(self, query: str) -> Optional[str]:
+    def lookup(self, query: str, persona: str = "default") -> Optional[str]:
         if not self._entries:
             return None
         q_emb = self._encode([query])[0]
         best_score = -1.0
         best_idx = -1
         for i, e in enumerate(self._entries):
+            if e.get("persona", "default") != persona:
+                continue
             try:
                 vec = np.array(e["embedding"], dtype=np.float32)
             except Exception:
@@ -578,12 +580,13 @@ class SemanticCache:
             return entry["response"]
         return None
 
-    def store(self, query: str, response: str, intent: Optional[str] = None):
+    def store(self, query: str, response: str, persona: str = "default", intent: Optional[str] = None):
         emb = self._encode([query])[0].tolist()
         self._entries.append({
             "query": query,
             "embedding": emb,
             "response": response,
+            "persona": persona,
             "intent": intent,
             "hits": 0,
             "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),

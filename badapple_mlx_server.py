@@ -1207,9 +1207,11 @@ class MLXServer:
 
         # Semantic cache: bypass the 9B for repeated questions.
         if not voice_mode and not should_use_tools(user_prompt):
-            cached = self.cache.lookup(user_prompt)
+            cached = self.cache.lookup(user_prompt, persona=self.personas.active)
             if cached:
-                self.audit.record("cache_hit", {"prompt": user_prompt, "response": cached[:500]})
+                if self.firewall.check_full(cached):
+                    cached = "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
+                self.audit.record("cache_hit", {"prompt": user_prompt, "response": cached[:500], "persona": self.personas.active})
                 self.messages.append({"role": "user", "content": user_prompt})
                 self.messages.append({"role": "assistant", "content": cached})
                 self.prune_history()
@@ -1251,7 +1253,7 @@ class MLXServer:
 
         if not tool_calls:
             final = clean(raw)
-            self.cache.store(user_prompt, final, intent=self.cache.classify_intent(user_prompt))
+            self.cache.store(user_prompt, final, persona=self.personas.active, intent=self.cache.classify_intent(user_prompt))
             return final
 
         # Tool loop (multi-step task execution; allow more chained tool calls)
@@ -1273,11 +1275,11 @@ class MLXServer:
             tool_calls, _ = extract_tool_calls(raw)
             if not tool_calls:
                 final = clean(raw)
-                self.cache.store(user_prompt, final, intent=self.cache.classify_intent(user_prompt))
+                self.cache.store(user_prompt, final, persona=self.personas.active, intent=self.cache.classify_intent(user_prompt))
                 return final
 
         final = clean(raw)
-        self.cache.store(user_prompt, final, intent=self.cache.classify_intent(user_prompt))
+        self.cache.store(user_prompt, final, persona=self.personas.active, intent=self.cache.classify_intent(user_prompt))
         return final
 
     def _run_approved_tool(self, name: str, args: Dict[str, Any], user_prompt: str) -> str:
