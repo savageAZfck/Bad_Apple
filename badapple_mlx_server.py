@@ -777,6 +777,9 @@ def polish_text(text: str) -> str:
     text = re.sub(r"\s+([.,!?;:])", r"\1", text)
     # Ensure a space after sentence punctuation when the next token runs together.
     text = re.sub(r"([.!?…])([A-Za-z])", r"\1 \2", text)
+    # Rewrite "fr fr" / "frfr" to the full phrase so it is spoken clearly.
+    text = re.sub(r"\bfr fr\b", "for real for real", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bfrfr\b", "for real for real", text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -1654,6 +1657,9 @@ class MLXServer:
                 text = m.group(0).strip()
         # Tighten trailing whitespace around any final ellipsis.
         text = re.sub(r"\s*…\s*$", "…", text)
+        # Rewrite "fr fr" / "frfr" to "for real for real" as requested.
+        text = re.sub(r"\bfr fr\b", "for real for real", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bfrfr\b", "for real for real", text, flags=re.IGNORECASE)
         return text
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
