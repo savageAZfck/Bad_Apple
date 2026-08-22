@@ -204,8 +204,10 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
         onDidFinish = nil
     }
 
-    static let defaultVoice = "es_MX-claude-high"
+    static let defaultVoice = "en_US-lessac-high"
     static let availableVoices = [
+        "en_US-lessac-high",
+        "en_US-amy-medium",
         "es_MX-claude-high",
         "es_MX-cortana-19669-epoch-high",
     ]
@@ -695,11 +697,22 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     }
 
     /// Pick the highest-quality installed female voice for the selected
-    /// Latina / Eastern European accent. Latina (Paulina) is default.
+    /// California beach-girl accent. US English (Samantha/Ava) is default.
     private func bestVoice() -> AVSpeechSynthesisVoice {
-        let accent = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
+        let accent = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "en-US"
 
         switch accent {
+        case "en-US":
+            for id in [
+                "com.apple.voice.premium.en-US.Ava",
+                "com.apple.voice.enhanced.en-US.Ava",
+                "com.apple.voice.superpremium.en-US.Ava",
+                "com.apple.voice.premium.en-US.Samantha",
+                "com.apple.voice.enhanced.en-US.Samantha",
+                "com.apple.voice.superpremium.en-US.Samantha",
+                "com.apple.voice.compact.en-US.Samantha",
+            ] { if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice } }
+            if let voice = AVSpeechSynthesisVoice(language: "en-US") { return voice }
         case "uk-UA":
             for id in [
                 "com.apple.voice.premium.uk-UA.Lesya",
@@ -738,8 +751,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 
-    /// Split the response into slow, breathy, sultry chunks. Eastern European
-    /// voices sound more seductive at a slower rate with a slightly lower pitch.
+    /// Split the response into chilled, beachy chunks. US voices stay relaxed
+    /// with a slightly slower rate and a soft, natural pitch.
     private func prosodyChunks(from text: String) -> [ProsodyChunk] {
         var chunks: [ProsodyChunk] = []
         var current = ""
@@ -750,8 +763,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
                 current = ""
                 return
             }
-            // sign-off "—besos" gets extra warmth and a long trailing breath
-            let isSignOff = trimmed.lowercased().contains("besos")
+            // sign-off "—xoxo" gets a warm trailing breath
+            let isSignOff = trimmed.lowercased().contains("xoxo")
             let finalRate: Float = isSignOff ? 0.42 : rate
             let finalPitch: Float = isSignOff ? 0.94 : pitch
             let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.5) : postDelay
@@ -1748,6 +1761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         for voice in PiperTTSClient.availableVoices {
             let display = voice
                 .replacingOccurrences(of: "es_MX-", with: "")
+                .replacingOccurrences(of: "en_US-", with: "")
                 .replacingOccurrences(of: "-high", with: "")
                 .replacingOccurrences(of: "-medium", with: "")
                 .replacingOccurrences(of: "-", with: " ")
@@ -1765,6 +1779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         let accentMenu = NSMenu(title: "Accent")
         for accent in [
+            ("en-US", "California Beach (Samantha)"),
             ("es-MX", "Latina (Paulina)"),
             ("ru-RU", "Russian (Milena)"),
             ("uk-UA", "Ukrainian (Lesya)"),
@@ -1772,7 +1787,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         ] {
             let item = NSMenuItem(title: accent.1, action: #selector(selectAccent(_:)), keyEquivalent: "")
             item.representedObject = accent.0
-            let current = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "es-MX"
+            let current = UserDefaults.standard.string(forKey: "BadAppleTTSAccent") ?? "en-US"
             item.state = (current == accent.0) ? .on : .off
             item.isEnabled = !usePiper
             accentMenu.addItem(item)

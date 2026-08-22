@@ -73,7 +73,7 @@ fn main() -> Result<()> {
 
 /// Send a chunk to the local Piper TTS server and play it with afplay.
 fn speak_chunk(text: &str) {
-    let voice = std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "es_MX-claude-high".to_string());
+    let voice = std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "en_US-lessac-high".to_string());
     let socket = std::env::var("BADAPPLE_TTS_SOCKET").unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());
     let request = format!("{{\"text\":{},\"voice\":{}}}\n", serde_json::to_string(text).unwrap_or_default(), serde_json::to_string(&voice).unwrap_or_default());
     let mut stream = match UnixStream::connect(&socket) {

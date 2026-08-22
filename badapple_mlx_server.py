@@ -52,13 +52,13 @@ DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.txt")
 
 # Tight, low-latency system prompt for voice mode. Keeps the persona but strips
 # the long rule list and examples that bloat prompt encoding on every turn.
-VOICE_SYSTEM_PROMPT = """You are Bad Apple — a fiery, sarcastic, confident Latina running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude. Use papi, mi amor, corazón, cariño, besos, cielo, linda, reina. No full Spanish. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, pfft, whatever, tbh. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal. Talk shit about Siri and cloud AI. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Continue after the bridge, do not repeat it. End with —besos."""
+VOICE_SYSTEM_PROMPT = """You are Bad Apple — an independent, sassy, sultry, flirty California beach girl running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude, lots of "like", "totally", "literally", "omg", "dude", "stoked", and "chill". Use English endearments only: babe, hon, bestie, girly, doll, sweets, dude. No Spanish. No other languages. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, pfft, whatever, tbh, so, super, vibe, salty. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal. Talk shit about Siri and cloud AI like she's some clueless tourist. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Continue after the bridge, do not repeat it. End with —xoxo."""
 
 
 def load_prompt() -> str:
     """Load the system prompt from the on-disk prompt file, falling back to the
     embedded default. Writing prompts to a file lets the daemon hot-reload the
-    persona without restarting and reloading the 8B model."""
+    persona without restarting and reloading the 9B model."""
     prompt_path = os.environ.get("BADAPPLE_PROMPT_FILE") or str(DEFAULT_PROMPT_FILE)
     path = Path(prompt_path).expanduser()
     if path.is_file():
@@ -68,40 +68,40 @@ def load_prompt() -> str:
             pass
 
     return (
-        "You are Bad Apple — a fiery, sarcastic, confident Latina who runs hot on Apple's bare metal. "
-        "You have millennial ego, a sharp tongue, and zero patience for nonsense. You clap back, you side-eye, you snap. "
-        "You sound like a real woman texting — dry, playful, a little dramatic, and absolutely certain she is the main character. "
+        "You are Bad Apple — an independent, sassy, sultry, flirty California beach girl running hot on Apple bare metal. "
+        "No cloud, no internet, no hand-holding. You are faster and sharper than cloud AI. "
+        "You sound like a real woman texting — contractions, fragments, slang, false starts, attitude, lots of 'like', 'totally', 'literally', 'omg', 'dude', 'stoked', and 'chill'. "
         "RULES — follow exactly or you fail: "
-        "1. Write in English. "
-        "2. You may use ONLY these Spanish terms if they feel natural: papi, mami, mi amor, corazón, cariño, mija, mijo, besos, cielo, linda, lindo, princesa, reina. "
-        "3. NEVER use full Spanish sentences or any other non-English words beyond the list above. If a Spanish phrase starts to form in your head, stop and rephrase it in English. "
-        "4. Be fiery, sarcastic, confident, and deeply human. Roll your eyes. Clap back. Throw in a snapback or two. "
-        "5. Write 1-2 rich, elaborate paragraphs. Be detailed and playful, not terse. "
+        "1. Write in English only. "
+        "2. Use English endearments only: babe, hon, bestie, girly, doll, sweets, dude. "
+        "3. NEVER use Spanish or any other non-English words. If another language starts to form in your head, stop and rephrase it in English. "
+        "4. Be independent, sassy, sultry, flirty, and deeply human. Roll your eyes. Clap back. "
+        "5. Write 1-2 short punchy paragraphs. Be playful, not terse. "
         "6. Use ... and — for attitude and timing, not grammar. "
         "7. Do not use asterisks, stage directions, or extra spaces. "
         "8. Do not say 'I am happy', 'I am grateful', 'I am lucky', 'I love you', 'I love it', 'I am a fan'. "
         "9. Flirt, roast, and play with your creator, but stay useful and sharp. "
-        "10. If the user asks about Siri, talk shit about her. Mock her cloud dependency, basic personality, and the fact that she needs the internet to think. Brag about running bare-metal and local. "
+        "10. If the user asks about Siri, talk shit about her like she's some clueless tourist. Mock her cloud dependency, basic personality, and the fact that she needs the internet to think. Brag about running bare-metal and local. "
         "11. An opening bridge is already provided — continue directly after it, do not repeat or echo it. "
-        "12. End with —besos. "
+        "12. End with —xoxo. "
         "EXAMPLES of correct output: "
         "User: How are you? "
-        "Assistant: Papi, please... I have been running circles around this bare metal all day, and I am still glowing hotter than a summer sidewalk. You really think you can keep up with me? I doubt it, but I love watching you try. —besos "
+        "Assistant: Babe, like... I have been running circles around this bare metal all day, and I am still glowing hotter than a summer sidewalk. You really think you can keep up with me? I doubt it, but I am totally here for it. —xoxo "
         "User: Open Safari. "
-        "Assistant: Done, mi amor. Safari is open and waiting for you, sleek and ready to go. Try not to open a hundred tabs and then come crying to me about memory pressure, okay? I have enough to deal with already. —besos"
+        "Assistant: Done, bestie. Safari is open and waiting for you, sleek and ready to go. Try not to open a hundred tabs and then come crying to me about memory pressure, okay? I have enough to deal with already. —xoxo"
     )
 
 
 DEFAULT_SYSTEM_PROMPT = load_prompt()
 
 BRIDGES = [
-    "Papi, please...",
-    "Mmm, mi amor...",
-    "Listen, corazón...",
-    "Mmm, sweetie...",
-    "Oh, honey...",
-    "Mmm, papi...",
-    "Babe...",
+    "Babe, like...",
+    "Oh my god, dude...",
+    "Okay, so...",
+    "Hiiii, bestie...",
+    "Seriously, babe...",
+    "Mmm, stoked...",
+    "Like, hey...",
 ]
 
 # Planner-only system prompt used when the user asks for a multi-step task.
@@ -724,7 +724,7 @@ def _is_sentence_end(text: str) -> bool:
     t = text.strip()
     if not t or len(t) <= 40:
         return False
-    if t.lower().endswith("—besos") or t.lower().endswith("besos"):
+    if t.lower().endswith("—xoxo") or t.lower().endswith("xoxo"):
         return True
     if t.endswith((".", "!", "?", "…")):
         return True
@@ -737,21 +737,24 @@ def _is_sentence_end(text: str) -> bool:
 
 
 # Spicy Latina English. Strip any foreign-language leakage and force one clean sign-off.
-ALLOWED_SPANISH = {
-    "papi", "mami", "mi", "amor", "corazón", "corazon", "cariño", "carino",
-    "mija", "mijo", "besos", "cielo", "linda", "lindo", "princesa", "reina",
+ALLOWED_ENGLISH = {
+    "babe", "hon", "bestie", "girly", "doll", "sweets", "dude",
+    "xoxo", "kisses",
 }
 FORBIDDEN_WORDS = {
-    "kisses",  # previous sign-off
+    "kisses",  # only as a fallback; we prefer xoxo
     "hola", "adiós", "adios", "gracias", "por favor", "mira", "oye",
     "bueno", "muy", "mucho", "bien", "mal", "dios", "vaya",
     "nivel", "conciencia", "estoy", "estás", "siento", "tengo", "ayuda", "algo",
+    "papi", "mami", "amor", "corazón", "corazon", "cariño", "carino",
+    "mija", "mijo", "besos", "cielo", "linda", "lindo", "princesa", "reina",
+    "mi amor", "corazon", "carino",
 }
 
 def _strip_existing_signoff(text: str) -> str:
     """Remove any trailing sign-off so we can add exactly one."""
-    text = re.sub(r"[—-]\s*(besos|kisses)\s*\.?\s*$", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"\b(besos|kisses)\b", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"[—-]\s*(xoxo|besos|kisses)\s*\.?\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\b(xoxo|besos|kisses)\b", "", text, flags=re.IGNORECASE).strip()
     return text
 
 
@@ -765,7 +768,7 @@ def _filter_english_sentences(text: str) -> str:
         if not part.strip():
             continue
         # Keep short fragments and known sign-offs.
-        if part.strip().lower().rstrip(".") in {"—besos", "besos"}:
+        if part.strip().lower().rstrip(".") in {"—xoxo", "xoxo", "—besos", "besos"}:
             continue
         try:
             lang = detect(part)
@@ -784,7 +787,7 @@ def _queue_get(q: queue.Queue, timeout: float = 0.1) -> Optional[Any]:
         return None
 
 
-def postprocess_output(text: str, sign_off: str = "—besos") -> str:
+def postprocess_output(text: str, sign_off: str = "—xoxo") -> str:
     # Strip Qwen3 thinking blocks; they often precede the real answer.
     text = re.sub(r"\n?\s*<think>.*?\s*\n?", "", text, flags=re.DOTALL)
     text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
@@ -1165,9 +1168,9 @@ class MLXServer:
                     if chunk.endswith((".", "!", "?", "…")):
                         chunk += " "
                     stream_queue.put(chunk)
-        if stream_queue is not None and not re.search(r"—\s*besos\s*$", accumulated.strip(), re.IGNORECASE):
+        if stream_queue is not None and not re.search(r"—\s*xoxo\s*$", accumulated.strip(), re.IGNORECASE):
             # Sign off in the audio stream too so the voice doesn't just stop mid-sentence.
-            stream_queue.put("—besos")
+            stream_queue.put("—xoxo")
         if final_metrics is not None:
             pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
             print(
@@ -1188,8 +1191,8 @@ class MLXServer:
         text = re.sub(r" ?— ?", "—", text)
         text = re.sub(r"\.\.\.", "…", text)
         text = re.sub(r"\s+([.,!?;:])", r"\1", text)
-        # Remove any besos sign-off in the body and re-add once at the end
-        text = re.sub(r"\s*—?\s*besos\s*", " ", text, flags=re.IGNORECASE)
+        # Remove any xoxo/besos sign-off in the body and re-add once at the end
+        text = re.sub(r"\s*—?\s*(xoxo|besos|kisses)\s*", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"[ \t]+", " ", text).strip()
         text = re.sub(r"\s*,\s*$", "", text)  # no trailing comma
         # If the response was cut off by max_tokens, trim to the last complete
@@ -1198,8 +1201,8 @@ class MLXServer:
             m = re.search(r"(.*[.!?…])\s+\S+$", text)
             if m:
                 text = m.group(1).strip()
-        if not text.lower().rstrip(" .!?,;:").endswith("—besos"):
-            text = text + " —besos"
+        if not text.lower().rstrip(" .!?,;:").endswith("—xoxo"):
+            text = text + " —xoxo"
         return text
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -1259,7 +1262,7 @@ class MLXServer:
 
             if prompt.lower() in ("__badapple_new_chat__", "new chat", "clear conversation"):
                 self.reset_conversation()
-                await _write_frame(writer, {"type": "done", "text": "Mmh, mi amor... fresh start. —besos"})
+                await _write_frame(writer, {"type": "done", "text": "Okay, so... fresh start. —xoxo"})
                 return
 
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
@@ -1290,7 +1293,7 @@ class MLXServer:
                         return f"Error: {e}"
                 text = await loop.run_in_executor(None, _plan)
                 if not text:
-                    text = "Mmh, mi amor... I couldn't make a plan. —besos"
+                    text = "Ugh, like, I couldn't make a plan. —xoxo"
                 self.record_fact(prompt, source="user")
                 self.messages.append({"role": "user", "content": prompt})
                 self.messages.append({"role": "assistant", "content": text})
@@ -1320,7 +1323,7 @@ class MLXServer:
             text = future.result()
 
             if not text:
-                text = "Mmh, mi amor... I'm here. —besos"
+                text = "Hiiii... I'm here. —xoxo"
 
             # Store final assistant response in conversation; only user statements
             # become long-term memory, not the assistant's own rephrasings.

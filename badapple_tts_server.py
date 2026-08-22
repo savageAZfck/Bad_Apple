@@ -6,7 +6,7 @@ WAV file, and plays it. No cloud, no API, no subscription.
 
 Socket protocol (line-delimited JSON):
 
-  request : {"text": "Mmm, papi... corazón, listen."}
+  request : {"text": "Babe, like... listen.", "voice": "en_US-lessac-high"}
   response: {"ok": true, "wav_path": "/tmp/badapple_tts_xxx.wav", "sample_rate": 22050,
              "duration_ms": 1420}
   error   : {"ok": false, "error": "voice model not found"}
@@ -35,7 +35,7 @@ from pathlib import Path
 from piper.config import SynthesisConfig
 from piper.voice import PiperVoice
 
-DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "es_MX-claude-high")
+DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "en_US-lessac-high")
 DEFAULT_SOCKET = os.environ.get("BADAPPLE_TTS_SOCKET", "/tmp/badapple_tts.sock")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
