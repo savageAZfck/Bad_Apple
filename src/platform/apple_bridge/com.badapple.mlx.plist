@@ -30,8 +30,16 @@
         <key>BADAPPLE_MAIN_MODEL</key>
         <string>caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit</string>
         <key>BADAPPLE_DRAFT_MODEL</key>
-        <string></string>
+        <string>z-lab/Qwen3.5-9B-DFlash</string>
         <key>BADAPPLE_NUM_DRAFT_TOKENS</key>
+        <string>2</string>
+        <key>BADAPPLE_DFLASH</key>
+        <string>1</string>
+        <key>BADAPPLE_DFLASH_VERIFY_LEN_CAP</key>
+        <string>6</string>
+        <key>BADAPPLE_DFLASH_BLOCK_TOKENS</key>
+        <string>6</string>
+        <key>BADAPPLE_DFLASH_QUANTIZE_KV</key>
         <string>1</string>
         <key>BADAPPLE_PROMPT_FILE</key>
         <string>/Users/savag3/bad_apple/prompt.txt</string>
