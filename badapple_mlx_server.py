@@ -1739,6 +1739,117 @@ class MLXServer:
         text = re.sub(r"\bfrfr\b", "for real for real", text, flags=re.IGNORECASE)
         return text
 
+    async def _handle_agent_request(self, raw: str, writer: asyncio.StreamWriter):
+        """Minimal local agent protocol (LAP) over SLICKS.
+
+        Request envelope (JSON, embedded after the `__BADAPPLE_AGENT__ ` sentinel):
+            {"id": "req-1", "method": "discover_tools"}
+            {"id": "req-2", "method": "invoke_tool", "params": {"name": "run_shell", "args": {"command": "ls"}}}
+            {"id": "req-3", "method": "inference", "params": {"prompt": "what is 2+2?", "max_new_tokens": 120}}
+        """
+
+        async def _respond(req_id: Optional[str], result: Any, error: Optional[str] = None):
+            frame: Dict[str, Any] = {"id": req_id}
+            if error:
+                frame["type"] = "error"
+                frame["message"] = error
+            else:
+                frame["type"] = "response"
+                frame["result"] = result
+            await _write_frame(writer, frame)
+
+        try:
+            req = json.loads(raw[len("__BADAPPLE_AGENT__ "):])
+        except json.JSONDecodeError as e:
+            await _respond(None, None, f"invalid agent JSON: {e}")
+            return
+
+        req_id = req.get("id")
+        method = req.get("method")
+        params = req.get("params") or {}
+
+        if method == "discover_tools":
+            await _respond(req_id, {"tools": TOOLS})
+            return
+
+        if method == "invoke_tool":
+            tool_name = params.get("name", "")
+            tool_args = params.get("args") or {}
+            result = run_tool(
+                tool_name,
+                tool_args,
+                self.knowledge,
+                approval=self.approval,
+                policy=self.policy,
+                workspace=self.workspace,
+            )
+            await _respond(req_id, {"tool": tool_name, "result": result})
+            return
+
+        if method == "inference":
+            prompt = params.get("prompt", "")
+            max_tokens = int(params.get("max_new_tokens", 120))
+            if not prompt:
+                await _respond(req_id, None, "inference requires prompt")
+                return
+            loop = asyncio.get_event_loop()
+
+            def _gen():
+                mx.set_default_device(self.mlx_device)
+                mx.set_default_stream(mx.new_stream(self.mlx_device))
+                try:
+                    return self.polish_response(self.generate_with_tools(prompt, max_tokens))
+                except Exception as e:
+                    traceback.print_exc()
+                    return f"Error generating response: {e}"
+
+            text = await loop.run_in_executor(self.executor, _gen)
+            metrics = self.last_metrics
+            await _respond(req_id, {"text": text, "metrics": metrics})
+            return
+
+        if method == "switch_persona":
+            name = params.get("name", "")
+            if self.personas.switch(name):
+                await _respond(req_id, {"active_persona": self.personas.active})
+            else:
+                await _respond(req_id, None, f"unknown persona '{name}'")
+            return
+
+        if method == "set_workspace":
+            path = params.get("path", "")
+            if not path:
+                await _respond(req_id, None, "set_workspace requires path")
+                return
+            result = self.workspace.set(path)
+            await _respond(req_id, {"status": result})
+            return
+
+        if method == "get_workspace":
+            summary = self.workspace.summary() if self.workspace.path else None
+            await _respond(req_id, {"workspace": str(self.workspace.path) if self.workspace.path else None, "summary": summary})
+            return
+
+        if method == "audit_tail":
+            n = int(params.get("n", 20))
+            entries = []
+            if self.audit.ledger_path.is_file():
+                try:
+                    with open(self.audit.ledger_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    entries = [json.loads(l) for l in lines[-n:] if l.strip()]
+                except Exception as e:
+                    await _respond(req_id, None, f"could not read ledger: {e}")
+                    return
+            await _respond(req_id, {"entries": entries})
+            return
+
+        if method == "get_pending_approvals":
+            await _respond(req_id, {"pending": self.approval.get_pending_summary()})
+            return
+
+        await _respond(req_id, None, f"unknown method '{method}'")
+
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             line = await reader.readline()
@@ -1786,6 +1897,12 @@ class MLXServer:
 
             # Voice clients prepend this sentinel so the server can use a tight,
             # low-latency prompt and skip long document retrieval.
+            # Agent protocol: a signed JSON-RPC style request over the existing
+            # SLICKS channel. The prompt is encoded as `__BADAPPLE_AGENT__ <json>`.
+            if prompt.startswith("__BADAPPLE_AGENT__ "):
+                await self._handle_agent_request(prompt, writer)
+                return
+
             voice_mode = prompt.startswith("__BADAPPLE_VOICE__ ")
             if voice_mode:
                 prompt = prompt[len("__BADAPPLE_VOICE__ "):]
