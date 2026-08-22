@@ -1820,6 +1820,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         } else if !voiceBuffer.isEmpty {
             voiceHost.speak(voiceBuffer)
             voiceBuffer = ""
+        } else {
+            // No streaming chunks were received (e.g. short-circuit answers).
+            // Speak the final response so the voice host leaves the
+            // "Generating" state.
+            voiceHost.speak(parsed.spoken)
         }
         if let parseError = parsed.error {
             actionExecutor.showParsingFailure(parseError)
