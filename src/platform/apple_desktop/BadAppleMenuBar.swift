@@ -204,8 +204,9 @@ final class PiperTTSClient: NSObject, AVAudioPlayerDelegate {
         onDidFinish = nil
     }
 
-    static let defaultVoice = "en_US-lessac-high"
+    static let defaultVoice = "en_US-libritts-high"
     static let availableVoices = [
+        "en_US-libritts-high",
         "en_US-lessac-high",
         "en_US-amy-medium",
         "es_MX-claude-high",
@@ -704,13 +705,9 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         switch accent {
         case "en-US":
             for id in [
-                "com.apple.voice.premium.en-US.Ava",
-                "com.apple.voice.enhanced.en-US.Ava",
-                "com.apple.voice.superpremium.en-US.Ava",
-                "com.apple.voice.premium.en-US.Samantha",
-                "com.apple.voice.enhanced.en-US.Samantha",
-                "com.apple.voice.superpremium.en-US.Samantha",
-                "com.apple.voice.compact.en-US.Samantha",
+                "com.apple.eloquence.en-US.Sandy",
+                "com.apple.eloquence.en-US.Shelley",
+                "com.apple.eloquence.en-US.Flo",
             ] { if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice } }
             if let voice = AVSpeechSynthesisVoice(language: "en-US") { return voice }
         case "uk-UA":
@@ -1779,7 +1776,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         let accentMenu = NSMenu(title: "Accent")
         for accent in [
-            ("en-US", "California Beach (Samantha)"),
+            ("en-US", "California Beach (Sandy)"),
             ("es-MX", "Latina (Paulina)"),
             ("ru-RU", "Russian (Milena)"),
             ("uk-UA", "Ukrainian (Lesya)"),

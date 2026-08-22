@@ -35,7 +35,7 @@ from pathlib import Path
 from piper.config import SynthesisConfig
 from piper.voice import PiperVoice
 
-DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "en_US-lessac-high")
+DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "en_US-libritts-high")
 DEFAULT_SOCKET = os.environ.get("BADAPPLE_TTS_SOCKET", "/tmp/badapple_tts.sock")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
