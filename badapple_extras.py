@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import re
+import subprocess
 import tempfile
 import time
 import uuid
@@ -621,6 +622,101 @@ class SemanticCache:
                 best_score = avg
                 best_label = label
         return best_label
+
+
+# =============================================================================
+# 4a. WORKSPACE / PROJECT CONTEXT
+# =============================================================================
+
+
+class Workspace:
+    """Tracks the active project/workspace directory and provides context
+    (recent files, git state, notes) for the assistant to reason over.
+    """
+
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+        self.workspace_file = data_dir / "workspace.json"
+        self._state: Dict[str, Any] = {}
+        self._load()
+
+    def _load(self):
+        if self.workspace_file.is_file():
+            try:
+                self._state = json.loads(self.workspace_file.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"[workspace] could not load: {e}", flush=True)
+
+    def _save(self):
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.workspace_file, "w", encoding="utf-8") as f:
+                json.dump(self._state, f, indent=2)
+        except Exception as e:
+            print(f"[workspace] could not save: {e}", flush=True)
+
+    @property
+    def path(self) -> Optional[Path]:
+        p = self._state.get("workspace_dir")
+        if not p:
+            return None
+        expanded = Path(p).expanduser()
+        return expanded if expanded.is_dir() else None
+
+    def set(self, workspace_dir: str) -> str:
+        p = Path(workspace_dir).expanduser()
+        if not p.is_dir():
+            return f"Error: {p} is not a directory"
+        self._state["workspace_dir"] = str(p.resolve())
+        self._state["set_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self._save()
+        return f"Workspace set to {p}"
+
+    def clear(self) -> str:
+        self._state = {}
+        self._save()
+        return "Workspace cleared."
+
+    def summary(self) -> str:
+        p = self.path
+        if not p:
+            return "No active workspace."
+
+        files = []
+        try:
+            files = [f.name for f in sorted(p.iterdir()) if f.is_file()][:30]
+        except Exception:
+            pass
+
+        git_info = ""
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(p),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            dirty = len(result.stdout.strip().splitlines()) if result.stdout.strip() else 0
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=str(p),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip() or "unknown"
+            git_info = f"git branch: {branch}, dirty files: {dirty}. "
+        except Exception:
+            pass
+
+        file_list = f"Files: {', '.join(files)}" if files else "(empty)"
+        return f"Workspace: {p}. {git_info}{file_list}"
+
+    def resolve_path(self, maybe_path: Optional[str]) -> Path:
+        if maybe_path:
+            return Path(maybe_path).expanduser()
+        p = self.path
+        return p if p else Path.home()
 
 
 # =============================================================================

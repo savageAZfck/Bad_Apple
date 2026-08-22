@@ -37,6 +37,7 @@ from badapple_extras import (
     Policy,
     SemanticCache,
     StreamingFirewall,
+    Workspace,
 )
 from langdetect import detect, LangDetectException
 from mlx_lm import load
@@ -563,7 +564,7 @@ def is_multi_step(prompt: str) -> bool:
     return any(re.search(p, low) for p in MULTI_STEP_PATTERNS)
 
 
-def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None) -> Optional[str]:
+def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None, workspace: Optional[Any] = None) -> Optional[str]:
     """Fast deterministic path for common local tool commands.
 
     Recognizes patterns like:
@@ -576,7 +577,7 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
     low = prompt.lower().strip()
 
     def _rt(name, args):
-        return run_tool(name, args, knowledge, approval=approval, policy=policy)
+        return run_tool(name, args, knowledge, approval=approval, policy=policy, workspace=workspace)
 
     # Multi-step: find ... and save to ...
     m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+in\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
@@ -647,7 +648,16 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
     return None
 
 
-def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None) -> str:
+def _resolve_tool_path(args: dict, key: str, workspace: Optional[Any] = None) -> Path:
+    maybe = args.get(key)
+    if maybe:
+        return Path(maybe).expanduser()
+    if workspace is not None:
+        return workspace.resolve_path(None)
+    return Path("~").expanduser()
+
+
+def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None, workspace: Optional[Any] = None) -> str:
     if policy is not None:
         if not policy.is_allowed(name):
             return f"Policy: tool '{name}' is not allowed."
@@ -665,13 +675,13 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
         if name == "get_current_time":
             return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
         if name == "list_directory":
-            p = Path(args.get("path", "~")).expanduser()
+            p = _resolve_tool_path(args, "path", workspace)
             if not p.is_dir():
                 return f"Error: {p} is not a directory"
             items = sorted(p.iterdir())[:50]
             return "\n".join(str(i.name) for i in items)
         if name == "read_file":
-            p = Path(args.get("path", "~")).expanduser()
+            p = _resolve_tool_path(args, "path", workspace)
             if not p.is_file():
                 return f"Error: {p} is not a file"
             try:
@@ -699,7 +709,7 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return f"Wrote {p}"
         if name == "search_content":
             query = args.get("query", "")
-            p = Path(args.get("path", "~")).expanduser()
+            p = _resolve_tool_path(args, "path", workspace)
             if not p.is_dir():
                 return f"Error: {p} is not a directory"
             max_results = int(args.get("max_results") or 20)
@@ -739,7 +749,7 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             lines = [l for l in (result.stdout or "").splitlines() if l][:20]
             return "\n".join(lines) or "No files found"
         if name == "index_documents" and knowledge is not None:
-            p = Path(args.get("path", "~")).expanduser()
+            p = _resolve_tool_path(args, "path", workspace)
             if p.exists():
                 count = knowledge.index_paths([p])
                 return f"Indexed {count} chunks from {p}"
@@ -942,6 +952,9 @@ class MLXServer:
         self.audit = AuditLedger(self.data_dir)
         self.cache = SemanticCache(self.data_dir)
         self.policy = Policy(self.data_dir)
+        self.workspace = Workspace(self.data_dir)
+        if os.environ.get("BADAPPLE_WORKSPACE_DIR"):
+            self.workspace.set(os.environ["BADAPPLE_WORKSPACE_DIR"])
         self.approval = ApprovalGate(self.data_dir, policy=self.policy)
 
         # Keep the last few turns in context. When it grows, older turns are
@@ -1226,6 +1239,14 @@ class MLXServer:
                 "content": f"Use this context to answer:\n\n{docs_text}",
             })
 
+        # Include the active workspace/project context.
+        if self.workspace.path:
+            ws_text = f"Active workspace:\n{self.workspace.summary()}"
+            patched.insert(-1, {
+                "role": "user",
+                "content": f"Use this project context if relevant:\n\n{ws_text}",
+            })
+
         rendered = self.tokenizer.apply_chat_template(
             patched,
             tokenize=False,
@@ -1246,6 +1267,26 @@ class MLXServer:
         stream_queue: Optional[queue.Queue] = None,
     ) -> str:
         self.check_prompt_reload()
+
+        # Workspace commands (set workspace to ... / clear workspace) are handled
+        # without the 9B model.
+        ws_low = user_prompt.strip().lower()
+        if ws_low.startswith("set workspace to "):
+            resp = self.workspace.set(user_prompt[16:].strip())
+            self.audit.record("workspace", {"prompt": user_prompt, "response": resp})
+            self.messages.append({"role": "user", "content": user_prompt})
+            self.messages.append({"role": "assistant", "content": resp})
+            self.prune_history()
+            save_conversation(self.messages)
+            return resp
+        if ws_low in ("clear workspace", "unset workspace"):
+            resp = self.workspace.clear()
+            self.audit.record("workspace", {"prompt": user_prompt, "response": resp})
+            self.messages.append({"role": "user", "content": user_prompt})
+            self.messages.append({"role": "assistant", "content": resp})
+            self.prune_history()
+            save_conversation(self.messages)
+            return resp
 
         # Persona commands (switch, teach) are handled without the 9B model.
         persona_resp = self.personas.handle_command(user_prompt)
@@ -1380,7 +1421,7 @@ class MLXServer:
                 f"Reply with 'approve {proposal_id}' to proceed. "
                 f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
             )
-        result = run_tool(name, args, self.knowledge, policy=self.policy)
+        result = run_tool(name, args, self.knowledge, policy=self.policy, workspace=self.workspace)
         return result
 
     def _stream(
@@ -1778,7 +1819,7 @@ class MLXServer:
             approval_action = self.approval.handle_approve_command(prompt)
             if approval_action:
                 tool_name, args = approval_action
-                result = run_tool(tool_name, args, self.knowledge, policy=self.policy)
+                result = run_tool(tool_name, args, self.knowledge, policy=self.policy, workspace=self.workspace)
                 self.audit.record("approval_execute", {"tool": tool_name, "args": args, "result": result[:500]})
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
@@ -1789,7 +1830,7 @@ class MLXServer:
 
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
             # This avoids a full 8B generation for simple local actions and stays air-gapped.
-            fast = fast_execute(prompt, self.knowledge, approval=self.approval, policy=self.policy)
+            fast = fast_execute(prompt, self.knowledge, approval=self.approval, policy=self.policy, workspace=self.workspace)
             if fast:
                 fast = self.polish_response(postprocess_output(fast))
                 self.record_fact(prompt, source="user")
