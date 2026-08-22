@@ -154,12 +154,15 @@ def _handle_request(raw: bytes) -> dict:
         return {"ok": False, "error": "missing or invalid 'text' field"}
 
     voice_name = req.get("voice", DEFAULT_VOICE)
+    text_preview = text[:60].replace("\n", " ")
+    print(f"badapple_tts: request voice={voice_name} text='{text_preview}...'", file=sys.stderr)
     try:
         wav_path = _synthesize(text, voice_name)
         with wave.open(str(wav_path), "rb") as w:
             frames = w.getnframes()
             rate = w.getframerate()
             duration_ms = int((frames / rate) * 1000) if rate else 0
+        print(f"badapple_tts: synthesized {duration_ms}ms -> {wav_path}", file=sys.stderr)
         return {
             "ok": True,
             "wav_path": str(wav_path),

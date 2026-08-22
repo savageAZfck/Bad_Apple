@@ -228,14 +228,18 @@ final class PiperTTSClient {
         guard !queue.isEmpty else {
             isProcessing = false
             queueLock.unlock()
+            badAppleVoiceLog("PiperTTS queue empty, stopping")
             return
         }
         let item = queue.removeFirst()
         queueLock.unlock()
+        badAppleVoiceLog("PiperTTS processNext: \(queue.count) left, text='\(item.text.prefix(40))...' voice='\(item.voice)'")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
+                badAppleVoiceLog("PiperTTS synthesizing \(item.text.prefix(40))...")
                 let wavURL = try self.synthesize(item.text, voice: item.voice)
+                badAppleVoiceLog("PiperTTS got wav \(wavURL.path)")
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
                     self.play(url: wavURL) { [weak self] success in
@@ -319,12 +323,15 @@ final class PiperTTSClient {
         return response
     }
 
-    /// Play the synthesized WAV via afplay for reliability. The Piper model
-    /// already has warmth and cadence baked in; we keep the playback raw.
+    /// Play the synthesized WAV via afplay in the user session for reliability.
+    /// LSUIElement/background apps can fail to open CoreAudio; launching afplay
+    /// with `launchctl asuser` puts it in the user's login bootstrap where audio
+    /// actually works.
     private func play(url: URL, completion: @escaping (Bool) -> Void) {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-        task.arguments = [url.path]
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        let uid = getuid()
+        task.arguments = ["asuser", "\(uid)", "/usr/bin/afplay", url.path]
         task.standardOutput = nil
         task.standardError = nil
         badAppleVoiceLog("PiperTTS playing \(url.path)")
@@ -337,6 +344,7 @@ final class PiperTTSClient {
         }
         do {
             try task.run()
+            badAppleVoiceLog("PiperTTS afplay launched for \(url.path)")
         } catch {
             badAppleVoiceLog("PiperTTS play error: \(error.localizedDescription)")
             completion(false)
