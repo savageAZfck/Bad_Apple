@@ -28,9 +28,9 @@
         <key>BADAPPLE_SOCKET_PATH</key>
         <string>/var/run/badapple/substrate_mlx.sock</string>
         <key>BADAPPLE_MAIN_MODEL</key>
-        <string>mlx-community/Qwen3-8B-4bit</string>
+        <string>caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit</string>
         <key>BADAPPLE_DRAFT_MODEL</key>
-        <string>mlx-community/Qwen3-4B-4bit</string>
+        <string></string>
         <key>BADAPPLE_NUM_DRAFT_TOKENS</key>
         <string>1</string>
         <key>BADAPPLE_PROMPT_FILE</key>

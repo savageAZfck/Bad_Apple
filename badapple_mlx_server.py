@@ -709,6 +709,7 @@ def polish_text(text: str) -> str:
     text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
     text = text.replace("— —", "—")
     text = text.replace("*", "")
+    text = re.sub(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]+", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" ?— ?", "—", text)
     text = re.sub(r"\.\.\.", "…", text)
@@ -788,6 +789,7 @@ def postprocess_output(text: str, sign_off: str = "—besos") -> str:
     text = re.sub(r"\n?\s*<think>.*?\s*\n?", "", text, flags=re.DOTALL)
     text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
     text = text.replace("— —", "—")
+    text = re.sub(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
 
     text = _strip_existing_signoff(text)
@@ -1044,7 +1046,7 @@ class MLXServer:
             print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
             return rendered.rstrip()
         print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
-        return f"{rendered.rstrip()}\n{bridge} "
+        return f"{rendered.rstrip()}{bridge} "
 
     def generate_with_tools(
         self,
@@ -1108,7 +1110,7 @@ class MLXServer:
         t0 = time.time()
         tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
-        sampler = make_sampler(temp=0.6, top_p=0.9, top_k=40, min_p=0.05)
+        sampler = make_sampler(temp=0.5, top_p=0.9, top_k=40, min_p=0.05)
         logits_processors = make_logits_processors(
             repetition_penalty=1.1,
             repetition_context_size=24,
@@ -1181,6 +1183,7 @@ class MLXServer:
     def polish_response(self, text: str) -> str:
         text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL).strip()
         text = text.replace("*", "")
+        text = re.sub(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]+", " ", text)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r" ?— ?", "—", text)
         text = re.sub(r"\.\.\.", "…", text)
