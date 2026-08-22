@@ -799,6 +799,12 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         return PiperTTSClient.availableVoices.contains(raw) ? raw : PiperTTSClient.defaultVoice
     }
 
+    /// Stop any in-flight audio so a new request does not stack on old output.
+    func stopAllAudio() {
+        synthesizer.stopSpeaking(at: .immediate)
+        PiperTTSClient.shared.stop()
+    }
+
     /// Queue a single streamed sentence chunk without stopping any in-flight audio.
     /// This keeps responses smooth while the model is still generating the next chunk.
     func speakChunk(_ text: String) {
@@ -1459,6 +1465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var lastPrompt = ""
     private var lastError: String?
     private var isSubmittingVoicePrompt = false
+    private var voiceBuffer = ""
     private var voiceEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "BadAppleVoiceEnabled") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleVoiceEnabled") }
@@ -1495,6 +1502,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         lastPrompt = prompt
         lastError = nil
         streamedTokenCount = 0
+        voiceBuffer = ""
+        voiceHost.stopAllAudio()
         rebuildMenu()
 
         // Voice mode switch commands are handled without a daemon call.
@@ -1519,7 +1528,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             do {
                 let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens) { chunk in
                     DispatchQueue.main.async {
-                        self.voiceHost.speakChunk(chunk)
+                        self.voiceBuffer += chunk
+                        self.streamedTokenCount += chunk.count
+                        if self.shouldFlushVoiceBuffer() {
+                            self.voiceHost.speakChunk(self.voiceBuffer)
+                            self.voiceBuffer = ""
+                        }
+                        self.rebuildMenu()
                     }
                 }
                 await MainActor.run {
@@ -1697,6 +1712,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
+    /// Decide whether the accumulated voice buffer is a complete enough utterance
+    /// to send to TTS. We flush on sentence boundaries or on paragraph breaks,
+    /// but also cap the buffer so long run-on sentences don't stall audio forever.
+    private func shouldFlushVoiceBuffer() -> Bool {
+        let t = voiceBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return false }
+        if t.hasSuffix(".") || t.hasSuffix("!") || t.hasSuffix("?") || t.hasSuffix("…") {
+            return true
+        }
+        if t.hasSuffix("—") {
+            return true
+        }
+        if t.contains("\n\n") {
+            return true
+        }
+        if t.count > 120 {
+            return true
+        }
+        return false
+    }
+
     private struct BadAppleMenuBarError: LocalizedError {
         let errorDescription: String?
         init(_ message: String) { self.errorDescription = message }
@@ -1708,6 +1744,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         badAppleVoiceLog("parsed actions: \(parsed.actions.count) error: \(parsed.error ?? "nil") spoken: \(parsed.spoken)")
         if !skipSpeak {
             voiceHost.speak(parsed.spoken)
+        } else if !voiceBuffer.isEmpty {
+            voiceHost.speakChunk(voiceBuffer)
+            voiceBuffer = ""
         }
         if let parseError = parsed.error {
             actionExecutor.showParsingFailure(parseError)
