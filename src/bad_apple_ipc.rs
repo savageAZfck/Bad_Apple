@@ -37,6 +37,15 @@ pub enum ClientFrame {
     },
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Metrics {
+    pub tokens: usize,
+    pub decode_tps: f64,
+    pub total_tps: f64,
+    pub draft_accept_pct: f64,
+    pub peak_memory_gb: f64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerFrame {
@@ -51,6 +60,8 @@ pub enum ServerFrame {
     },
     Done {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics: Option<Metrics>,
     },
     Error {
         message: String,
@@ -196,7 +207,14 @@ pub fn validate_request(prompt: &str, max_new_tokens: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn stream_query<F>(prompt: &str, max_new_tokens: usize, mut on_token: F) -> Result<String>
+pub fn stream_query<F>(prompt: &str, max_new_tokens: usize, on_token: F) -> Result<String>
+where
+    F: FnMut(&str),
+{
+    query_with_metrics(prompt, max_new_tokens, on_token).map(|(text, _)| text)
+}
+
+pub fn query_with_metrics<F>(prompt: &str, max_new_tokens: usize, mut on_token: F) -> Result<(String, Option<Metrics>)>
 where
     F: FnMut(&str),
 {
@@ -259,7 +277,7 @@ where
         match read_frame::<_, ServerFrame>(&mut reader)? {
             ServerFrame::Accepted => accepted = true,
             ServerFrame::Token { text } if accepted => on_token(&text),
-            ServerFrame::Done { text } if accepted => return Ok(text),
+            ServerFrame::Done { text, metrics } if accepted => return Ok((text, metrics)),
             ServerFrame::Error { message } => bail!("Bad Apple request failed: {message}"),
             _ => bail!("Bad Apple returned an out-of-order IPC frame"),
         }
