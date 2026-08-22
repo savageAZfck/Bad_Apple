@@ -799,7 +799,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     }
 
     private var usePiperTTS: Bool {
-        UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
+        UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? true
     }
 
     private var selectedPiperVoice: String {
