@@ -1236,7 +1236,11 @@ class MLXServer:
         def clean(raw: str) -> str:
             _, text = extract_tool_calls(raw)
             text = postprocess_output(text)
-            if self.firewall.check_full(text):
+            if os.environ.get("BADAPPLE_DISABLE_FIREWALL") == "1":
+                return text
+            matched = self.firewall.check_full(text)
+            if matched:
+                print(f"[firewall] blocked pattern {matched!r} in final text: {text[:200]!r}", flush=True)
                 return "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
             return text
 
@@ -1309,6 +1313,10 @@ class MLXServer:
 
         def _emit(chunk: str) -> bool:
             """Send a streaming chunk through the output firewall. Returns False if blocked."""
+            if os.environ.get("BADAPPLE_DISABLE_FIREWALL") == "1":
+                if stream_queue is not None:
+                    stream_queue.put(chunk)
+                return True
             matched = self.firewall.push_and_check(chunk)
             if matched:
                 print(f"[firewall] blocked pattern {matched!r} in chunk: {chunk[:80]!r}", flush=True)
@@ -1433,6 +1441,10 @@ class MLXServer:
         self.firewall.reset()
 
         def _emit(chunk: str) -> bool:
+            if os.environ.get("BADAPPLE_DISABLE_FIREWALL") == "1":
+                if stream_queue is not None:
+                    stream_queue.put(chunk)
+                return True
             matched = self.firewall.push_and_check(chunk)
             if matched:
                 print(f"[firewall] blocked pattern {matched!r} in chunk: {chunk[:80]!r}", flush=True)
