@@ -99,6 +99,21 @@ The server can run these directly, either through a fast deterministic parser or
 - `run_applescript` — execute AppleScript on macOS
 - `index_documents` — index a directory into the local RAG store
 
+### Menu bar app
+
+`Bad Apple.app` lives in the macOS status bar. Right-click the apple icon for:
+
+- **New Chat** — clears conversation history
+- **Chat History** — opens the transcript window
+- **Voice Listening** — toggle always-on voice wake
+- **Roast Mode** — alias for the `drill` persona on the next voice query
+- **Persona** — switch between Default, Wicket, Gen Z, Drill, and Midwest Aunt
+- **Benchmark** — runs the default prompt suite and shows results
+- **Voice (Piper / Apple)** and **Accent** — TTS engine and voice selection
+- **Quit**
+
+Voice queries respect the selected persona and roast mode by passing `--persona <name>` / `--roast` to the bundled `badapple` CLI helper.
+
 ### Voice / TTS
 
 - `--speak` streams each sentence to the local **Piper TTS server** and plays with `afplay`
@@ -134,7 +149,7 @@ Built-in persona packs (in `personas.json`) include Wicket (witty Londoner), Gen
 `target/release/badapple` is the authenticated Rust client.
 
 ```bash
-badapple --max-tokens 120 "What is the capital of France?"
+badapple --max-tokens 240 "What is the capital of France?"
 badapple --roast "What do you think of Siri?"            # --persona drill
 badapple --persona wicket "Who are you?"
 badapple --speak "Tell me a joke."                        # stream to TTS queue
@@ -161,6 +176,14 @@ New flags:
             │ Unix socket + SLICKS auth
             ▼
 ┌───────────────────────────────────────┐
+│  com.badapple.gatekeeper              │
+│  target/release/gatekeeper            │
+│  - SLICKS proxy, fast actions,        │
+│    automation cage                    │
+└───────────┬───────────────────────────┘
+            │
+            ▼
+┌───────────────────────────────────────┐
 │  com.badapple.mlx                     │
 │  badapple_mlx_server.py               │
 │  - loads single 9B target + DFlash    │
@@ -174,7 +197,8 @@ New flags:
 └───────────────────────────────────────┘
 ```
 
-- **Socket**: `/var/run/badapple/substrate_mlx.sock`
+- **Client socket (via gatekeeper)**: `/var/run/badapple/substrate.sock`
+- **MLX socket**: `/var/run/badapple/substrate_mlx.sock`
 - **Logs**: `/var/log/bad_apple_mlx_server.log`
 - **Conversation & memory**: `~/.bad_apple/`
 - **RAG index**: `/var/lib/bad_apple/knowledge`
@@ -206,7 +230,7 @@ target/release/badapple --speak "What time is it?"
 BADAPPLE_VOICE=1 target/release/badapple "What time is it?"
 
 # Set max tokens
-target/release/badapple -n 120 "Write me a poem about bare metal"
+target/release/badapple -n 240 "Write me a poem about bare metal"
 ```
 
 ---
@@ -231,4 +255,5 @@ target/release/badapple -n 120 "Write me a poem about bare metal"
 - **DFlash is deterministic for the same prompt**: identical questions get identical answers. A per-query random seed is set, but the primary source of variance is different phrasing.
 - **Throughput is workload-dependent**: DFlash acceptance swings from ~45% to ~80%, so tok/s swings with it. Sustained 22–33 tok/s is possible on high-acceptance turns but not guaranteed for every prompt on this hardware.
 - **First-token latency is dominated by prefill**: long prompts or large knowledge chunks push the first token toward the 5–7 s range.
-- The Rust `gatekeeper`, `automation_cage`, `wasm_cage`, and 576-D `tensor_brain` classifier exist in the repo but are **not the active path** in the current live setup. The active stack is the MLX server + CLI + TTS server.
+- **Max-token cutoffs are cleaned up**: if the model runs out of output tokens mid-sentence, the response is trimmed to the last complete sentence so it doesn't end on a dangling word.
+- The older `automation_cage`, `wasm_cage`, and 576-D `tensor_brain` classifier still exist in the repo but are **not the active path**. The active stack is the gatekeeper + MLX server + CLI + TTS server + menu bar.
