@@ -109,7 +109,7 @@ def _load_voice(name: str) -> PiperVoice:
 
 def _synth_config() -> SynthesisConfig:
     return SynthesisConfig(
-        length_scale=float(os.environ.get("BADAPPLE_TTS_LENGTH_SCALE", "0.76")),
+        length_scale=float(os.environ.get("BADAPPLE_TTS_LENGTH_SCALE", "0.80")),
         noise_scale=float(os.environ.get("BADAPPLE_TTS_NOISE_SCALE", "0.80")),
         noise_w_scale=float(os.environ.get("BADAPPLE_TTS_NOISE_W_SCALE", "0.80")),
         volume=float(os.environ.get("BADAPPLE_TTS_VOLUME", "0.95")),

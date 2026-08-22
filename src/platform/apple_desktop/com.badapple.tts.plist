@@ -11,7 +11,7 @@
 		<key>BADAPPLE_TTS_VOICE</key>
 		<string>en_US-amy-medium</string>
 		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
-		<string>0.76</string>
+		<string>0.80</string>
 		<key>BADAPPLE_TTS_NOISE_SCALE</key>
 		<string>0.80</string>
 		<key>BADAPPLE_TTS_NOISE_W_SCALE</key>
