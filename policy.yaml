@@ -1,0 +1,111 @@
+# Bad Apple — declarative policy for the local tool cage.
+# This file controls what the assistant is allowed to do, what needs
+# explicit approval, and what is flat-out denied.
+
+policy_version: "1.0"
+
+# Global autopilot: when true, the assistant runs destructive tools
+# immediately without asking. When false, tools with require_approval: true
+# go through the human-in-the-loop flow.
+autopilot: false
+
+# Defaults for tools that are not explicitly listed below.
+defaults:
+  allowed: true
+  require_approval: true
+  allowed_paths: []
+  denied_patterns: []
+
+# Tool-specific rules. An unlisted tool inherits from `defaults`.
+tools:
+  get_current_time:
+    allowed: true
+    require_approval: false
+
+  list_directory:
+    allowed: true
+    require_approval: false
+    allowed_paths: ["/Users", "/private"]
+
+  read_file:
+    allowed: true
+    require_approval: false
+    allowed_paths: ["/Users", "/private"]
+    max_size: 10000
+
+  search_content:
+    allowed: true
+    require_approval: false
+    allowed_paths: ["/Users", "/private"]
+    max_timeout: 15
+
+  search_local_files:
+    allowed: true
+    require_approval: false
+    max_timeout: 15
+
+  write_file:
+    allowed: true
+    require_approval: true
+    notes_dir: "~/.bad_apple/notes"
+    denied_patterns:
+      - "../"
+      - "..\\"
+      - "~/.ssh"
+      - "~/.aws"
+      - "/etc"
+      - "/usr"
+
+  run_shell:
+    allowed: true
+    require_approval: true
+    allowed_commands:
+      - ls
+      - cat
+      - head
+      - tail
+      - find
+      - grep
+      - wc
+      - file
+      - pwd
+      - mdfind
+      - ps
+      - df
+      - du
+      - echo
+      - which
+    denied_patterns:
+      - "curl"
+      - "wget"
+      - "ftp"
+      - "ssh"
+      - "scp"
+      - "rsync"
+      - "nc "
+      - "netcat"
+      - "bash -c"
+      - "sh -c"
+      - "rm -rf /"
+      - ":(){"
+    max_timeout: 15
+
+  run_applescript:
+    allowed: true
+    require_approval: true
+    allowed_apps: []
+    denied_patterns:
+      - "do shell script"
+      - "curl"
+      - "wget"
+      - "rm -rf"
+    max_timeout: 15
+
+  index_documents:
+    allowed: true
+    require_approval: true
+    allowed_paths: ["/Users", "/private"]
+
+  search_notes:
+    allowed: true
+    require_approval: false

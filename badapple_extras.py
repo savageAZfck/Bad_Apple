@@ -25,6 +25,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+try:
+    import yaml
+except Exception:  # pragma: no cover
+    yaml = None
+
 
 def _safe_json(data: Any, sort_keys: bool = True) -> str:
     """Canonical JSON string for hashing."""
@@ -619,6 +624,162 @@ class SemanticCache:
 
 
 # =============================================================================
+# 4b. DECLARATIVE POLICY / CAGE LANGUAGE
+# =============================================================================
+
+
+class Policy:
+    """Declarative policy engine for the Bad Apple tool cage.
+
+    Loads a YAML (or JSON) policy file that controls which tools are allowed,
+    which require explicit approval, and which arguments/paths are permitted.
+    """
+
+    DEFAULT_POLICY = {
+        "policy_version": "1.0",
+        "autopilot": False,
+        "defaults": {
+            "allowed": True,
+            "require_approval": True,
+            "allowed_paths": [],
+            "denied_patterns": [],
+        },
+        "tools": {
+            "get_current_time": {"allowed": True, "require_approval": False},
+            "list_directory": {"allowed": True, "require_approval": False},
+            "read_file": {"allowed": True, "require_approval": False},
+            "search_content": {"allowed": True, "require_approval": False},
+            "search_local_files": {"allowed": True, "require_approval": False},
+            "write_file": {"allowed": True, "require_approval": True},
+            "run_shell": {"allowed": True, "require_approval": True},
+            "run_applescript": {"allowed": True, "require_approval": True},
+            "index_documents": {"allowed": True, "require_approval": True},
+            "search_notes": {"allowed": True, "require_approval": False},
+        },
+    }
+
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+        self.policy_path = (
+            Path(os.environ["BADAPPLE_POLICY_FILE"]).expanduser()
+            if os.environ.get("BADAPPLE_POLICY_FILE")
+            else (data_dir / "policy.yaml")
+            if (data_dir / "policy.yaml").is_file()
+            else Path(__file__).with_name("policy.yaml")
+        )
+        self._policy: Dict[str, Any] = dict(self.DEFAULT_POLICY)
+        self._load()
+
+    def _load(self):
+        if not self.policy_path.is_file():
+            return
+        try:
+            raw = self.policy_path.read_text(encoding="utf-8")
+            if yaml is not None:
+                data = yaml.safe_load(raw)
+            else:
+                data = json.loads(raw)
+            if isinstance(data, dict):
+                self._policy = data
+        except Exception as e:
+            print(f"[policy] could not load {self.policy_path}: {e}", flush=True)
+
+    @property
+    def autopilot(self) -> bool:
+        return bool(self._policy.get("autopilot", self.DEFAULT_POLICY["autopilot"]))
+
+    def _tool_cfg(self, tool_name: str) -> Dict[str, Any]:
+        tools = self._policy.get("tools", self.DEFAULT_POLICY["tools"])
+        defaults = self._policy.get("defaults", self.DEFAULT_POLICY["defaults"])
+        cfg = dict(defaults)
+        if isinstance(tools, dict) and tool_name in tools:
+            if isinstance(tools[tool_name], dict):
+                cfg.update(tools[tool_name])
+        return cfg
+
+    def is_allowed(self, tool_name: str) -> bool:
+        return bool(self._tool_cfg(tool_name).get("allowed", True))
+
+    def needs_approval(self, tool_name: str) -> bool:
+        if self.autopilot:
+            return False
+        return bool(self._tool_cfg(tool_name).get("require_approval", True))
+
+    def _denied(self, value: str, patterns: List[str]) -> Optional[str]:
+        if not patterns:
+            return None
+        lower = value.lower()
+        for pat in patterns:
+            if pat and pat.lower() in lower:
+                return pat
+        return None
+
+    def _path_in_allowed(self, path: Path, allowed: List[str]) -> bool:
+        if not allowed:
+            return True
+        resolved = path.expanduser().resolve()
+        for root in allowed:
+            try:
+                root_path = Path(root).expanduser().resolve()
+                if str(resolved).startswith(str(root_path)):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def validate(self, tool_name: str, args: Dict[str, Any]) -> Optional[str]:
+        """Return an error string if the tool call violates policy, else None."""
+        if not self.is_allowed(tool_name):
+            return f"tool '{tool_name}' is not allowed"
+        cfg = self._tool_cfg(tool_name)
+
+        # Path-based checks
+        if "path" in args:
+            path = Path(args["path"]).expanduser()
+            allowed_paths = cfg.get("allowed_paths", [])
+            if allowed_paths and not self._path_in_allowed(path, allowed_paths):
+                return f"path {path} is outside allowed roots"
+
+        # Write directory containment for write_file
+        if tool_name == "write_file":
+            notes_dir = Path(
+                cfg.get("notes_dir")
+                or os.environ.get("BADAPPLE_NOTES_DIR", "~/.bad_apple/notes")
+            ).expanduser()
+            filename = os.path.basename(args.get("filename", "note.txt"))
+            target = (notes_dir / filename).resolve()
+            try:
+                notes_dir_resolved = notes_dir.resolve()
+                if not str(target).startswith(str(notes_dir_resolved)):
+                    return "write_file must stay in the notes directory"
+            except Exception:
+                return "invalid write_file path"
+            if self._denied(filename, cfg.get("denied_patterns", [])):
+                return "write filename contains a forbidden pattern"
+
+        # Shell command checks
+        if tool_name == "run_shell":
+            command = args.get("command", "")
+            allowed = cfg.get("allowed_commands", [])
+            if allowed:
+                first = command.strip().split()[0].lower() if command.strip() else ""
+                if first not in [c.lower() for c in allowed]:
+                    return f"command '{first}' is not in the allowed list"
+            denied = self._denied(command, cfg.get("denied_patterns", []))
+            if denied:
+                return f"command matches forbidden pattern '{denied}'"
+
+        # AppleScript checks
+        if tool_name == "run_applescript":
+            script = args.get("script", "")
+            denied = self._denied(script, cfg.get("denied_patterns", []))
+            if denied:
+                return f"AppleScript matches forbidden pattern '{denied}'"
+
+        return None
+
+
+# =============================================================================
 # 5. HUMAN-IN-THE-LOOP APPROVALS
 # =============================================================================
 
@@ -626,18 +787,16 @@ class SemanticCache:
 class ApprovalGate:
     """Phased, human-in-the-loop approval for destructive tools.
 
-    Gestation: every destructive tool requires explicit approval.
-    Autopilot: `BADAPPLE_AUTOPILOT=1` allows the tool immediately.
+    The policy engine now decides which tools require approval; this gate
+    stores the pending proposals and handles the user approve/reject flow.
 
     Modeled on ify / savageops proposal/approve flow.
     """
 
-    DESTRUCTIVE_TOOLS = {"write_file", "run_shell", "run_applescript", "index_documents"}
-
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, policy: Optional[Policy] = None):
         self.data_dir = data_dir
         self.pending: Dict[str, Dict[str, Any]] = {}
-        self.autopilot = os.environ.get("BADAPPLE_AUTOPILOT", "0").lower() in ("1", "true", "yes", "on")
+        self.policy = policy or Policy(data_dir)
         self._load_pending()
 
     def _load_pending(self):
@@ -660,7 +819,7 @@ class ApprovalGate:
             print(f"[approval] could not save pending: {e}", flush=True)
 
     def needs_approval(self, tool_name: str) -> bool:
-        return tool_name in self.DESTRUCTIVE_TOOLS and not self.autopilot
+        return self.policy.needs_approval(tool_name)
 
     def propose(self, tool_name: str, arguments: Dict[str, Any], user_prompt: str = "") -> str:
         proposal_id = str(uuid.uuid4())[:8]

@@ -34,6 +34,7 @@ from badapple_extras import (
     ApprovalGate,
     AuditLedger,
     PersonaPack,
+    Policy,
     SemanticCache,
     StreamingFirewall,
 )
@@ -562,7 +563,7 @@ def is_multi_step(prompt: str) -> bool:
     return any(re.search(p, low) for p in MULTI_STEP_PATTERNS)
 
 
-def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None) -> Optional[str]:
+def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None) -> Optional[str]:
     """Fast deterministic path for common local tool commands.
 
     Recognizes patterns like:
@@ -575,7 +576,7 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
     low = prompt.lower().strip()
 
     def _rt(name, args):
-        return run_tool(name, args, knowledge, approval=approval)
+        return run_tool(name, args, knowledge, approval=approval, policy=policy)
 
     # Multi-step: find ... and save to ...
     m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+in\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
@@ -646,7 +647,13 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
     return None
 
 
-def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None) -> str:
+def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None) -> str:
+    if policy is not None:
+        if not policy.is_allowed(name):
+            return f"Policy: tool '{name}' is not allowed."
+        error = policy.validate(name, args)
+        if error:
+            return f"Policy: {error}"
     if approval is not None and approval.needs_approval(name):
         proposal_id = approval.propose(name, args)
         return (
@@ -934,7 +941,8 @@ class MLXServer:
         self.firewall = StreamingFirewall(self.data_dir)
         self.audit = AuditLedger(self.data_dir)
         self.cache = SemanticCache(self.data_dir)
-        self.approval = ApprovalGate(self.data_dir)
+        self.policy = Policy(self.data_dir)
+        self.approval = ApprovalGate(self.data_dir, policy=self.policy)
 
         # Keep the last few turns in context. When it grows, older turns are
         # still persisted to disk and a rolling summary keeps context alive.
@@ -1360,6 +1368,11 @@ class MLXServer:
 
     def _run_approved_tool(self, name: str, args: Dict[str, Any], user_prompt: str) -> str:
         """Run a tool, but gate destructive tools behind the approval workflow."""
+        if not self.policy.is_allowed(name):
+            return f"Policy: tool '{name}' is not allowed."
+        error = self.policy.validate(name, args)
+        if error:
+            return f"Policy: {error}"
         if self.approval.needs_approval(name):
             proposal_id = self.approval.propose(name, args, user_prompt)
             return (
@@ -1367,7 +1380,7 @@ class MLXServer:
                 f"Reply with 'approve {proposal_id}' to proceed. "
                 f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
             )
-        result = run_tool(name, args, self.knowledge)
+        result = run_tool(name, args, self.knowledge, policy=self.policy)
         return result
 
     def _stream(
@@ -1765,7 +1778,7 @@ class MLXServer:
             approval_action = self.approval.handle_approve_command(prompt)
             if approval_action:
                 tool_name, args = approval_action
-                result = run_tool(tool_name, args, self.knowledge)
+                result = run_tool(tool_name, args, self.knowledge, policy=self.policy)
                 self.audit.record("approval_execute", {"tool": tool_name, "args": args, "result": result[:500]})
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
@@ -1776,7 +1789,7 @@ class MLXServer:
 
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
             # This avoids a full 8B generation for simple local actions and stays air-gapped.
-            fast = fast_execute(prompt, self.knowledge, approval=self.approval)
+            fast = fast_execute(prompt, self.knowledge, approval=self.approval, policy=self.policy)
             if fast:
                 fast = self.polish_response(postprocess_output(fast))
                 self.record_fact(prompt, source="user")
