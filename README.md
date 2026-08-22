@@ -26,6 +26,12 @@ After the models are downloaded once, **no prompt, response, or action leaves yo
 
 ---
 
+## Standards
+
+- [MANIFESTO.md](MANIFESTO.md) — the Bare-Metal AI OS principles.
+- [STANDARDS.md](STANDARDS.md) — public interfaces: SLICKS, LAP, policy schema, ledger, certification.
+- [ROADMAP.md](ROADMAP.md) — future features toward a cognitive bare-metal AI OS standard.
+
 ## Quick start
 
 ### Requirements
@@ -33,7 +39,7 @@ After the models are downloaded once, **no prompt, response, or action leaves yo
 - Apple Silicon Mac (M1 or later)
 - macOS 26 or later
 - Rust toolchain with Cargo
-- Python 3.12 with `mlx`, `mlx-lm`, and the packages in `requirements.txt`
+- Python 3.12 with `mlx`, `mlx-lm`, and the packages in the active venv
 - Models are downloaded on first run:
   - `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`
   - `z-lab/Qwen3.5-9B-DFlash`
