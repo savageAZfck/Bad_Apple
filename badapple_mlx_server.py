@@ -33,6 +33,7 @@ from badapple_knowledge import BadAppleKnowledge
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
+    MemoryGraph,
     PersonaPack,
     Policy,
     SemanticCache,
@@ -936,7 +937,6 @@ class MLXServer:
             os.environ.get("BADAPPLE_PROMPT_FILE") or DEFAULT_PROMPT_FILE
         ).expanduser()
         self.prompt_mtime: Optional[float] = self.prompt_file.stat().st_mtime if self.prompt_file.is_file() else None
-        self.user_memory = load_user_memory()
         self.knowledge = BadAppleKnowledge()
         self._roast_index = 0
         self.last_metrics: Optional[Dict[str, Any]] = None
@@ -947,6 +947,8 @@ class MLXServer:
             os.environ.get("BADAPPLE_DATA_DIR") or "/var/lib/bad_apple"
         ).expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.memory = MemoryGraph(self.data_dir, encoder=self.knowledge._encode_texts)
+        # legacy short-term memory is folded into the memory graph
         self.personas = PersonaPack(self.data_dir, self.prompt_file)
         self.firewall = StreamingFirewall(self.data_dir)
         self.audit = AuditLedger(self.data_dir)
@@ -1095,18 +1097,11 @@ class MLXServer:
     def record_fact(self, text: str, source: str = "user"):
         low = text.lower()
         if source == "user":
-            if any(phrase in low for phrase in ("my name is", "my name's", "i like", "i love", "i prefer", "remember that")):
-                sentence = re.split(r"(?<=[.!?])\s+", text)[0]
-                if 5 < len(sentence) < 200:
-                    if sentence not in self.user_memory:
-                        self.user_memory.append(sentence)
-                    save_user_memory(self.user_memory)
+            if any(phrase in low for phrase in ("my name is", "my name's", "i like", "i love", "i prefer", "i hate", "remember that")):
+                self.memory.remember(text, source="user")
         elif source == "assistant" and "your name is" in low:
             # Trust the assistant when it confirms a user fact
-            sentence = re.split(r"(?<=[.!?])\s+", text)[0]
-            if 5 < len(sentence) < 200 and sentence not in self.user_memory:
-                self.user_memory.append(sentence)
-                save_user_memory(self.user_memory)
+            self.memory.remember(text, source="assistant")
 
     def prune_history(self):
         system = [m for m in self.messages if m["role"] == "system"]
@@ -1208,7 +1203,7 @@ class MLXServer:
                     "content": f"{last['content']}\n\n(Vibe: {mood} — this turn's roast target is {target}.)",
                 }
 
-        rel_mem = relevant_memories(messages[-1]["content"], self.user_memory)
+        rel_mem = self.memory.search(messages[-1]["content"], k=3)
 
         # If a user-fact is already remembered, answer from that instead of
         # getting distracted by unrelated documents.
@@ -1951,6 +1946,7 @@ class MLXServer:
             if fast:
                 fast = self.polish_response(postprocess_output(fast))
                 self.record_fact(prompt, source="user")
+                self.memory.add_episode(prompt, fast)
                 self.messages.append({"role": "user", "content": prompt})
                 self.messages.append({"role": "assistant", "content": fast})
                 self.prune_history()
@@ -1984,6 +1980,7 @@ class MLXServer:
                 if not text:
                     text = "Ugh, like, I couldn't make a plan."
                 self.record_fact(prompt, source="user")
+                self.memory.add_episode(prompt, text)
                 self.messages.append({"role": "user", "content": prompt})
                 self.messages.append({"role": "assistant", "content": text})
                 self.prune_history()
@@ -2028,6 +2025,7 @@ class MLXServer:
             # Store final assistant response in conversation; only user statements
             # become long-term memory, not the assistant's own rephrasings.
             self.messages.append({"role": "assistant", "content": text})
+            self.memory.add_episode(prompt, text)
             self.prune_history()
             save_conversation(self.messages)
             self.audit.record("response", {
