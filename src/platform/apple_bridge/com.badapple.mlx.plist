@@ -49,6 +49,8 @@
         <string>/Users/savag3</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <key>BADAPPLE_AUTOPILOT</key>
+        <string>1</string>
     </dict>
     <key>StandardOutPath</key>
     <string>/var/log/bad_apple_mlx_server.log</string>
