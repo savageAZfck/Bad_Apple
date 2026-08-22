@@ -1309,7 +1309,9 @@ class MLXServer:
 
         def _emit(chunk: str) -> bool:
             """Send a streaming chunk through the output firewall. Returns False if blocked."""
-            if self.firewall.push_and_check(chunk):
+            matched = self.firewall.push_and_check(chunk)
+            if matched:
+                print(f"[firewall] blocked pattern {matched!r} in chunk: {chunk[:80]!r}", flush=True)
                 redacted = "[Output firewall: I caught a pattern I am not allowed to stream.]"
                 if stream_queue is not None:
                     stream_queue.put(redacted)
@@ -1431,7 +1433,9 @@ class MLXServer:
         self.firewall.reset()
 
         def _emit(chunk: str) -> bool:
-            if self.firewall.push_and_check(chunk):
+            matched = self.firewall.push_and_check(chunk)
+            if matched:
+                print(f"[firewall] blocked pattern {matched!r} in chunk: {chunk[:80]!r}", flush=True)
                 redacted = "[Output firewall: I caught a pattern I am not allowed to stream.]"
                 if stream_queue is not None:
                     stream_queue.put(redacted)
