@@ -271,9 +271,6 @@ class StreamingFirewall:
     """
 
     DEFAULT_PATTERNS = [
-        "password",
-        "secret",
-        "api key",
         "sk-",
         "ssh-rsa",
         "-----BEGIN",
