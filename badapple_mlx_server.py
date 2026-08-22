@@ -1247,6 +1247,8 @@ class MLXServer:
             self.messages.append({"role": "assistant", "content": resp})
             self.prune_history()
             save_conversation(self.messages)
+            if stream_queue is not None:
+                stream_queue.put(resp)
             return resp
 
         # Semantic cache: bypass the 9B for repeated questions.
