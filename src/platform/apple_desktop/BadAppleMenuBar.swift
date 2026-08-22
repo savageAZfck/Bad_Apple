@@ -833,7 +833,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     /// Main entry point: try the local neural Piper TTS first, then fall back
     /// to the on-device Apple speech engine. The result is much more human at
-    /// the cost of ~200-600 ms synthesis latency for the 8B response.
+    /// the cost of ~200-600 ms synthesis latency for the 9B response.
     func speak(_ text: String) {
         currentSpeakID += 1
         let id = currentSpeakID
@@ -1510,7 +1510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         // Fallback: ask the on-device daemon via the bundled badapple CLI.
         // The CLI streams sentence chunks as they are generated, so TTS starts
-        // while the 8B model is still finishing the rest of the response.
+        // while the 9B model is still finishing the rest of the response.
         let socket = BadAppleBrain.deepSocket
         let maxTokens = 100
         Task {
@@ -1720,14 +1720,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     func rebuildMenu() {
         guard let menu = menu else { return }
         menu.removeAllItems()
-        let header = NSMenuItem(title: "Bad Apple — 8B MLX + RAG", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Bad Apple — 9B MLX + RAG", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
 
         let voiceStatus = NSMenuItem(title: voiceHost.state.label.truncated(to: 90), action: nil, keyEquivalent: "")
         voiceStatus.isEnabled = false
         menu.addItem(voiceStatus)
-        let mode = NSMenuItem(title: "Brain: 8B MLX + RAG", action: nil, keyEquivalent: "")
+        let mode = NSMenuItem(title: "Brain: Qwen3.5 9B MLX + RAG", action: nil, keyEquivalent: "")
         mode.isEnabled = false
         menu.addItem(mode)
         menu.addItem(NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n"))
