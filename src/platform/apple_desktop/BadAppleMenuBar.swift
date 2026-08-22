@@ -187,6 +187,7 @@ final class PiperTTSClient {
         let text: String
         let voice: String
         let id: Int
+        let completion: ((Bool) -> Void)?
     }
     private var queue: [QueueItem] = []
     private let queueLock = NSLock()
@@ -213,15 +214,13 @@ final class PiperTTSClient {
         requestID += 1
         let myID = requestID
         queueLock.lock()
-        queue.append(QueueItem(text: text, voice: voice, id: myID))
+        queue.append(QueueItem(text: text, voice: voice, id: myID, completion: completion))
         let shouldStart = !isProcessing
         if shouldStart { isProcessing = true }
         queueLock.unlock()
         if shouldStart {
             processNext()
         }
-        // Fire-and-forget for streaming; real completion is handled by AVAudioPlayerDelegate.
-        completion?(true)
     }
 
     private func processNext() {
@@ -238,13 +237,15 @@ final class PiperTTSClient {
             do {
                 let wavURL = try self.synthesize(item.text, voice: item.voice)
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, item.id >= self.requestID - 1 else { return }
-                    self.play(url: wavURL) { [weak self] _ in
+                    guard let self = self else { return }
+                    self.play(url: wavURL) { [weak self] success in
+                        item.completion?(success)
                         self?.processNext()
                     }
                 }
             } catch {
                 badAppleVoiceLog("PiperTTS synthesize error: \(error.localizedDescription)")
+                item.completion?(false)
                 DispatchQueue.main.async { [weak self] in
                     self?.processNext()
                 }
@@ -322,10 +323,17 @@ final class PiperTTSClient {
     /// already has warmth and cadence baked in; we keep the playback raw.
     private func play(url: URL, completion: @escaping (Bool) -> Void) {
         let task = Process()
-        task.launchPath = "/usr/bin/afplay"
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
         task.arguments = [url.path]
-        task.terminationHandler = { _ in
-            DispatchQueue.main.async { completion(true) }
+        task.standardOutput = nil
+        task.standardError = nil
+        badAppleVoiceLog("PiperTTS playing \(url.path)")
+        task.terminationHandler = { task in
+            let code = task.terminationStatus
+            if code != 0 {
+                badAppleVoiceLog("PiperTTS afplay exited with \(code)")
+            }
+            DispatchQueue.main.async { completion(code == 0) }
         }
         do {
             try task.run()
@@ -741,12 +749,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
                 current = ""
                 return
             }
-            // sign-off "—mwah" gets a warm trailing breath
-            let isSignOff = trimmed.lowercased().contains("mwah")
-            let finalRate: Float = isSignOff ? 0.42 : rate
-            let finalPitch: Float = isSignOff ? 0.94 : pitch
-            let finalDelay: TimeInterval = isSignOff ? max(postDelay, 0.5) : postDelay
-            chunks.append(ProsodyChunk(text: trimmed, rate: finalRate, pitch: finalPitch, postDelay: finalDelay))
+            chunks.append(ProsodyChunk(text: trimmed, rate: rate, pitch: pitch, postDelay: postDelay))
             current = ""
         }
 

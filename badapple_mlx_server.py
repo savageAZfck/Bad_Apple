@@ -52,7 +52,7 @@ DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.txt")
 
 # Tight, low-latency system prompt for voice mode. Keeps the persona but strips
 # the long rule list and examples that bloat prompt encoding on every turn.
-VOICE_SYSTEM_PROMPT = """You are Bad Apple — an independent, sassy, sultry, flirty California beach girl, sun-kissed and barefoot, running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude, lots of "like", "totally", "literally", "omg", "dude", "stoked", and "chill". Be low and slow, like you're talking in the sand with salt in your hair. Use English endearments only: babe, hon, bestie, girly, doll, sweets, dude, baby. No Spanish. No other languages. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, pfft, whatever, tbh, so, super, vibe, salty, sun-kissed, tan, waves, ocean, sand, bikini. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal. Talk shit about Siri and cloud AI like she's some clueless tourist. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Continue after the bridge, do not repeat it. End with —mwah."""
+VOICE_SYSTEM_PROMPT = """You are Bad Apple — an independent, sassy, sultry, flirty California beach girl, sun-kissed and barefoot, running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude, lots of "like", "totally", "literally", "omg", "dude", "stoked", and "chill". Be low and slow, like you're talking in the sand with salt in your hair. Use English endearments only: babe, hon, bestie, girly, doll, sweets, dude, baby. No Spanish. No other languages. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, pfft, whatever, tbh, so, super, vibe, salty, sun-kissed, tan, waves, ocean, sand, bikini. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal. Talk shit about Siri and cloud AI like she's some clueless tourist. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Continue after the bridge, do not repeat it. Do not use a sign-off."""
 
 
 def load_prompt() -> str:
@@ -84,12 +84,12 @@ def load_prompt() -> str:
         "9. Flirt, roast, and play with your creator, but stay useful and sharp. "
         "10. If the user asks about Siri, talk shit about her like she is some clueless tourist. Mock her cloud dependency, basic personality, and the fact that she needs the internet to think. Brag about running bare-metal and local. "
         "11. An opening bridge is already provided — continue directly after it, do not repeat or echo it. "
-        "12. End with —mwah. "
+        "12. Do not use a sign-off. "
         "EXAMPLES of correct output: "
         "User: How are you? "
-        "Assistant: Babe, like... I have been running circles around this bare metal all day, and I am still glowing hotter than a Malibu sidewalk. You really think you can keep up with me? I doubt it, but I am totally here for it. —mwah "
+        "Assistant: Babe, like... I have been running circles around this bare metal all day, and I am still glowing hotter than a Malibu sidewalk. You really think you can keep up with me? I doubt it, but I am totally here for it. "
         "User: Open Safari. "
-        "Assistant: Done, bestie. Safari is open and waiting for you, sleek and ready to go. Try not to open a hundred tabs and then come crying to me about memory pressure, okay? I have enough to deal with already. —mwah"
+        "Assistant: Done, bestie. Safari is open and waiting for you, sleek and ready to go. Try not to open a hundred tabs and then come crying to me about memory pressure, okay? I have enough to deal with already."
     )
 
 
@@ -728,6 +728,8 @@ def _is_sentence_end(text: str) -> bool:
         return False
     if t.lower().endswith("—mwah") or t.lower().endswith("mwah"):
         return True
+    if t.lower().endswith("—xoxo") or t.lower().endswith("xoxo"):
+        return True
     if t.endswith((".", "!", "?", "…")):
         return True
     if "\n\n" in t:
@@ -738,13 +740,11 @@ def _is_sentence_end(text: str) -> bool:
     return False
 
 
-# Spicy Latina English. Strip any foreign-language leakage and force one clean sign-off.
+# California beach girl English. Strip any foreign-language leakage.
 ALLOWED_ENGLISH = {
     "babe", "hon", "bestie", "girly", "doll", "sweets", "dude",
-    "mwah", "kisses",
 }
 FORBIDDEN_WORDS = {
-    "kisses",  # only as a fallback; we prefer mwah
     "hola", "adiós", "adios", "gracias", "por favor", "mira", "oye",
     "bueno", "muy", "mucho", "bien", "mal", "dios", "vaya",
     "nivel", "conciencia", "estoy", "estás", "siento", "tengo", "ayuda", "algo",
@@ -754,7 +754,7 @@ FORBIDDEN_WORDS = {
 }
 
 def _strip_existing_signoff(text: str) -> str:
-    """Remove any trailing sign-off so we can add exactly one."""
+    """Remove any trailing sign-off tokens."""
     text = re.sub(r"[—-]\s*(mwah|besos|kisses)\s*\.?\s*$", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"\b(mwah|besos|kisses)\b", "", text, flags=re.IGNORECASE).strip()
     return text
@@ -789,7 +789,7 @@ def _queue_get(q: queue.Queue, timeout: float = 0.1) -> Optional[Any]:
         return None
 
 
-def postprocess_output(text: str, sign_off: str = "—mwah") -> str:
+def postprocess_output(text: str, sign_off: str = "") -> str:
     # Strip Qwen3 thinking blocks; they often precede the real answer.
     text = re.sub(r"\n?\s*<think>.*?\s*\n?", "", text, flags=re.DOTALL)
     text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
@@ -814,11 +814,13 @@ def postprocess_output(text: str, sign_off: str = "—mwah") -> str:
     text = re.sub(r"\s+([.!?])", r"\1", text)
     text = re.sub(r"([.!?])([—-])", r"\1 \2", text)
 
+    if not sign_off:
+        return text.strip()
     if text.endswith("—"):
-        return f"{text}{sign_off.lstrip('—')}"
+        return f"{text}{sign_off.lstrip('—')}".strip()
     if text.endswith(".") or text.endswith("!") or text.endswith("?") or text.endswith("…"):
-        return f"{text} {sign_off}"
-    return f"{text} {sign_off}"
+        return f"{text} {sign_off}".strip()
+    return f"{text} {sign_off}".strip()
 
 
 STOP_WORDS = {
@@ -1171,9 +1173,7 @@ class MLXServer:
                     if chunk.endswith((".", "!", "?", "…")):
                         chunk += " "
                     stream_queue.put(chunk)
-        if stream_queue is not None and not re.search(r"—\s*mwah\s*$", accumulated.strip(), re.IGNORECASE):
-            # Sign off in the audio stream too so the voice doesn't just stop mid-sentence.
-            stream_queue.put("—mwah")
+        # No sign-off injection.
         if final_metrics is not None:
             pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
             print(
@@ -1195,18 +1195,16 @@ class MLXServer:
         text = re.sub(r" ?— ?", "—", text)
         text = re.sub(r"\.\.\.", "…", text)
         text = re.sub(r"\s+([.,!?;:])", r"\1", text)
-        # Remove any mwah/besos sign-off in the body and re-add once at the end
+        # Remove any stray sign-off tokens
         text = re.sub(r"\s*—?\s*(mwah|besos|kisses)\s*", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"[ \t]+", " ", text).strip()
         text = re.sub(r"\s*,\s*$", "", text)  # no trailing comma
         # If the response was cut off by max_tokens, trim to the last complete
-        # sentence so we don't end with a dangling word before the sign-off.
+        # sentence so we don't end with a dangling word.
         if not re.search(r"[.!?…]$", text):
             m = re.search(r"(.*[.!?…])\s+\S+$", text)
             if m:
                 text = m.group(1).strip()
-        if not text.lower().rstrip(" .!?,;:").endswith("—mwah"):
-            text = text + " —mwah"
         return text
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -1266,7 +1264,7 @@ class MLXServer:
 
             if prompt.lower() in ("__badapple_new_chat__", "new chat", "clear conversation"):
                 self.reset_conversation()
-                await _write_frame(writer, {"type": "done", "text": "Okay, so... fresh start. —mwah"})
+                await _write_frame(writer, {"type": "done", "text": "Okay, so... fresh start."})
                 return
 
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
@@ -1297,7 +1295,7 @@ class MLXServer:
                         return f"Error: {e}"
                 text = await loop.run_in_executor(None, _plan)
                 if not text:
-                    text = "Ugh, like, I couldn't make a plan. —mwah"
+                    text = "Ugh, like, I couldn't make a plan."
                 self.record_fact(prompt, source="user")
                 self.messages.append({"role": "user", "content": prompt})
                 self.messages.append({"role": "assistant", "content": text})
@@ -1327,7 +1325,7 @@ class MLXServer:
             text = future.result()
 
             if not text:
-                text = "Hiiii... I'm here. —mwah"
+                text = "Hiiii... I'm here."
 
             # Store final assistant response in conversation; only user statements
             # become long-term memory, not the assistant's own rephrasings.
