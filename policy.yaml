@@ -137,6 +137,11 @@ tools:
     require_approval: false
     max_timeout: 15
 
+  slicks_keychain_store:
+    allowed: true
+    require_approval: true
+    max_timeout: 30
+
   xcode_index_project:
     allowed: true
     require_approval: true

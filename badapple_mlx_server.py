@@ -44,6 +44,7 @@ import badapple_scheduler
 import badapple_ambient
 import badapple_spotlight
 import badapple_xcode
+import badapple_keychain
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -1000,6 +1001,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "slicks_keychain_store",
+            "description": "Store or rotate the SLICKS secret in the macOS Keychain instead of a plain file. Requires approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Keychain service name. Default 'com.badapple.slicks'.",
+                    },
+                    "account": {
+                        "type": "string",
+                        "description": "Keychain account name. Default 'mlx-server'.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1054,6 +1076,14 @@ TOOL_KEYWORDS = [
 def load_slicks_secret() -> bytes:
     if "BADAPPLE_SLICKS_SECRET" in os.environ:
         raw = os.environ["BADAPPLE_SLICKS_SECRET"]
+    elif os.environ.get("BADAPPLE_SLICKS_KEYCHAIN", "0") == "1":
+        try:
+            return badapple_keychain.get_or_create_secret()
+        except Exception as e:
+            print(f"[slicks] keychain load failed: {e}; falling back to key file", flush=True)
+            key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
+            with open(key_path, "r") as f:
+                raw = f.read()
     else:
         key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
         with open(key_path, "r") as f:
@@ -1513,6 +1543,15 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 args.get("query", ""),
                 knowledge,
                 max_results=int(args.get("max_results") or 10),
+            )
+        if name == "slicks_keychain_store":
+            return badapple_keychain.store_secret(
+                badapple_keychain.get_or_create_secret(
+                    args.get("service", badapple_keychain.DEFAULT_SERVICE),
+                    args.get("account", badapple_keychain.DEFAULT_ACCOUNT),
+                ),
+                args.get("service", badapple_keychain.DEFAULT_SERVICE),
+                args.get("account", badapple_keychain.DEFAULT_ACCOUNT),
             )
         if name == "p2p_peers":
             daemon = badapple_p2p.get_p2p_daemon()
