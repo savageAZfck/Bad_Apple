@@ -358,6 +358,65 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shortcut",
+            "description": "Run a named macOS Shortcut from the Shortcuts app. Returns the shortcut's text output if any.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The exact name of the macOS Shortcut to run.",
+                    },
+                    "input": {
+                        "type": "string",
+                        "description": "Optional text input to pass to the shortcut.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_shortcuts",
+            "description": "List the names of installed macOS Shortcuts.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "accessibility_action",
+            "description": "Perform a local macOS UI action via System Events/AppleScript: type text, press a key, click a menu, or click a UI element by name. Use only for approved local actions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["type", "key", "menu", "click"],
+                        "description": "The UI action to perform.",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "The app name, menu path, or UI element name to target.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The text to type, key to press, or menu/item to select.",
+                    },
+                },
+                "required": ["action", "target"],
+            },
+        },
+    },
 ]
 
 TOOL_KEYWORDS = [
@@ -646,6 +705,15 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
     if m:
         return _rt("write_file", {"filename": m.group(1).strip(), "content": m.group(2).strip()})
 
+    # Shortcuts / Accessibility
+    m = re.search(r"\blist\b(?:\s+(?:my|all))?(?:\s+shortcuts)$", low, re.IGNORECASE)
+    if m or re.search(r"\bwhat\s+shortcuts\b", low, re.IGNORECASE):
+        return _rt("list_shortcuts", {})
+
+    m = re.search(r"\brun\s+shortcut\s+['\"]?(.+?)['\"]?(?:\s+with\s+input\s+['\"]?(.+?)['\"]?)?$", low, re.IGNORECASE)
+    if m:
+        return _rt("run_shortcut", {"name": m.group(1).strip("'\""), "input": (m.group(2) or "").strip("'\"")})
+
     return None
 
 
@@ -656,6 +724,39 @@ def _resolve_tool_path(args: dict, key: str, workspace: Optional[Any] = None) ->
     if workspace is not None:
         return workspace.resolve_path(None)
     return Path("~").expanduser()
+
+
+def _console_user() -> Optional[str]:
+    """Return the name of the current console (Aqua/session) user, if any."""
+    try:
+        result = subprocess.run(
+            ["stat", "-f", "%Su", "/dev/console"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+    except Exception:
+        return None
+
+
+def _run_as_user(cmd: List[str], user: Optional[str] = None, input_text: Optional[str] = None, timeout: int = 30):
+    """Run a subprocess as the console user when the daemon is root."""
+    target = user or _console_user()
+    if target and target != "root":
+        full = ["sudo", "-n", "-u", target] + cmd
+    else:
+        full = cmd
+    try:
+        return subprocess.run(
+            full,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
 
 def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None, workspace: Optional[Any] = None) -> str:
@@ -732,12 +833,35 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return _run_shell(args.get("command", ""))
         if name == "run_applescript":
             script = args.get("script", "")
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
+            result = _run_as_user(["osascript", "-e", script], timeout=15)
+            return (result.stdout or result.stderr or "done").strip()
+        if name == "run_shortcut":
+            shortcut_name = args.get("name", "")
+            shortcut_input = args.get("input", "")
+            result = _run_as_user(["shortcuts", "run", shortcut_name], input_text=shortcut_input or "", timeout=60)
+            return (result.stdout or result.stderr or "done").strip()
+        if name == "list_shortcuts":
+            result = _run_as_user(["shortcuts", "list"], timeout=15)
+            if result.returncode != 0:
+                return f"Error listing shortcuts: {result.stderr or result.stdout}"
+            lines = [l for l in (result.stdout or "").splitlines() if l][:100]
+            return "\n".join(lines) or "No shortcuts found"
+        if name == "accessibility_action":
+            action = args.get("action", "")
+            target = args.get("target", "")
+            value = args.get("value", "")
+            if action == "type":
+                script = f'tell application "{target}" to activate\ntell application "System Events" to keystroke "{value}"'
+            elif action == "key":
+                script = f'tell application "System Events" to key code {value}'
+            elif action == "menu":
+                parts = value.split(">")
+                script = f'tell application "{target}" to activate\ntell application "System Events" to tell process "{target}" to click menu item "{parts[-1]}" of menu "{parts[0]}" of menu bar 1'
+            elif action == "click":
+                script = f'tell application "{target}" to activate\ntell application "System Events" to tell process "{target}" to click UI element "{value}"'
+            else:
+                return f"Error: unknown accessibility action '{action}'"
+            result = _run_as_user(["osascript", "-e", script], timeout=15)
             return (result.stdout or result.stderr or "done").strip()
         if name == "search_local_files":
             query = args.get("query", "")

@@ -109,3 +109,18 @@ tools:
   search_notes:
     allowed: true
     require_approval: false
+
+  run_shortcut:
+    allowed: true
+    require_approval: true
+    max_timeout: 60
+
+  list_shortcuts:
+    allowed: true
+    require_approval: false
+    max_timeout: 15
+
+  accessibility_action:
+    allowed: true
+    require_approval: true
+    max_timeout: 15
