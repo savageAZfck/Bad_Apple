@@ -40,6 +40,7 @@ import badapple_image_gen
 import badapple_translate
 import badapple_git
 import badapple_dashboard
+import badapple_scheduler
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -805,6 +806,64 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "schedule_task",
+            "description": "Schedule a local shell command or Bad Apple query to run later. `when` is seconds from now or an ISO timestamp. `repeat` is optional seconds for recurring tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "when": {
+                        "type": "string",
+                        "description": "When to run: seconds from now, or an ISO timestamp like 2026-08-23T08:00.",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command or Bad Apple query to run. Use JSON list for exact args.",
+                    },
+                    "repeat": {
+                        "type": "string",
+                        "description": "Optional interval in seconds to repeat the task.",
+                    },
+                },
+                "required": ["when", "command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_scheduled_tasks",
+            "description": "List pending and completed scheduled tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shortcut",
+            "description": "Run a macOS Shortcuts shortcut by name. Optionally pass input text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the shortcut.",
+                    },
+                    "input": {
+                        "type": "string",
+                        "description": "Optional input text.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1359,6 +1418,19 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return badapple_git.commit(args.get("repo"), args.get("message", ""))
         if name == "system_dashboard":
             return badapple_dashboard.snapshot()
+        if name == "schedule_task":
+            return badapple_scheduler.add_task(
+                when=args.get("when", ""),
+                command=args.get("command", ""),
+                repeat=args.get("repeat", ""),
+            )
+        if name == "list_scheduled_tasks":
+            return badapple_scheduler.list_tasks()
+        if name == "run_shortcut":
+            return badapple_scheduler.run_shortcut(
+                name=args.get("name", ""),
+                input_text=args.get("input"),
+            )
         if name == "screen_capture":
             p = args.get("path") or str(Path(tempfile.gettempdir()) / "badapple_screen.png")
             return str(badapple_vision.capture_screen(Path(p).expanduser()))
@@ -2778,6 +2850,13 @@ async def main():
         await server.p2p.start()
     except Exception as e:
         print(f"[main] P2P daemon failed to start: {e}", flush=True)
+
+    # Start the local task scheduler background thread.
+    try:
+        badapple_scheduler.start_background_scheduler(interval=60)
+        print("[main] Background task scheduler started", flush=True)
+    except Exception as e:
+        print(f"[main] Scheduler failed to start: {e}", flush=True)
 
     async with srv:
         await srv.serve_forever()
