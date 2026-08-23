@@ -66,8 +66,10 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
   sentinel-prefixed JSON payloads.
 - **Tool set** — local file system, shell (approved), AppleScript (approved),
   RAG, time, macOS Shortcuts, Accessibility actions, screen capture, image
-  description, P2P peer discovery, and LoRA training/inference. No web search
-  or cloud APIs.
+  description, P2P peer discovery, LoRA training/inference, local image
+  generation, speech-to-text, OCR, PDF/EPUB reading, translation, Git copilot,
+  system dashboard, scheduled tasks, Spotlight search, ambient context, and
+  Xcode project RAG. No web search or cloud APIs.
 
 ### Vision
 
@@ -81,7 +83,45 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 - **LoRA training** — `lora_add_example` / `lora_train` to build on-device
   adapters from prompt/completion pairs using `mlx-lm`.
 - **LoRA generation** — `lora_generate` to run the saved adapter.
+- **P2P adapter handoff** — `p2p_send_adapter` beams a trained adapter to a
+  discovered Bad Apple peer like AirDrop for models.
 - Adapters and datasets live in `/var/lib/bad_apple/lora_*` by default.
+
+### Multimodal & media
+
+- **Local image generation** — `generate_image` with FLUX.2-klein-4B via `mflux`
+  (quantized, on-device, ~4 GB model cache).
+- **Local speech-to-text** — `transcribe_audio` with MLX Whisper.
+- **OCR / screen text** — `extract_text_from_image` and `capture_and_extract_screen`.
+- **PDF/EPUB Q&A** — `read_document` and `index_documents` feed local documents
+  into the RAG pipeline.
+- **Translation** — `translate_text` with a local `m2m100-418M` model.
+
+### Productivity & control
+
+- **Git copilot** — `git_status`, `git_diff`, `git_log`, and `git_commit` tools
+  use only the local repo.
+- **Power dashboard** — `system_dashboard` returns CPU, memory, swap, disk,
+  battery, thermal pressure, and Bad Apple process stats.
+- **Deterministic sessions** — `set_session_seed` pins the MLX random stream;
+  same prompt, same output.
+- **Scheduler + Shortcuts** — `schedule_task`, `list_scheduled_tasks`, and
+  `run_shortcut` run local commands and macOS Shortcuts.
+- **Ambient context** — `ambient_start`/`ambient_context` captures active app,
+  window title, and screenshots in the background.
+- **Universal Spotlight** — `spotlight_search` queries macOS Notes, Mail,
+  files, and the Bad Apple history/ledger locally.
+- **Xcode coding assistant** — `xcode_index_project` and `xcode_search` index a
+  whole Xcode/Swift project for code Q&A.
+- **Safari companion** — scaffolded in `src/platform/safari_extension/`;
+  native-messaging bridge to the local socket.
+
+### Security
+
+- **Keychain key storage** — `slicks_keychain_store` puts the SLICKS secret in
+  the macOS Keychain instead of a plain file.
+- **Per-app / per-file policy** — `allowed_apps` and `allowed_files` in
+  `policy.yaml` restrict `accessibility_action`, `read_file`, and other tools.
 
 ### Network & sync
 
@@ -228,7 +268,7 @@ badapple CLI / menu bar / Siri
   /var/run/badapple/substrate_mlx.sock
               │
               ▼
-   badapple_mlx_server.py (9B Qwen3.5 + DFlash + tools + RAG + memory + vision + LoRA)
+   badapple_mlx_server.py (9B Qwen3.5 + DFlash + tools + RAG + memory + vision + LoRA + multimodal)
               │
               ▼
     badapple_tts_server.py (Piper TTS)
@@ -239,7 +279,9 @@ badapple CLI / menu bar / Siri
   the MLX server on `substrate_mlx.sock`.
 - **MLX server** — loads the 9B target + DFlash draft once; handles
   conversation, memory, RAG, tools, approvals, cache, firewall, audit, P2P,
-  screen capture, image description, and LoRA.
+  screen capture, image description, LoRA, image generation, STT, OCR,
+  translation, Git, dashboard, scheduling, Spotlight, ambient context, and
+  Xcode RAG.
 - **TTS server** — Piper on a Unix socket, returns WAV paths.
 - **Menu bar app** — Swift status-bar host with voice, persona switching,
   benchmarks, and output.
@@ -258,15 +300,27 @@ All tools are local and policy-governed:
 - `search_local_files` — Spotlight via `mdfind`.
 - `run_shell` — read-only allowlisted shell commands (approved).
 - `run_applescript` — safe macOS automation (approved).
-- `index_documents` — index a directory into the RAG store (approved).
+- `index_documents` / `read_document` — index or extract PDF/EPUB/plain files.
 - `search_notes` — semantic RAG search.
-- `run_shortcut` / `list_shortcuts` — macOS Shortcuts integration.
+- `run_shortcut` — macOS Shortcuts integration.
+- `schedule_task` / `list_scheduled_tasks` — local task scheduler.
 - `accessibility_action` — type/click/key/menu via System Events.
-- `screen_capture` — capture the main screen.
-- `describe_image` — VLM image description.
+- `screen_capture` / `capture_and_extract_screen` — capture the screen.
+- `describe_image` / `extract_text_from_image` — VLM and OCR.
+- `generate_image` — local FLUX.2-klein-4B image generation.
+- `transcribe_audio` — local Whisper speech-to-text.
+- `translate_text` — local m2m100 text translation.
+- `git_status` / `git_diff` / `git_log` / `git_commit` — local Git copilot.
+- `system_dashboard` — power/performance dashboard.
+- `set_session_seed` / `get_session_seed` — deterministic sessions.
+- `spotlight_search` — local Spotlight across Mail/Notes/files/history.
+- `ambient_start` / `ambient_stop` / `ambient_context` — always-on context.
 - `lora_add_example` / `lora_train` / `lora_adapters` / `lora_generate` —
   personal LoRA fine-tuning.
-- `p2p_peers` — list discovered LAN peers.
+- `p2p_peers` / `p2p_list_adapters` / `p2p_send_adapter` — P2P discovery and
+  AirDrop-style LoRA handoff.
+- `xcode_index_project` / `xcode_search` — Xcode/Swift project RAG.
+- `slicks_keychain_store` — store SLICKS secret in macOS Keychain.
 
 ---
 
@@ -298,7 +352,18 @@ badapple_mlx_server.py          # 9B MLX inference + tools daemon
 badapple_extras.py              # personas, firewall, audit, cache, approvals, memory graph
 badapple_vision.py              # screen capture and VLM image description
 badapple_lora.py                # on-device LoRA training and generation
-badapple_p2p.py                 # encrypted peer-to-peer sync
+badapple_p2p.py                 # encrypted peer-to-peer sync and adapter handoff
+badapple_stt.py                 # local Whisper speech-to-text
+badapple_image_gen.py           # local FLUX.2 image generation via mflux
+badapple_translate.py           # local m2m100 text translation
+badapple_documents.py           # PDF/EPUB extraction and RAG
+badapple_git.py                 # local Git status/diff/log/commit helper
+badapple_dashboard.py           # power and performance dashboard
+badapple_scheduler.py           # task scheduler and Shortcuts runner
+badapple_ambient.py             # always-on screen/app context capture
+badapple_spotlight.py           # local Spotlight search across Notes/Mail/files/history
+badapple_xcode.py               # Xcode/Swift project RAG
+badapple_keychain.py            # macOS Keychain-backed SLICKS secret storage
 badapple_tts_server.py          # Piper TTS daemon
 agent_client.py                 # SLICKS/LAP agent client
 policy.yaml                     # declarative tool cage
@@ -313,6 +378,7 @@ src/bin/gatekeeper.rs           # SLICKS proxy + fast action gate
 src/bad_apple_ipc.rs            # SLICKS protocol
 src/platform/apple_bridge/      # launchd plists and Siri bridge
 src/platform/apple_desktop/     # menu bar app source
+src/platform/safari_extension/  # Safari companion extension scaffold
 ```
 
 ---
@@ -325,7 +391,8 @@ Measured on a 16 GB Apple Silicon M-series Mac:
 - **Decode throughput**: ~13–25 tok/s, with spikes to ~36 tok/s on
   high-acceptance turns.
 - **Peak memory**: ~5.7–6.5 GB with the 9B model + DFlash draft loaded;
-  VLM and LoRA generation add transient working memory.
+  VLM, image generation, translation, and LoRA generation add transient
+  working memory.
 - **RAG embeddings**: `bge-small-en-v1.5` on CPU.
 
 ---
