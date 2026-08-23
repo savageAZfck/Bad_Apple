@@ -134,6 +134,11 @@ tools:
     require_approval: false
     max_timeout: 15
 
+  system_dashboard:
+    allowed: true
+    require_approval: false
+    max_timeout: 15
+
   git_status:
     allowed: true
     require_approval: false

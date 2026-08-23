@@ -39,6 +39,7 @@ import badapple_stt
 import badapple_image_gen
 import badapple_translate
 import badapple_git
+import badapple_dashboard
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -754,6 +755,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "system_dashboard",
+            "description": "Return a local power and performance dashboard: CPU, memory, swap, disk, battery, thermal pressure, Bad Apple process stats, and the latest log perf line.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1296,6 +1309,8 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             if "error" in stage_result.lower():
                 return stage_result
             return badapple_git.commit(args.get("repo"), args.get("message", ""))
+        if name == "system_dashboard":
+            return badapple_dashboard.snapshot()
         if name == "screen_capture":
             p = args.get("path") or str(Path(tempfile.gettempdir()) / "badapple_screen.png")
             return str(badapple_vision.capture_screen(Path(p).expanduser()))
