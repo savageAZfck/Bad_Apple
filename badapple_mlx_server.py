@@ -35,6 +35,8 @@ import badapple_p2p
 import badapple_vision
 import badapple_lora
 import badapple_documents
+import badapple_stt
+import badapple_image_gen
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -515,6 +517,39 @@ TOOLS = [
                     },
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate an image from a text prompt using a local FLUX.2-klein-4B MLX model. No cloud after the model is cached.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Text description of the image to generate.",
+                    },
+                    "width": {
+                        "type": "integer",
+                        "description": "Width in pixels. Default 512.",
+                    },
+                    "height": {
+                        "type": "integer",
+                        "description": "Height in pixels. Default 512.",
+                    },
+                    "steps": {
+                        "type": "integer",
+                        "description": "Inference steps. Default 4.",
+                    },
+                    "seed": {
+                        "type": "integer",
+                        "description": "Random seed. Optional.",
+                    },
+                },
+                "required": ["prompt"],
             },
         },
     },
@@ -1102,6 +1137,14 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             p = Path(args.get("path", "")).expanduser()
             lang = args.get("language", "en")
             return badapple_stt.transcribe(str(p), language=lang)
+        if name == "generate_image":
+            return badapple_image_gen.generate(
+                prompt=args.get("prompt", ""),
+                width=int(args.get("width") or 512),
+                height=int(args.get("height") or 512),
+                steps=int(args.get("steps") or 4),
+                seed=int(args.get("seed")) if args.get("seed") is not None else None,
+            )
         if name == "lora_add_example":
             return badapple_lora.write_example(
                 args.get("dataset", "personal"),
