@@ -144,6 +144,11 @@ tools:
     require_approval: true
     max_timeout: 900
 
+  translate_text:
+    allowed: true
+    require_approval: false
+    max_timeout: 300
+
   lora_add_example:
     allowed: true
     require_approval: false

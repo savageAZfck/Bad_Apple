@@ -37,6 +37,7 @@ import badapple_lora
 import badapple_documents
 import badapple_stt
 import badapple_image_gen
+import badapple_translate
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -550,6 +551,31 @@ TOOLS = [
                     },
                 },
                 "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "translate_text",
+            "description": "Translate text locally between languages using the small on-device m2m100 model. No cloud after model is cached.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to translate.",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target language code (ISO 639-1), e.g. 'en', 'fr', 'de'. Default 'en'.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Source language code, e.g. 'fr'. Default 'en'.",
+                    },
+                },
+                "required": ["text", "target"],
             },
         },
     },
@@ -1144,6 +1170,12 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 height=int(args.get("height") or 512),
                 steps=int(args.get("steps") or 4),
                 seed=int(args.get("seed")) if args.get("seed") is not None else None,
+            )
+        if name == "translate_text":
+            return badapple_translate.translate(
+                text=args.get("text", ""),
+                source=args.get("source", "en"),
+                target=args.get("target", "en"),
             )
         if name == "lora_add_example":
             return badapple_lora.write_example(
