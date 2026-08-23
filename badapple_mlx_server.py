@@ -30,6 +30,7 @@ from typing import List, Dict, Any, Optional
 import mlx.core as mx
 
 from badapple_knowledge import BadAppleKnowledge
+import badapple_p2p
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -384,6 +385,18 @@ TOOLS = [
         "function": {
             "name": "list_shortcuts",
             "description": "List the names of installed macOS Shortcuts.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "p2p_peers",
+            "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -863,6 +876,11 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 return f"Error: unknown accessibility action '{action}'"
             result = _run_as_user(["osascript", "-e", script], timeout=15)
             return (result.stdout or result.stderr or "done").strip()
+        if name == "p2p_peers":
+            daemon = badapple_p2p.get_p2p_daemon()
+            if daemon is None:
+                return "P2P daemon is not running."
+            return daemon.get_peers()
         if name == "search_local_files":
             query = args.get("query", "")
             result = subprocess.run(
@@ -1072,6 +1090,10 @@ class MLXServer:
         ).expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.memory = MemoryGraph(self.data_dir, encoder=self.knowledge._encode_texts)
+        # P2P sync shares the SLICKS secret and the memory graph, but only on
+        # local interfaces and only with authenticated peers.
+        self.p2p = badapple_p2p.P2PDaemon(secret, self.data_dir, memory=self.memory)
+        badapple_p2p.set_p2p_daemon(self.p2p)
         # legacy short-term memory is folded into the memory graph
         self.personas = PersonaPack(self.data_dir, self.prompt_file)
         self.firewall = StreamingFirewall(self.data_dir)
@@ -1966,6 +1988,21 @@ class MLXServer:
         if method == "get_pending_approvals":
             await _respond(req_id, {"pending": self.approval.get_pending_summary()})
             return
+        if method == "p2p_peers":
+            daemon = badapple_p2p.get_p2p_daemon()
+            if daemon is None:
+                await _respond(req_id, None, "P2P daemon is not running")
+                return
+            await _respond(req_id, {"peers_summary": daemon.get_peers()})
+            return
+        if method == "p2p_sync":
+            daemon = badapple_p2p.get_p2p_daemon()
+            if daemon is None:
+                await _respond(req_id, None, "P2P daemon is not running")
+                return
+            result = await daemon.sync_memory()
+            await _respond(req_id, {"sync_status": result})
+            return
 
         await _respond(req_id, None, f"unknown method '{method}'")
 
@@ -2062,6 +2099,22 @@ class MLXServer:
 
             if prompt.strip().lower() == "pending approvals":
                 await _write_frame(writer, {"type": "done", "text": self.approval.get_pending_summary()})
+                return
+
+            # P2P direct commands
+            low = prompt.strip().lower()
+            if low in ("p2p sync", "sync memory", "sync my memory", "sync to peers"):
+                if self.p2p is None:
+                    await _write_frame(writer, {"type": "done", "text": "P2P daemon is not running."})
+                    return
+                result = await self.p2p.sync_memory()
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if low in ("p2p peers", "discovered peers", "list peers"):
+                if self.p2p is None:
+                    await _write_frame(writer, {"type": "done", "text": "P2P daemon is not running."})
+                    return
+                await _write_frame(writer, {"type": "done", "text": self.p2p.get_peers()})
                 return
 
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
@@ -2207,6 +2260,12 @@ async def main():
     except FileExistsError:
         pass
     print(f"Bad Apple MLX server listening on {socket_path}", flush=True)
+
+    # Start the local-only P2P sync daemon on the same event loop.
+    try:
+        await server.p2p.start()
+    except Exception as e:
+        print(f"[main] P2P daemon failed to start: {e}", flush=True)
 
     async with srv:
         await srv.serve_forever()

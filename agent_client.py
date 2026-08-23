@@ -115,7 +115,7 @@ def call_agent(method: str, params: dict = None, prompt_text: str = None, max_to
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt>>")
+        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | p2p_sync | p2p_peers>")
         return 1
 
     cmd = sys.argv[1]
@@ -136,6 +136,10 @@ def main():
     elif cmd == "infer":
         prompt = " ".join(sys.argv[2:])
         print(json.dumps(call_agent("inference", {"prompt": prompt, "max_new_tokens": 120}), indent=2))
+    elif cmd == "p2p_sync":
+        print(json.dumps(call_agent("p2p_sync"), indent=2))
+    elif cmd == "p2p_peers":
+        print(json.dumps(call_agent("p2p_peers"), indent=2))
     else:
         print(f"Unknown command: {cmd}")
         return 1
