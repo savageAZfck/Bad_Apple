@@ -42,6 +42,7 @@ import badapple_git
 import badapple_dashboard
 import badapple_scheduler
 import badapple_ambient
+import badapple_spotlight
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -939,6 +940,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "spotlight_search",
+            "description": "Universal local Spotlight-style search across macOS Notes, Mail, files, and Bad Apple history. No cloud.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max results per category. Default 20.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1436,6 +1458,11 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return badapple_ambient.stop()
         if name == "ambient_context":
             return badapple_ambient.get_context()
+        if name == "spotlight_search":
+            return badapple_spotlight.search(
+                query=args.get("query", ""),
+                max_results=int(args.get("max_results") or 20),
+            )
         if name == "p2p_peers":
             daemon = badapple_p2p.get_p2p_daemon()
             if daemon is None:
