@@ -129,3 +129,31 @@ tools:
     allowed: true
     require_approval: false
     max_timeout: 15
+
+  lora_add_example:
+    allowed: true
+    require_approval: false
+
+  lora_train:
+    allowed: true
+    require_approval: true
+    max_timeout: 3000
+
+  lora_adapters:
+    allowed: true
+    require_approval: false
+
+  lora_generate:
+    allowed: true
+    require_approval: false
+    max_timeout: 120
+
+  screen_capture:
+    allowed: true
+    require_approval: true
+    max_timeout: 30
+
+  describe_image:
+    allowed: true
+    require_approval: true
+    max_timeout: 120

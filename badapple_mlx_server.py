@@ -19,6 +19,7 @@ import json
 import os
 import queue
 import random
+import tempfile
 import re
 import shlex
 import subprocess
@@ -31,6 +32,8 @@ import mlx.core as mx
 
 from badapple_knowledge import BadAppleKnowledge
 import badapple_p2p
+import badapple_vision
+import badapple_lora
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -389,6 +392,139 @@ TOOLS = [
                 "type": "object",
                 "properties": {},
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screen_capture",
+            "description": "Capture the main Mac screen to a PNG and return the local file path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional absolute path to save the screenshot. Defaults to a temp file.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_image",
+            "description": "Run the local MLX vision model on an image and answer a question about it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to a PNG/JPG image.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The question or instruction for the vision model. Default: 'Describe this image.'",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max output tokens. Default 256.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lora_add_example",
+            "description": "Add a personal prompt/completion example to a LoRA training dataset. The dataset is stored locally and never leaves the device.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dataset": {
+                        "type": "string",
+                        "description": "Name of the local dataset to append to.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The user prompt for this example.",
+                    },
+                    "completion": {
+                        "type": "string",
+                        "description": "The desired assistant response for this example.",
+                    },
+                },
+                "required": ["dataset", "prompt", "completion"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lora_train",
+            "description": "Train a local LoRA adapter on a dataset using mlx-lm. The adapter is saved to the local adapters directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dataset": {
+                        "type": "string",
+                        "description": "Name of the dataset to train on.",
+                    },
+                    "adapter": {
+                        "type": "string",
+                        "description": "Name for the saved adapter.",
+                    },
+                    "iters": {
+                        "type": "integer",
+                        "description": "Number of training iterations. Default 100.",
+                    },
+                    "learning_rate": {
+                        "type": "number",
+                        "description": "Learning rate. Default 1e-4.",
+                    },
+                },
+                "required": ["dataset", "adapter"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lora_adapters",
+            "description": "List saved local LoRA adapters.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lora_generate",
+            "description": "Generate a response with a saved LoRA adapter using the local mlx-lm CLI.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "adapter": {
+                        "type": "string",
+                        "description": "Name of the saved adapter.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The prompt to generate from.",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max tokens. Default 120.",
+                    },
+                },
+                "required": ["adapter", "prompt"],
             },
         },
     },
@@ -881,6 +1017,38 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             if daemon is None:
                 return "P2P daemon is not running."
             return daemon.get_peers()
+        if name == "lora_add_example":
+            return badapple_lora.write_example(
+                args.get("dataset", "personal"),
+                [
+                    {"role": "user", "content": args.get("prompt", "")},
+                    {"role": "assistant", "content": args.get("completion", "")},
+                ],
+            )
+        if name == "lora_train":
+            return badapple_lora.train(
+                dataset=args.get("dataset", ""),
+                adapter=args.get("adapter", ""),
+                iters=int(args.get("iters") or 100),
+                learning_rate=float(args.get("learning_rate") or 1e-4),
+            )
+        if name == "lora_adapters":
+            return badapple_lora.get_summary()
+        if name == "lora_generate":
+            return badapple_lora.generate_with_adapter(
+                adapter=args.get("adapter", ""),
+                prompt=args.get("prompt", ""),
+                max_tokens=int(args.get("max_tokens") or 120),
+            )
+        if name == "screen_capture":
+            p = args.get("path") or str(Path(tempfile.gettempdir()) / "badapple_screen.png")
+            return str(badapple_vision.capture_screen(Path(p).expanduser()))
+        if name == "describe_image":
+            path = Path(args.get("path", "")).expanduser()
+            prompt = args.get("prompt", "Describe this image.")
+            max_tokens = int(args.get("max_tokens") or 256)
+            host = badapple_vision.get_vision_host()
+            return host.describe(path, prompt, max_tokens)
         if name == "search_local_files":
             query = args.get("query", "")
             result = subprocess.run(
