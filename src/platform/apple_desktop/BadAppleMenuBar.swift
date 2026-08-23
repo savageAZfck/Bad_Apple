@@ -205,10 +205,6 @@ final class PiperTTSClient {
     static let defaultVoice = "en_US-amy-medium"
     static let availableVoices = [
         "en_US-amy-medium",
-        "en_US-libritts-high",
-        "en_US-lessac-high",
-        "es_MX-claude-high",
-        "es_MX-cortana-19669-epoch-high",
     ]
 
     /// Enqueue a chunk for synthesis. Chunks play in order so streaming stays smooth.
