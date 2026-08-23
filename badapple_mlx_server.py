@@ -41,6 +41,7 @@ import badapple_translate
 import badapple_git
 import badapple_dashboard
 import badapple_scheduler
+import badapple_ambient
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -897,6 +898,47 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "ambient_start",
+            "description": "Start always-on ambient screen/app context capture. Optionally set interval in seconds (default 30).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "interval": {
+                        "type": "number",
+                        "description": "Capture interval in seconds. Default 30.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ambient_stop",
+            "description": "Stop always-on ambient screen/app context capture.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ambient_context",
+            "description": "Get the latest ambient screen/app context: active app, window title, timestamp, and screenshot path.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1388,6 +1430,12 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 return "Error: seed must be an integer"
         if name == "get_session_seed":
             return str(_SESSION_SEED) if _SESSION_SEED is not None else "random"
+        if name == "ambient_start":
+            return badapple_ambient.start(float(args.get("interval") or 30))
+        if name == "ambient_stop":
+            return badapple_ambient.stop()
+        if name == "ambient_context":
+            return badapple_ambient.get_context()
         if name == "p2p_peers":
             daemon = badapple_p2p.get_p2p_daemon()
             if daemon is None:
