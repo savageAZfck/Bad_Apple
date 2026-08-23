@@ -106,6 +106,10 @@ tools:
     require_approval: true
     allowed_paths: ["/Users", "/private"]
 
+  read_document:
+    allowed: true
+    require_approval: false
+
   search_notes:
     allowed: true
     require_approval: false
@@ -130,6 +134,11 @@ tools:
     require_approval: false
     max_timeout: 15
 
+  transcribe_audio:
+    allowed: true
+    require_approval: false
+    max_timeout: 300
+
   lora_add_example:
     allowed: true
     require_approval: false
@@ -153,7 +162,17 @@ tools:
     require_approval: true
     max_timeout: 30
 
+  capture_and_extract_screen:
+    allowed: true
+    require_approval: true
+    max_timeout: 120
+
   describe_image:
+    allowed: true
+    require_approval: true
+    max_timeout: 120
+
+  extract_text_from_image:
     allowed: true
     require_approval: true
     max_timeout: 120

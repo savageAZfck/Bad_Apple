@@ -34,6 +34,7 @@ from badapple_knowledge import BadAppleKnowledge
 import badapple_p2p
 import badapple_vision
 import badapple_lora
+import badapple_documents
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -244,7 +245,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "index_documents",
-            "description": "Index the user's local text/code files for RAG. Provide an absolute path or '~' for the home directory.",
+            "description": "Index the user's local text/code/PDF/EPUB files for RAG. Provide an absolute path or '~' for the home directory.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -271,6 +272,27 @@ TOOLS = [
                     }
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_document",
+            "description": "Extract and read text from a local PDF, EPUB, or other document. Returns a text preview.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or tilde-expanded path to the document.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max characters to return. Default 10000.",
+                    },
+                },
+                "required": ["path"],
             },
         },
     },
@@ -415,6 +437,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "capture_and_extract_screen",
+            "description": "Capture the main screen and return the visible text using the local MLX vision model.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max output tokens. Default 256.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "describe_image",
             "description": "Run the local MLX vision model on an image and answer a question about it.",
             "parameters": {
@@ -431,6 +470,48 @@ TOOLS = [
                     "max_tokens": {
                         "type": "integer",
                         "description": "Max output tokens. Default 256.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "extract_text_from_image",
+            "description": "Extract visible text from a PNG/JPG image using the local MLX vision model.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to a PNG/JPG image.",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max output tokens. Default 256.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "transcribe_audio",
+            "description": "Transcribe a local audio file (wav, mp3, m4a) to text using on-device Whisper. No cloud.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to the audio file.",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Language code, e.g. 'en'. Default 'en'.",
                     },
                 },
                 "required": ["path"],
@@ -1017,6 +1098,10 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             if daemon is None:
                 return "P2P daemon is not running."
             return daemon.get_peers()
+        if name == "transcribe_audio":
+            p = Path(args.get("path", "")).expanduser()
+            lang = args.get("language", "en")
+            return badapple_stt.transcribe(str(p), language=lang)
         if name == "lora_add_example":
             return badapple_lora.write_example(
                 args.get("dataset", "personal"),
@@ -1043,12 +1128,23 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
         if name == "screen_capture":
             p = args.get("path") or str(Path(tempfile.gettempdir()) / "badapple_screen.png")
             return str(badapple_vision.capture_screen(Path(p).expanduser()))
+        if name == "capture_and_extract_screen":
+            p = Path(tempfile.gettempdir()) / "badapple_screen.png"
+            badapple_vision.capture_screen(p)
+            max_tokens = int(args.get("max_tokens") or 256)
+            host = badapple_vision.get_vision_host()
+            return host.extract_text(p, max_tokens)
         if name == "describe_image":
             path = Path(args.get("path", "")).expanduser()
             prompt = args.get("prompt", "Describe this image.")
             max_tokens = int(args.get("max_tokens") or 256)
             host = badapple_vision.get_vision_host()
             return host.describe(path, prompt, max_tokens)
+        if name == "extract_text_from_image":
+            path = Path(args.get("path", "")).expanduser()
+            max_tokens = int(args.get("max_tokens") or 256)
+            host = badapple_vision.get_vision_host()
+            return host.extract_text(path, max_tokens)
         if name == "search_local_files":
             query = args.get("query", "")
             result = subprocess.run(
@@ -1062,9 +1158,15 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
         if name == "index_documents" and knowledge is not None:
             p = _resolve_tool_path(args, "path", workspace)
             if p.exists():
+                if p.is_file() and p.suffix.lower() in {".pdf", ".epub"}:
+                    return badapple_documents.index_document(str(p), knowledge)
                 count = knowledge.index_paths([p])
                 return f"Indexed {count} chunks from {p}"
             return f"Path not found: {p}"
+        if name == "read_document":
+            p = _resolve_tool_path(args, "path", workspace)
+            limit = int(args.get("limit") or 10000)
+            return badapple_documents.read_document(str(p), limit)
         if name == "search_notes" and knowledge is not None:
             results = knowledge.search(args.get("query", ""), k=3)
             if not results:

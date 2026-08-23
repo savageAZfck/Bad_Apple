@@ -56,6 +56,19 @@ class VisionHost:
 
     def describe(self, image_path: Path, prompt: str = "Describe this image.", max_tokens: int = 256) -> str:
         self._load()
+        return self._generate(image_path, prompt, max_tokens)
+
+    def extract_text(self, image_path: Path, max_tokens: int = 256) -> str:
+        """Return the text visible in an image or screenshot."""
+        self._load()
+        prompt = (
+            "Extract and return only the text visible in this image. "
+            "Preserve line breaks and structure as closely as possible. "
+            "Do not describe the image. If no text is visible, say 'No text found.'"
+        )
+        return self._generate(image_path, prompt, max_tokens)
+
+    def _generate(self, image_path: Path, prompt: str, max_tokens: int) -> str:
         try:
             result = _vlm_generate(
                 self._model,
