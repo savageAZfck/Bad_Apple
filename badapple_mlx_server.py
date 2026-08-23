@@ -85,6 +85,15 @@ MAIN_MODEL = os.environ.get("BADAPPLE_MAIN_MODEL", "caiovicentino1/Qwen3.5-9B-HL
 DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "z-lab/Qwen3.5-9B-DFlash").strip()
 NUM_DRAFT_TOKENS = int(os.environ.get("BADAPPLE_NUM_DRAFT_TOKENS") or "3")
 
+# Pinned random seed for reproducible sessions. Set at startup via BADAPPLE_SEED
+# or changed at runtime with the set_session_seed tool. 0 means random.
+_SESSION_SEED: Optional[int] = None
+if os.environ.get("BADAPPLE_SEED"):
+    try:
+        _SESSION_SEED = int(os.environ.get("BADAPPLE_SEED"))
+    except ValueError:
+        _SESSION_SEED = None
+
 # DFlash speculative decoding (Path 2). Set BADAPPLE_DFLASH=1 and point
 # BADAPPLE_DRAFT_MODEL at a DFlash draft (e.g. z-lab/Qwen3.5-9B-DFlash).
 USE_DFLASH = _dflash_available and os.environ.get("BADAPPLE_DFLASH", "0") == "1"
@@ -767,6 +776,35 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "set_session_seed",
+            "description": "Pin the session random seed so model outputs are deterministic and reproducible. Pass 0 to return to random (non-deterministic).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seed": {
+                        "type": "integer",
+                        "description": "The random seed to pin. 0 disables pinned seed.",
+                    },
+                },
+                "required": ["seed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_session_seed",
+            "description": "Return the current pinned session seed, if any.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1248,6 +1286,16 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 return f"Error: unknown accessibility action '{action}'"
             result = _run_as_user(["osascript", "-e", script], timeout=15)
             return (result.stdout or result.stderr or "done").strip()
+        if name == "set_session_seed":
+            global _SESSION_SEED
+            try:
+                seed = int(args.get("seed", 0))
+                _SESSION_SEED = seed if seed != 0 else None
+                return f"Session seed pinned to {_SESSION_SEED}"
+            except ValueError:
+                return "Error: seed must be an integer"
+        if name == "get_session_seed":
+            return str(_SESSION_SEED) if _SESSION_SEED is not None else "random"
         if name == "p2p_peers":
             daemon = badapple_p2p.get_p2p_daemon()
             if daemon is None:
@@ -2058,6 +2106,10 @@ class MLXServer:
                 runtime_context=self.dflash_runtime_context,
             )
 
+        # Pin the random stream when a session seed is set for reproducible output.
+        if _SESSION_SEED is not None:
+            mx.random.seed(_SESSION_SEED)
+
         sampler = make_sampler(temp=0.5, top_p=0.9, top_k=40, min_p=0.05)
         logits_processors = make_logits_processors(
             repetition_penalty=1.12,
@@ -2166,7 +2218,11 @@ class MLXServer:
         # Rotate the MLX random stream so identical prompts can produce different
         # roasts / phrasing across turns. DFlash still verifies the target output,
         # but the sampling key is different on each call.
-        mx.random.seed(int(time.time() * 1_000_000) % (2**32))
+        # If a session seed is pinned, use it for deterministic reproduction.
+        if _SESSION_SEED is not None:
+            mx.random.seed(_SESSION_SEED)
+        else:
+            mx.random.seed(int(time.time() * 1_000_000) % (2**32))
 
         self.firewall.reset()
 
