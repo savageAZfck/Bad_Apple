@@ -38,6 +38,7 @@ import badapple_documents
 import badapple_stt
 import badapple_image_gen
 import badapple_translate
+import badapple_git
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -673,6 +674,86 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "git_status",
+            "description": "Show a concise git status for a repository (defaults to current working directory).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Path to a git repository. Defaults to current directory.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Show git diff stats and the diff for a repository. No cloud.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Path to a git repository. Defaults to current directory.",
+                    },
+                    "staged": {
+                        "type": "boolean",
+                        "description": "Show staged diff. Default false.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Show recent git log for a repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Path to a git repository. Defaults to current directory.",
+                    },
+                    "n": {
+                        "type": "integer",
+                        "description": "Number of commits. Default 10.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Stage all changes and commit with a message. Requires approval. No cloud.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Path to a git repository. Defaults to current directory.",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Commit message.",
+                    },
+                },
+                "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1200,6 +1281,21 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 prompt=args.get("prompt", ""),
                 max_tokens=int(args.get("max_tokens") or 120),
             )
+        if name == "git_status":
+            return badapple_git.status(args.get("repo"))
+        if name == "git_diff":
+            return badapple_git.diff(
+                args.get("repo"),
+                staged=bool(args.get("staged", False)),
+                stat=False,
+            )
+        if name == "git_log":
+            return badapple_git.log(args.get("repo"), n=int(args.get("n") or 10))
+        if name == "git_commit":
+            stage_result = badapple_git.stage_all(args.get("repo"))
+            if "error" in stage_result.lower():
+                return stage_result
+            return badapple_git.commit(args.get("repo"), args.get("message", ""))
         if name == "screen_capture":
             p = args.get("path") or str(Path(tempfile.gettempdir()) / "badapple_screen.png")
             return str(badapple_vision.capture_screen(Path(p).expanduser()))
