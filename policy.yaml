@@ -137,6 +137,16 @@ tools:
     require_approval: false
     max_timeout: 15
 
+  xcode_index_project:
+    allowed: true
+    require_approval: true
+    max_timeout: 120
+
+  xcode_search:
+    allowed: true
+    require_approval: false
+    max_timeout: 60
+
   spotlight_search:
     allowed: true
     require_approval: false

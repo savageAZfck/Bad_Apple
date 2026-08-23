@@ -43,6 +43,7 @@ import badapple_dashboard
 import badapple_scheduler
 import badapple_ambient
 import badapple_spotlight
+import badapple_xcode
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -961,6 +962,44 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "xcode_index_project",
+            "description": "Index an Xcode / Swift / source project into the local RAG pipeline for coding questions. No cloud.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {
+                        "type": "string",
+                        "description": "Absolute path to the Xcode project or source directory.",
+                    },
+                },
+                "required": ["project_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "xcode_search",
+            "description": "Search the indexed Xcode project for code, symbols, or concepts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query, e.g. 'where is accessibility handled'.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max results. Default 10.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1462,6 +1501,18 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return badapple_spotlight.search(
                 query=args.get("query", ""),
                 max_results=int(args.get("max_results") or 20),
+            )
+        if name == "xcode_index_project":
+            if knowledge is None:
+                return "Xcode RAG unavailable: no knowledge store."
+            return badapple_xcode.index_project(args.get("project_path", ""), knowledge)
+        if name == "xcode_search":
+            if knowledge is None:
+                return "Xcode RAG unavailable: no knowledge store."
+            return badapple_xcode.search_project(
+                args.get("query", ""),
+                knowledge,
+                max_results=int(args.get("max_results") or 10),
             )
         if name == "p2p_peers":
             daemon = badapple_p2p.get_p2p_daemon()
