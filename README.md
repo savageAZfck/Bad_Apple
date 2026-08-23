@@ -1,36 +1,112 @@
 # Bad Apple
 
-> **Local AI that runs on your Mac — no cloud after the first download.**
+> **A local, air-gapped AI that runs on your Mac — no cloud after the first download.**
 
-Bad Apple is an on-device, air-gapped AI assistant for macOS. It runs a local Qwen 3.5 9B model on Apple Silicon using [MLX](https://github.com/ml-explore/mlx), with a smaller DFlash speculative draft for faster token generation. It answers questions, runs local tools, indexes your files, switches personas, and speaks back through a local Piper TTS server.
+Bad Apple is a bare-metal AI OS for macOS. It runs a local **Qwen 3.5 9B**
+model on Apple Silicon with [MLX](https://github.com/ml-explore/mlx), uses a
+DFlash speculative draft for fast token generation, and exposes a growing set
+of local tools, memory, vision, peer-to-peer sync, and on-device LoRA
+fine-tuning — all without sending prompts, responses, or actions to the cloud.
 
-After the models are downloaded once, **no prompt, response, or action leaves your machine**.
+After the model weights are cached once, **nothing leaves your machine**.
+
+---
+
+## What it is
+
+Bad Apple is both a product and a proof-of-concept for a **Bare-Metal AI OS**:
+
+- The model, memory, RAG index, audit ledger, and persona data live on device.
+- Every client connection is authenticated with a **SLICKS** HMAC-SHA256
+  challenge-response bound to the prompt.
+- Tool calls are governed by a declarative `policy.yaml` cage.
+- Destructive actions require explicit approval unless the user opts into
+  autopilot.
+- It can sync encrypted memory with other Bad Apple peers on the same LAN.
+
+Read the public specs in [MANIFESTO.md](MANIFESTO.md) and [STANDARDS.md](STANDARDS.md),
+and the roadmap in [ROADMAP.md](ROADMAP.md).
 
 ---
 
 ## What it does
 
-- **Local 9B reasoning** — `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` runs on your GPU.
-- **DFlash speculative decoding** — `z-lab/Qwen3.5-9B-DFlash` blocks speed up generation.
-- **Streaming output** — tokens stream to the terminal, TTS, or the menu bar as they are generated.
-- **Local RAG** — indexes your text files with `bge-small-en-v1.5` and retrieves relevant chunks.
-- **Persona packs** — `personas.json` with Default, Wicket, Gen Z, Drill, Midwest Aunt; switch at runtime.
-- **Teachable quips** — `teach The cloud is just hamsters on a wheel` and the persona remembers.
-- **Streaming output firewall** — Aho-Corasick blocklist for secrets, PII, and custom patterns.
-- **Hash-chained audit ledger** — every query, tool, and response is logged with SHA-256 chaining.
-- **Human-in-the-loop approvals** — destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_documents`) require approval.
-- **Semantic cache** — common answers are cached by embedding similarity and served instantly.
-- **Local TTS** — Piper neural TTS via `badapple_tts_server.py`; plays through `afplay`.
-- **Menu bar app** — `Bad Apple.app` sits in the status bar, listens for voice, switches persona/roast, and runs benchmarks.
-- **SLICKS-secured IPC** — every client completes an HMAC-SHA256 challenge-response over a Unix socket.
+### Core inference
+
+- **Local 9B reasoning** — `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` on the GPU.
+- **DFlash speculative decoding** — `z-lab/Qwen3.5-9B-DFlash` blocked draft for
+  faster generation.
+- **Streaming output** — tokens stream to the terminal, TTS, or the menu bar
+  as they are generated.
+- **Hot-reloadable prompt** — edit `prompt.txt` without restarting the daemon.
+- **Voice + TTS** — local Piper TTS via `badapple_tts_server.py`, played
+  through `afplay`; optional menu-bar voice input.
+
+### Memory & retrieval
+
+- **Long-term memory graph** — facts, entities, and relations stored in
+  `badapple_extras.py`; supports semantic search.
+- **Local RAG** — indexes text/code files with `BAAI/bge-small-en-v1.5` and
+  retrieves relevant excerpts.
+- **Semantic cache** — caches answers by embedding similarity and serves them
+  instantly.
+
+### Personas & behavior
+
+- **Persona packs** — `personas.json` with Default, Wicket, Gen Z, Drill,
+  Midwest Aunt; switch at runtime.
+- **Teachable quips** — `teach The cloud is just hamsters on a wheel` and the
+  active persona remembers.
+
+### Agent protocol & tools
+
+- **Local Agent Protocol (LAP)** — JSON-RPC over the authenticated SLICKS
+  Unix socket, exposed by `agent_client.py` and `__BADAPPLE_AGENT__` frames.
+- **Tool set** — local file system, shell (approved), AppleScript (approved),
+  web search disabled, RAG, time, macOS Shortcuts, Accessibility actions,
+  screen capture, image description, P2P peer discovery, and LoRA
+  training/inference.
+
+### Vision
+
+- **Screen capture** — capture the main Mac screen to a PNG via `screencapture`
+  (macOS screen-recording permission required).
+- **Image description** — local MLX-VLM with
+  `mlx-community/Qwen2-VL-2B-Instruct-4bit`; no cloud after model cache.
+
+### Personal fine-tuning
+
+- **LoRA training** — `lora_add_example` / `lora_train` to build on-device
+  adapters from prompt/completion pairs using `mlx-lm`.
+- **LoRA generation** — `lora_generate` to run the saved adapter.
+- Adapters and datasets live in `/var/lib/bad_apple/lora_*` by default.
+
+### Network & sync
+
+- **Encrypted P2P sync** — `badapple_p2p.py` discovers peers on the local
+  network via UDP beacons and syncs the memory graph over TCP with
+  AES-256-GCM + HMAC-SHA256, keyed from the SLICKS secret.
+- **Air-gap certification** — `cert_suite.py` validates network isolation,
+  local sockets, policy, secret redaction, local model weights, and absence
+  of hard-coded cloud endpoints.
+
+### Safety & audit
+
+- **Declarative policy cage** — `policy.yaml` defines which tools are allowed,
+  whether they need approval, and argument constraints.
+- **Streaming output firewall** — Aho-Corasick blocklist for secrets, PII,
+  and custom patterns.
+- **Hash-chained audit ledger** — every query, tool, and response is logged to
+  `/var/lib/bad_apple/ledger.jsonl` with SHA-256 chaining and secret redaction.
+- **Human-in-the-loop approvals** — destructive tools require approval
+  (reply `approve <id>`) unless `BADAPPLE_AUTOPILOT=1`.
+
+### Workspace mode
+
+- **Project/workspace** — `set_workspace <path>` scopes file and RAG operations
+  to a directory; `clear_workspace` returns to global mode.
 
 ---
-
-## Standards
-
-- [MANIFESTO.md](MANIFESTO.md) — the Bare-Metal AI OS principles.
-- [STANDARDS.md](STANDARDS.md) — public interfaces: SLICKS, LAP, policy schema, ledger, certification.
-- [ROADMAP.md](ROADMAP.md) — future features toward a cognitive bare-metal AI OS standard.
 
 ## Quick start
 
@@ -39,11 +115,12 @@ After the models are downloaded once, **no prompt, response, or action leaves yo
 - Apple Silicon Mac (M1 or later)
 - macOS 26 or later
 - Rust toolchain with Cargo
-- Python 3.12 with `mlx`, `mlx-lm`, and the packages in the active venv
-- Models are downloaded on first run:
+- Python 3.12 with the packages in `.venv` (`mlx`, `mlx-lm`, `mlx-vlm`, etc.)
+- Models download on first run:
   - `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`
   - `z-lab/Qwen3.5-9B-DFlash`
-  - `BAAI/bge-small-en-v1.5` (for RAG/cache)
+  - `BAAI/bge-small-en-v1.5`
+  - `mlx-community/Qwen2-VL-2B-Instruct-4bit` (first vision call)
 
 ### Build
 
@@ -95,6 +172,18 @@ target/release/badapple "switch to midwest"
 target/release/badapple --benchmark
 ```
 
+### Agent / tool calls
+
+```bash
+# List exposed tools
+python agent_client.py discover
+
+# Run a tool
+python agent_client.py invoke get_current_time '{}'
+python agent_client.py invoke screen_capture '{}'
+python agent_client.py invoke lora_adapters '{}'
+```
+
 ### Menu bar
 
 Build and install the status-bar host:
@@ -119,60 +208,88 @@ badapple CLI / menu bar / Siri
      gatekeeper (SLICKS proxy, fast actions)
               │
               ▼
-   badapple_mlx_server.py (9B Qwen3.5 + DFlash + tools + RAG)
+   badapple_mlx_server.py (9B Qwen3.5 + DFlash + tools + RAG + memory + vision + LoRA)
               │
               ▼
     badapple_tts_server.py (Piper TTS)
 ```
 
-- The **gatekeeper** is the authenticated front door. It handles SLICKS, fast local actions, and proxies generation to the MLX server.
-- The **MLX server** loads the 9B target + DFlash draft once and keeps them hot. It handles conversation, memory, tools, RAG, approvals, cache, firewall, and audit.
-- The **TTS server** runs Piper on a Unix socket and returns WAV paths.
-- The **menu bar app** is a Swift/Objective-C status-bar host that listens for voice, sends prompts through the bundled `badapple` helper, and speaks responses.
+- **gatekeeper** — authenticated front door; SLICKS challenge-response, prompt
+  binding, fast action proxy.
+- **MLX server** — loads the 9B target + DFlash draft once; handles
+  conversation, memory, RAG, tools, approvals, cache, firewall, audit, P2P,
+  screen capture, image description, and LoRA.
+- **TTS server** — Piper on a Unix socket, returns WAV paths.
+- **Menu bar app** — Swift status-bar host with voice, persona switching,
+  benchmarks, and output.
 
 ---
 
 ## Tools
 
-All tools are local:
+All tools are local and policy-governed:
 
-- `get_current_time`
-- `list_directory`
-- `read_file`
-- `write_file` — writes to `~/.bad_apple/notes/`
-- `search_content` — `grep -R`
-- `search_local_files` — Spotlight via `mdfind`
-- `run_shell` — proposed, then executed after approval
-- `run_applescript` — proposed, then executed after approval
-- `index_documents` — indexes a directory into the RAG store
+- `get_current_time` — current local time.
+- `list_directory` — list a directory.
+- `read_file` — read a text file.
+- `write_file` — write a note to `~/.bad_apple/notes/` (approved).
+- `search_content` — grep under a directory.
+- `search_local_files` — Spotlight via `mdfind`.
+- `run_shell` — read-only allowlisted shell commands (approved).
+- `run_applescript` — safe macOS automation (approved).
+- `index_documents` — index a directory into the RAG store (approved).
+- `search_notes` — semantic RAG search.
+- `run_shortcut` / `list_shortcuts` — macOS Shortcuts integration.
+- `accessibility_action` — type/click/key/menu via System Events.
+- `screen_capture` — capture the main screen.
+- `describe_image` — VLM image description.
+- `lora_add_example` / `lora_train` / `lora_adapters` / `lora_generate` —
+  personal LoRA fine-tuning.
+- `p2p_peers` — list discovered LAN peers.
+- `set_workspace` / `clear_workspace` — project scope.
 
 ---
 
 ## Security & privacy
 
-- **Air-gapped at runtime** — no network calls for inference, actions, or TTS.
-- **Authenticated** — every client completes a SLICKS HMAC-SHA256 challenge-response with prompt binding.
-- **Fail-closed tools** — shell/AppleScript and file writes require explicit user approval unless `BADAPPLE_AUTOPILOT=1` is set.
-- **Streaming firewall** — secrets and PII patterns are blocked or redacted in generated text.
-- **Audit ledger** — append-only, hash-chained JSONL at `/var/lib/bad_apple/ledger.jsonl`.
-- **Local-only audio** — TTS is synthesized on-device.
+- **Air-gapped at runtime** — no network calls for inference, actions, TTS,
+  LoRA, or P2P data (P2P is strictly local broadcast/TCP).
+- **Authenticated** — SLICKS HMAC-SHA256 challenge-response with prompt
+  binding; replaying an old challenge does not work.
+- **Fail-closed tools** — shell/AppleScript, file writes, indexing, screen
+  capture, and LoRA training require approval unless `BADAPPLE_AUTOPILOT=1`.
+- **Declarative cage** — `policy.yaml` controls tool permissions and validates
+  arguments.
+- **Streaming firewall** — secrets and PII patterns are blocked or redacted.
+- **Audit ledger** — append-only, hash-chained JSONL at
+  `/var/lib/bad_apple/ledger.jsonl`.
+- **Local-only audio** — TTS synthesized on device.
 
 ---
 
 ## Project structure
 
 ```text
-badapple_mlx_server.py          # 9B MLX inference daemon
-badapple_extras.py              # personas, firewall, audit, cache, approvals
+badapple_mlx_server.py          # 9B MLX inference + tools daemon
+badapple_extras.py              # personas, firewall, audit, cache, approvals, memory graph
+badapple_vision.py              # screen capture and VLM image description
+badapple_lora.py                # on-device LoRA training and generation
+badapple_p2p.py                 # encrypted peer-to-peer sync
 badapple_tts_server.py          # Piper TTS daemon
+badapple_mcp.py                 # local MCP-style function registry
+agent_client.py                 # SLICKS/LAP agent client
+policy.yaml                     # declarative tool cage
 personas.json                   # persona packs
 prompt.txt                      # hot-reloadable system prompt
+cert_suite.py                   # air-gap certification self-tests
+BAD_APPLE.md                    # technical deep-dive
+MANIFESTO.md                    # Bare-Metal AI OS principles
+STANDARDS.md                    # public interface and protocol specs
 src/bin/badapple.rs             # Rust CLI client
 src/bin/gatekeeper.rs           # SLICKS proxy + fast action gate
 src/bad_apple_ipc.rs            # SLICKS protocol
-src/platform/apple_bridge/      # launchd plists, Siri bridge
+src/platform/apple_bridge/      # launchd plists and Siri bridge
 src/platform/apple_desktop/     # menu bar app source
-BAD_APPLE.md                    # technical deep-dive
 ```
 
 ---
@@ -182,8 +299,10 @@ BAD_APPLE.md                    # technical deep-dive
 Measured on a 16 GB Apple Silicon M-series Mac:
 
 - **First token**: ~3.5–6.5 s for 450–750 token prompts.
-- **Decode throughput**: ~13–25 tok/s, with spikes to ~36 tok/s on high-acceptance turns.
-- **Peak memory**: ~5.7–6.5 GB with the 9B model + DFlash draft loaded.
+- **Decode throughput**: ~13–25 tok/s, with spikes to ~36 tok/s on
+  high-acceptance turns.
+- **Peak memory**: ~5.7–6.5 GB with the 9B model + DFlash draft loaded;
+  VLM and LoRA generation add transient working memory.
 - **RAG embeddings**: `bge-small-en-v1.5` on CPU.
 
 ---
