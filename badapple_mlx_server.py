@@ -864,6 +864,39 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "p2p_send_adapter",
+            "description": "Send a local LoRA adapter to a discovered Bad Apple peer over the encrypted P2P link. Like AirDrop for models.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "peer_id": {
+                        "type": "string",
+                        "description": "The peer origin_id (use p2p_peers to discover).",
+                    },
+                    "adapter": {
+                        "type": "string",
+                        "description": "Name of the local adapter to send.",
+                    },
+                },
+                "required": ["peer_id", "adapter"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "p2p_list_adapters",
+            "description": "List local LoRA adapters available to share.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_peers",
             "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
             "parameters": {
@@ -1360,6 +1393,20 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             if daemon is None:
                 return "P2P daemon is not running."
             return daemon.get_peers()
+        if name == "p2p_list_adapters":
+            daemon = badapple_p2p.get_p2p_daemon()
+            if daemon is None:
+                return "P2P daemon is not running."
+            return daemon.list_local_adapters(badapple_lora.LORA_ADAPTERS_DIR)
+        if name == "p2p_send_adapter":
+            daemon = badapple_p2p.get_p2p_daemon()
+            if daemon is None:
+                return "P2P daemon is not running."
+            return daemon.send_adapter_sync(
+                args.get("peer_id", ""),
+                args.get("adapter", ""),
+                badapple_lora.LORA_ADAPTERS_DIR,
+            )
         if name == "transcribe_audio":
             p = Path(args.get("path", "")).expanduser()
             lang = args.get("language", "en")

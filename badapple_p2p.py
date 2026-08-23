@@ -14,11 +14,14 @@ import base64
 import datetime
 import hashlib
 import hmac
+import io
 import json
 import os
+import shutil
 import socket
 import time
 import traceback
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -270,18 +273,37 @@ class P2PDaemon:
             frame = P2PFrame.from_bytes(data)
             if frame is None or not self._verify(frame):
                 return
-            if frame.frame_type != "sync" or not self._timestamp_fresh(frame.timestamp_ms) or not self._nonce_fresh(frame.nonce_b64):
+            if frame.frame_type not in ("sync", "adapter") or not self._timestamp_fresh(frame.timestamp_ms) or not self._nonce_fresh(frame.nonce_b64):
                 return
             plaintext = self._decrypt(frame.nonce_b64, frame.payload_b64)
             if plaintext is None:
                 return
-            packet = json.loads(plaintext.decode())
-            facts = packet.get("facts", [])
-            if self.memory is not None:
-                for f in facts:
-                    self.memory.remember(f, source="peer")
-            writer.write(b'{"ok":true}\n')
-            await writer.drain()
+            if frame.frame_type == "sync":
+                packet = json.loads(plaintext.decode())
+                facts = packet.get("facts", [])
+                if self.memory is not None:
+                    for f in facts:
+                        self.memory.remember(f, source="peer")
+                writer.write(b'{"ok":true}\n')
+                await writer.drain()
+            elif frame.frame_type == "adapter":
+                packet = json.loads(plaintext.decode())
+                adapter_name = packet.get("name", " unnamed")
+                adapters_dir = Path(packet.get("adapters_dir", str(self.data_dir / "lora_adapters")))
+                target = adapters_dir / adapter_name
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                    import zipfile, io
+                    zip_bytes = base64.b64decode(packet.get("data_b64", ""))
+                    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                        zf.extractall(target)
+                    print(f"[p2p] received adapter '{adapter_name}' into {target}", flush=True)
+                    writer.write(b'{"ok":true}\n')
+                    await writer.drain()
+                except Exception as e:
+                    print(f"[p2p] adapter receive error: {e}", flush=True)
+                    writer.write(json.dumps({"ok": False, "error": str(e)}).encode() + b"\n")
+                    await writer.drain()
         except Exception as e:
             print(f"[p2p] sync handler error: {e}", flush=True)
         finally:
@@ -345,6 +367,76 @@ class P2PDaemon:
             for p in self.peers.values()
         ]
         return "Discovered peers:\n" + "\n".join(lines)
+
+    def send_adapter_sync(self, peer_origin_id: str, adapter_name: str, adapters_dir: Path) -> str:
+        """Sync a LoRA adapter directory to a peer over the existing P2P TCP sync port."""
+        if not self.peers:
+            return "No peers discovered. Broadcast a beacon first or list peers."
+        peer = None
+        for p in self.peers.values():
+            if p.origin_id == peer_origin_id or f"{p.origin_id}@{p.host}" == peer_origin_id:
+                peer = p
+                break
+        if peer is None:
+            return f"Peer {peer_origin_id} not found."
+
+        adapter_path = Path(adapters_dir).expanduser() / adapter_name
+        if not adapter_path.is_dir():
+            return f"Adapter '{adapter_name}' not found at {adapter_path}"
+
+        try:
+            zip_buf = io.BytesIO()
+            base = shutil.make_archive(str(adapter_path), 'zip', str(adapter_path))
+            with open(base, "rb") as f:
+                zip_bytes = f.read()
+            Path(base).unlink(missing_ok=True)
+        except Exception as e:
+            return f"Error packaging adapter: {e}"
+
+        plaintext = json.dumps({
+            "origin_id": self.origin_id,
+            "name": adapter_name,
+            "data_b64": base64.b64encode(zip_bytes).decode(),
+        }).encode()
+        nonce_b64, payload_b64 = self._encrypt(plaintext)
+        frame = P2PFrame(
+            frame_type="adapter",
+            origin_id=self.origin_id,
+            timestamp_ms=int(time.time() * 1000),
+            nonce_b64=nonce_b64,
+            payload_b64=payload_b64,
+            proof="",
+        )
+        frame.proof = self._proof(frame)
+
+        async def _send():
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(peer.host, peer.port),
+                    timeout=30,
+                )
+                writer.write(frame.to_bytes())
+                await writer.drain()
+                line = await asyncio.wait_for(reader.readline(), timeout=60)
+                writer.close()
+                await writer.wait_closed()
+                if line and b'"ok":true' in line:
+                    return f"Sent adapter '{adapter_name}' to {peer.origin_id}"
+                return f"Peer rejected adapter: {line.decode().strip()}"
+            except Exception as e:
+                return f"P2P adapter send failed: {e}"
+
+        try:
+            return asyncio.run(_send())
+        except Exception as e:
+            return f"P2P adapter send error: {e}"
+
+    def list_local_adapters(self, adapters_dir: Path) -> str:
+        d = Path(adapters_dir).expanduser()
+        if not d.is_dir():
+            return f"No adapters directory: {d}"
+        names = [x.name for x in d.iterdir() if x.is_dir()]
+        return "Local adapters: " + ", ".join(names) if names else "No local adapters."
 
     # ------------------------------------------------------------------
     # Helpers
