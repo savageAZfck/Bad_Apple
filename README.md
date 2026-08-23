@@ -53,19 +53,21 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 
 ### Personas & behavior
 
-- **Persona packs** — `personas.json` with Default, Wicket, Gen Z, Drill,
-  Midwest Aunt; switch at runtime.
+- **Persona packs** — Default persona from `prompt.txt`, plus `personas.json`
+  packs for Wicket, Gen Z Hype (`genz`), Drill, and Midwest Aunt; switch at
+  runtime with `switch to <persona>`.
 - **Teachable quips** — `teach The cloud is just hamsters on a wheel` and the
-  active persona remembers.
+  line is stored in the active persona's custom banter.
 
 ### Agent protocol & tools
 
 - **Local Agent Protocol (LAP)** — JSON-RPC over the authenticated SLICKS
-  Unix socket, exposed by `agent_client.py` and `__BADAPPLE_AGENT__` frames.
+  Unix socket, exposed by `agent_client.py` via `__BADAPPLE_AGENT__`
+  sentinel-prefixed JSON payloads.
 - **Tool set** — local file system, shell (approved), AppleScript (approved),
-  web search disabled, RAG, time, macOS Shortcuts, Accessibility actions,
-  screen capture, image description, P2P peer discovery, and LoRA
-  training/inference.
+  RAG, time, macOS Shortcuts, Accessibility actions, screen capture, image
+  description, P2P peer discovery, and LoRA training/inference. No web search
+  or cloud APIs.
 
 ### Vision
 
@@ -99,12 +101,13 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 - **Hash-chained audit ledger** — every query, tool, and response is logged to
   `/var/lib/bad_apple/ledger.jsonl` with SHA-256 chaining and secret redaction.
 - **Human-in-the-loop approvals** — destructive tools require approval
-  (reply `approve <id>`) unless `BADAPPLE_AUTOPILOT=1`.
+  (reply `approve <id>`) by default; set `BADAPPLE_AUTOPILOT=1` to skip.
 
 ### Workspace mode
 
-- **Project/workspace** — `set_workspace <path>` scopes file and RAG operations
-  to a directory; `clear_workspace` returns to global mode.
+- **Project/workspace** — say `set workspace to <path>` (or call the LAP
+  `set_workspace` method) to scope file and RAG operations to a directory;
+  `clear workspace` returns to global mode.
 
 ---
 
@@ -133,10 +136,18 @@ cargo build --release
 ```bash
 sudo cp src/platform/apple_bridge/com.badapple.gatekeeper.plist /Library/LaunchDaemons/
 sudo cp src/platform/apple_bridge/com.badapple.mlx.plist /Library/LaunchDaemons/
-sudo cp src/platform/apple_bridge/com.badapple.tts.plist /Library/LaunchDaemons/
-sudo launchctl load -w /Library/LaunchDaemons/com.badapple.gatekeeper.plist
-sudo launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist
-sudo launchctl load -w /Library/LaunchDaemons/com.badapple.tts.plist
+sudo cp src/platform/apple_desktop/com.badapple.tts.plist /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.badapple.gatekeeper.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.badapple.mlx.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.badapple.tts.plist
+```
+
+If the plists were already loaded, `bootout` them first:
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.badapple.gatekeeper.plist
+sudo launchctl bootout system /Library/LaunchDaemons/com.badapple.mlx.plist
+sudo launchctl bootout system /Library/LaunchDaemons/com.badapple.tts.plist
 ```
 
 Wait ~45 s for the 9B model and embedding model to load. Check the log:
@@ -182,6 +193,12 @@ python agent_client.py discover
 python agent_client.py invoke get_current_time '{}'
 python agent_client.py invoke screen_capture '{}'
 python agent_client.py invoke lora_adapters '{}'
+
+# Other agent commands
+python agent_client.py infer 'What is 2+2?'
+python agent_client.py workspace /Users/savag3/bad_apple
+python agent_client.py p2p_peers
+python agent_client.py p2p_sync
 ```
 
 ### Menu bar
@@ -202,10 +219,13 @@ open -a "Bad Apple"
 badapple CLI / menu bar / Siri
               │
               ▼
-  /var/run/badapple/substrate.sock
+  /var/run/badapple/substrate.sock  (gatekeeper)
               │
               ▼
      gatekeeper (SLICKS proxy, fast actions)
+              │
+              ▼
+  /var/run/badapple/substrate_mlx.sock
               │
               ▼
    badapple_mlx_server.py (9B Qwen3.5 + DFlash + tools + RAG + memory + vision + LoRA)
@@ -215,7 +235,8 @@ badapple CLI / menu bar / Siri
 ```
 
 - **gatekeeper** — authenticated front door; SLICKS challenge-response, prompt
-  binding, fast action proxy.
+  binding, fast action proxy. It listens on `substrate.sock` and forwards to
+  the MLX server on `substrate_mlx.sock`.
 - **MLX server** — loads the 9B target + DFlash draft once; handles
   conversation, memory, RAG, tools, approvals, cache, firewall, audit, P2P,
   screen capture, image description, and LoRA.
@@ -246,18 +267,21 @@ All tools are local and policy-governed:
 - `lora_add_example` / `lora_train` / `lora_adapters` / `lora_generate` —
   personal LoRA fine-tuning.
 - `p2p_peers` — list discovered LAN peers.
-- `set_workspace` / `clear_workspace` — project scope.
 
 ---
 
 ## Security & privacy
 
-- **Air-gapped at runtime** — no network calls for inference, actions, TTS,
-  LoRA, or P2P data (P2P is strictly local broadcast/TCP).
+- **Air-gapped at runtime** — after models are cached, no network calls are
+  made for inference, actions, TTS, LoRA, or P2P data (P2P is strictly local
+  broadcast/TCP).
 - **Authenticated** — SLICKS HMAC-SHA256 challenge-response with prompt
   binding; replaying an old challenge does not work.
 - **Fail-closed tools** — shell/AppleScript, file writes, indexing, screen
   capture, and LoRA training require approval unless `BADAPPLE_AUTOPILOT=1`.
+  The provided `com.badapple.mlx.plist` sets it to `1`, so a
+  launchd-installed daemon runs without prompts; remove it if you want
+  per-action approval.
 - **Declarative cage** — `policy.yaml` controls tool permissions and validates
   arguments.
 - **Streaming firewall** — secrets and PII patterns are blocked or redacted.
@@ -276,7 +300,6 @@ badapple_vision.py              # screen capture and VLM image description
 badapple_lora.py                # on-device LoRA training and generation
 badapple_p2p.py                 # encrypted peer-to-peer sync
 badapple_tts_server.py          # Piper TTS daemon
-badapple_mcp.py                 # local MCP-style function registry
 agent_client.py                 # SLICKS/LAP agent client
 policy.yaml                     # declarative tool cage
 personas.json                   # persona packs
