@@ -1053,6 +1053,20 @@ class Policy:
             if denied:
                 return f"AppleScript matches forbidden pattern '{denied}'"
 
+        # Per-app permissions (accessibility, run_shell, run_applescript, etc.)
+        target = args.get("target") or args.get("app") or args.get("application")
+        if target:
+            allowed_apps = cfg.get("allowed_apps") or self._policy.get("allowed_apps")
+            if allowed_apps and str(target).lower() not in [a.lower() for a in allowed_apps]:
+                return f"app '{target}' is not in the allowed apps list"
+
+        # Per-file permissions for any tool that touches a file
+        if "path" in args:
+            target_path = Path(args["path"]).expanduser()
+            allowed_files = cfg.get("allowed_files")
+            if allowed_files and not self._path_in_allowed(target_path, allowed_files):
+                return f"path {target_path} is outside allowed_files list"
+
         return None
 
 
