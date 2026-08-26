@@ -226,7 +226,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
 PLIST
 
 plutil -lint "${CONTENTS_DIR}/Info.plist"
-codesign --force --deep --sign - "${APP_DIR}"
+"${REPO_ROOT}/src/platform/apple_desktop/sign_bad_apple.sh"
 
 echo "Built: ${APP_DIR}"
 echo "Install it in /Applications and launch it once so macOS indexes Execute Bad Apple."

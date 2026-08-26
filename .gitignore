@@ -12,6 +12,7 @@
 /.venv-ane
 /.venv
 __pycache__/
+.badapple_dev_cert.*
 *.pyc
 /tests/ane_brain_perf/artifacts
 src/platform/apple_desktop/.build
