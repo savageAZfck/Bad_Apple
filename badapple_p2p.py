@@ -327,6 +327,15 @@ class P2PDaemon:
                 if self.memory is not None:
                     for f in facts:
                         self.memory.remember(f, source="peer")
+                    # Merge incoming project context if present and newer.
+                    remote_ctx = packet.get("project_context")
+                    if remote_ctx and isinstance(remote_ctx, dict):
+                        local_ctx = self.memory._state.get("project_context", {})
+                        remote_ts = remote_ctx.get("updated_at", "")
+                        local_ts = local_ctx.get("updated_at", "")
+                        if not local_ts or remote_ts > local_ts:
+                            self.memory._state["project_context"] = remote_ctx
+                            self.memory._save()
                 writer.write(b'{"ok":true}\n')
                 await writer.drain()
             elif frame.frame_type == "adapter":
@@ -373,12 +382,14 @@ class P2PDaemon:
         if self.workspace is not None:
             workspace = str(getattr(self.workspace, "path", ""))
             workspace_summary = getattr(self.workspace, "summary", lambda: "")() or ""
+        project_context = self.memory._state.get("project_context", {}) if self.memory else {}
         plaintext = json.dumps({
             "origin_id": self.origin_id,
             "ts": int(time.time() * 1000),
             "facts": facts,
             "workspace": workspace,
             "workspace_summary": workspace_summary,
+            "project_context": project_context,
         }).encode()
         nonce_b64, payload_b64 = self._encrypt(plaintext)
         frame = P2PFrame(
