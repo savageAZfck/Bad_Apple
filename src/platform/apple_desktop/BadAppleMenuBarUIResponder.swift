@@ -10,6 +10,7 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
     private let requestFile: URL
     private var lastSeenSize: Int64 = 0
     private var timer: Timer?
+    private var trustPromptRequested = false
 
     init() {
         requestFile = requestDir.appendingPathComponent("ui_request.json")
@@ -32,6 +33,17 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
         timer = nil
     }
 
+    private func writeResponse(id: String, result: [String: Any]) {
+        let responseFile = requestDir.appendingPathComponent("ui_response_\(id).json")
+        do {
+            let data = try JSONSerialization.data(withJSONObject: result, options: .sortedKeys)
+            try data.write(to: responseFile, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: responseFile.path)
+        } catch {
+            print("UIResponder: could not write response: \(error)")
+        }
+    }
+
     private func poll() {
         guard FileManager.default.fileExists(atPath: requestFile.path) else { return }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: requestFile.path),
@@ -46,6 +58,17 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
               let action = req["action"] as? String else { return }
 
         let access = BadAppleUIAccess.shared
+        if !access.isTrusted() {
+            if !trustPromptRequested {
+                trustPromptRequested = true
+                access.requestTrustPrompt()
+            }
+            writeResponse(id: id, result: ["ok": false, "error": "Bad Apple is not trusted for Accessibility. Grant it in System Settings > Privacy & Security > Accessibility and try again."])
+            // Clear the request so it is not processed twice.
+            try? Data().write(to: requestFile, options: .atomic)
+            return
+        }
+
         var result: [String: Any]
         switch action {
         case "info":
@@ -70,15 +93,12 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
             result = ["ok": false, "error": "unknown action \(action)"]
         }
 
-        let responseFile = requestDir.appendingPathComponent("ui_response_\(id).json")
+        writeResponse(id: id, result: result)
+        // Clear the request so it is not processed twice.
         do {
-            let data = try JSONSerialization.data(withJSONObject: result, options: .sortedKeys)
-            try data.write(to: responseFile, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: responseFile.path)
-            // Clear the request so it is not processed twice.
             try Data().write(to: requestFile, options: .atomic)
         } catch {
-            print("UIResponder: could not write response: \(error)")
+            print("UIResponder: could not clear request: \(error)")
         }
     }
 }

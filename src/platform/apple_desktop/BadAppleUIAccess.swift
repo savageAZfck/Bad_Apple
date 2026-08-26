@@ -34,6 +34,8 @@ final class BadAppleUIAccess {
     }
 
     func requestTrustPrompt() {
+        // The prompt only appears for a foreground app; force activation.
+        NSApplication.shared.activate(ignoringOtherApps: true)
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as! String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
