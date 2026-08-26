@@ -19,6 +19,7 @@
       <nav>
         <a class="nav-item active" data-view="dashboard" href="/dashboard"><span class="icon">◈</span> Dashboard</a>
         <a class="nav-item" data-view="chat" href="/chat"><span class="icon">💬</span> Chat</a>
+        <a class="nav-item" data-view="ocular" href="/ocular"><span class="icon">◉</span> Ocular</a>
         <a class="nav-item" data-view="persona" href="/persona"><span class="icon">✦</span> Persona</a>
         <a class="nav-item" data-view="settings" href="/settings"><span class="icon">⚙</span> Settings</a>
         <a class="nav-item" data-view="logs" href="/logs"><span class="icon">⌘</span> Logs</a>
@@ -227,6 +228,29 @@
         </div>
       </section>
 
+      <!-- Ocular -->
+      <section class="view hidden" id="view-ocular">
+        <div class="panel" style="max-width: 900px;">
+          <h3>Ocular UI Stream</h3>
+          <p class="text-tertiary">Live screen capture. Enable the stream to feed periodic VLM descriptions into the assistant's context.</p>
+          <div class="form-row" style="gap: 0.75rem; flex-wrap: wrap; margin: 1rem 0;">
+            <label for="ocular-capture-interval">Capture every (s)</label>
+            <input id="ocular-capture-interval" type="number" min="1" value="5" style="width: 5rem;">
+            <label for="ocular-describe-interval">VLM describe every (s)</label>
+            <input id="ocular-describe-interval" type="number" min="0" value="0" style="width: 5rem;">
+            <button id="ocular-toggle" onclick="toggleOcular()">Start stream</button>
+            <button class="secondary" onclick="captureOcular()">Capture now</button>
+          </div>
+          <div id="ocular-status" class="text-tertiary" style="margin-bottom: 1rem;">Loading...</div>
+          <div class="form-row" style="margin-bottom: 1rem;">
+            <label for="ocular-prompt">VLM prompt</label>
+            <input id="ocular-prompt" type="text" value="Describe what is currently on the screen in a few sentences, focusing on the active window and visible text." style="flex: 1;">
+          </div>
+          <img id="ocular-image" src="/api/ocular/screen.png" alt="Screen" style="width: 100%; max-width: 800px; border: 1px solid var(--border); border-radius: 0.5rem; display: none;">
+          <div id="ocular-description" class="log" style="margin-top: 1rem; min-height: 3rem;">No description yet.</div>
+        </div>
+      </section>
+
       <!-- Logs -->
       <section class="view hidden" id="view-logs">
         <div class="panel">
@@ -257,9 +281,10 @@
         <li><strong>?</strong> — Show this help</li>
         <li><strong>Cmd/Ctrl + 1</strong> — Dashboard</li>
         <li><strong>Cmd/Ctrl + 2</strong> — Chat</li>
-        <li><strong>Cmd/Ctrl + 3</strong> — Persona</li>
-        <li><strong>Cmd/Ctrl + 4</strong> — Settings</li>
-        <li><strong>Cmd/Ctrl + 5</strong> — Logs</li>
+        <li><strong>Cmd/Ctrl + 3</strong> — Ocular</li>
+        <li><strong>Cmd/Ctrl + 4</strong> — Persona</li>
+        <li><strong>Cmd/Ctrl + 5</strong> — Settings</li>
+        <li><strong>Cmd/Ctrl + 6</strong> — Logs</li>
         <li><strong>Cmd/Ctrl + N</strong> — New chat</li>
         <li><strong>Cmd/Ctrl + Enter</strong> — Send message</li>
         <li><strong>Esc</strong> — Close modals</li>

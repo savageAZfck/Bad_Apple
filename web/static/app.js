@@ -4,6 +4,7 @@ const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
 const ROUTES = {
   dashboard: 'Dashboard',
   chat: 'Chat',
+  ocular: 'Ocular',
   persona: 'Persona',
   settings: 'Settings',
   logs: 'Logs',
@@ -122,9 +123,9 @@ function setupKeyboard() {
     if (!meta) return;
     if (e.key === 'n') { e.preventDefault(); newChat(); }
     if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
-    if (e.key >= '1' && e.key <= '5') {
+    if (e.key >= '1' && e.key <= '6') {
       e.preventDefault();
-      const map = { '1': 'dashboard', '2': 'chat', '3': 'persona', '4': 'settings', '5': 'logs' };
+      const map = { '1': 'dashboard', '2': 'chat', '3': 'ocular', '4': 'persona', '5': 'settings', '6': 'logs' };
       navigate(map[e.key]);
     }
   });
@@ -135,6 +136,7 @@ function closeHelp() { const h = $('#help'); if (h) h.style.display = 'none'; }
 const tourSteps = [
   { title: 'Dashboard', body: 'See runtime mode, memory, models, P2P, MCP status, tool calls, and live charts.', view: 'dashboard' },
   { title: 'Chat', body: 'Talk to Bad Apple. Conversations are saved locally, and you can copy code, retry, or delete messages.', view: 'chat' },
+  { title: 'Ocular', body: 'Live screen capture and VLM description. Toggle the stream or capture a single frame.', view: 'ocular' },
   { title: 'Persona', body: 'Switch voices and edit the system prompt. Changes apply on the next query.', view: 'persona' },
   { title: 'Settings', body: 'Set workspace, add MCP servers, switch models, toggle autopilot/fast-tier/P2P, and change theme.', view: 'settings' },
   { title: 'Logs', body: 'Tail the daemon log for debugging and performance details.', view: 'logs' },
@@ -279,6 +281,7 @@ function route() {
 function onViewEnter(view) {
   if (view === 'dashboard') loadDashboard();
   if (view === 'chat') setupChat();
+  if (view === 'ocular') loadOcular();
   if (view === 'persona') loadPersona();
   if (view === 'settings') loadSettings();
   if (view === 'logs') loadLogs();
@@ -1304,6 +1307,96 @@ function runSplash() {
   };
 
   poll();
+}
+
+/* ---------- Ocular ---------- */
+let ocularInterval = null;
+let ocularRunning = false;
+
+function _updateOcularStatus(data) {
+  const statusEl = $('#ocular-status');
+  const img = $('#ocular-image');
+  const desc = $('#ocular-description');
+  const btn = $('#ocular-toggle');
+  if (!statusEl) return;
+
+  ocularRunning = data.running;
+  if (data.running) {
+    statusEl.textContent = `Streaming: capture every ${data.context?.capture_interval || data.capture_interval}s, describe every ${data.context?.describe_interval || data.describe_interval}s.`;
+    btn.textContent = 'Stop stream';
+    btn.classList.remove('secondary');
+  } else {
+    statusEl.textContent = 'Stream stopped. Capture a frame or start the stream.';
+    btn.textContent = 'Start stream';
+    btn.classList.add('secondary');
+  }
+
+  if (data.context?.description) {
+    desc.textContent = data.context.description;
+  } else if (data.context?.error) {
+    desc.textContent = 'Error: ' + data.context.error;
+  }
+
+  if (img) {
+    img.style.display = 'block';
+    img.src = '/api/ocular/screen.png?t=' + Date.now();
+  }
+}
+
+async function loadOcular() {
+  try {
+    const data = await api('/api/ocular');
+    _updateOcularStatus(data);
+    if (data.context) {
+      $('#ocular-capture-interval').value = data.context.capture_interval || 5;
+      $('#ocular-describe-interval').value = data.context.describe_interval || 0;
+    }
+  } catch (e) {
+    $('#ocular-status').textContent = 'Error: ' + e.message;
+  }
+  if (ocularInterval) clearInterval(ocularInterval);
+  ocularInterval = setInterval(() => {
+    if (currentView === 'ocular') loadOcular();
+  }, 5000);
+}
+
+async function toggleOcular() {
+  const btn = $('#ocular-toggle');
+  btn.disabled = true;
+  try {
+    const action = ocularRunning ? 'stop' : 'start';
+    const payload = { action };
+    if (action === 'start') {
+      payload.capture_interval = parseFloat($('#ocular-capture-interval').value) || 5;
+      payload.describe_interval = parseFloat($('#ocular-describe-interval').value) || 0;
+      payload.prompt = $('#ocular-prompt').value;
+    }
+    const res = await api('/api/ocular', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    toast(res.result || res);
+    await loadOcular();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function captureOcular() {
+  try {
+    const res = await api('/api/ocular', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'capture', prompt: $('#ocular-prompt').value }),
+    });
+    toast(res.result || res);
+    await loadOcular();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

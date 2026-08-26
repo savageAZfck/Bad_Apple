@@ -32,6 +32,7 @@ import psutil
 
 import badapple_ambient
 import badapple_mcp_marketplace
+import badapple_ocular
 
 # The MLXServer instance is set here by badapple_mlx_server.py at startup so
 # the HTTP handler can return daemon-internal status.
@@ -276,6 +277,8 @@ def _daemon_status() -> dict[str, Any]:
             "fast_tier": None,
             "ambient_running": False,
             "ambient": None,
+            "ocular_running": False,
+            "ocular": None,
             "workspace": None,
             "p2p_enabled": False,
             "p2p_peers": [],
@@ -300,6 +303,8 @@ def _daemon_status() -> dict[str, Any]:
         "fast_tier": _server_instance.fast_tier_enabled,
         "ambient_running": badapple_ambient.is_running(),
         "ambient": ambient,
+        "ocular_running": badapple_ocular.is_running(),
+        "ocular": badapple_ocular.status() if badapple_ocular.is_running() or badapple_ocular.OCULAR_CONTEXT.is_file() else None,
         "workspace": str(_server_instance.workspace.path) if _server_instance.workspace.path else None,
         "p2p_enabled": _server_instance.p2p is not None and _server_instance.p2p.is_running(),
         "p2p_peers": _server_instance.p2p.get_peers() if _server_instance.p2p is not None and _server_instance.p2p.is_running() else [],
@@ -986,6 +991,22 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return
+        if path == "/api/ocular":
+            try:
+                self._send_json(badapple_ocular.status())
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
+        if path == "/api/ocular/screen.png":
+            try:
+                screen_path = badapple_ocular.OCULAR_SCREEN
+                if screen_path.is_file():
+                    self._send_file(screen_path, "image/png")
+                else:
+                    self._send_text("No screen capture yet", 404)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
         if path.startswith("/api/image/"):
             filename = urllib.parse.unquote(path[11:])
             safe = Path(filename).name
@@ -1082,6 +1103,28 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     result = badapple_mcp_marketplace.install_catalog_server(payload.get("name", ""), catalog_path)
                 elif action == "list":
                     result = _load_mcp_servers()
+                else:
+                    self._send_json({"error": "unknown action"}, 400)
+                    return
+                self._send_json({"ok": True, "result": result} if isinstance(result, str) else result)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        if path == "/api/ocular":
+            try:
+                payload = _read_body()
+                action = payload.get("action", "")
+                if action == "start":
+                    result = badapple_ocular.start(
+                        float(payload.get("capture_interval", 5)),
+                        float(payload.get("describe_interval", 0)),
+                        payload.get("prompt"),
+                    )
+                elif action == "stop":
+                    result = badapple_ocular.stop()
+                elif action == "capture":
+                    result = badapple_ocular.capture_now(payload.get("prompt"))
                 else:
                     self._send_json({"error": "unknown action"}, 400)
                     return

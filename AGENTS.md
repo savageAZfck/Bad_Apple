@@ -313,7 +313,7 @@ In `badapple_mlx_server.py`:
 - Streaming chat: POST /api/chat with `{"prompt": "...", "stream": true}` returns Server-Sent Events (tokens, tool calls, done, error).
 - Automatic fact extraction: `badapple_fact_extractor.py` pulls name/like/location/work/etc. from every user message and stores normalized facts.
 - Workspace file watcher: `badapple_workspace_watcher.py` uses macOS FSEvents via `watchdog` for near-zero CPU file watching and indexes changed .txt/.md/.py/.rs/.swift/etc. files into the RAG index. Falls back to a 10s poll loop if watchdog is unavailable.
-- Image generation: say `generate an image of ...` or `draw a picture of ...` to use the cached FLUX.2-klein-4B model. The dashboard displays generated images via `/api/image/<filename>`.
+- Ocular UI Stream: `badapple_ocular.py` captures the screen on a configurable interval and optionally runs the local MLX VLM (Qwen2-VL-2B-Instruct-4bit) to describe it. Dashboard at `http://127.0.0.1:8787/ocular` with a live feed and stream toggles. Tools: `ocular_start`, `ocular_stop`, `ocular_context`.
 - Persona editor: `http://127.0.0.1:8787/persona` lets you switch between personas and edit the active system prompt live. `prompt.txt` hot-reloads; `personas.json` changes are reloaded on the next `get_system_prompt`.
 - MCP marketplace: `badapple_mcp_marketplace.py` is a minimal stdio MCP client for registering and invoking local MCP servers. Try:
   - `add mcp server <name> <command>`

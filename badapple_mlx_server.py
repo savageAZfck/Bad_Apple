@@ -37,6 +37,7 @@ from mlx_lm.sample_utils import make_sampler
 import badapple_ambient
 import badapple_aqua_helper
 import badapple_dashboard
+import badapple_ocular
 import badapple_documents
 import badapple_fact_extractor
 import badapple_fast_model
@@ -1183,6 +1184,46 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "ocular_start",
+            "description": "Start the Ocular UI Stream. Captures the screen every capture_interval seconds and, if describe_interval > 0, runs the local VLM to describe it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "capture_interval": {"type": "number", "description": "Screen capture interval in seconds. Default 5."},
+                    "describe_interval": {"type": "number", "description": "VLM describe interval in seconds. 0 disables description. Default 0."},
+                    "prompt": {"type": "string", "description": "Optional prompt for the VLM description."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ocular_stop",
+            "description": "Stop the Ocular UI Stream and unload the vision model.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ocular_context",
+            "description": "Get the latest Ocular UI Stream context: screenshot, active app/window, and the most recent VLM description.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "spotlight_search",
             "description": "Universal local Spotlight-style search across macOS Notes, Mail, files, and Bad Apple history. No cloud.",
             "parameters": {
@@ -2198,6 +2239,16 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
             return badapple_ambient.stop()
         if name == "ambient_context":
             return badapple_ambient.get_context()
+        if name == "ocular_start":
+            return badapple_ocular.start(
+                float(args.get("capture_interval") or 5),
+                float(args.get("describe_interval") or 0),
+                args.get("prompt"),
+            )
+        if name == "ocular_stop":
+            return badapple_ocular.stop()
+        if name == "ocular_context":
+            return badapple_ocular.get_context()
         if name == "spotlight_search":
             return badapple_spotlight.search(
                 query=args.get("query", ""),
@@ -3923,6 +3974,11 @@ class MLXServer:
             except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
                 print(f"[mlx_server] is_file failed: {e}", flush=True)
             ambient_running = badapple_ambient.is_running()
+            ocular = None
+            try:
+                ocular = badapple_ocular.status() if badapple_ocular.OCULAR_CONTEXT.is_file() else None
+            except Exception as e:  # noqa: BLE001
+                print(f"[mlx_server] ocular status error: {e}", flush=True)
             await _respond(req_id, {
                 "runtime": self.runtime.status(),
                 "health": self.health.snapshot(),
@@ -3933,6 +3989,8 @@ class MLXServer:
                 "fast_tier": self.fast_tier_enabled,
                 "ambient_running": ambient_running,
                 "ambient": ambient,
+                "ocular_running": badapple_ocular.is_running(),
+                "ocular": ocular,
                 "workspace": str(self.workspace.path) if self.workspace.path else None,
                 "p2p_enabled": self.p2p is not None and self.p2p.is_running(),
                 "p2p_peers": self.p2p.get_peers() if self.p2p is not None and self.p2p.is_running() else [],
@@ -4082,6 +4140,16 @@ class MLXServer:
             enabled = bool(params.get("enabled", False))
             text = badapple_ambient.start() if enabled else badapple_ambient.stop()
             await _respond(req_id, {"ambient_running": badapple_ambient.is_running(), "message": text})
+            return
+
+        if method == "set_ocular":
+            enabled = bool(params.get("enabled", False))
+            text = badapple_ocular.start(
+                float(params.get("capture_interval", 5)),
+                float(params.get("describe_interval", 0)),
+                params.get("prompt"),
+            ) if enabled else badapple_ocular.stop()
+            await _respond(req_id, {"ocular_running": badapple_ocular.is_running(), "message": text})
             return
 
         if method == "audit_tail":
@@ -4301,6 +4369,14 @@ class MLXServer:
                 return
             if control in ("stop ambient", "disable ambient", "ambient off"):
                 text = badapple_ambient.stop()
+                await _write_frame(writer, {"type": "done", "text": text})
+                return
+            if control in ("start ocular", "enable ocular", "ocular on"):
+                text = badapple_ocular.start()
+                await _write_frame(writer, {"type": "done", "text": text})
+                return
+            if control in ("stop ocular", "disable ocular", "ocular off"):
+                text = badapple_ocular.stop()
                 await _write_frame(writer, {"type": "done", "text": text})
                 return
             if control.startswith("set workspace to "):
