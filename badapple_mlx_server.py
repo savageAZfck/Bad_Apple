@@ -1446,6 +1446,27 @@ TOOLS.extend([
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_agent_task",
+            "description": "Execute a multi-step goal autonomously by planning, acting with tools, observing results, and correcting. Use when the user says 'do X', 'plan and do X', or asks for a task that requires multiple tools.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "The high-level task to accomplish.",
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Maximum number of steps to take before giving up. Default 10.",
+                    },
+                },
+                "required": ["goal"],
+            },
+        },
+    },
 ])
 
 
@@ -1488,6 +1509,7 @@ TOOL_KEYWORDS = [
     "working memory", "scratchpad",
     "consolidate memory", "dream", "offline consolidation",
     "mcp", "model context protocol", "mcp server", "mcp tool",
+    "do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step",
 ]
 
 # Map query keywords to the most relevant tool names.  This lets the 9B chat
@@ -1517,6 +1539,7 @@ KEYWORD_TOOL_MAP = [
     (["run applescript", "run script", "applescript"], ["run_applescript"]),
     (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
     (["mcp", "model context protocol", "mcp server", "mcp tool"], ["list_mcp_servers", "add_mcp_server", "list_mcp_tools", "invoke_mcp_tool"]),
+    (["do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step"], ["run_agent_task"]),
 ]
 
 
@@ -3208,6 +3231,8 @@ class MLXServer:
                 result = self.memory.consolidate()
             elif name == "set_workflow_enabled":
                 result = self.memory.set_workflow_enabled(args.get("name", ""), bool(args.get("enabled")))
+            elif name == "run_agent_task":
+                result = self.run_agent_task(args.get("goal", ""), int(args.get("max_steps") or 10))
             elif name == "run_workflow":
                 workflow = next((item for item in self.memory.workflows() if item.get("name") == args.get("name")), None)
                 if workflow is None:
@@ -3237,6 +3262,120 @@ class MLXServer:
         except Exception as e:
             self.breakers["tools"].failure()
             return f"Tool error: {e}"
+
+    def _extract_agent_json(self, text: str) -> Optional[Dict[str, Any]]:
+        """Pull a JSON object out of a model response for the agent loop."""
+        # Try a fenced JSON block first.
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+        # Fall back to the first bare JSON object.
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    def _extract_agent_xml(self, text: str) -> Optional[Dict[str, Any]]:
+        """Convert a Qwen-style <tool_call> into an agent decision."""
+        calls, _ = extract_tool_calls(text)
+        if not calls:
+            return None
+        call = calls[0]
+        return {
+            "thought": text.strip(),
+            "tool": call.get("name", ""),
+            "args": call.get("arguments") or call.get("args") or {},
+        }
+
+    def run_agent_task(self, goal: str, max_steps: int = 10, voice_mode: bool = False) -> str:
+        """Autonomous plan/act/observe loop for multi-step tasks."""
+        max_steps = max(1, min(max_steps, 15))
+        # Pick a focused tool set for the goal so the prompt stays small.
+        agent_tools = tools_for_prompt(goal)
+        agent_tools = [t for t in agent_tools if t["function"]["name"] != "run_agent_task"]
+        if not agent_tools:
+            agent_tools = [t for t in TOOLS if t["function"]["name"] != "run_agent_task"][:12]
+        tool_names = ", ".join(t["function"]["name"] for t in agent_tools)
+        tool_docs = "\n".join(
+            f"- {t['function']['name']}: {t['function'].get('description', '')}\n  args: {json.dumps(t['function'].get('parameters', {}))}"
+            for t in agent_tools
+        )
+
+        history: List[Dict[str, Any]] = []
+        system_prompt = (
+            "You are an autonomous agent inside Bad Apple. "
+            "You have a goal and a focused set of tools. "
+            "Think step by step. For each step, output a single JSON object with one of these shapes:\n"
+            "1. To take an action: {\"thought\": \"...\", \"tool\": \"tool_name\", \"args\": {...}}\n"
+            "2. To finish the task: {\"thought\": \"...\", \"finish\": \"final answer to the user\"}\n\n"
+            "Important: 'finish' is NOT a tool. When the task is done, emit the finish JSON and do not call any tool.\n"
+            "Available tools: " + tool_names + "\n\n"
+            + tool_docs + "\n\n"
+            "Rules:\n"
+            "- Output ONLY the JSON object. No markdown, no explanation outside the JSON.\n"
+            "- Choose the right tool for each step.\n"
+            "- If a tool returns an error or unexpected result, decide whether to retry with different arguments, try a different tool, or finish with what you know.\n"
+            "- Do not repeat the same failed action more than once without changing something.\n"
+            "- Keep going until the goal is fully achieved or you are stuck."
+        )
+
+        for step in range(max_steps):
+            # Keep only the last 3 steps in context so the prompt does not balloon.
+            recent_history = history[-3:]
+            step_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Goal: {goal}\n\nHistory so far:\n{json.dumps(recent_history, indent=2, default=str)}\n\nWhat is the next step?"},
+            ]
+            prompt_text = self.tokenizer.apply_chat_template(
+                step_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            raw = self._stream(prompt_text, 160, voice_mode=voice_mode)
+
+            # The model may emit tool-style XML or JSON. Try both.
+            decision = self._extract_agent_json(raw)
+            if decision is None:
+                decision = self._extract_agent_xml(raw)
+
+            if decision is None:
+                history.append({"step": step, "raw": raw[:500], "error": "could not parse agent JSON"})
+                continue
+
+            thought = decision.get("thought", "")
+            if "finish" in decision:
+                return str(decision["finish"])
+
+            tool_name = decision.get("tool", "")
+            tool_args = decision.get("args", {})
+            if tool_name == "finish":
+                # Sometimes the model tries 'finish' as a tool; accept it.
+                return str(decision.get("finish", decision.get("args", json.dumps(decision))))
+            if not tool_name:
+                history.append({"step": step, "thought": thought, "error": "no tool chosen"})
+                continue
+
+            result = self._run_approved_tool(tool_name, tool_args, f"agent task: {goal}")
+            history.append({
+                "step": step,
+                "thought": thought,
+                "tool": tool_name,
+                "args": tool_args,
+                "result": str(result)[:280],
+            })
+
+            if str(result).startswith(("Approval required", "Policy:", "Runtime", "Tool error")):
+                # Stop the agent loop on a blocking error and return it to the user.
+                return f"Agent task paused: {result}"
+
+        return f"Agent task for \"{goal}\" reached the step limit ({max_steps}).\n\nProgress:\n{json.dumps(history, indent=2, default=str)}"
 
     def load_main_model(self, model_ref: str) -> str:
         """Load a new main LLM on the fly and replace the current one.
