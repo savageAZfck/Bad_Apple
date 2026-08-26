@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// File-based responder that lets the Aqua helper ask the Bad Apple menu bar
 /// process (which has Accessibility permission) to perform AXUIElement actions.
@@ -33,6 +34,33 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
         timer = nil
     }
 
+    private func showAccessibilityPermissionAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Bad Apple needs Accessibility permission"
+        alert.informativeText = """
+        To control other apps — read the UI tree, click, type, and focus controls — Bad Apple needs to be granted Accessibility access.
+
+        1. Open System Settings.
+        2. Go to Privacy & Security → Accessibility.
+        3. Remove any existing “Bad Apple” or “BadApple” entries.
+        4. Click the + button.
+        5. Select /Applications/Bad Apple.app.
+        6. Toggle the switch on.
+        7. Fully quit Bad Apple, then reopen it.
+
+        Once this is done, the UI actor will work across rebuilds.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Accessibility")
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
     private func writeResponse(id: String, result: [String: Any]) {
         let responseFile = requestDir.appendingPathComponent("ui_response_\(id).json")
         do {
@@ -62,6 +90,7 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
             if !trustPromptRequested {
                 trustPromptRequested = true
                 access.requestTrustPrompt()
+                showAccessibilityPermissionAlert()
             }
             writeResponse(id: id, result: ["ok": false, "error": "Bad Apple is not trusted for Accessibility. Grant it in System Settings > Privacy & Security > Accessibility and try again."])
             // Clear the request so it is not processed twice.

@@ -6,6 +6,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 APP_DIR="${REPO_ROOT}/target/release/Bad Apple.app"
 CERT_NAME="Bad Apple Dev (savag3)"
+KEYCHAIN="${HOME}/Library/Keychains/badapple.keychain-db"
+
+# Unlock the dev keychain and allow codesign to use it without prompting.
+security unlock-keychain -p "" "${KEYCHAIN}" || true
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "${KEYCHAIN}" || true
 
 if [[ ! -d "${APP_DIR}" ]]; then
     echo "Bad Apple.app not found at ${APP_DIR}; build it first." >&2
