@@ -65,6 +65,28 @@ def _list_shortcuts(timeout: int = 15) -> dict[str, Any]:
         return {"ok": False, "error": f"list error: {e}"}
 
 
+def _app_bundle() -> Path | None:
+    bundle = os.environ.get("BADAPPLE_APP_BUNDLE")
+    if bundle and Path(bundle).is_dir():
+        return Path(bundle)
+    return None
+
+
+def _helper_executable(name: str) -> str | None:
+    bundle = _app_bundle()
+    candidates = [
+        f"/Applications/Bad Apple.app/Contents/Helpers/{name}",
+        str(Path.home() / "bad_apple/target/release/Bad Apple.app/Contents/Helpers/{name}"),
+        str(Path(__file__).parent / f"Bad Apple.app/Contents/Helpers/{name}"),
+    ]
+    if bundle:
+        candidates.insert(0, str(bundle / "Contents" / "Helpers" / name))
+    for path in candidates:
+        if Path(path).is_file():
+            return path
+    return None
+
+
 def _capture_screen(path: str, region: str = "") -> dict[str, Any]:
     """Capture the main screen to a PNG using the Bad Apple screen-capture helper.
 
@@ -74,15 +96,7 @@ def _capture_screen(path: str, region: str = "") -> dict[str, Any]:
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        # Prefer the Bad Apple helper so the Screen Recording prompt is
-        # attributed to the signed Bad Apple.app bundle, not python3.
-        app_paths = [
-            "/Applications/Bad Apple.app/Contents/Helpers/BadAppleScreenCapture",
-            str(Path.home() / "bad_apple/target/release/Bad Apple.app/Contents/Helpers/BadAppleScreenCapture"),
-            str(Path(__file__).parent / "Bad Apple.app/Contents/Helpers/BadAppleScreenCapture"),
-        ]
-        helper = next((p for p in app_paths if Path(p).is_file()), None)
-
+        helper = _helper_executable("BadAppleScreenCapture")
         if helper and not region:
             result = subprocess.run([helper, "--output", str(out)], capture_output=True, text=True, timeout=30, check=False)
             if result.returncode == 0 and out.is_file() and out.stat().st_size > 0:
@@ -105,17 +119,6 @@ def _capture_screen(path: str, region: str = "") -> dict[str, Any]:
         return {"ok": True, "path": str(out)}
     except (subprocess.SubprocessError, OSError, ValueError) as e:
         return {"ok": False, "error": f"screen capture error: {e}"}
-
-
-def _helper_executable(name: str) -> str | None:
-    for path in [
-        f"/Applications/Bad Apple.app/Contents/Helpers/{name}",
-        str(Path.home() / "bad_apple/target/release/Bad Apple.app/Contents/Helpers/{name}"),
-        str(Path(__file__).parent / f"Bad Apple.app/Contents/Helpers/{name}"),
-    ]:
-        if Path(path).is_file():
-            return path
-    return None
 
 
 def _ui_via_menubar(action: str, **kwargs: Any) -> dict[str, Any] | None:

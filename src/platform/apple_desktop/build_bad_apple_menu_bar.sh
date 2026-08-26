@@ -129,6 +129,7 @@ install -m 755 "${SCRATCH_DIR}/native/BadAppleUI" "${CONTENTS_DIR}/Helpers/BadAp
 install -d "${CONTENTS_DIR}/Resources"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/update_bad_apple.sh" "${CONTENTS_DIR}/Resources/update_bad_apple.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${CONTENTS_DIR}/Resources/strip_quarantine.sh"
+install -m 644 "${REPO_ROOT}/badapple_aqua_helper.py" "${CONTENTS_DIR}/Resources/badapple_aqua_helper.py"
 
 if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
     install -m 755 "${BUILD_DIR}/libbad_apple.dylib" "${FRAMEWORKS_DIR}/libbad_apple.dylib"

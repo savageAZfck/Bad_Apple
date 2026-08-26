@@ -3454,15 +3454,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         stopAquaHelper()
     }
 
+    private func findAquaHelper() -> (python: URL, script: URL)? {
+        // Prefer a full platform install under ~/.bad_apple/bad_apple-<version>/bad_apple.
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let badAppleDir = home.appendingPathComponent(".bad_apple")
+        if let versions = try? fm.contentsOfDirectory(at: badAppleDir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
+            for versionDir in versions.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
+                let script = versionDir.appendingPathComponent("bad_apple/badapple_aqua_helper.py")
+                let python = versionDir.appendingPathComponent("bad_apple/.venv/bin/python3")
+                if fm.isExecutableFile(atPath: python.path) && fm.fileExists(atPath: script.path) {
+                    return (python, script)
+                }
+            }
+        }
+
+        // Fall back to the script bundled in the app bundle; it only needs the system python.
+        if let bundledScript = Bundle.main.url(forResource: "badapple_aqua_helper", withExtension: "py") {
+            return (URL(fileURLWithPath: "/usr/bin/python3"), bundledScript)
+        }
+
+        return nil
+    }
+
     private func startAquaHelper() {
         guard aquaHelperProcess == nil else { return }
+        guard let helper = findAquaHelper() else {
+            print("Aqua helper script not found", terminator: "\n")
+            return
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/Users/savag3/bad_apple/.venv/bin/python3")
-        process.arguments = ["-u", "/Users/savag3/bad_apple/badapple_aqua_helper.py"]
-        process.environment = [
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
-            "BADAPPLE_AQUA_SOCKET": "/var/run/badapple/aqua_helper.sock",
-        ]
+        process.executableURL = helper.python
+        process.arguments = ["-u", helper.script.path]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+        env["BADAPPLE_AQUA_SOCKET"] = "/var/run/badapple/aqua_helper.sock"
+        env["BADAPPLE_APP_BUNDLE"] = Bundle.main.bundlePath
+        process.environment = env
         do {
             try process.run()
             aquaHelperProcess = process
