@@ -814,6 +814,7 @@ class MemoryGraph:
             "relations": [],
             "episodes": [],
             "workflows": [],
+            "project_context": {},
         }
         self._load()
 
@@ -1003,6 +1004,30 @@ class MemoryGraph:
         if not relevant:
             return ""
         return "Things you remember about the user and past turns:\n" + "\n".join(f"- {r}" for r in relevant)
+
+    def set_project_context(self, name: str, description: str, goals: Optional[List[str]] = None, tags: Optional[List[str]] = None) -> str:
+        """Store a long-horizon project profile for the user."""
+        self._state["project_context"] = {
+            "name": name,
+            "description": description,
+            "goals": goals or [],
+            "tags": tags or [],
+            "updated_at": datetime.datetime.now().isoformat(),
+        }
+        self._save()
+        return f"Project context set: {name}."
+
+    def get_project_context(self) -> str:
+        """Return the project context as a prompt-ready string."""
+        ctx = self._state.get("project_context", {})
+        if not ctx:
+            return ""
+        goals = "\n- " + "\n- ".join(ctx.get("goals", [])) if ctx.get("goals") else ""
+        tags = "\nTags: " + ", ".join(ctx.get("tags", [])) if ctx.get("tags") else ""
+        return (
+            f"Active project: {ctx.get('name', '')}\n"
+            f"Description: {ctx.get('description', '')}{goals}{tags}"
+        )
 
     def get_summary(self) -> str:
         return (

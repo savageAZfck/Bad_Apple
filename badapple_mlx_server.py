@@ -1467,6 +1467,31 @@ TOOLS.extend([
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_project_context",
+            "description": "Set a long-horizon project context so Bad Apple remembers the project's name, description, goals, and tags across sessions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "goals": {"type": "array", "items": {"type": "string"}},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["name", "description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_project_context",
+            "description": "Return the active long-horizon project context.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ])
 
 
@@ -1510,6 +1535,7 @@ TOOL_KEYWORDS = [
     "consolidate memory", "dream", "offline consolidation",
     "mcp", "model context protocol", "mcp server", "mcp tool",
     "do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step",
+    "set project", "this project is", "project context", "project goals",
 ]
 
 # Map query keywords to the most relevant tool names.  This lets the 9B chat
@@ -1540,6 +1566,7 @@ KEYWORD_TOOL_MAP = [
     (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
     (["mcp", "model context protocol", "mcp server", "mcp tool"], ["list_mcp_servers", "add_mcp_server", "list_mcp_tools", "invoke_mcp_tool"]),
     (["do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step"], ["run_agent_task"]),
+    (["set project", "this project is", "project context", "project goals"], ["set_project_context", "get_project_context"]),
 ]
 
 
@@ -3025,6 +3052,13 @@ class MLXServer:
                 "content": f"Use this project context if relevant:\n\n{ws_text}",
             })
 
+        project_ctx = self.memory.get_project_context()
+        if project_ctx:
+            patched.insert(-1, {
+                "role": "user",
+                "content": f"Long-horizon project context:\n\n{project_ctx}",
+            })
+
         rendered = self.tokenizer.apply_chat_template(
             patched,
             tokenize=False,
@@ -3233,6 +3267,15 @@ class MLXServer:
                 result = self.memory.set_workflow_enabled(args.get("name", ""), bool(args.get("enabled")))
             elif name == "run_agent_task":
                 result = self.run_agent_task(args.get("goal", ""), int(args.get("max_steps") or 10))
+            elif name == "set_project_context":
+                result = self.memory.set_project_context(
+                    args.get("name", ""),
+                    args.get("description", ""),
+                    args.get("goals") or [],
+                    args.get("tags") or [],
+                )
+            elif name == "get_project_context":
+                result = self.memory.get_project_context()
             elif name == "run_workflow":
                 workflow = next((item for item in self.memory.workflows() if item.get("name") == args.get("name")), None)
                 if workflow is None:
