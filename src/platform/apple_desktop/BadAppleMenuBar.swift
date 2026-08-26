@@ -3355,6 +3355,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         memoryGovernor.start()
         refreshTelemetry()
 
+        controlCenter.onVoiceToggle = { [weak self] enabled in
+            guard let self = self else { return }
+            UserDefaults.standard.set(enabled, forKey: "BadAppleVoiceEnabled")
+            self.voiceHost.setEnabled(enabled)
+            self.rebuildMenu()
+        }
+
         NSApp.servicesProvider = self
 
         // Pause voice when the screen locks or the Mac sleeps; resume on unlock/wake.

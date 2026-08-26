@@ -19,6 +19,7 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
     private let fastTierButton = NSButton()
     private let autopilotButton = NSButton()
     private let p2pButton = NSButton()
+    private let voiceButton = NSButton()
     private let purgeButton = NSButton()
     private let unloadButton = NSButton()
     private let killButton = NSButton()
@@ -29,7 +30,10 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
     private var fastTier = false
     private var autopilot = false
     private var p2p = false
+    private var voice = false
     private var killed = false
+
+    var onVoiceToggle: ((Bool) -> Void)?
 
     override init() {
         super.init()
@@ -65,7 +69,7 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
 
         contentStack.setCustomSpacing(20, after: hibernationLabel)
 
-        let toggles = [fastTierButton, autopilotButton, p2pButton]
+        let toggles = [fastTierButton, autopilotButton, p2pButton, voiceButton]
         for button in toggles {
             button.setButtonType(.toggle)
             button.font = NSFont.systemFont(ofSize: 13)
@@ -83,6 +87,10 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
         p2pButton.title = "P2P Sync"
         p2pButton.target = self
         p2pButton.action = #selector(toggleP2P)
+
+        voiceButton.title = "Voice"
+        voiceButton.target = self
+        voiceButton.action = #selector(toggleVoice)
 
         let buttonStack = NSStackView()
         buttonStack.orientation = .horizontal
@@ -201,6 +209,9 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
         autopilot = json["autopilot"] as? Bool ?? false
         autopilotButton.state = autopilot ? .on : .off
 
+        voice = UserDefaults.standard.object(forKey: "BadAppleVoiceEnabled") as? Bool ?? true
+        voiceButton.state = voice ? .on : .off
+
         let hibernating = json["hibernating"] as? Bool ?? false
         hibernationLabel.stringValue = "Hibernating: \(hibernating ? "yes" : "no")"
     }
@@ -215,6 +226,10 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
 
     @objc private func toggleP2P() {
         send(prompt: p2pButton.state == .on ? "p2p on" : "p2p off")
+    }
+
+    @objc private func toggleVoice() {
+        onVoiceToggle?(voiceButton.state == .on)
     }
 
     @objc private func purgeVRAM() {
