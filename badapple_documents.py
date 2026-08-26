@@ -5,12 +5,9 @@ Reads PDF and EPUB files on device, extracts text, and exposes it for
 indexing, search, and question-answering through the existing RAG pipeline.
 """
 
-import os
 import re
-import traceback
-import zipfile
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 try:
     from badapple_knowledge import BadAppleKnowledge
@@ -21,7 +18,7 @@ except Exception:
 def _extract_pdf(path: Path) -> str:
     try:
         import pdfplumber
-        parts: List[str] = []
+        parts: list[str] = []
         with pdfplumber.open(str(path)) as pdf:
             for i, page in enumerate(pdf.pages, 1):
                 try:
@@ -39,7 +36,7 @@ def _extract_epub(path: Path) -> str:
     try:
         from ebooklib import epub
         book = epub.read_epub(str(path))
-        parts: List[str] = []
+        parts: list[str] = []
         for item in book.get_items():
             if item.get_type() == 9:  # ITEM_DOCUMENT / DOCUMENT
                 try:
@@ -62,7 +59,7 @@ def _extract_plain(path: Path, limit: int = 100000) -> str:
         return f"Text read error: {e}"
 
 
-def extract_document(path: Path, limit: int = 100000) -> Tuple[str, int]:
+def extract_document(path: Path, limit: int = 100000) -> tuple[str, int]:
     """Extract text from a local PDF, EPUB, or plain text file.
 
     Returns (text, pages_or_chunks).

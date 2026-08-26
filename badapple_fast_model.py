@@ -8,7 +8,7 @@ responses without waking the 9B brain. No cloud.
 import gc
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 import mlx.core as mx
 from mlx_lm import load
@@ -16,7 +16,7 @@ from mlx_lm.generate import generate
 from mlx_lm.sample_utils import make_sampler
 
 
-def _default_fast_model() -> Optional[str]:
+def _default_fast_model() -> str | None:
     """Return the default downloaded tiny model path if it exists."""
     candidates = [
         "/Users/savag3/.cache/huggingface/hub/models--mlx-community--Qwen2.5-0.5B-Instruct-4bit/snapshots/a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
@@ -27,7 +27,7 @@ def _default_fast_model() -> Optional[str]:
     return None
 
 
-def fast_model_path() -> Optional[str]:
+def fast_model_path() -> str | None:
     """Resolve the tiny fast model path from env only.
 
     The 0.5B default is no longer auto-loaded because it produces vague,
@@ -37,7 +37,7 @@ def fast_model_path() -> Optional[str]:
     return os.environ.get("BADAPPLE_FAST_MODEL")
 
 
-def load_fast_model(path: Optional[str] = None) -> Optional[Tuple[Any, Any]]:
+def load_fast_model(path: str | None = None) -> tuple[Any, Any] | None:
     """Load a tiny MLX model and tokenizer. Returns (model, tokenizer) or None."""
     p = path or fast_model_path()
     if not p:
@@ -57,7 +57,7 @@ def generate_fast(
     model: Any,
     tokenizer: Any,
     prompt: str,
-    system_prompt: Optional[str] = None,
+    system_prompt: str | None = None,
     max_tokens: int = 48,
     temperature: float = 0.0,
 ) -> str:

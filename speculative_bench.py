@@ -6,6 +6,7 @@ draft models on a standard M4. This bypasses the socket/RAG overhead and
 benchmarks only the MLX generation engine.
 """
 import time
+
 from mlx_lm import load
 from mlx_lm.generate import stream_generate
 from mlx_lm.sample_utils import make_sampler

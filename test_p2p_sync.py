@@ -2,8 +2,6 @@
 """Test encrypted P2P sync between the live daemon and a local test peer."""
 
 import asyncio
-import os
-import shutil
 import subprocess
 import sys
 import tempfile

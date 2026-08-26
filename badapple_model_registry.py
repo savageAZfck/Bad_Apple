@@ -8,10 +8,8 @@ initial cache; all metadata is read from local `config.json` / `tokenizer.json`.
 
 import json
 import os
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 HUB_ROOT = Path.home() / ".cache" / "huggingface" / "hub"
 REGISTRY_FILE = "model_registry.json"
@@ -28,7 +26,7 @@ class ModelRegistry:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.registry_path = data_dir / REGISTRY_FILE
-        self._state: Dict[str, Any] = {
+        self._state: dict[str, Any] = {
             "current": os.environ.get("BADAPPLE_MAIN_MODEL", ""),
             "models": [],
         }
@@ -60,7 +58,7 @@ class ModelRegistry:
         if not self._state.get("models"):
             self.scan()
 
-    def _model_info(self, model_dir: Path) -> Optional[Dict[str, Any]]:
+    def _model_info(self, model_dir: Path) -> dict[str, Any] | None:
         """Inspect a single cached model directory."""
         blobs = model_dir / "blobs"
         if not blobs.is_dir():
@@ -114,7 +112,7 @@ class ModelRegistry:
 
     def scan(self) -> str:
         """Scan the HF hub cache and rebuild the registry."""
-        models: List[Dict[str, Any]] = []
+        models: list[dict[str, Any]] = []
         if HUB_ROOT.is_dir():
             for model_dir in sorted(HUB_ROOT.iterdir()):
                 if not model_dir.is_dir() or not model_dir.name.startswith("models--"):

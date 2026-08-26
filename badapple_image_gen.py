@@ -8,9 +8,7 @@ The model is downloaded once and cached locally. No cloud after caching.
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
-from typing import Optional
 
 DEFAULT_MODEL = os.environ.get("BADAPPLE_IMAGE_MODEL", "flux2-klein-4b")
 
@@ -32,12 +30,12 @@ def _output_dir() -> Path:
 
 def generate(
     prompt: str,
-    output: Optional[str] = None,
+    output: str | None = None,
     width: int = 512,
     height: int = 512,
     steps: int = 4,
     quantize: int = 4,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     low_ram: bool = True,
 ) -> str:
     """Generate an image from a prompt and return the output path."""

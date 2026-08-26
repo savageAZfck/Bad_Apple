@@ -6,12 +6,10 @@ on disk under /var/lib/bad_apple/knowledge so the assistant can answer from the
 user's own documents without the cloud.
 """
 import json
-import os
 import re
 import threading
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
 
 import numpy as np
 import torch
@@ -50,9 +48,9 @@ class BadAppleKnowledge:
 
         self.tokenizer = None
         self.model = None
-        self.chunks: List[str] = []
-        self.sources: List[str] = []
-        self.embeddings: Optional[np.ndarray] = None
+        self.chunks: list[str] = []
+        self.sources: list[str] = []
+        self.embeddings: np.ndarray | None = None
 
         self._load_index()
 
@@ -64,7 +62,7 @@ class BadAppleKnowledge:
             self.model.eval()
             print("Embedding model loaded.", flush=True)
 
-    def _encode_texts(self, texts: List[str]) -> np.ndarray:
+    def _encode_texts(self, texts: list[str]) -> np.ndarray:
         self._load_model()
         all_embeddings = []
         for i in range(0, len(texts), self.batch_size):
@@ -82,7 +80,7 @@ class BadAppleKnowledge:
             all_embeddings.append(embeddings.numpy())
         return _normalize(np.vstack(all_embeddings))
 
-    def _chunk_file(self, path: Path) -> List[Tuple[str, str]]:
+    def _chunk_file(self, path: Path) -> list[tuple[str, str]]:
         """Return (source_label, chunk_text) for a file."""
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -112,12 +110,12 @@ class BadAppleKnowledge:
                 return True
         return False
 
-    def index_paths(self, paths: List[Path], extensions: Optional[set] = None) -> int:
+    def index_paths(self, paths: list[Path], extensions: set | None = None) -> int:
         """Index the given files or directories. Returns number of chunks."""
         with self._lock:
             return self._index_paths_unsafe(paths, extensions)
 
-    def _index_paths_unsafe(self, paths: List[Path], extensions: Optional[set] = None) -> int:
+    def _index_paths_unsafe(self, paths: list[Path], extensions: set | None = None) -> int:
         extensions = extensions or {".txt", ".md", ".rs", ".swift", ".py", ".sh", ".toml"}
 
         new_chunks = []
@@ -163,7 +161,7 @@ class BadAppleKnowledge:
         self._save_index()
         return len(new_chunks)
 
-    def search(self, query: str, k: int = 3, threshold: float = 0.45) -> List[Tuple[str, float]]:
+    def search(self, query: str, k: int = 3, threshold: float = 0.45) -> list[tuple[str, float]]:
         with self._lock:
             if self.embeddings is None or not self.chunks:
                 return []

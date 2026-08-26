@@ -9,14 +9,12 @@ Run as root for full socket/process visibility:
     sudo /Users/savag3/bad_apple/.venv/bin/python cert_suite.py
 """
 
-import hashlib
 import json
 import os
 import re
 import socket
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import psutil
@@ -37,7 +35,7 @@ def _info(msg: str) -> None:
     print(f"  [INFO] {msg}")
 
 
-def find_badapple_processes() -> List[psutil.Process]:
+def find_badapple_processes() -> list[psutil.Process]:
     if psutil is None:
         return []
     procs = []

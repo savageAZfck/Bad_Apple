@@ -17,8 +17,7 @@ Tiers:
 import datetime
 import random
 import re
-from typing import Dict, Any, List, Optional, Tuple
-
+from typing import Any
 
 # Rotating response banks keep the fast tier from sounding like a broken record.
 IDENTITY_RESPONSES = [
@@ -53,7 +52,7 @@ JOKE_RESPONSES = [
 ]
 
 
-def _rotated(responses: List[str]) -> str:
+def _rotated(responses: list[str]) -> str:
     # Cycle with a little randomness so the fast tier doesn't get stale.
     return random.choice(responses)
 
@@ -62,7 +61,7 @@ class TieringRouter:
     def __init__(self, fast_model_enabled: bool = False):
         self.fast_model_enabled = fast_model_enabled
 
-    def select_tier(self, prompt: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    def select_tier(self, prompt: str) -> tuple[str, dict[str, Any] | None]:
         """Return (tier, fast_payload_or_none).  fast_payload is a pre-built
         response dict for the `fast` tier, or None if the 9B model should run.
         """

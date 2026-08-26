@@ -9,7 +9,7 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from badapple_runtime import RuntimeControl
 
@@ -36,7 +36,7 @@ def _console_uid() -> int:
         return os.getuid()
 
 
-def _services() -> Dict[str, Dict[str, Any]]:
+def _services() -> dict[str, dict[str, Any]]:
     uid = _console_uid()
     return {
         "gatekeeper": {"domain": "system/com.badapple.gatekeeper", "socket": "/var/run/badapple/substrate.sock"},
@@ -45,7 +45,7 @@ def _services() -> Dict[str, Dict[str, Any]]:
     }
 
 
-def _atomic_state(state: Dict[str, Any]) -> None:
+def _atomic_state(state: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = STATE_PATH.with_name(f".{STATE_PATH.name}.{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -55,7 +55,7 @@ def _atomic_state(state: Dict[str, Any]) -> None:
     os.replace(tmp, STATE_PATH)
 
 
-def _load_state() -> Dict[str, Any]:
+def _load_state() -> dict[str, Any]:
     try:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         return state if isinstance(state, dict) else {}
@@ -87,7 +87,7 @@ def _socket_ready(path: str) -> bool:
         client.close()
 
 
-def _healthy(service: Dict[str, Any], entry: Dict[str, Any], now: float) -> tuple[bool, Dict[str, Any]]:
+def _healthy(service: dict[str, Any], entry: dict[str, Any], now: float) -> tuple[bool, dict[str, Any]]:
     running = _launchd_running(service["domain"])
     socket_ok = True if service["socket"] is None else _socket_ready(service["socket"])
     start_at = float(entry.get("start_at", 0.0))
@@ -102,7 +102,7 @@ def _healthy(service: Dict[str, Any], entry: Dict[str, Any], now: float) -> tupl
     return running and (socket_ok or in_grace), detail
 
 
-def _restart_allowed(entry: Dict[str, Any], now: float) -> bool:
+def _restart_allowed(entry: dict[str, Any], now: float) -> bool:
     attempts = [stamp for stamp in entry.get("restart_attempts", []) if now - stamp < RESTART_WINDOW]
     entry["restart_attempts"] = attempts
     return len(attempts) < RESTART_BUDGET
@@ -117,11 +117,11 @@ def _restart(domain: str) -> bool:
     ).returncode == 0
 
 
-def check_once(repair: bool = True) -> Dict[str, Any]:
+def check_once(repair: bool = True) -> dict[str, Any]:
     now = time.time()
     state = _load_state()
     state.setdefault("services", {})
-    report: Dict[str, Any] = {"timestamp": now, "services": {}, "safe_mode": False}
+    report: dict[str, Any] = {"timestamp": now, "services": {}, "safe_mode": False}
     runtime = RuntimeControl(DATA_DIR)
 
     for name, service in _services().items():

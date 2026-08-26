@@ -10,8 +10,8 @@ Usage:
 This is a reference / test client, not the production `badapple` CLI.
 """
 
-import hmac
 import hashlib
+import hmac
 import json
 import os
 import random

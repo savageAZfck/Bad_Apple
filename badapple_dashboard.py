@@ -18,7 +18,6 @@ import http.server
 import json
 import os
 import re
-import shutil
 import socketserver
 import subprocess
 import threading
@@ -27,17 +26,16 @@ import urllib.parse
 from collections import deque
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 import psutil
 
 import badapple_ambient
 import badapple_mcp_marketplace
 
-
 # The MLXServer instance is set here by badapple_mlx_server.py at startup so
 # the HTTP handler can return daemon-internal status.
-_server_instance: Optional[Any] = None
+_server_instance: Any | None = None
 
 # New web UX assets live in the web/ directory next to this module.
 WEB_ROOT = Path(__file__).with_name("web").resolve()
@@ -88,7 +86,7 @@ def _thermal() -> str:
     return out.splitlines()[0] if out else "unknown"
 
 
-def _badapple_proc() -> Optional[dict[str, Any]]:
+def _badapple_proc() -> dict[str, Any] | None:
     """Find the Bad Apple MLX server process and return its stats."""
     for p in psutil.process_iter(["pid", "name", "cmdline", "memory_info", "cpu_percent"]):
         try:
@@ -106,7 +104,7 @@ def _badapple_proc() -> Optional[dict[str, Any]]:
     return None
 
 
-def _latest_log_perf() -> Optional[dict[str, Any]]:
+def _latest_log_perf() -> dict[str, Any] | None:
     """Parse the latest [perf] line from the Bad Apple log."""
     log = Path("/var/log/bad_apple_mlx_server.log")
     if not log.is_file():
@@ -747,7 +745,7 @@ def _active_persona() -> str:
     return "default"
 
 
-def _list_personas() -> Tuple[List[str], str, str]:
+def _list_personas() -> tuple[list[str], str, str]:
     pf = _personas_file()
     active = _active_persona()
     personas = {"default": "Bad Apple"}
@@ -762,8 +760,8 @@ def _list_personas() -> Tuple[List[str], str, str]:
     return list(personas.keys()), active, prompt
 
 
-def _load_persona_prompt(name: str) -> Tuple[str, Optional[Path]]:
-    active_file: Optional[Path] = None
+def _load_persona_prompt(name: str) -> tuple[str, Path | None]:
+    active_file: Path | None = None
     if name == "default":
         active_file = _prompt_file()
         if active_file.is_file():
@@ -808,7 +806,6 @@ def _run_cli(prompt: str, max_tokens: int = 240) -> str:
 
 def _stream_cli(handler: http.server.BaseHTTPRequestHandler, prompt: str, max_tokens: int = 240) -> None:
     """Stream the badapple CLI --json output as Server-Sent Events."""
-    import select
 
     exe = "/Users/savag3/bad_apple/target/release/badapple"
     handler.send_response(200)
@@ -820,7 +817,7 @@ def _stream_cli(handler: http.server.BaseHTTPRequestHandler, prompt: str, max_to
     def _emit(obj: dict) -> None:
         try:
             line = json.dumps(obj, default=str)
-            handler.wfile.write(f"data: {line}\n\n".encode("utf-8"))
+            handler.wfile.write(f"data: {line}\n\n".encode())
             handler.wfile.flush()
         except Exception:
             pass
@@ -1098,8 +1095,8 @@ class DashboardWebServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 8787):
         self.host = host
         self.port = port
-        self._server: Optional[ThreadedHTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: ThreadedHTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def start(self, mlx_server: Any) -> None:
         set_server_instance(mlx_server)

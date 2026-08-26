@@ -4,10 +4,9 @@
 import base64
 import hashlib
 import json
-import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -16,7 +15,7 @@ class PluginError(RuntimeError):
     pass
 
 
-def _canonical(value: Dict[str, Any]) -> bytes:
+def _canonical(value: dict[str, Any]) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -36,8 +35,8 @@ class PluginRegistry:
         self.trust_dir = Path(data_dir) / "trusted_publishers"
         self.root.mkdir(parents=True, exist_ok=True)
         self.trust_dir.mkdir(parents=True, exist_ok=True)
-        self.plugins: Dict[str, Dict[str, Any]] = {}
-        self.tools: Dict[str, Dict[str, Any]] = {}
+        self.plugins: dict[str, dict[str, Any]] = {}
+        self.tools: dict[str, dict[str, Any]] = {}
         self.reload()
 
     def _trusted_key(self, publisher: str) -> Ed25519PublicKey:
@@ -50,7 +49,7 @@ class PluginRegistry:
         except Exception as e:
             raise PluginError(f"invalid trusted key for '{publisher}': {e}") from e
 
-    def verify(self, plugin_dir: Path) -> Dict[str, Any]:
+    def verify(self, plugin_dir: Path) -> dict[str, Any]:
         manifest_path = plugin_dir / "plugin.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -73,10 +72,10 @@ class PluginRegistry:
         self._trusted_key(manifest["publisher"]).verify(signature, _canonical(unsigned))
         return manifest
 
-    def reload(self) -> Dict[str, str]:
+    def reload(self) -> dict[str, str]:
         self.plugins.clear()
         self.tools.clear()
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
         for plugin_dir in sorted(path for path in self.root.iterdir() if path.is_dir()):
             try:
                 manifest = self.verify(plugin_dir)
@@ -90,7 +89,7 @@ class PluginRegistry:
                 errors[plugin_dir.name] = str(e)
         return errors
 
-    def tool_schemas(self) -> List[Dict[str, Any]]:
+    def tool_schemas(self) -> list[dict[str, Any]]:
         return [
             {
                 "type": "function",
@@ -106,7 +105,7 @@ class PluginRegistry:
     def has_tool(self, name: str) -> bool:
         return name in self.tools
 
-    def invoke(self, name: str, arguments: Dict[str, Any], timeout: int = 30) -> str:
+    def invoke(self, name: str, arguments: dict[str, Any], timeout: int = 30) -> str:
         item = self.tools.get(name)
         if item is None:
             raise PluginError(f"unknown plugin tool: {name}")

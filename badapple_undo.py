@@ -9,7 +9,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class UndoJournal:
@@ -24,7 +24,7 @@ class UndoJournal:
         path = Path(path).expanduser().resolve()
         undo_id = uuid.uuid4().hex
         existed = path.is_file()
-        object_path: Optional[Path] = None
+        object_path: Path | None = None
         checksum = None
         if existed:
             object_path = self.objects / undo_id
@@ -43,7 +43,7 @@ class UndoJournal:
         self._append(entry)
         return undo_id
 
-    def _append(self, entry: Dict[str, Any]) -> None:
+    def _append(self, entry: dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         with self.lock.open("a+") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -55,7 +55,7 @@ class UndoJournal:
                 os.close(fd)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-    def entries(self) -> list[Dict[str, Any]]:
+    def entries(self) -> list[dict[str, Any]]:
         if not self.journal.is_file():
             return []
         results = []

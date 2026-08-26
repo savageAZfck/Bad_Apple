@@ -18,13 +18,11 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 import threading
-import time
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -75,7 +73,7 @@ class PersonaPack:
             else Path(__file__).with_name("personas.json")
         )
         self.personas = dict(self.DEFAULT_PERSONAS)
-        self._last_mtime: Optional[float] = None
+        self._last_mtime: float | None = None
         self._load_personas()
         self.active = os.environ.get("BADAPPLE_PERSONA", "default").lower().strip()
         if self.active not in self.personas:
@@ -98,7 +96,7 @@ class PersonaPack:
     def reload_personas(self):
         self._load_personas()
 
-    def _resolve_prompt(self, persona: Dict[str, Any]) -> str:
+    def _resolve_prompt(self, persona: dict[str, Any]) -> str:
         path = persona.get("system_prompt_file")
         if path:
             try:
@@ -111,7 +109,7 @@ class PersonaPack:
                 pass
         return persona.get("system_prompt", self._fallback_prompt())
 
-    def _resolve_voice_prompt(self, persona: Dict[str, Any]) -> Optional[str]:
+    def _resolve_voice_prompt(self, persona: dict[str, Any]) -> str | None:
         if persona.get("voice_system_prompt"):
             return persona["voice_system_prompt"].strip()
         return None
@@ -137,7 +135,7 @@ class PersonaPack:
                 return vp
         return self._resolve_prompt(persona)
 
-    def get_roast_bank(self) -> List[str]:
+    def get_roast_bank(self) -> list[str]:
         persona = self.personas.get(self.active, self.personas["default"])
         return persona.get("roast_bank", []) or []
 
@@ -153,10 +151,10 @@ class PersonaPack:
                 return True
         return False
 
-    def list_personas(self) -> List[str]:
+    def list_personas(self) -> list[str]:
         return list(self.personas.keys())
 
-    def handle_command(self, prompt: str) -> Optional[str]:
+    def handle_command(self, prompt: str) -> str | None:
         """Intercept persona-related user commands.
 
         Supported:
@@ -184,7 +182,7 @@ class PersonaPack:
     def _custom_lines_file(self) -> Path:
         return self.data_dir / "custom_banter.json"
 
-    def _load_custom_lines(self) -> List[str]:
+    def _load_custom_lines(self) -> list[str]:
         try:
             if self._custom_lines_file().is_file():
                 data = json.loads(self._custom_lines_file().read_text(encoding="utf-8"))
@@ -194,7 +192,7 @@ class PersonaPack:
             pass
         return []
 
-    def _save_custom_lines(self, lines: List[str]):
+    def _save_custom_lines(self, lines: list[str]):
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             with open(self._custom_lines_file(), "w", encoding="utf-8") as f:
@@ -212,8 +210,8 @@ class _TrieNode:
     __slots__ = ("children", "fail", "outputs")
 
     def __init__(self):
-        self.children: Dict[str, "_TrieNode"] = {}
-        self.fail: Optional["_TrieNode"] = None
+        self.children: dict[str, _TrieNode] = {}
+        self.fail: _TrieNode | None = None
         self.outputs: set = set()
 
 
@@ -225,7 +223,7 @@ class AhoCorasickAutomaton:
     match phrases while ignoring punctuation and casing.
     """
 
-    def __init__(self, patterns: List[str]):
+    def __init__(self, patterns: list[str]):
         self.root = _TrieNode()
         for idx, pat in enumerate(patterns):
             node = self.root
@@ -251,7 +249,7 @@ class AhoCorasickAutomaton:
                 unode.fail = fnode.children[key] if fnode and key in fnode.children else self.root
                 unode.outputs |= unode.fail.outputs
 
-    def search(self, tokens: List[str]) -> Optional[str]:
+    def search(self, tokens: list[str]) -> str | None:
         node = self.root
         for tok in tokens:
             while node and tok not in node.children:
@@ -262,7 +260,7 @@ class AhoCorasickAutomaton:
         return None
 
 
-def _tokenize_structural(text: str, partial_word: str = "", trailing_gap: bool = False) -> Tuple[List[str], str, bool]:
+def _tokenize_structural(text: str, partial_word: str = "", trailing_gap: bool = False) -> tuple[list[str], str, bool]:
     tokens = []
     buff = partial_word
     in_gap = trailing_gap
@@ -300,7 +298,7 @@ class StreamingFirewall:
     def __init__(self, data_dir: Path, window: int = 256):
         self.data_dir = data_dir
         self.window = window
-        self.patterns: List[str] = list(self.DEFAULT_PATTERNS)
+        self.patterns: list[str] = list(self.DEFAULT_PATTERNS)
         self._load_blocklist()
         self.automaton = AhoCorasickAutomaton(self.patterns)
         self.partial_word = ""
@@ -322,7 +320,7 @@ class StreamingFirewall:
         self.trailing_gap = False
         self.buffer.clear()
 
-    def push_and_check(self, text: str) -> Optional[str]:
+    def push_and_check(self, text: str) -> str | None:
         """Push text into the rolling window.  Returns the matched pattern if any."""
         tokens, self.partial_word, self.trailing_gap = _tokenize_structural(
             text, self.partial_word, self.trailing_gap
@@ -331,7 +329,7 @@ class StreamingFirewall:
         win = list(self.buffer)[-self.window :]
         return self.automaton.search(win)
 
-    def check_full(self, text: str) -> Optional[str]:
+    def check_full(self, text: str) -> str | None:
         """One-shot scan of a complete string."""
         toks, _, _ = _tokenize_structural(text)
         return self.automaton.search(toks)
@@ -438,7 +436,7 @@ class AuditLedger:
         except Exception as e:
             print(f"[audit] ledger write failed: {e}", flush=True)
 
-    def verify(self) -> List[Dict[str, Any]]:
+    def verify(self) -> list[dict[str, Any]]:
         """Return a list of verification results for every entry."""
         results = []
         prev = hashlib.sha256(self.genesis.encode()).hexdigest()
@@ -494,7 +492,7 @@ class SemanticCache:
     DEFAULT_THRESHOLD = 0.92
     MAX_CACHE_SIZE = 500
 
-    def __init__(self, data_dir: Path, threshold: Optional[float] = None):
+    def __init__(self, data_dir: Path, threshold: float | None = None):
         self.data_dir = data_dir
         self.cache_path = data_dir / "semantic_cache.json"
         self.threshold = threshold or float(
@@ -502,14 +500,13 @@ class SemanticCache:
         )
         self.tokenizer = None
         self.model = None
-        self._entries: List[Dict[str, Any]] = []
+        self._entries: list[dict[str, Any]] = []
         self._load()
 
     def _load_model(self):
         if self.model is not None:
             return
         try:
-            import torch
             from transformers import AutoModel, AutoTokenizer
 
             print("[cache] loading bge-small encoder...", flush=True)
@@ -520,7 +517,7 @@ class SemanticCache:
         except Exception as e:
             print(f"[cache] encoder failed to load: {e}", flush=True)
 
-    def _encode(self, texts: List[str]) -> np.ndarray:
+    def _encode(self, texts: list[str]) -> np.ndarray:
         self._load_model()
         if self.model is None:
             # Fallback: zero vectors. Cache will not match.
@@ -562,7 +559,7 @@ class SemanticCache:
         except Exception as e:
             print(f"[cache] could not save cache: {e}", flush=True)
 
-    def lookup(self, query: str, persona: str = "default") -> Optional[str]:
+    def lookup(self, query: str, persona: str = "default") -> str | None:
         if not self._entries:
             return None
         q_emb = self._encode([query])[0]
@@ -587,7 +584,7 @@ class SemanticCache:
             return entry["response"]
         return None
 
-    def store(self, query: str, response: str, persona: str = "default", intent: Optional[str] = None):
+    def store(self, query: str, response: str, persona: str = "default", intent: str | None = None):
         emb = self._encode([query])[0].tolist()
         self._entries.append({
             "query": query,
@@ -613,7 +610,7 @@ class SemanticCache:
             print(f"[cache] could not clear cache file: {e}", flush=True)
         return "Semantic cache cleared."
 
-    def classify_intent(self, query: str) -> Optional[str]:
+    def classify_intent(self, query: str) -> str | None:
         """Compare query to a small fixed set of example phrases and return label."""
         examples = {
             "greeting": ["hi", "hello", "hey", "what's up", "good morning", "good evening"],
@@ -651,7 +648,7 @@ class Workspace:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.workspace_file = data_dir / "workspace.json"
-        self._state: Dict[str, Any] = {}
+        self._state: dict[str, Any] = {}
         self._load()
 
     def _load(self):
@@ -670,7 +667,7 @@ class Workspace:
             print(f"[workspace] could not save: {e}", flush=True)
 
     @property
-    def path(self) -> Optional[Path]:
+    def path(self) -> Path | None:
         p = self._state.get("workspace_dir")
         if not p:
             return None
@@ -770,7 +767,7 @@ class Workspace:
         files = f"Recent files: {', '.join(recent)}." if recent else "No files found."
         return f"Workspace: {p}. {build}{git_info}{readme_summary}{files}"
 
-    def resolve_path(self, maybe_path: Optional[str]) -> Path:
+    def resolve_path(self, maybe_path: str | None) -> Path:
         if maybe_path:
             return Path(maybe_path).expanduser()
         p = self.path
@@ -803,12 +800,12 @@ class MemoryGraph:
         re.compile(r"\bmy name is ([A-Z][a-zA-Z]+)\b", re.IGNORECASE),
     ]
 
-    def __init__(self, data_dir: Path, encoder: Optional[Any] = None):
+    def __init__(self, data_dir: Path, encoder: Any | None = None):
         self.data_dir = data_dir
         self.memory_file = data_dir / "memory_graph.json"
         self.encoder = encoder
         self._lock = threading.RLock()
-        self._state: Dict[str, Any] = {
+        self._state: dict[str, Any] = {
             "facts": [],
             "entities": [],
             "relations": [],
@@ -841,7 +838,7 @@ class MemoryGraph:
         except Exception as e:
             print(f"[memory] could not save: {e}", flush=True)
 
-    def _embed(self, text: str) -> Optional[List[float]]:
+    def _embed(self, text: str) -> list[float] | None:
         if self.encoder is None:
             return None
         try:
@@ -850,7 +847,7 @@ class MemoryGraph:
             print(f"[memory] embedding failed: {e}", flush=True)
             return None
 
-    def _extract_fact(self, text: str) -> Optional[str]:
+    def _extract_fact(self, text: str) -> str | None:
         # Keep just the first sentence; must be a statement about the user.
         low = text.lower()
         if not any(k in low for k in ("my ", "i like", "i love", "i prefer", "i hate", "remember that", "my name is")):
@@ -891,7 +888,7 @@ class MemoryGraph:
         self._trim()
         self._save()
 
-    def add_episode(self, user_text: str, assistant_text: str, context: Optional[Dict[str, Any]] = None):
+    def add_episode(self, user_text: str, assistant_text: str, context: dict[str, Any] | None = None):
         """Store a brief episodic record of a turn."""
         self._state["episodes"].append({
             "user": user_text[:300],
@@ -912,7 +909,7 @@ class MemoryGraph:
             self._state["relations"].append(triple)
             self._save()
 
-    def learn_workflow(self, name: str, trigger: str, steps: List[Dict[str, Any]]) -> str:
+    def learn_workflow(self, name: str, trigger: str, steps: list[dict[str, Any]]) -> str:
         name, trigger = name.strip(), trigger.strip()
         if not name or not trigger or not steps:
             return "Workflow name, trigger, and at least one step are required."
@@ -940,10 +937,10 @@ class MemoryGraph:
                 return f"Workflow '{name}' enabled={bool(enabled)}."
         return f"Workflow '{name}' not found."
 
-    def workflows(self) -> List[Dict[str, Any]]:
+    def workflows(self) -> list[dict[str, Any]]:
         return [dict(workflow) for workflow in self._state["workflows"]]
 
-    def search(self, query: str, k: int = 3) -> List[str]:
+    def search(self, query: str, k: int = 3) -> list[str]:
         """Return the most relevant fact and episode texts for a query."""
         if not (self._state["facts"] or self._state["episodes"]):
             return []
@@ -1005,7 +1002,7 @@ class MemoryGraph:
             return ""
         return "Things you remember about the user and past turns:\n" + "\n".join(f"- {r}" for r in relevant)
 
-    def set_project_context(self, name: str, description: str, goals: Optional[List[str]] = None, tags: Optional[List[str]] = None) -> str:
+    def set_project_context(self, name: str, description: str, goals: list[str] | None = None, tags: list[str] | None = None) -> str:
         """Store a long-horizon project profile for the user."""
         self._state["project_context"] = {
             "name": name,
@@ -1116,7 +1113,7 @@ class Policy:
             if (data_dir / "policy.yaml").is_file()
             else Path(__file__).with_name("policy.yaml")
         )
-        self._policy: Dict[str, Any] = dict(self.DEFAULT_POLICY)
+        self._policy: dict[str, Any] = dict(self.DEFAULT_POLICY)
         self._load()
 
     def _load(self):
@@ -1140,7 +1137,7 @@ class Policy:
     def set_autopilot(self, enabled: bool) -> None:
         self._policy["autopilot"] = bool(enabled)
 
-    def _tool_cfg(self, tool_name: str) -> Dict[str, Any]:
+    def _tool_cfg(self, tool_name: str) -> dict[str, Any]:
         tools = self._policy.get("tools", self.DEFAULT_POLICY["tools"])
         defaults = self._policy.get("defaults", self.DEFAULT_POLICY["defaults"])
         cfg = dict(defaults)
@@ -1160,7 +1157,7 @@ class Policy:
     def timeout(self, tool_name: str, default: int = 30) -> int:
         return int(self._tool_cfg(tool_name).get("max_timeout", default))
 
-    def _denied(self, value: str, patterns: List[str]) -> Optional[str]:
+    def _denied(self, value: str, patterns: list[str]) -> str | None:
         if not patterns:
             return None
         lower = value.lower()
@@ -1169,7 +1166,7 @@ class Policy:
                 return pat
         return None
 
-    def _path_in_allowed(self, path: Path, allowed: List[str]) -> bool:
+    def _path_in_allowed(self, path: Path, allowed: list[str]) -> bool:
         if not allowed:
             return True
         resolved = path.expanduser().resolve()
@@ -1182,7 +1179,7 @@ class Policy:
                 continue
         return False
 
-    def validate(self, tool_name: str, args: Dict[str, Any]) -> Optional[str]:
+    def validate(self, tool_name: str, args: dict[str, Any]) -> str | None:
         """Return an error string if the tool call violates policy, else None."""
         if not self.is_allowed(tool_name):
             return f"tool '{tool_name}' is not allowed"
@@ -1262,9 +1259,9 @@ class ApprovalGate:
     Modeled on ify / savageops proposal/approve flow.
     """
 
-    def __init__(self, data_dir: Path, policy: Optional[Policy] = None):
+    def __init__(self, data_dir: Path, policy: Policy | None = None):
         self.data_dir = data_dir
-        self.pending: Dict[str, Dict[str, Any]] = {}
+        self.pending: dict[str, dict[str, Any]] = {}
         self.policy = policy or Policy(data_dir)
         self._load_pending()
 
@@ -1294,7 +1291,7 @@ class ApprovalGate:
     def needs_approval(self, tool_name: str) -> bool:
         return self.policy.needs_approval(tool_name)
 
-    def propose(self, tool_name: str, arguments: Dict[str, Any], user_prompt: str = "") -> str:
+    def propose(self, tool_name: str, arguments: dict[str, Any], user_prompt: str = "") -> str:
         proposal_id = str(uuid.uuid4())[:8]
         self.pending[proposal_id] = {
             "tool": tool_name,
@@ -1306,7 +1303,7 @@ class ApprovalGate:
         self._save_pending()
         return proposal_id
 
-    def approve(self, proposal_id: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    def approve(self, proposal_id: str) -> tuple[str, dict[str, Any]] | None:
         entry = self.pending.get(proposal_id)
         if not entry:
             return None
@@ -1314,7 +1311,7 @@ class ApprovalGate:
         self._save_pending()
         return entry["tool"], entry["arguments"]
 
-    def handle_approve_command(self, prompt: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    def handle_approve_command(self, prompt: str) -> tuple[str, dict[str, Any]] | None:
         """Parse `approve <id>` and return (tool, args) if found."""
         low = prompt.strip().lower()
         m = re.match(r"^approve\s+([a-z0-9\-]+)$", low)

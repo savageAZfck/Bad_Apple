@@ -6,14 +6,12 @@ Apple history/ledger in one query. No cloud.
 """
 
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional
 
 
-def _run_mdfind(query: str, max_results: int = 20) -> List[str]:
+def _run_mdfind(query: str, max_results: int = 20) -> list[str]:
     if not shutil.which("mdfind"):
         return []
     try:
@@ -30,7 +28,7 @@ def _run_mdfind(query: str, max_results: int = 20) -> List[str]:
         return []
 
 
-def _search_notes(query: str, max_results: int = 10) -> List[str]:
+def _search_notes(query: str, max_results: int = 10) -> list[str]:
     """Search macOS Notes via Spotlight."""
     try:
         q = f"(kMDItemTextContent == '*{query}*'c || kMDItemTitle == '*{query}*'c) && kMDItemContentType == 'com.apple.notes.note'"
@@ -45,11 +43,11 @@ def _search_notes(query: str, max_results: int = 10) -> List[str]:
         return []
 
 
-def _search_mail(query: str, max_results: int = 10) -> List[str]:
+def _search_mail(query: str, max_results: int = 10) -> list[str]:
     """Search macOS Mail via Spotlight."""
     try:
         # Try common Mail content types
-        results: List[str] = []
+        results: list[str] = []
         for ct in ("com.apple.mail.email", "com.apple.mail.emlx", "com.apple.mail.message"):
             q = f"(kMDItemTextContent == '*{query}*'c || kMDItemTitle == '*{query}*'c) && kMDItemContentType == '{ct}'"
             result = subprocess.run(
@@ -64,7 +62,7 @@ def _search_mail(query: str, max_results: int = 10) -> List[str]:
         return []
 
 
-def _search_history(query: str, max_results: int = 10) -> List[str]:
+def _search_history(query: str, max_results: int = 10) -> list[str]:
     ledger = Path("/var/lib/bad_apple/ledger.jsonl")
     if not ledger.is_file():
         return []

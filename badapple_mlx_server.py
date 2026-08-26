@@ -13,12 +13,11 @@ import asyncio
 import concurrent.futures
 import datetime
 import gc
-import hmac
 import hashlib
+import hmac
 import json
 import os
 import queue
-import random
 import re
 import shlex
 import subprocess
@@ -27,41 +26,41 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 import mlx.core as mx
+from langdetect import LangDetectException, detect
+from mlx_lm import load
+from mlx_lm.generate import stream_generate
+from mlx_lm.sample_utils import make_sampler
 
-from badapple_knowledge import BadAppleKnowledge
-import badapple_p2p
-import badapple_vision
-import badapple_lora
-import badapple_documents
-import badapple_stt
-import badapple_image_gen
-import badapple_translate
-import badapple_git
-import badapple_dashboard
-import badapple_scheduler
 import badapple_ambient
-import badapple_working_memory
+import badapple_aqua_helper
+import badapple_dashboard
+import badapple_documents
+import badapple_fact_extractor
+import badapple_fast_model
+import badapple_git
+import badapple_identity
+import badapple_image_gen
+import badapple_keychain
+import badapple_lora
+import badapple_macos_apps
+import badapple_mcp_marketplace
+import badapple_model_registry
+import badapple_p2p
+import badapple_scheduler
+import badapple_spotlight
+import badapple_stt
+import badapple_supervisor
 import badapple_tier
 import badapple_tool_router
-import badapple_model_registry
-import badapple_supervisor
-import badapple_fact_extractor
-import badapple_workspace_watcher
-import badapple_mcp_marketplace
-import badapple_fast_model
-import badapple_aqua_helper
-import badapple_spotlight
-import badapple_xcode
-import badapple_keychain
-import badapple_identity
+import badapple_translate
 import badapple_undo
-from badapple_plugins import PluginRegistry
-from badapple_runtime import CircuitBreaker, HealthRegistry, ResourceGovernor, RuntimeControl
-from badapple_vault import GenerationStore
-import badapple_macos_apps
+import badapple_vision
+import badapple_working_memory
+import badapple_workspace_watcher
+import badapple_xcode
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -72,19 +71,24 @@ from badapple_extras import (
     StreamingFirewall,
     Workspace,
 )
-from langdetect import detect, LangDetectException
-from mlx_lm import load
-from mlx_lm.generate import stream_generate
-from mlx_lm.sample_utils import make_logits_processors, make_sampler
+from badapple_knowledge import BadAppleKnowledge
+from badapple_plugins import PluginRegistry
+from badapple_runtime import (
+    CircuitBreaker,
+    HealthRegistry,
+    ResourceGovernor,
+    RuntimeControl,
+)
+from badapple_vault import GenerationStore
 
 try:
     from dflash_mlx.generate import (
+        SummaryEvent,
+        TokenEvent,
         build_offline_runtime_context,
         decode_token,
         get_stop_token_ids,
         stream_dflash_generate,
-        TokenEvent,
-        SummaryEvent,
     )
     from dflash_mlx.runtime.bundle import load_runtime_bundle
     _dflash_available = True
@@ -109,7 +113,7 @@ NUM_DRAFT_TOKENS = int(os.environ.get("BADAPPLE_NUM_DRAFT_TOKENS") or "3")
 
 # Pinned random seed for reproducible sessions. Set at startup via BADAPPLE_SEED
 # or changed at runtime with the set_session_seed tool. 0 means random.
-_SESSION_SEED: Optional[int] = None
+_SESSION_SEED: int | None = None
 if os.environ.get("BADAPPLE_SEED"):
     try:
         _SESSION_SEED = int(os.environ.get("BADAPPLE_SEED"))
@@ -1548,7 +1552,7 @@ TOOLS.extend([
 ])
 
 
-def _compact_tool_schema(tool: Dict[str, Any]) -> Dict[str, Any]:
+def _compact_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
     """Return a token-light tool schema for the 9B chat template.
 
     The full TOOLS schemas are still used for API discovery and execution.
@@ -1636,7 +1640,7 @@ DEFAULT_TOOL_NAMES = {
 }
 
 
-def tools_for_prompt(prompt: str) -> List[Dict[str, Any]]:
+def tools_for_prompt(prompt: str) -> list[dict[str, Any]]:
     """Return a small, focused tool schema for the 9B chat template."""
     low = prompt.lower()
     selected = set()
@@ -1728,7 +1732,7 @@ def conversation_path() -> Path:
     return path
 
 
-def load_user_memory() -> List[str]:
+def load_user_memory() -> list[str]:
     try:
         with open(memory_path(), "r") as f:
             data = json.load(f)
@@ -1739,7 +1743,7 @@ def load_user_memory() -> List[str]:
     return []
 
 
-def save_user_memory(facts: List[str]):
+def save_user_memory(facts: list[str]):
     try:
         with open(memory_path(), "w") as f:
             json.dump(facts[-50:], f, indent=2)
@@ -1747,7 +1751,7 @@ def save_user_memory(facts: List[str]):
         pass
 
 
-def load_conversation() -> List[Dict[str, str]]:
+def load_conversation() -> list[dict[str, str]]:
     try:
         with open(conversation_path(), "r") as f:
             data = json.load(f)
@@ -1758,7 +1762,7 @@ def load_conversation() -> List[Dict[str, str]]:
     return []
 
 
-def save_conversation(messages: List[Dict[str, str]]):
+def save_conversation(messages: list[dict[str, str]]):
     try:
         path = conversation_path()
         # Persist last 40 messages max to keep file small and token count sane.
@@ -1847,7 +1851,7 @@ def is_multi_step(prompt: str) -> bool:
     return any(re.search(p, low) for p in MULTI_STEP_PATTERNS)
 
 
-def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None, workspace: Optional[Any] = None) -> Optional[str]:
+def fast_execute(prompt: str, knowledge: BadAppleKnowledge | None = None, approval: Any | None = None, policy: Any | None = None, workspace: Any | None = None) -> str | None:
     """Fast deterministic path for common local tool commands.
 
     Recognizes patterns like:
@@ -1978,7 +1982,7 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
     return None
 
 
-def _resolve_tool_path(args: dict, key: str, workspace: Optional[Any] = None) -> Path:
+def _resolve_tool_path(args: dict, key: str, workspace: Any | None = None) -> Path:
     maybe = args.get(key)
     if maybe:
         return Path(maybe).expanduser()
@@ -1987,7 +1991,7 @@ def _resolve_tool_path(args: dict, key: str, workspace: Optional[Any] = None) ->
     return Path("~").expanduser()
 
 
-def _console_user() -> Optional[str]:
+def _console_user() -> str | None:
     """Return the name of the current console (Aqua/session) user, if any."""
     try:
         result = subprocess.run(
@@ -2001,7 +2005,7 @@ def _console_user() -> Optional[str]:
         return None
 
 
-def _run_as_user(cmd: List[str], user: Optional[str] = None, input_text: Optional[str] = None, timeout: int = 30):
+def _run_as_user(cmd: list[str], user: str | None = None, input_text: str | None = None, timeout: int = 30):
     """Run a subprocess as the console user when the daemon is root."""
     target = user or _console_user()
     if target and target != "root":
@@ -2016,11 +2020,11 @@ def _run_as_user(cmd: List[str], user: Optional[str] = None, input_text: Optiona
             text=True,
             timeout=timeout,
         )
-    except subprocess.TimeoutExpired as e:
+    except subprocess.TimeoutExpired:
         return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
 
-def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = None, approval: Optional[Any] = None, policy: Optional[Any] = None, workspace: Optional[Any] = None) -> str:
+def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, approval: Any | None = None, policy: Any | None = None, workspace: Any | None = None) -> str:
     if policy is not None:
         if not policy.is_allowed(name):
             return f"Policy: tool '{name}' is not allowed."
@@ -2535,7 +2539,7 @@ FORBIDDEN_WORDS = {
     "nivel", "conciencia", "estoy", "estás", "siento", "tengo", "ayuda", "algo",
     "papi", "mami", "amor", "corazón", "corazon", "cariño", "carino",
     "mija", "mijo", "besos", "cielo", "linda", "lindo", "princesa", "reina",
-    "mi amor", "corazon", "carino",
+    "mi amor",
 }
 
 def _strip_existing_signoff(text: str) -> str:
@@ -2567,7 +2571,7 @@ def _filter_english_sentences(text: str) -> str:
     return " ".join(cleaned).strip()
 
 
-def _queue_get(q: queue.Queue, timeout: float = 0.1) -> Optional[Any]:
+def _queue_get(q: queue.Queue, timeout: float = 0.1) -> Any | None:
     try:
         return q.get(block=True, timeout=timeout)
     except queue.Empty:
@@ -2605,7 +2609,7 @@ def postprocess_output(text: str, sign_off: str = "") -> str:
 
     # Collapse immediately repeated sentences (the 9B sometimes echoes itself).
     sentences = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", text) if s.strip()]
-    deduped: List[str] = []
+    deduped: list[str] = []
     for s in sentences:
         low = s.lower().strip(".!?")
         if deduped and low == deduped[-1].lower().strip(".!?"):
@@ -2632,7 +2636,7 @@ STOP_WORDS = {
 }
 
 
-def relevant_memories(user_prompt: str, memories: List[str]) -> List[str]:
+def relevant_memories(user_prompt: str, memories: list[str]) -> list[str]:
     words = set(w for w in re.findall(r"\b\w+\b", user_prompt.lower()) if w not in STOP_WORDS)
     scored = []
     for m in memories:
@@ -2651,7 +2655,7 @@ class MLXServer:
         self.prompt_file = Path(
             os.environ.get("BADAPPLE_PROMPT_FILE") or DEFAULT_PROMPT_FILE
         ).expanduser()
-        self.prompt_mtime: Optional[float] = self.prompt_file.stat().st_mtime if self.prompt_file.is_file() else None
+        self.prompt_mtime: float | None = self.prompt_file.stat().st_mtime if self.prompt_file.is_file() else None
 
         # OS extras: persona packs, output firewall, audit ledger, semantic cache,
         # and human-in-the-loop approvals.
@@ -2666,7 +2670,7 @@ class MLXServer:
         )
         self.model_registry = badapple_model_registry.ModelRegistry(self.data_dir)
         self._roast_index = 0
-        self.last_metrics: Optional[Dict[str, Any]] = None
+        self.last_metrics: dict[str, Any] | None = None
 
         # Runtime/health/breakers
         self.runtime = RuntimeControl(self.data_dir)
@@ -2711,7 +2715,7 @@ class MLXServer:
         elif loaded:
             self.messages = [{"role": "system", "content": system_prompt}] + loaded
         else:
-            self.messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+            self.messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
         self.dflash_bundle = None
         self.dflash_runtime_context = None
@@ -2796,7 +2800,7 @@ class MLXServer:
 
         self.runtime.set_ready()
 
-    def flush_vram(self) -> Dict[str, Any]:
+    def flush_vram(self) -> dict[str, Any]:
         """Clear the Metal allocation cache instantly."""
         try:
             before = mx.get_cache_memory() / (1024 ** 2)
@@ -2806,9 +2810,9 @@ class MLXServer:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def unload_model(self, model_type: str = "vision") -> Dict[str, Any]:
+    def unload_model(self, model_type: str = "vision") -> dict[str, Any]:
         """Unload heavy optional models to reclaim RAM without killing the daemon."""
-        results: Dict[str, Any] = {}
+        results: dict[str, Any] = {}
         if model_type in ("vision", "all"):
             results["vision"] = badapple_vision.unload_vision_model()
         if model_type in ("image", "all"):
@@ -2836,7 +2840,7 @@ class MLXServer:
             self.hibernating = False
             print("[hibernate] resumed from hibernation", flush=True)
 
-    def _is_passive_method(self, method: Optional[str], prompt: str = "") -> bool:
+    def _is_passive_method(self, method: str | None, prompt: str = "") -> bool:
         """Return True for status/monitoring requests that should not reset idle."""
         if method:
             return method in {
@@ -2858,7 +2862,7 @@ class MLXServer:
                 self.unload_model("all")
                 self.hibernating = True
 
-    def active_models(self) -> List[str]:
+    def active_models(self) -> list[str]:
         """Return a list of currently resident heavy models."""
         models = ["main_9b"]
         if self.draft_model is not None:
@@ -2984,12 +2988,12 @@ class MLXServer:
             history = history[2:]
         self.messages = system + history
 
-    def build_messages(self, user_prompt: str) -> List[Dict[str, str]]:
+    def build_messages(self, user_prompt: str) -> list[dict[str, str]]:
         self.messages.append({"role": "user", "content": user_prompt})
         self.prune_history()
         return list(self.messages)
 
-    def plan_and_execute(self, task: str, max_tokens: int, voice_mode: bool = False) -> Optional[str]:
+    def plan_and_execute(self, task: str, max_tokens: int, voice_mode: bool = False) -> str | None:
         """Generate a step plan and execute it using local tools."""
         # 1. Ask the 8B for a dry, structured plan.
         plan_messages = [
@@ -3044,7 +3048,7 @@ class MLXServer:
         # No SAY step: just return the last tool result with persona polish.
         return postprocess_output(last_tool_result)
 
-    def render_prompt(self, messages: List[Dict[str, str]], use_tools: bool = False, voice_mode: bool = False, benchmark: bool = False) -> str:
+    def render_prompt(self, messages: list[dict[str, str]], use_tools: bool = False, voice_mode: bool = False, benchmark: bool = False) -> str:
         # Build retrieved context from long-term memory and local documents.
         # Keep it tight: prompt encoding is the biggest latency hit on Apple Silicon.
         t0 = time.time()
@@ -3156,7 +3160,7 @@ class MLXServer:
         user_prompt: str,
         max_tokens: int,
         voice_mode: bool = False,
-        stream_queue: Optional[queue.Queue] = None,
+        stream_queue: queue.Queue | None = None,
         benchmark: bool = False,
     ) -> str:
         self.touch_activity()
@@ -3303,7 +3307,7 @@ class MLXServer:
         self._cache_store(user_prompt, final)
         return final
 
-    def _run_approved_tool(self, name: str, args: Dict[str, Any], user_prompt: str) -> str:
+    def _run_approved_tool(self, name: str, args: dict[str, Any], user_prompt: str) -> str:
         """Run a tool, but gate destructive tools behind the approval workflow."""
         if not self.runtime.allows_mutation():
             return "Runtime is stopped or in safe mode; tool execution is disabled."
@@ -3386,7 +3390,7 @@ class MLXServer:
             self.breakers["tools"].failure()
             return f"Tool error: {e}"
 
-    def _extract_agent_json(self, text: str) -> Optional[Dict[str, Any]]:
+    def _extract_agent_json(self, text: str) -> dict[str, Any] | None:
         """Pull a JSON object out of a model response for the agent loop."""
         # Try a fenced JSON block first.
         m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
@@ -3404,7 +3408,7 @@ class MLXServer:
                 pass
         return None
 
-    def _extract_agent_xml(self, text: str) -> Optional[Dict[str, Any]]:
+    def _extract_agent_xml(self, text: str) -> dict[str, Any] | None:
         """Convert a Qwen-style <tool_call> into an agent decision."""
         calls, _ = extract_tool_calls(text)
         if not calls:
@@ -3430,7 +3434,7 @@ class MLXServer:
             for t in agent_tools
         )
 
-        history: List[Dict[str, Any]] = []
+        history: list[dict[str, Any]] = []
         system_prompt = (
             "You are an autonomous agent inside Bad Apple. "
             "You have a goal and a focused set of tools. "
@@ -3508,7 +3512,7 @@ class MLXServer:
         """
         import gc
 
-        print(f"[model_registry] unloading current model...", flush=True)
+        print("[model_registry] unloading current model...", flush=True)
         try:
             del self.model
             del self.tokenizer
@@ -3538,7 +3542,7 @@ class MLXServer:
         self,
         prompt: str,
         max_tokens: int,
-        stream_queue: Optional[queue.Queue] = None,
+        stream_queue: queue.Queue | None = None,
         voice_mode: bool = False,
     ) -> str:
         t0 = time.time()
@@ -3670,9 +3674,9 @@ class MLXServer:
     def _stream_dflash(
         self,
         prompt: str,
-        tokens: List[int],
+        tokens: list[int],
         max_tokens: int,
-        stream_queue: Optional[queue.Queue] = None,
+        stream_queue: queue.Queue | None = None,
         bundle: Any = None,
         runtime_context: Any = None,
     ) -> str:
@@ -3716,12 +3720,12 @@ class MLXServer:
 
         accumulated = ""
         stream_buffer = ""
-        summary: Optional[SummaryEvent] = None
+        summary: SummaryEvent | None = None
         token_count = 0
         mx.reset_peak_memory()
         gen_t0 = time.time()
         first_token_logged = False
-        first_token_time: Optional[float] = None
+        first_token_time: float | None = None
         for event in stream_dflash_generate(
             target_model=bundle.target_model,
             target_ops=bundle.target_ops,
@@ -3876,8 +3880,8 @@ class MLXServer:
             {"id": "req-3", "method": "inference", "params": {"prompt": "what is 2+2?", "max_new_tokens": 120}}
         """
 
-        async def _respond(req_id: Optional[str], result: Any, error: Optional[str] = None):
-            frame: Dict[str, Any] = {"id": req_id}
+        async def _respond(req_id: str | None, result: Any, error: str | None = None):
+            frame: dict[str, Any] = {"id": req_id}
             if error:
                 frame["type"] = "error"
                 frame["message"] = error
@@ -4719,7 +4723,7 @@ async def main():
         print(f"[main] Scheduler failed to start: {e}", flush=True)
 
     # Start the local MCP server (Unix socket only; uses the same SLICKS agent channel).
-    mcp_process: Optional[subprocess.Popen] = None
+    mcp_process: subprocess.Popen | None = None
     try:
         mcp_env = os.environ.copy()
         mcp_env.setdefault("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock")

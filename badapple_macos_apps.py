@@ -5,10 +5,7 @@ applications via AppleScript. No cloud APIs are used.
 """
 
 import subprocess
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
 
 CONTACTS_FILE = Path("/var/lib/bad_apple/allowed_contacts.json")
 

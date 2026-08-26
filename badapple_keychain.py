@@ -11,7 +11,6 @@ import os
 import secrets
 import shutil
 import subprocess
-from typing import Optional
 
 DEFAULT_SERVICE = "com.badapple.slicks"
 DEFAULT_ACCOUNT = "mlx-server"
@@ -39,7 +38,7 @@ def _keychain_file() -> str:
     return ""
 
 
-def get_secret(service: str = DEFAULT_SERVICE, account: str = DEFAULT_ACCOUNT) -> Optional[bytes]:
+def get_secret(service: str = DEFAULT_SERVICE, account: str = DEFAULT_ACCOUNT) -> bytes | None:
     """Load the SLICKS secret from the macOS Keychain."""
     keychain = _keychain_file()
     cmd = ["security", "find-generic-password", "-s", service, "-a", account, "-w"]

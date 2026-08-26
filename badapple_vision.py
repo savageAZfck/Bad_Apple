@@ -6,21 +6,19 @@ language-vision model run through `mlx-vlm`. No cloud, no network once the
 model weights are cached.
 """
 
-import base64
 import os
 import subprocess
 import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import List, Optional
 
 import mlx.core as mx
 
 _VLM_LOADED = False
 try:
-    from mlx_vlm import load as _vlm_load
     from mlx_vlm import generate as _vlm_generate
+    from mlx_vlm import load as _vlm_load
     _VLM_LOADED = True
 except Exception:
     _vlm_load = None
@@ -86,7 +84,7 @@ class VisionHost:
             return f"Vision error: {e}"
 
 
-def _console_user() -> Optional[str]:
+def _console_user() -> str | None:
     try:
         r = subprocess.run(
             ["stat", "-f", "%Su", "/dev/console"],
@@ -99,7 +97,7 @@ def _console_user() -> Optional[str]:
         return None
 
 
-def _run_as_user(cmd: List[str], user: Optional[str] = None, input_text: Optional[str] = None, timeout: int = 30):
+def _run_as_user(cmd: list[str], user: str | None = None, input_text: str | None = None, timeout: int = 30):
     target = user or _console_user()
     if target and target != "root":
         full = ["sudo", "-n", "-u", target] + cmd
@@ -117,7 +115,7 @@ def _run_as_user(cmd: List[str], user: Optional[str] = None, input_text: Optiona
         return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
 
-def capture_screen(path: Optional[Path] = None, region: str = "") -> Path:
+def capture_screen(path: Path | None = None, region: str = "") -> Path:
     """Capture the full main screen to a PNG using macOS screencapture.
 
     In a LaunchDaemon context, this calls the Aqua helper running in the user
@@ -166,7 +164,7 @@ def extract_text_from_screen(max_tokens: int = 256) -> str:
 
 
 # Shared, lazy instance.
-_vision_host: Optional[VisionHost] = None
+_vision_host: VisionHost | None = None
 
 
 def get_vision_host(model_name: str = DEFAULT_VLM_MODEL) -> VisionHost:

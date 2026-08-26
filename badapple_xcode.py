@@ -9,14 +9,13 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, List
-
+from typing import Any
 
 CODE_SUFFIXES = {".swift", ".m", ".mm", ".h", ".c", ".cpp", ".metal", ".glsl", ".py", ".rs", ".go", ".java"}
 
 
-def _find_source_files(project_path: Path) -> List[Path]:
-    files: List[Path] = []
+def _find_source_files(project_path: Path) -> list[Path]:
+    files: list[Path] = []
     for root, _dirs, names in os.walk(project_path):
         for name in names:
             p = Path(root) / name

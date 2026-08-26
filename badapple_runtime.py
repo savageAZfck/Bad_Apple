@@ -7,14 +7,15 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 import psutil
 
 
-def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -39,7 +40,7 @@ class RuntimeControl:
         if self._state.get("killed"):
             self.cancel_event.set()
 
-    def _load(self) -> Dict[str, Any]:
+    def _load(self) -> dict[str, Any]:
         default = {
             "schema_version": self.SCHEMA_VERSION,
             "mode": "STARTING",
@@ -57,7 +58,7 @@ class RuntimeControl:
             pass
         return default
 
-    def _update(self, **changes: Any) -> Dict[str, Any]:
+    def _update(self, **changes: Any) -> dict[str, Any]:
         with self._lock:
             self._state.update(changes)
             self._state["revision"] = int(self._state.get("revision", 0)) + 1
@@ -80,27 +81,27 @@ class RuntimeControl:
         with self._lock:
             return self._state.get("mode") == "SAFE_MODE"
 
-    def set_ready(self) -> Dict[str, Any]:
+    def set_ready(self) -> dict[str, Any]:
         if self.killed or self.safe_mode:
             return self.status()
         return self._update(mode="READY")
 
-    def set_private_mode(self, enabled: bool) -> Dict[str, Any]:
+    def set_private_mode(self, enabled: bool) -> dict[str, Any]:
         return self._update(private_mode=bool(enabled))
 
-    def engage_kill_switch(self, reason: str = "user requested") -> Dict[str, Any]:
+    def engage_kill_switch(self, reason: str = "user requested") -> dict[str, Any]:
         self.cancel_event.set()
         return self._update(killed=True, mode="STOPPED", kill_reason=reason)
 
-    def reset_kill_switch(self) -> Dict[str, Any]:
+    def reset_kill_switch(self) -> dict[str, Any]:
         self.cancel_event.clear()
         mode = "SAFE_MODE" if self._state.get("safe_mode_reason") else "READY"
         return self._update(killed=False, mode=mode, kill_reason=None)
 
-    def enter_safe_mode(self, reason: str) -> Dict[str, Any]:
+    def enter_safe_mode(self, reason: str) -> dict[str, Any]:
         return self._update(mode="SAFE_MODE", safe_mode_reason=reason)
 
-    def leave_safe_mode(self) -> Dict[str, Any]:
+    def leave_safe_mode(self) -> dict[str, Any]:
         mode = "STOPPED" if self.killed else "READY"
         return self._update(mode=mode, safe_mode_reason=None)
 
@@ -110,7 +111,7 @@ class RuntimeControl:
     def allows_mutation(self) -> bool:
         return not self.killed and not self.safe_mode
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._state)
 
@@ -132,7 +133,7 @@ class CircuitBreaker:
         self.recovery_seconds = max(0.1, recovery_seconds)
         self._lock = threading.Lock()
         self._failures = 0
-        self._opened_at: Optional[float] = None
+        self._opened_at: float | None = None
         self._half_open_probe = False
 
     def allow(self) -> bool:
@@ -174,7 +175,7 @@ class HealthRegistry:
     """Separates process liveness, semantic readiness, and correctness checks."""
 
     def __init__(self):
-        self._checks: Dict[str, tuple[str, Callable[[], Any]]] = {}
+        self._checks: dict[str, tuple[str, Callable[[], Any]]] = {}
         self._lock = threading.Lock()
 
     def register(self, name: str, level: str, check: Callable[[], Any]) -> None:
@@ -183,8 +184,8 @@ class HealthRegistry:
         with self._lock:
             self._checks[name] = (level, check)
 
-    def snapshot(self) -> Dict[str, Any]:
-        results: Dict[str, Any] = {}
+    def snapshot(self) -> dict[str, Any]:
+        results: dict[str, Any] = {}
         with self._lock:
             checks = dict(self._checks)
         for name, (level, check) in checks.items():
@@ -222,7 +223,7 @@ class ResourceGovernor:
         self.min_battery_percent = min_battery_percent
 
     @staticmethod
-    def _battery() -> tuple[Optional[int], bool]:
+    def _battery() -> tuple[int | None, bool]:
         try:
             out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3).stdout
             match = re.search(r"(\d+)%", out)
@@ -230,7 +231,7 @@ class ResourceGovernor:
         except Exception:
             return None, False
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         memory = psutil.virtual_memory()
         battery, plugged_in = self._battery()
         load = os.getloadavg()[0]
@@ -243,7 +244,7 @@ class ResourceGovernor:
             "cpu_count": psutil.cpu_count() or 1,
         }
 
-    def admit(self, capability: str) -> tuple[bool, str, Dict[str, Any]]:
+    def admit(self, capability: str) -> tuple[bool, str, dict[str, Any]]:
         state = self.snapshot()
         if capability not in self.HEAVY_CAPABILITIES:
             return True, "routine capability", state

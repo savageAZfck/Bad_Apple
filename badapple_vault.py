@@ -10,8 +10,9 @@ import shutil
 import tarfile
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -36,7 +37,7 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -51,7 +52,7 @@ class ArtifactManifest:
     SCHEMA_VERSION = 1
 
     @classmethod
-    def create(cls, artifacts: Iterable[Path], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def create(cls, artifacts: Iterable[Path], metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         records = []
         for artifact in artifacts:
             path = Path(artifact).expanduser().resolve()
@@ -66,19 +67,19 @@ class ArtifactManifest:
         }
 
     @staticmethod
-    def signing_payload(manifest: Dict[str, Any]) -> bytes:
+    def signing_payload(manifest: dict[str, Any]) -> bytes:
         unsigned = dict(manifest)
         unsigned.pop("seal", None)
         return json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     @classmethod
-    def seal(cls, manifest: Dict[str, Any], public_key: str, signature: str) -> Dict[str, Any]:
+    def seal(cls, manifest: dict[str, Any], public_key: str, signature: str) -> dict[str, Any]:
         sealed = dict(manifest)
         sealed["seal"] = {"algorithm": "secure-enclave-p256-sha256", "public_key": public_key, "signature": signature}
         return sealed
 
     @classmethod
-    def verify(cls, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    def verify(cls, manifest: dict[str, Any]) -> dict[str, Any]:
         results = []
         for record in manifest.get("artifacts", []):
             path = Path(record.get("path", ""))
@@ -91,7 +92,7 @@ class ArtifactManifest:
                 "expected_sha256": record.get("sha256"),
                 "actual_sha256": actual,
             })
-        signature_valid: Optional[bool] = None
+        signature_valid: bool | None = None
         seal = manifest.get("seal")
         if isinstance(seal, dict):
             try:
@@ -127,7 +128,7 @@ class GenerationStore:
         self.keep = max(2, keep)
         self.current_path = self.root / "current.json"
 
-    def commit(self, name: str, sources: Dict[str, Path], metadata: Optional[Dict[str, Any]] = None) -> str:
+    def commit(self, name: str, sources: dict[str, Path], metadata: dict[str, Any] | None = None) -> str:
         generation_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         staging = self.root / f".{generation_id}.staging"
         final = self.root / generation_id
@@ -175,13 +176,13 @@ class GenerationStore:
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
-    def current(self) -> Optional[Dict[str, Any]]:
+    def current(self) -> dict[str, Any] | None:
         try:
             return json.loads(self.current_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
 
-    def verify(self, generation_id: str) -> Dict[str, Any]:
+    def verify(self, generation_id: str) -> dict[str, Any]:
         generation = self.root / generation_id
         try:
             manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
@@ -196,7 +197,7 @@ class GenerationStore:
         valid = marker == generation_id and manifest.get("generation_id") == generation_id and bool(results) and all(r["valid"] for r in results)
         return {"valid": valid, "generation_id": generation_id, "manifest": manifest, "files": results}
 
-    def latest_valid(self) -> Optional[str]:
+    def latest_valid(self) -> str | None:
         candidates = sorted(
             (p.name for p in self.root.iterdir() if p.is_dir() and not p.name.startswith(".")),
             reverse=True,
@@ -206,7 +207,7 @@ class GenerationStore:
                 return generation_id
         return None
 
-    def restore(self, generation_id: str, destination: Path) -> Dict[str, Any]:
+    def restore(self, generation_id: str, destination: Path) -> dict[str, Any]:
         verification = self.verify(generation_id)
         if not verification.get("valid"):
             raise ValueError(f"generation {generation_id} failed verification")
@@ -252,7 +253,7 @@ class EncryptedBackup:
         )
 
     @classmethod
-    def create(cls, source_dir: Path, output_path: Path, passphrase: str) -> Dict[str, Any]:
+    def create(cls, source_dir: Path, output_path: Path, passphrase: str) -> dict[str, Any]:
         source_dir = Path(source_dir).expanduser().resolve()
         output_path = Path(output_path).expanduser().resolve()
         if not source_dir.is_dir():
@@ -277,7 +278,7 @@ class EncryptedBackup:
         return {"path": str(output_path), "size": output_path.stat().st_size, "sha256": _hash_file(output_path)}
 
     @classmethod
-    def extract(cls, archive_path: Path, destination: Path, passphrase: str) -> Dict[str, Any]:
+    def extract(cls, archive_path: Path, destination: Path, passphrase: str) -> dict[str, Any]:
         raw = Path(archive_path).expanduser().read_bytes()
         if not raw.startswith(MAGIC) or len(raw) < len(MAGIC) + 28:
             raise ValueError("not a Bad Apple encrypted backup")

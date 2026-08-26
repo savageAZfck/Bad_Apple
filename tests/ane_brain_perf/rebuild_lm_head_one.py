@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Rebuild the LM head as a single contiguous shard and compile it for CPU+ANE."""
 import json
-import sys
 import shutil
+import sys
 import time
 from pathlib import Path
 

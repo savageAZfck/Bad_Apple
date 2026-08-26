@@ -7,12 +7,10 @@ Uses `mlx-audio` Whisper models. No cloud after the model is cached.
 import os
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 
 def _available() -> bool:
     try:
-        from mlx_audio.stt.generate import generate_transcription
         return True
     except Exception:
         return False

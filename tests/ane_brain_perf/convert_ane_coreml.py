@@ -740,6 +740,7 @@ def _woodbury_gptq_compress(conv_module, hook_inputs, group_size=32,
     - Full control over damping, block size, and quantization parameters
     """
     import time
+
     import torch
     import torch.nn as _nn
 
@@ -1017,7 +1018,7 @@ def _apply_gptq(model, gguf_model, token_embd, cfg, n_layers, max_seq_len,
             del qkv_hook_inputs, out_hook_inputs, gate_up_hook_inputs, down_hook_inputs
 
         # GPTQ the LM head
-        print(f"  GPTQ lm_head...")
+        print("  GPTQ lm_head...")
         lm_head_inputs = []
         for x in hidden_states:
             normed = model.output_norm(x)
@@ -1135,7 +1136,7 @@ def _apply_smoothquant(model, gguf_model, token_embd, cfg, n_layers, max_seq_len
 
             # Apply smoothing in fp32 — no nan_to_num needed since fp32 doesn't overflow
             layer.attn_norm.weight.data.copy_(
-                (layer.attn_norm.weight / s_qkv.reshape(-1, 1, 1)))
+                layer.attn_norm.weight / s_qkv.reshape(-1, 1, 1))
             layer.qkv_conv.weight.data.copy_(
                 (qkv_w * s_qkv.unsqueeze(0)).reshape_as(layer.qkv_conv.weight))
 
@@ -1148,7 +1149,7 @@ def _apply_smoothquant(model, gguf_model, token_embd, cfg, n_layers, max_seq_len
             s_ffn = (ffn_act_max.pow(alpha) / gate_up_w_max.pow(1 - alpha)).clamp(min=0.01, max=100.0)
 
             layer.ffn_norm.weight.data.copy_(
-                (layer.ffn_norm.weight / s_ffn.reshape(-1, 1, 1)))
+                layer.ffn_norm.weight / s_ffn.reshape(-1, 1, 1))
             layer.gate_up_conv.weight.data.copy_(
                 (gate_up_w * s_ffn.unsqueeze(0)).reshape_as(layer.gate_up_conv.weight))
 
@@ -1166,8 +1167,8 @@ def build_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
                 group_size=32, strategy="uniform", compute_units="all"):
     import coremltools as ct
     import torch
-    import torch.nn as nn
     import torch.nn.functional as F
+    from torch import nn
 
     print(f"Loading GGUF: {gguf_path}")
     gguf = GGUFModel(gguf_path)
@@ -1541,7 +1542,7 @@ def build_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
 
     print(f"\n{'='*60}")
     print(f"  Model:      {gguf.meta('general.name', cfg['arch'])} ({n_layers}L, d={d}, nh={nh}, nkv={nkv})")
-    print(f"  Format:     CoreML mlprogram (iOS18+)")
+    print("  Format:     CoreML mlprogram (iOS18+)")
     print(f"  Dtype:      Float16{f' + int{quant_bits} weights' if quant_bits else ''}")
     print(f"  KV Cache:   StateType (on-device, {max_seq_len} positions)")
     print(f"  Tokenizer:  BPE ({len(tok_data['tokens'])} vocab)")
@@ -1566,8 +1567,8 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
     """
     import coremltools as ct
     import torch
-    import torch.nn as nn
     import torch.nn.functional as F
+    from torch import nn
 
     print(f"Loading GGUF: {gguf_path}")
     gguf = GGUFModel(gguf_path)
@@ -2020,8 +2021,8 @@ def build_fixed_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0,
 
     print(f"\n{'='*60}")
     print(f"  Model:      {gguf.meta('general.name', cfg['arch'])} ({n_layers}L, d={d}, nh={nh}, nkv={nkv})")
-    print(f"  Format:     CoreML mlprogram (iOS18+)")
-    print(f"  Shapes:     FIXED (all static, no RangeDim)")
+    print("  Format:     CoreML mlprogram (iOS18+)")
+    print("  Shapes:     FIXED (all static, no RangeDim)")
     print(f"  Attention:  Batched GQA ({n_layers * nkv * 2} matmuls, not {n_layers * nh * 2})")
     print(f"  Dtype:      Float16{f' + int{quant_bits} weights' if quant_bits else ''}")
     print(f"  KV Cache:   Fixed {max_seq_len} positions (masked)")
@@ -2088,8 +2089,8 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
         max_seq_len = MIN_SEQ_LEN
     import coremltools as ct
     import torch
-    import torch.nn as nn
     import torch.nn.functional as F
+    from torch import nn
 
     print(f"Loading GGUF: {gguf_path}")
     gguf = GGUFModel(gguf_path)
@@ -2719,7 +2720,7 @@ def build_stateful_model(gguf_path, n_layers=None, max_seq_len=512, quant_bits=0
     print(f"\n{'='*60}")
     print(f"  Model:      {gguf.meta('general.name', cfg['arch'])} ({shard_n}L [{layer_start},{layer_end}), d={d}, nh={nh}, nkv={nkv})")
     print(f"  Split:      {split_mode}")
-    print(f"  Format:     CoreML mlprogram (iOS18+)")
+    print("  Format:     CoreML mlprogram (iOS18+)")
     print(f"  KV Cache:   {kv_label}")
     if split_mode != "ffn":
         print(f"  Attention:  Batched GQA ({shard_n * nkv * 2} matmul ops)")
@@ -2737,7 +2738,7 @@ def build_lm_head_shard(gguf_path, vocab_start, vocab_end, output_dir,
                         output_name, quant_bits=8, compute_units="all"):
     import coremltools as ct
     import torch
-    import torch.nn as nn
+    from torch import nn
 
     gguf = GGUFModel(gguf_path)
     cfg = gguf.config()

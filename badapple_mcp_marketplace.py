@@ -12,20 +12,16 @@ cloud dependency.  Servers must be installed locally (npx, uvx, python, etc.).
 
 import json
 import os
-import re
 import subprocess
 import threading
-import time
-import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 
 DEFAULT_REGISTRY = Path("/var/lib/bad_apple/mcp_servers.json")
 DEFAULT_TIMEOUT = 30
 
 
-def _load_registry() -> Dict[str, Any]:
+def _load_registry() -> dict[str, Any]:
     if DEFAULT_REGISTRY.is_file():
         try:
             return json.loads(DEFAULT_REGISTRY.read_text(encoding="utf-8"))
@@ -34,7 +30,7 @@ def _load_registry() -> Dict[str, Any]:
     return {"servers": []}
 
 
-def _save_registry(data: Dict[str, Any]) -> None:
+def _save_registry(data: dict[str, Any]) -> None:
     DEFAULT_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     with open(DEFAULT_REGISTRY, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -43,16 +39,16 @@ def _save_registry(data: Dict[str, Any]) -> None:
 class MCPClient:
     """A lightweight stdio MCP client."""
 
-    def __init__(self, name: str, command: List[str], env: Optional[Dict[str, str]] = None):
+    def __init__(self, name: str, command: list[str], env: dict[str, str] | None = None):
         self.name = name
         self.command = command
         self.env = env or {}
-        self._proc: Optional[subprocess.Popen] = None
+        self._proc: subprocess.Popen | None = None
         self._lock = threading.RLock()
         self._next_id = 1
-        self._pending: Dict[str, Any] = {}
-        self._reader: Optional[threading.Thread] = None
-        self._tools: List[Dict[str, Any]] = []
+        self._pending: dict[str, Any] = {}
+        self._reader: threading.Thread | None = None
+        self._tools: list[dict[str, Any]] = []
 
     def _next_jsonrpc_id(self) -> int:
         with self._lock:
@@ -60,7 +56,7 @@ class MCPClient:
             self._next_id += 1
             return i
 
-    def _send_line(self, obj: Dict[str, Any]) -> None:
+    def _send_line(self, obj: dict[str, Any]) -> None:
         if self._proc is None or self._proc.stdin is None:
             raise RuntimeError("MCP server is not running")
         line = json.dumps(obj, separators=(",", ":")) + "\n"
@@ -86,7 +82,7 @@ class MCPClient:
                     event["msg"] = msg
                     event["done"].set()
 
-    def _call(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = DEFAULT_TIMEOUT) -> Any:
+    def _call(self, method: str, params: dict[str, Any] | None = None, timeout: int = DEFAULT_TIMEOUT) -> Any:
         req_id = self._next_jsonrpc_id()
         req = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params is not None:
@@ -146,10 +142,10 @@ class MCPClient:
                 pass
             self._proc = None
 
-    def tools(self) -> List[Dict[str, Any]]:
+    def tools(self) -> list[dict[str, Any]]:
         return list(self._tools)
 
-    def call_tool(self, tool_name: str, arguments: Dict[str, Any], timeout: int = 60) -> Any:
+    def call_tool(self, tool_name: str, arguments: dict[str, Any], timeout: int = 60) -> Any:
         return self._call("tools/call", {"name": tool_name, "arguments": arguments}, timeout=timeout)
 
 
@@ -157,14 +153,14 @@ class MCPMarketplace:
     """Registry + active clients for local MCP servers."""
 
     def __init__(self):
-        self._clients: Dict[str, MCPClient] = {}
+        self._clients: dict[str, MCPClient] = {}
         self._lock = threading.RLock()
 
-    def list_servers(self) -> List[Dict[str, Any]]:
+    def list_servers(self) -> list[dict[str, Any]]:
         data = _load_registry()
         return data.get("servers", [])
 
-    def add_server(self, name: str, command: List[str], env: Optional[Dict[str, str]] = None) -> str:
+    def add_server(self, name: str, command: list[str], env: dict[str, str] | None = None) -> str:
         data = _load_registry()
         servers = data.get("servers", [])
         for s in servers:
@@ -186,7 +182,7 @@ class MCPMarketplace:
             client.stop()
         return f"Removed MCP server '{name}'."
 
-    def get_client(self, name: str) -> Optional[MCPClient]:
+    def get_client(self, name: str) -> MCPClient | None:
         with self._lock:
             client = self._clients.get(name)
             if client is not None:
@@ -200,13 +196,13 @@ class MCPMarketplace:
                     return None
         return None
 
-    def list_tools(self, name: str) -> List[Dict[str, Any]]:
+    def list_tools(self, name: str) -> list[dict[str, Any]]:
         client = self.get_client(name)
         if client is None:
             return []
         return client.tools()
 
-    def invoke(self, server: str, tool: str, arguments: Dict[str, Any]) -> str:
+    def invoke(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         client = self.get_client(server)
         if client is None:
             return f"Error: MCP server '{server}' not found or failed to start."
@@ -226,7 +222,7 @@ class MCPMarketplace:
 _MARKETPLACE = MCPMarketplace()
 
 
-def add_mcp_server(name: str, command: str, env: Optional[Dict[str, str]] = None) -> str:
+def add_mcp_server(name: str, command: str, env: dict[str, str] | None = None) -> str:
     """command is a shell-style string; split with shell semantics."""
     import shlex
     return _MARKETPLACE.add_server(name, shlex.split(command), env)
@@ -250,7 +246,7 @@ def list_mcp_tools(server: str) -> str:
     return "\n".join(f"- {t['name']}: {t.get('description', '')}" for t in tools)
 
 
-def invoke_mcp_tool(server: str, tool: str, arguments: Dict[str, Any]) -> str:
+def invoke_mcp_tool(server: str, tool: str, arguments: dict[str, Any]) -> str:
     return _MARKETPLACE.invoke(server, tool, arguments)
 
 

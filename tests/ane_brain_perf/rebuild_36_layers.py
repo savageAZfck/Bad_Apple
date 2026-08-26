@@ -34,6 +34,7 @@ manifest["status"] = "pending"
 manifest["updated_at_unix"] = None
 
 import time
+
 manifest["updated_at_unix"] = time.time()
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 print("Manifest reset; 36 layer shards will be rebuilt on next pipeline run.")

@@ -20,15 +20,13 @@ import os
 import shutil
 import socket
 import time
-import traceback
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Optional
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
 
 P2P_VERSION = 1
 P2P_BROADCAST_PORT = int(os.environ.get("BADAPPLE_P2P_UDP_PORT", "9999"))
@@ -112,10 +110,10 @@ class P2PDaemon:
         self,
         secret: bytes,
         data_dir: Path,
-        memory: Optional[Any] = None,
+        memory: Any | None = None,
         broadcast_port: int = P2P_BROADCAST_PORT,
         sync_port: int = P2P_SYNC_PORT,
-        workspace: Optional[Any] = None,
+        workspace: Any | None = None,
     ):
         self.enc_key, self.mac_key = _derive_keys(secret)
         self.origin_id = _origin_id(secret)
@@ -124,10 +122,10 @@ class P2PDaemon:
         self.workspace = workspace
         self.broadcast_port = broadcast_port
         self.sync_port = sync_port
-        self.peers: Dict[str, Peer] = {}
-        self._seen_nonces: Set[str] = set()
+        self.peers: dict[str, Peer] = {}
+        self._seen_nonces: set[str] = set()
         self._nonce_window: int = 10000
-        self._tasks: List[asyncio.Task] = []
+        self._tasks: list[asyncio.Task] = []
         self._running = False
         self._aes = AESGCM(self.enc_key)
 
@@ -146,7 +144,7 @@ class P2PDaemon:
         ct = self._aes.encrypt(nonce, plaintext, None)
         return base64.b64encode(nonce).decode(), base64.b64encode(ct).decode()
 
-    def _decrypt(self, nonce_b64: str, payload_b64: str) -> Optional[bytes]:
+    def _decrypt(self, nonce_b64: str, payload_b64: str) -> bytes | None:
         try:
             nonce = base64.b64decode(nonce_b64)
             ct = base64.b64decode(payload_b64)
@@ -345,7 +343,8 @@ class P2PDaemon:
                 target = adapters_dir / adapter_name
                 try:
                     target.mkdir(parents=True, exist_ok=True)
-                    import zipfile, io
+                    import io
+                    import zipfile
                     zip_bytes = base64.b64decode(packet.get("data_b64", ""))
                     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
                         zf.extractall(target)
@@ -519,7 +518,7 @@ class P2PDaemon:
 
 
 # Global reference set by the main server so standalone `run_tool` can reach it.
-_p2p_daemon: Optional[P2PDaemon] = None
+_p2p_daemon: P2PDaemon | None = None
 
 
 def set_p2p_daemon(daemon: P2PDaemon):
@@ -527,5 +526,5 @@ def set_p2p_daemon(daemon: P2PDaemon):
     _p2p_daemon = daemon
 
 
-def get_p2p_daemon() -> Optional[P2PDaemon]:
+def get_p2p_daemon() -> P2PDaemon | None:
     return _p2p_daemon

@@ -12,12 +12,10 @@ import json
 import os
 import socketserver
 import subprocess
-import sys
-import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 DEFAULT_SOCKET_PATH = "/var/run/badapple/aqua_helper.sock"
 
@@ -35,7 +33,7 @@ def _remove_stale(path: str) -> None:
         pass
 
 
-def _run_shortcut(name: str, input_text: str = "", timeout: int = 60) -> Dict[str, Any]:
+def _run_shortcut(name: str, input_text: str = "", timeout: int = 60) -> dict[str, Any]:
     if not name:
         return {"ok": False, "error": "shortcut name is required"}
     try:
@@ -56,7 +54,7 @@ def _run_shortcut(name: str, input_text: str = "", timeout: int = 60) -> Dict[st
         return {"ok": False, "error": f"shortcut error: {e}"}
 
 
-def _list_shortcuts(timeout: int = 15) -> Dict[str, Any]:
+def _list_shortcuts(timeout: int = 15) -> dict[str, Any]:
     try:
         result = subprocess.run(["shortcuts", "list"], capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
@@ -67,7 +65,7 @@ def _list_shortcuts(timeout: int = 15) -> Dict[str, Any]:
         return {"ok": False, "error": f"list error: {e}"}
 
 
-def _capture_screen(path: str, region: str = "") -> Dict[str, Any]:
+def _capture_screen(path: str, region: str = "") -> dict[str, Any]:
     """Capture the main screen to a PNG using the Bad Apple screen-capture helper.
 
     Falls back to macOS screencapture if the helper is missing.
@@ -109,7 +107,7 @@ def _capture_screen(path: str, region: str = "") -> Dict[str, Any]:
         return {"ok": False, "error": f"screen capture error: {e}"}
 
 
-def _helper_executable(name: str) -> Optional[str]:
+def _helper_executable(name: str) -> str | None:
     for path in [
         f"/Applications/Bad Apple.app/Contents/Helpers/{name}",
         str(Path.home() / "bad_apple/target/release/Bad Apple.app/Contents/Helpers/{name}"),
@@ -120,7 +118,7 @@ def _helper_executable(name: str) -> Optional[str]:
     return None
 
 
-def _ui_via_menubar(action: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
+def _ui_via_menubar(action: str, **kwargs: Any) -> dict[str, Any] | None:
     """Ask the Bad Apple menu bar (which holds Accessibility) to run a UI action.
 
     Uses a simple file IPC in /var/run/badapple because the menu bar is a GUI
@@ -163,7 +161,7 @@ def _ui_via_menubar(action: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _ui_info() -> Dict[str, Any]:
+def _ui_info() -> dict[str, Any]:
     """Return the frontmost app/window and a JSON UI tree."""
     # Prefer the menu bar process, which has Accessibility and can prompt.
     result = _ui_via_menubar("info")
@@ -215,7 +213,7 @@ def _ui_info() -> Dict[str, Any]:
     return {"ok": True, "app": parts[0], "window": parts[1], "elements": [e.strip() for e in parts[2].strip("{}").split(",") if e.strip()]}
 
 
-def _ui_click(target: str, role: str = "") -> Dict[str, Any]:
+def _ui_click(target: str, role: str = "") -> dict[str, Any]:
     """Click the first accessible element whose name or role matches the target."""
     if not target and not role:
         return {"ok": False, "error": "target name or role is required"}
@@ -259,7 +257,7 @@ def _ui_click(target: str, role: str = "") -> Dict[str, Any]:
     return {"ok": True, "result": text}
 
 
-def _ui_type(target: str, text: str) -> Dict[str, Any]:
+def _ui_type(target: str, text: str) -> dict[str, Any]:
     """Type text into the named text field of the frontmost window."""
     if not target or text is None:
         return {"ok": False, "error": "target name and text are required"}
@@ -298,7 +296,7 @@ def _ui_type(target: str, text: str) -> Dict[str, Any]:
     return {"ok": True, "result": out}
 
 
-def _ui_focus(target: str) -> Dict[str, Any]:
+def _ui_focus(target: str) -> dict[str, Any]:
     """Set keyboard focus to the named element in the frontmost window."""
     if not target:
         return {"ok": False, "error": "target name is required"}
@@ -316,7 +314,7 @@ def _ui_focus(target: str) -> Dict[str, Any]:
     return {"ok": False, "error": "BadAppleUI helper not available"}
 
 
-def _handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
+def _handle_request(req: dict[str, Any]) -> dict[str, Any]:
     command = req.get("command")
     if command == "list_shortcuts":
         return _list_shortcuts(int(req.get("timeout") or 15))
@@ -350,7 +348,7 @@ class _AquaHelperHandler(socketserver.StreamRequestHandler):
             self.wfile.flush()
 
 
-def call_aqua(command: str, timeout: float = 15.0, **kwargs) -> Optional[Dict[str, Any]]:
+def call_aqua(command: str, timeout: float = 15.0, **kwargs) -> dict[str, Any] | None:
     """Call an Aqua helper over its Unix socket and return its JSON response."""
     path = _socket_path()
     if not Path(path).exists():

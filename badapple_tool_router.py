@@ -10,15 +10,15 @@ import json
 import os
 import re
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
-
 # Tool-name -> list of example natural-language prompts.
 # These are the "ground-truth" training phrases the router compares against.
-TOOL_EXAMPLES: Dict[str, List[str]] = {
+TOOL_EXAMPLES: dict[str, list[str]] = {
     "list_directory": [
         "list the files in my documents",
         "show me what's in /tmp",
@@ -187,43 +187,43 @@ TOOL_EXAMPLES: Dict[str, List[str]] = {
 
 
 # Keyword regex patterns.  These win immediately, no embedding needed.
-TOOL_KEYWORDS: Dict[str, List[re.Pattern]] = {
-    "list_directory": [re.compile(r"\b(list|show)\b.*\bfiles\b|\blist files in\b|\blist the files\b", re.I)],
-    "read_file": [re.compile(r"\b(read|open)\b.*\bfile\b|\bread\s+[~./]\S+", re.I)],
-    "write_file": [re.compile(r"\b(write|create)\b.*\bfile\b|\bfile\s+named?\s+\S+", re.I)],
-    "run_shell": [re.compile(r"\b(run|execute)\b.*\bshell\b|\brun\s+(?:command|ls|cat|ps|df|du|find|grep|mdfind)\b", re.I)],
-    "run_applescript": [re.compile(r"\brun\b.*\bapplescript\b", re.I)],
-    "search_content": [re.compile(r"\bsearch\b.*\bfor\b.*\bin\b|\bgrep\b|\bfind.*containing\b", re.I)],
-    "search_local_files": [re.compile(r"\bmdfind\b|\bspotlight\b|\bfind my\b|\bfind (?:this|the) file\b", re.I)],
-    "index_documents": [re.compile(r"\bindex\b.*\bdocument|\bindex\s+[~./]", re.I)],
-    "git_status": [re.compile(r"\bgit\s+status\b", re.I)],
-    "git_diff": [re.compile(r"\bgit\s+diff\b", re.I)],
-    "git_log": [re.compile(r"\bgit\s+log\b", re.I)],
-    "git_commit": [re.compile(r"\bgit\s+commit\b", re.I)],
-    "read_working_memory": [re.compile(r"\bread\b.*\bworking memory\b|\bworking memory\b", re.I)],
-    "write_working_memory": [re.compile(r"\bwrite\b.*\bworking memory\b|\badd.*scratchpad\b", re.I)],
-    "clear_working_memory": [re.compile(r"\bclear\b.*\bworking memory\b|\bclear\s+scratchpad\b", re.I)],
-    "screen_capture": [re.compile(r"\bcapture\b.*\bscreen\b|\bscreenshot\b", re.I)],
-    "capture_and_describe_screen": [re.compile(r"\bwhat\b.*\bon my screen\b|\bdescribe my screen\b", re.I)],
-    "capture_and_extract_screen": [re.compile(r"\bextract\b.*\btext\b.*\bscreen\b", re.I)],
-    "describe_image": [re.compile(r"\bdescribe\b.*\bimage\b|\bdescribe\s+[~./]\S+\.(?:png|jpg|jpeg)\b", re.I)],
-    "extract_text_from_image": [re.compile(r"\bextract\b.*\btext\b.*\bimage\b|\bocr\b", re.I)],
-    "workspace_status": [re.compile(r"\bworkspace status\b|\bproject status\b", re.I)],
-    "today_events": [re.compile(r"\b(today'?s? events?|events? today|meetings today|what.*on my calendar today)\b", re.I)],
-    "upcoming_events": [re.compile(r"\bupcoming\b.*\bevents?\b|\bnext week\b.*\bcalendar\b", re.I)],
-    "list_reminders": [re.compile(r"\b(list|what are)\b.*\breminders\b", re.I)],
-    "add_reminder": [re.compile(r"\b(add|create)\b.*\breminder\b|\bremind me\b", re.I)],
-    "unread_emails": [re.compile(r"\bunread\b.*\b(email|mail)\b|\bcheck my mail\b", re.I)],
-    "search_mail": [re.compile(r"\bsearch\b.*\bmail\b|\bsearch\b.*\bemail\b", re.I)],
-    "consolidate_memory": [re.compile(r"\bconsolidate\b.*\bmemory\b|\bdream\b|\boffline consolidation\b", re.I)],
-    "p2p_sync": [re.compile(r"\bp2p\s+sync\b|\bsync\b.*\bpeers\b", re.I)],
-    "p2p_peers": [re.compile(r"\bp2p\s+peers\b|\blist\s+peers\b", re.I)],
-    "generate_image": [re.compile(r"\b(generate|draw|make|create)\b.*\bimage\b|\bimage generation\b", re.I)],
-    "list_mcp_servers": [re.compile(r"\b(list|show)\b.*\bmcp\s+servers?\b", re.I)],
-    "add_mcp_server": [re.compile(r"\b(add|register)\b.*\bmcp\s+server\b", re.I)],
-    "remove_mcp_server": [re.compile(r"\b(remove|delete)\b.*\bmcp\s+server\b", re.I)],
-    "list_mcp_tools": [re.compile(r"\b(list|show)\b.*\bmcp\s+tools?\b", re.I)],
-    "invoke_mcp_tool": [re.compile(r"\b(invoke|use|call)\b.*\bmcp\s+tool\b", re.I)],
+TOOL_KEYWORDS: dict[str, list[re.Pattern]] = {
+    "list_directory": [re.compile(r"\b(list|show)\b.*\bfiles\b|\blist files in\b|\blist the files\b", re.IGNORECASE)],
+    "read_file": [re.compile(r"\b(read|open)\b.*\bfile\b|\bread\s+[~./]\S+", re.IGNORECASE)],
+    "write_file": [re.compile(r"\b(write|create)\b.*\bfile\b|\bfile\s+named?\s+\S+", re.IGNORECASE)],
+    "run_shell": [re.compile(r"\b(run|execute)\b.*\bshell\b|\brun\s+(?:command|ls|cat|ps|df|du|find|grep|mdfind)\b", re.IGNORECASE)],
+    "run_applescript": [re.compile(r"\brun\b.*\bapplescript\b", re.IGNORECASE)],
+    "search_content": [re.compile(r"\bsearch\b.*\bfor\b.*\bin\b|\bgrep\b|\bfind.*containing\b", re.IGNORECASE)],
+    "search_local_files": [re.compile(r"\bmdfind\b|\bspotlight\b|\bfind my\b|\bfind (?:this|the) file\b", re.IGNORECASE)],
+    "index_documents": [re.compile(r"\bindex\b.*\bdocument|\bindex\s+[~./]", re.IGNORECASE)],
+    "git_status": [re.compile(r"\bgit\s+status\b", re.IGNORECASE)],
+    "git_diff": [re.compile(r"\bgit\s+diff\b", re.IGNORECASE)],
+    "git_log": [re.compile(r"\bgit\s+log\b", re.IGNORECASE)],
+    "git_commit": [re.compile(r"\bgit\s+commit\b", re.IGNORECASE)],
+    "read_working_memory": [re.compile(r"\bread\b.*\bworking memory\b|\bworking memory\b", re.IGNORECASE)],
+    "write_working_memory": [re.compile(r"\bwrite\b.*\bworking memory\b|\badd.*scratchpad\b", re.IGNORECASE)],
+    "clear_working_memory": [re.compile(r"\bclear\b.*\bworking memory\b|\bclear\s+scratchpad\b", re.IGNORECASE)],
+    "screen_capture": [re.compile(r"\bcapture\b.*\bscreen\b|\bscreenshot\b", re.IGNORECASE)],
+    "capture_and_describe_screen": [re.compile(r"\bwhat\b.*\bon my screen\b|\bdescribe my screen\b", re.IGNORECASE)],
+    "capture_and_extract_screen": [re.compile(r"\bextract\b.*\btext\b.*\bscreen\b", re.IGNORECASE)],
+    "describe_image": [re.compile(r"\bdescribe\b.*\bimage\b|\bdescribe\s+[~./]\S+\.(?:png|jpg|jpeg)\b", re.IGNORECASE)],
+    "extract_text_from_image": [re.compile(r"\bextract\b.*\btext\b.*\bimage\b|\bocr\b", re.IGNORECASE)],
+    "workspace_status": [re.compile(r"\bworkspace status\b|\bproject status\b", re.IGNORECASE)],
+    "today_events": [re.compile(r"\b(today'?s? events?|events? today|meetings today|what.*on my calendar today)\b", re.IGNORECASE)],
+    "upcoming_events": [re.compile(r"\bupcoming\b.*\bevents?\b|\bnext week\b.*\bcalendar\b", re.IGNORECASE)],
+    "list_reminders": [re.compile(r"\b(list|what are)\b.*\breminders\b", re.IGNORECASE)],
+    "add_reminder": [re.compile(r"\b(add|create)\b.*\breminder\b|\bremind me\b", re.IGNORECASE)],
+    "unread_emails": [re.compile(r"\bunread\b.*\b(email|mail)\b|\bcheck my mail\b", re.IGNORECASE)],
+    "search_mail": [re.compile(r"\bsearch\b.*\bmail\b|\bsearch\b.*\bemail\b", re.IGNORECASE)],
+    "consolidate_memory": [re.compile(r"\bconsolidate\b.*\bmemory\b|\bdream\b|\boffline consolidation\b", re.IGNORECASE)],
+    "p2p_sync": [re.compile(r"\bp2p\s+sync\b|\bsync\b.*\bpeers\b", re.IGNORECASE)],
+    "p2p_peers": [re.compile(r"\bp2p\s+peers\b|\blist\s+peers\b", re.IGNORECASE)],
+    "generate_image": [re.compile(r"\b(generate|draw|make|create)\b.*\bimage\b|\bimage generation\b", re.IGNORECASE)],
+    "list_mcp_servers": [re.compile(r"\b(list|show)\b.*\bmcp\s+servers?\b", re.IGNORECASE)],
+    "add_mcp_server": [re.compile(r"\b(add|register)\b.*\bmcp\s+server\b", re.IGNORECASE)],
+    "remove_mcp_server": [re.compile(r"\b(remove|delete)\b.*\bmcp\s+server\b", re.IGNORECASE)],
+    "list_mcp_tools": [re.compile(r"\b(list|show)\b.*\bmcp\s+tools?\b", re.IGNORECASE)],
+    "invoke_mcp_tool": [re.compile(r"\b(invoke|use|call)\b.*\bmcp\s+tool\b", re.IGNORECASE)],
 }
 
 
@@ -242,15 +242,15 @@ class ToolRouter:
     def __init__(
         self,
         data_dir: Path,
-        encoder: Optional[Callable[[List[str]], Any]] = None,
+        encoder: Callable[[list[str]], Any] | None = None,
     ):
         self.data_dir = data_dir
         self.encoder = encoder
         self._lock = threading.RLock()
         self._learned_path = data_dir / "tool_router.json"
-        self._examples: Dict[str, List[str]] = {k: list(v) for k, v in TOOL_EXAMPLES.items()}
-        self._embeddings: Dict[str, np.ndarray] = {}
-        self._example_texts: Dict[str, List[str]] = {}
+        self._examples: dict[str, list[str]] = {k: list(v) for k, v in TOOL_EXAMPLES.items()}
+        self._embeddings: dict[str, np.ndarray] = {}
+        self._example_texts: dict[str, list[str]] = {}
         self._load_learned()
         self._rebuild_embeddings()
 
@@ -304,7 +304,7 @@ class ToolRouter:
                 self._save_learned()
                 self._rebuild_embeddings()
 
-    def _keyword_match(self, prompt: str) -> Optional[Tuple[str, float]]:
+    def _keyword_match(self, prompt: str) -> tuple[str, float] | None:
         low = prompt.lower()
         for name, patterns in TOOL_KEYWORDS.items():
             for pat in patterns:
@@ -312,13 +312,13 @@ class ToolRouter:
                     return name, 1.0
         return None
 
-    def _semantic_match(self, prompt: str) -> Optional[Tuple[str, float]]:
+    def _semantic_match(self, prompt: str) -> tuple[str, float] | None:
         if self.encoder is None or not self._embeddings:
             return None
         try:
             q = np.asarray(self.encoder([prompt]))
             q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-10)
-            best_name: Optional[str] = None
+            best_name: str | None = None
             best_score = -1.0
             for name, emb in self._embeddings.items():
                 sim = float(np.max(q @ emb.T))
@@ -331,11 +331,11 @@ class ToolRouter:
             print(f"[tool_router] semantic match failed: {e}", flush=True)
         return None
 
-    def _extract_args(self, tool_name: str, prompt: str) -> Dict[str, Any]:
+    def _extract_args(self, tool_name: str, prompt: str) -> dict[str, Any]:
         low = prompt.lower().strip()
 
         # Path extraction helper.
-        def _path_arg() -> Optional[str]:
+        def _path_arg() -> str | None:
             # Look for an absolute or tilde path, or a simple filename.
             m = re.search(r"(?:file|path|directory|folder|in|from|to|at)\s+['\"]?([~./]?[\w\-./]+(?:/[\w\-./]+)*)['\"]?", low)
             if m:
@@ -361,11 +361,11 @@ class ToolRouter:
             return {"filename": filename, "content": content}
 
         if tool_name in ("run_shell", "run_applescript"):
-            m = re.search(r"\b(?:run|execute)\s+(?:shell|applescript)\s+(.+)$", low, re.I)
+            m = re.search(r"\b(?:run|execute)\s+(?:shell|applescript)\s+(.+)$", low, re.IGNORECASE)
             if m:
                 return {"command": m.group(1).strip(), "timeout": 15}
             # Fallback: if prompt has a bare command pattern, use the rest.
-            m = re.search(r"\b(?:run|execute)\s+(.+)$", low, re.I)
+            m = re.search(r"\b(?:run|execute)\s+(.+)$", low, re.IGNORECASE)
             if m:
                 return {"command": m.group(1).strip(), "timeout": 15}
             return {"command": "", "timeout": 15}
@@ -389,11 +389,11 @@ class ToolRouter:
             return {"message": m.group(1) if m else "Update"}
 
         if tool_name == "write_working_memory":
-            m = re.search(r"(?:working memory|scratchpad)\s*[:-]?\s*['\"]?(.+)['\"]?$", low, re.I)
+            m = re.search(r"(?:working memory|scratchpad)\s*[:-]?\s*['\"]?(.+)['\"]?$", low, re.IGNORECASE)
             return {"content": m.group(1).strip("\"'").strip() if m else ""}
 
         if tool_name == "add_reminder":
-            m = re.search(r"(?:remind me to|reminder:?|add a reminder:?|remind me:)\s*(.+?)(?:\s+(?:at|on|in)\s+|$)", low, re.I)
+            m = re.search(r"(?:remind me to|reminder:?|add a reminder:?|remind me:)\s*(.+?)(?:\s+(?:at|on|in)\s+|$)", low, re.IGNORECASE)
             return {"title": m.group(1).strip("\"'").strip() if m else prompt}
 
         if tool_name in ("describe_image", "extract_text_from_image"):
@@ -414,52 +414,52 @@ class ToolRouter:
 
         if tool_name == "generate_image":
             # Extract the prompt phrase after 'image of', 'image:', 'draw', etc.
-            m = re.search(r"\b(?:image\s+(?:of|with)?|generate|draw|make|create)\b[\s:]*(an?\s+)?(?:image\b[\s:]*)?(.+?)(?:\.|$)", low, re.I)
+            m = re.search(r"\b(?:image\s+(?:of|with)?|generate|draw|make|create)\b[\s:]*(an?\s+)?(?:image\b[\s:]*)?(.+?)(?:\.|$)", low, re.IGNORECASE)
             if not m:
-                m = re.search(r"\b(?:image\s*[:\-]?\s*)?(.+?)(?:\.|$)", low, re.I)
+                m = re.search(r"\b(?:image\s*[:\-]?\s*)?(.+?)(?:\.|$)", low, re.IGNORECASE)
             prompt_text = m.group(2).strip() if m else low
-            prompt_text = re.sub(r"^(of|with|a|an)\s+", "", prompt_text, flags=re.I)
+            prompt_text = re.sub(r"^(of|with|a|an)\s+", "", prompt_text, flags=re.IGNORECASE)
             return {"prompt": prompt_text}
 
         if tool_name == "add_mcp_server":
-            m = re.search(r"\bmcp\s+server\s+(\S+)\s+(.+)$", low, re.I)
+            m = re.search(r"\bmcp\s+server\s+(\S+)\s+(.+)$", low, re.IGNORECASE)
             if m:
                 return {"name": m.group(1).strip(), "command": m.group(2).strip()}
-            m = re.search(r"(?:add|register)\s+mcp\s+server\s+(\S+)\s+(.+)$", low, re.I)
+            m = re.search(r"(?:add|register)\s+mcp\s+server\s+(\S+)\s+(.+)$", low, re.IGNORECASE)
             return {"name": m.group(1).strip() if m else "", "command": m.group(2).strip().rstrip(".!?,;:") if m else ""}
 
         if tool_name == "remove_mcp_server":
-            m = re.search(r"\bmcp\s+server\s+(\S+)(?:\s*\.|$)", low, re.I)
+            m = re.search(r"\bmcp\s+server\s+(\S+)(?:\s*\.|$)", low, re.IGNORECASE)
             if m:
                 return {"name": m.group(1).strip()}
-            m = re.search(r"(?:remove|delete)\s+mcp\s+server\s+(\S+)(?:\s*\.|$)", low, re.I)
+            m = re.search(r"(?:remove|delete)\s+mcp\s+server\s+(\S+)(?:\s*\.|$)", low, re.IGNORECASE)
             return {"name": m.group(1).strip() if m else ""}
 
         if tool_name == "list_mcp_tools":
-            m = re.search(r"\btools?\s+(?:from\s+server\s+|on\s+server\s+|of\s+server\s+)?(\S+)(?:\s+server\b)?(?:\.|$)", low, re.I)
+            m = re.search(r"\btools?\s+(?:from\s+server\s+|on\s+server\s+|of\s+server\s+)?(\S+)(?:\s+server\b)?(?:\.|$)", low, re.IGNORECASE)
             if m:
                 return {"server": m.group(1).strip()}
-            m = re.search(r"\bserver\s+(\S+)\b", low, re.I)
+            m = re.search(r"\bserver\s+(\S+)\b", low, re.IGNORECASE)
             return {"server": m.group(1).strip() if m else ""}
 
         if tool_name == "invoke_mcp_tool":
-            m = re.search(r"\btool\s+(\S+)\s+on\s+server\s+(\S+)\s*(?:with|using|args:?)?\s*(.+?)?(?:\s*\.|$)", low, re.I)
+            m = re.search(r"\btool\s+(\S+)\s+on\s+server\s+(\S+)\s*(?:with|using|args:?)?\s*(.+?)?(?:\s*\.|$)", low, re.IGNORECASE)
             if m:
                 args_text = (m.group(3) or "").strip()
                 arguments = {}
                 if args_text:
-                    kv = re.search(r"(\S+)\s+(.+)$", args_text, re.I)
+                    kv = re.search(r"(\S+)\s+(.+)$", args_text, re.IGNORECASE)
                     if kv:
                         arguments[kv.group(1)] = kv.group(2).strip('"\'')
                     else:
                         arguments["text"] = args_text
                 return {"tool": m.group(1).strip(), "server": m.group(2).strip(), "arguments": arguments}
-            m = re.search(r"\bserver\s+(\S+)\s+tool\s+(\S+)\s*(?:with|using|args:?)?\s*(.+?)?(?:\s*\.|$)", low, re.I)
+            m = re.search(r"\bserver\s+(\S+)\s+tool\s+(\S+)\s*(?:with|using|args:?)?\s*(.+?)?(?:\s*\.|$)", low, re.IGNORECASE)
             if m:
                 args_text = (m.group(3) or "").strip()
                 arguments = {}
                 if args_text:
-                    kv = re.search(r"(\S+)\s+(.+)$", args_text, re.I)
+                    kv = re.search(r"(\S+)\s+(.+)$", args_text, re.IGNORECASE)
                     if kv:
                         arguments[kv.group(1)] = kv.group(2).strip('"\'')
                     else:
@@ -469,7 +469,7 @@ class ToolRouter:
 
         return {}
 
-    def resolve(self, prompt: str) -> Optional[Tuple[str, Dict[str, Any], float]]:
+    def resolve(self, prompt: str) -> tuple[str, dict[str, Any], float] | None:
         """Return (tool_name, args, confidence) or None to fall through to 9B."""
         kw = self._keyword_match(prompt)
         if kw:

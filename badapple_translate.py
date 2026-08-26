@@ -9,7 +9,6 @@ No cloud after first use.
 import os
 import time
 from pathlib import Path
-from typing import Optional
 
 DEFAULT_MODEL = os.environ.get(
     "BADAPPLE_TRANSLATION_MODEL",

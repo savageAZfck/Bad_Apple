@@ -11,10 +11,8 @@ import os
 import shutil
 import subprocess
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 
 def _ambient_dir() -> Path:
@@ -36,12 +34,12 @@ _AMBIENT_DIR.mkdir(parents=True, exist_ok=True)
 _CONTEXT_FILE = _AMBIENT_DIR / "context.json"
 _SCREEN_FILE = _AMBIENT_DIR / "screen.png"
 
-_thread: Optional[threading.Thread] = None
+_thread: threading.Thread | None = None
 _stop_event = threading.Event()
 _interval = 30.0
 
 
-def _active_app_and_window() -> Dict[str, str]:
+def _active_app_and_window() -> dict[str, str]:
     try:
         result = subprocess.run(
             ["osascript", "-e", 'tell application "System Events" to get name of first application process whose frontmost is true'],
@@ -65,7 +63,7 @@ def _active_app_and_window() -> Dict[str, str]:
     return {"app": app, "window": window}
 
 
-def _capture_screen() -> Optional[Path]:
+def _capture_screen() -> Path | None:
     try:
         # Prefer screencapture if available (macOS built-in)
         if shutil.which("screencapture"):

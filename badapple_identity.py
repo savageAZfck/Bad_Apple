@@ -6,7 +6,6 @@ import os
 import pwd
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 DEFAULT_HELPER = Path(__file__).resolve().parent / "target" / "release" / "badapple-identity"
 
@@ -38,7 +37,7 @@ def _identity_blob_path() -> str:
     return str(Path(home) / "Library/Application Support/BadApple/identity.sekey")
 
 
-def _run(command: str, argument: Optional[str] = None, timeout: int = 60) -> str:
+def _run(command: str, argument: str | None = None, timeout: int = 60) -> str:
     helper = _helper()
     if not helper.is_file():
         raise IdentityError(f"Secure Enclave helper is missing: {helper}")

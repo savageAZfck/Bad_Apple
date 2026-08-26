@@ -13,7 +13,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
 
 DEFAULT_BASE_MODEL = os.environ.get(
     "BADAPPLE_LORA_BASE_MODEL",
@@ -32,14 +31,14 @@ def _ensure_dirs():
         pass
 
 
-def list_datasets() -> List[str]:
+def list_datasets() -> list[str]:
     _ensure_dirs()
     if not LORA_DATA_DIR.is_dir():
         return []
     return sorted([d.name for d in LORA_DATA_DIR.iterdir() if d.is_dir()])
 
 
-def list_adapters() -> List[str]:
+def list_adapters() -> list[str]:
     _ensure_dirs()
     if not LORA_ADAPTERS_DIR.is_dir():
         return []
@@ -60,7 +59,7 @@ def get_adapter_path(name: str) -> Path:
     return p
 
 
-def write_example(dataset: str, messages: List[Dict[str, str]]) -> str:
+def write_example(dataset: str, messages: list[dict[str, str]]) -> str:
     """Append one chat-formatted example to a dataset."""
     p = get_dataset_path(dataset)
     with open(p / "train.jsonl", "a", encoding="utf-8") as f:

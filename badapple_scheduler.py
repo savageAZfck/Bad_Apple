@@ -6,7 +6,6 @@ MLX server. `run_shortcut` calls the local `shortcuts` CLI directly.
 """
 
 import json
-import os
 import shutil
 import subprocess
 import tempfile
@@ -14,7 +13,6 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
 
 
 def _schedule_file() -> Path:
@@ -38,7 +36,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_when(when: str) -> Optional[float]:
+def _parse_when(when: str) -> float | None:
     """Parse when as an ISO timestamp or a delay in seconds."""
     try:
         # Delay in seconds
@@ -167,7 +165,7 @@ def run_due_tasks() -> str:
     return "\n".join(results)
 
 
-def run_shortcut(name: str, input_text: Optional[str] = None) -> str:
+def run_shortcut(name: str, input_text: str | None = None) -> str:
     """Run a macOS Shortcuts shortcut by name."""
     if not shutil.which("shortcuts"):
         return "Error: `shortcuts` CLI not available on this system."

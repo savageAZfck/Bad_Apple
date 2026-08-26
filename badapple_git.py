@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 
 def _git(repo: str) -> list[str]:
@@ -34,7 +33,7 @@ def _run(args: list[str], timeout: int = 30) -> str:
         return f"Git command error: {e}"
 
 
-def _find_repo(path: Optional[str] = None) -> str:
+def _find_repo(path: str | None = None) -> str:
     if not path:
         path = os.getcwd()
     p = Path(path).expanduser().resolve()
@@ -46,12 +45,12 @@ def _find_repo(path: Optional[str] = None) -> str:
     return str(Path(path).expanduser().resolve())
 
 
-def status(path: Optional[str] = None) -> str:
+def status(path: str | None = None) -> str:
     repo = _find_repo(path)
     return _run(_git(repo) + ["status", "--short"])
 
 
-def diff(path: Optional[str] = None, staged: bool = False, stat: bool = False, max_lines: int = 200) -> str:
+def diff(path: str | None = None, staged: bool = False, stat: bool = False, max_lines: int = 200) -> str:
     repo = _find_repo(path)
     cmd = _git(repo) + ["diff", "--stat"]
     stat_text = _run(cmd + (["--staged"] if staged else []))
@@ -68,23 +67,23 @@ def diff(path: Optional[str] = None, staged: bool = False, stat: bool = False, m
     return f"{stat_text}\n{out}".strip()
 
 
-def branch(path: Optional[str] = None) -> str:
+def branch(path: str | None = None) -> str:
     repo = _find_repo(path)
     return _run(_git(repo) + ["branch", "--show-current"]).strip()
 
 
-def log(path: Optional[str] = None, n: int = 10) -> str:
+def log(path: str | None = None, n: int = 10) -> str:
     repo = _find_repo(path)
     return _run(_git(repo) + ["log", "-n", str(n), "--oneline"])
 
 
-def commit(path: Optional[str] = None, message: str = "") -> str:
+def commit(path: str | None = None, message: str = "") -> str:
     repo = _find_repo(path)
     if not message:
         return "Error: commit message is required"
     return _run(_git(repo) + ["commit", "-m", message], timeout=60)
 
 
-def stage_all(path: Optional[str] = None) -> str:
+def stage_all(path: str | None = None) -> str:
     repo = _find_repo(path)
     return _run(_git(repo) + ["add", "-A"], timeout=60)

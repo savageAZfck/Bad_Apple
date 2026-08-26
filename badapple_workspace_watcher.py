@@ -10,8 +10,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
-
+from typing import Any
 
 SCAN_INTERVAL = float(os.environ.get("BADAPPLE_WORKSPACE_SCAN_INTERVAL", "10"))
 MAX_FILE_SIZE = 512 * 1024
@@ -24,13 +23,13 @@ class WorkspaceWatcher:
 
     def __init__(self, knowledge: Any):
         self.knowledge = knowledge
-        self.workspace: Optional[Path] = None
-        self._mtimes: Dict[str, float] = {}
+        self.workspace: Path | None = None
+        self._mtimes: dict[str, float] = {}
         self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
 
-    def set_workspace(self, path: Optional[Path]) -> None:
+    def set_workspace(self, path: Path | None) -> None:
         with self._lock:
             self.workspace = Path(path).expanduser() if path else None
             self._mtimes.clear()
@@ -53,8 +52,8 @@ class WorkspaceWatcher:
                 return True
         return False
 
-    def _collect_files(self, root: Path) -> Set[Path]:
-        files: Set[Path] = set()
+    def _collect_files(self, root: Path) -> set[Path]:
+        files: set[Path] = set()
         if not root.is_dir():
             return files
         try:
@@ -84,8 +83,8 @@ class WorkspaceWatcher:
             print(f"[workspace_watcher] scanning {ws}", flush=True)
             files = self._collect_files(ws)
             print(f"[workspace_watcher] found {len(files)} candidate files", flush=True)
-            to_index: Set[Path] = set()
-            new_mtimes: Dict[str, float] = {}
+            to_index: set[Path] = set()
+            new_mtimes: dict[str, float] = {}
             for f in files:
                 try:
                     mtime = f.stat().st_mtime

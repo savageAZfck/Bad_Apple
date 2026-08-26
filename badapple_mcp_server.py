@@ -18,12 +18,11 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import socketserver
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from agent_client import call_agent
 
@@ -51,15 +50,15 @@ _DIRECT_AGENT_METHODS = {
 # MCP helpers
 # ---------------------------------------------------------------------------
 
-def _result(request_id: Any, result: Any) -> Dict[str, Any]:
+def _result(request_id: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
-def _error(request_id: Any, code: int, message: str) -> Dict[str, Any]:
+def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def _mcp_text_content(obj: Any, is_error: bool = False) -> Dict[str, Any]:
+def _mcp_text_content(obj: Any, is_error: bool = False) -> dict[str, Any]:
     """Wrap an arbitrary object as a single MCP ``TextContent`` result."""
     text = obj if isinstance(obj, str) else json.dumps(obj, indent=2, default=str)
     return {
@@ -68,7 +67,7 @@ def _mcp_text_content(obj: Any, is_error: bool = False) -> Dict[str, Any]:
     }
 
 
-def _normalize_response(response: Dict[str, Any]) -> tuple[str, bool]:
+def _normalize_response(response: dict[str, Any]) -> tuple[str, bool]:
     """Extract display text and error flag from a daemon response frame."""
     is_error = response.get("type") == "error" or bool(response.get("error"))
     if is_error:
@@ -83,7 +82,7 @@ def _normalize_response(response: Dict[str, Any]) -> tuple[str, bool]:
 # Tool discovery / listing
 # ---------------------------------------------------------------------------
 
-def _core_tools() -> List[Dict[str, Any]]:
+def _core_tools() -> list[dict[str, Any]]:
     """The conceptual Bad Apple tools the request asked us to expose."""
     return [
         {
@@ -144,9 +143,9 @@ def _core_tools() -> List[Dict[str, Any]]:
     ]
 
 
-def _tools() -> List[Dict[str, Any]]:
+def _tools() -> list[dict[str, Any]]:
     """Merge the requested core tools with the daemon's live ``discover_tools`` list."""
-    by_name: Dict[str, Dict[str, Any]] = {t["name"]: t for t in _core_tools()}
+    by_name: dict[str, dict[str, Any]] = {t["name"]: t for t in _core_tools()}
 
     try:
         response = call_agent("discover_tools")
@@ -175,7 +174,7 @@ def _tools() -> List[Dict[str, Any]]:
 # Tool execution
 # ---------------------------------------------------------------------------
 
-def _call_agent_or_report(method: str, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _call_agent_or_report(method: str, params: dict[str, Any] | None) -> dict[str, Any]:
     """Call ``agent_client.call_agent`` and normalize errors."""
     try:
         return call_agent(method, params)
@@ -183,7 +182,7 @@ def _call_agent_or_report(method: str, params: Optional[Dict[str, Any]]) -> Dict
         return {"type": "error", "error": f"agent_client error: {exc}"}
 
 
-def _call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         arguments = {}
 
@@ -204,7 +203,7 @@ def _call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 # Resources
 # ---------------------------------------------------------------------------
 
-def _resources() -> List[Dict[str, Any]]:
+def _resources() -> list[dict[str, Any]]:
     return [
         {
             "uri": "badapple://status",
@@ -233,7 +232,7 @@ def _resources() -> List[Dict[str, Any]]:
     ]
 
 
-def _read_resource(uri: str) -> Dict[str, Any]:
+def _read_resource(uri: str) -> dict[str, Any]:
     if uri == "badapple://status":
         response = _call_agent_or_report("runtime_status", {})
     elif uri == "badapple://ambient":
@@ -262,11 +261,11 @@ def _read_resource(uri: str) -> Dict[str, Any]:
 # Prompts (optional / minimal)
 # ---------------------------------------------------------------------------
 
-def _prompts() -> List[Dict[str, Any]]:
+def _prompts() -> list[dict[str, Any]]:
     return []
 
 
-def _get_prompt(name: str) -> Dict[str, Any]:
+def _get_prompt(name: str) -> dict[str, Any]:
     if name == "badapple-inference":
         return {
             "description": "Run a prompt through local Bad Apple inference.",
@@ -284,7 +283,7 @@ def _get_prompt(name: str) -> Dict[str, Any]:
 # Request dispatch
 # ---------------------------------------------------------------------------
 
-def handle(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     """Process one JSON-RPC/MCP request and return a response, or ``None`` for
     notifications that do not require a response."""
     request_id = request.get("id")
@@ -345,7 +344,7 @@ def handle(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # Transports
 # ---------------------------------------------------------------------------
 
-def _write_line(stream, obj: Dict[str, Any]) -> None:
+def _write_line(stream, obj: dict[str, Any]) -> None:
     stream.write(json.dumps(obj, separators=(",", ":")) + "\n")
     stream.flush()
 

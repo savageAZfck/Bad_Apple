@@ -8,8 +8,6 @@ bar and dashboard so the user can see the assistant's scratch work.
 
 import os
 from pathlib import Path
-from typing import Dict, Any
-
 
 DEFAULT_WORK_FILE = "/var/lib/bad_apple/working_memory.txt"
 
