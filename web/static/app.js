@@ -269,21 +269,28 @@ async function loadDashboard() {
 
 async function updateDashboard() {
   const banner = $('#offline-banner');
+  let status;
   try {
-    const [status, snap, tail, ledger, mcp, voice] = await Promise.all([
-      api('/api/status'),
-      api('/api/snapshot'),
-      api('/api/tail?n=20'),
-      api('/api/ledger?n=50'),
-      api('/api/mcp_servers'),
-      api('/api/voice?n=12'),
-    ]);
-    if (banner) banner.classList.add('hidden');
-    renderDashboard(status, snap, tail, ledger, mcp, voice);
+    status = await api('/api/status');
   } catch (e) {
-    console.error(e);
+    console.error('status fetch failed:', e);
     if (banner) banner.classList.remove('hidden');
+    return;
   }
+  if (banner) banner.classList.add('hidden');
+
+  const settled = await Promise.allSettled([
+    api('/api/snapshot'),
+    api('/api/tail?n=20'),
+    api('/api/ledger?n=50'),
+    api('/api/mcp_servers'),
+    api('/api/voice?n=12'),
+  ]);
+  const [snap, tail, ledger, mcp, voice] = settled.map(r => r.status === 'fulfilled' ? r.value : null);
+  settled.forEach((r, i) => {
+    if (r.status === 'rejected') console.error(`dashboard endpoint ${i} failed:`, r.reason);
+  });
+  renderDashboard(status, snap || {}, tail || [], ledger || [], mcp || [], voice || []);
 }
 
 function renderDashboard(status, snap, tail, ledger, mcp, voice) {
