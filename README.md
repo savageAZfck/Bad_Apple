@@ -173,16 +173,17 @@ cargo build --release
 
 ### Install and start the daemons
 
-See [INSTALL.md](INSTALL.md) for the full consumer and unsigned build instructions. The short path is:
+See [INSTALL.md](INSTALL.md) for the full consumer instructions. The no-Dev-ID short path is:
 
 ```bash
 cargo build --release
-src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 cp -R "target/release/Bad Apple.app" /Applications/
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
+sudo src/platform/apple_desktop/strip_quarantine.sh
+osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
-If you do not have an Apple Developer ID, use `--unsigned-install` after copying the unsigned app.
+This installs and runs the platform without Apple notarization or a Developer ID. The `--unsigned-install` flag removes the Gatekeeper quarantine flag automatically.
 
 Wait ~45 s for the 9B model and embedding model to load. Check the log:
 

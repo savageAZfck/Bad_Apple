@@ -59,6 +59,14 @@ if [[ "${MODE}" == "--dry-run" ]]; then
 fi
 
 [[ "$(id -u)" -eq 0 ]] || fail "--install must run as root"
+
+if [[ "${UNSIGNED}" -eq 1 ]]; then
+    if [[ -d "/Applications/Bad Apple.app" ]]; then
+        echo "Removing Gatekeeper quarantine from unsigned Bad Apple.app..."
+        xattr -dr com.apple.quarantine "/Applications/Bad Apple.app" 2>/dev/null || true
+    fi
+fi
+
 install -d -o "${CONSOLE_USER}" -g staff -m 770 /var/lib/bad_apple /var/run/badapple
 chown -R "${CONSOLE_USER}":staff /var/lib/bad_apple
 chmod 600 /var/lib/bad_apple/slicks.key

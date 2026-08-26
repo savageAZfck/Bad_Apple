@@ -1,6 +1,6 @@
 # Install Bad Apple
 
-Bad Apple runs entirely on your Mac. You do **not** need an Apple Developer ID to build or run it unsigned, but macOS will ask you to approve the app the first time because it is not notarized.
+Bad Apple runs entirely on your Mac. **No Apple Developer ID is required.** The unsigned build ships without Apple notarization, so you strip the Gatekeeper quarantine flag locally instead of paying Apple to scan your binary.
 
 ## What you need
 
@@ -37,7 +37,17 @@ cp -R "target/release/Bad Apple.app" /Applications/
 
 ### Open an unsigned app for the first time
 
-Because the app is not signed or notarized, Gatekeeper blocks it by default. Do **not** disable Gatekeeper globally. Instead:
+Because the app is not signed or notarized, Gatekeeper flags it by default. Do **not** disable Gatekeeper globally. You have two options:
+
+**Option A — strip the quarantine flag (fastest):**
+
+```bash
+sudo src/platform/apple_desktop/strip_quarantine.sh
+```
+
+Then launch Bad Apple normally. The `--unsigned-install` platform installer does this automatically.
+
+**Option B — right-click Open (manual):**
 
 1. Open **System Settings → Privacy & Security**.
 2. Scroll down to **Security**.

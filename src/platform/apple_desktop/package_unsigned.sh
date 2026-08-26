@@ -26,21 +26,28 @@ PKG_DIR="${STAGING}/pkg"
 mkdir -p "${PKG_DIR}"
 
 ditto "${APP_DIR}" "${PKG_DIR}/Bad Apple.app"
+cp -f "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${PKG_DIR}/"
 
 cat > "${PKG_DIR}/README.txt" <<'EOF'
 Welcome to Bad Apple!
 
 This is an unsigned build of Bad Apple.app. It does not require an Apple
-Developer ID, but macOS Gatekeeper will warn you the first time you open it.
+Developer ID and never phones home to Apple for notarization. macOS Gatekeeper
+will flag it the first time you open it, so follow one of the two paths below.
 
-To run Bad Apple.app:
+Quick path (recommended):
 1. Unzip this archive if you have not already.
-2. In Finder, locate "Bad Apple.app".
-3. Right-click (or Control-click) "Bad Apple.app" and choose "Open".
-4. If a Gatekeeper dialog appears, click "Open".
-   On macOS Sequoia or later, you may instead need to open System Settings >
-   Privacy & Security > Security and click "Open Anyway" after your first
-   launch attempt.
+2. Copy "Bad Apple.app" into /Applications.
+3. Double-click "strip_quarantine.sh" or run it with sudo:
+
+       sudo bash strip_quarantine.sh
+
+4. Launch "Bad Apple.app" normally.
+
+Manual path:
+1. Copy "Bad Apple.app" into /Applications.
+2. Control-click "Bad Apple.app" and choose "Open".
+3. If prompted, click "Open Anyway" in System Settings > Privacy & Security > Security.
 
 To install the full Bad Apple platform (LaunchDaemons, supervisor, etc.),
 place Bad Apple.app in /Applications, then run the platform installer from
@@ -52,6 +59,6 @@ Replace /Users/savag3/bad_apple with the path to your checkout if you moved it.
 EOF
 
 rm -f "${ZIP_PATH}"
-( cd "${PKG_DIR}" && zip -r -y "${ZIP_PATH}" "Bad Apple.app" README.txt )
+( cd "${PKG_DIR}" && zip -r -y "${ZIP_PATH}" "Bad Apple.app" README.txt strip_quarantine.sh )
 
 echo "Packaged: ${ZIP_PATH}"

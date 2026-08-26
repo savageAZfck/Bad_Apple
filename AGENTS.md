@@ -42,15 +42,16 @@ It creates a rollback snapshot under `/var/lib/bad_apple/install_backups/` and r
 
 ## Unsigned build and install
 
-If no Apple Developer ID is available, build the menu-bar app unsigned and install without `codesign --verify` checks:
+No Apple Developer ID is required. Build unsigned, strip the quarantine flag locally, and install without `codesign --verify` checks:
 
 ```bash
 cargo build --release
 BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+sudo src/platform/apple_desktop/strip_quarantine.sh
 osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
-Package an unsigned release zip with a consumer README:
+Package an unsigned release zip with a consumer README and the quarantine stripper:
 
 ```bash
 src/platform/apple_desktop/package_unsigned.sh
