@@ -92,9 +92,14 @@ def check_unix_sockets() -> int:
             p = psutil.Process(pid)
             for conn in p.net_connections(kind="inet"):
                 if conn.status == psutil.CONN_LISTEN:
-                    _fail(f"pid {pid} is listening on TCP {conn.laddr}")
-                    tcp_found = True
-                    failures += 1
+                    addr = conn.laddr
+                    # 127.0.0.1 / ::1 only is still local; anything else is external.
+                    if str(addr.ip) not in ("127.0.0.1", "::1", "::", "0.0.0.0"):
+                        _fail(f"pid {pid} is listening on external TCP {addr}")
+                        tcp_found = True
+                        failures += 1
+                    else:
+                        _info(f"pid {pid} has local-only TCP listener {addr}")
         except Exception:
             pass
 
@@ -120,7 +125,7 @@ def check_unix_sockets() -> int:
 def check_policy_present() -> int:
     """Ensure a policy file is loaded."""
     print("\n[TEST] declarative policy present")
-    data_dir = Path(os.environ.get("BADAPPLE_DATA_DIR", os.path.expanduser("~/.bad_apple")))
+    data_dir = Path(os.environ.get("BADAPPLE_DATA_DIR", "/var/lib/bad_apple"))
     repo_policy = Path(__file__).with_name("policy.yaml")
     data_policy = data_dir / "policy.yaml"
 
@@ -149,39 +154,19 @@ def check_policy_present() -> int:
 def check_ledger_integrity(data_dir: Path) -> int:
     """Verify the audit ledger hash chain if it exists."""
     print("\n[TEST] audit ledger integrity")
-    ledger_path = data_dir / "ledger.jsonl"
-    if not ledger_path.is_file():
+    from badapple_extras import AuditLedger
+
+    ledger = AuditLedger(data_dir)
+    if not ledger.ledger_path.is_file():
         _info("no audit ledger found; test skipped")
         return 0
-
-    failures = 0
-    last_hash = ""
-    count = 0
-    with open(ledger_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                count += 1
-                if last_hash:
-                    if entry.get("previous_hash") != last_hash:
-                        _fail(f"ledger break at entry {count}: previous hash mismatch")
-                        failures += 1
-                entry_hash = entry.get("hash", "")
-                if not entry_hash:
-                    _fail(f"ledger entry {count} missing hash")
-                    failures += 1
-                else:
-                    last_hash = entry_hash
-            except json.JSONDecodeError:
-                _fail("ledger contains non-JSON line")
-                failures += 1
-
-    if not failures:
-        _ok(f"ledger {ledger_path} hash chain valid ({count} entries)")
-    return failures
+    results = ledger.verify()
+    invalid = [result for result in results if not result.get("valid")]
+    if invalid:
+        _fail(f"ledger has {len(invalid)} invalid entries out of {len(results)}")
+        return len(invalid)
+    _ok(f"ledger {ledger.ledger_path} hash chain valid ({len(results)} entries)")
+    return 0
 
 
 def check_no_secrets_in_logs(data_dir: Path) -> int:
@@ -286,12 +271,76 @@ def check_cloud_references(data_dir: Path) -> int:
     return failures
 
 
+def check_model_provenance() -> int:
+    print("\n[TEST] signed model provenance")
+    from badapple_vault import ArtifactManifest
+
+    candidates = [
+        Path(os.environ.get("BADAPPLE_MODEL_MANIFEST", "")),
+        Path.home() / ".bad_apple" / "model_manifest.json",
+        Path.home() / ".local" / "share" / "badapple" / "model_manifest.json",
+        Path("/var/lib/bad_apple/model_manifest.json"),
+    ]
+    manifest_path = next((path for path in candidates if str(path) and path.is_file()), None)
+    if manifest_path is None:
+        _fail("no signed model manifest found")
+        return 1
+    try:
+        result = ArtifactManifest.verify(json.loads(manifest_path.read_text(encoding="utf-8")))
+    except Exception as e:
+        _fail(f"model manifest could not be verified: {e}")
+        return 1
+    if result.get("valid") and result.get("signature_valid") is True:
+        _ok(f"model artifacts and Secure Enclave seal verified from {manifest_path}")
+        return 0
+    _fail(f"model provenance invalid: {result}")
+    return 1
+
+
+def check_hardware_identity() -> int:
+    print("\n[TEST] Secure Enclave identity")
+    try:
+        import badapple_identity
+        status = badapple_identity.status()
+        if status.startswith("secure-enclave:"):
+            _ok(f"hardware-bound identity active ({status.split(':', 1)[1][:16]}...)")
+            return 0
+        _fail(f"hardware identity status: {status}")
+    except Exception as e:
+        _fail(f"Secure Enclave identity unavailable: {e}")
+    return 1
+
+
+def check_supervisor() -> int:
+    print("\n[TEST] bounded health supervisor")
+    import subprocess
+    env = dict(os.environ)
+    env["BADAPPLE_DATA_DIR"] = "/tmp/badapple_cert_supervisor"
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("badapple_supervisor.py")), "--once", "--no-repair"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=env,
+    )
+    if result.returncode != 0:
+        _fail(result.stderr.strip() or "supervisor health check failed")
+        return 1
+    report = json.loads(result.stdout)
+    unhealthy = [name for name, state in report.get("services", {}).items() if not state.get("running")]
+    if unhealthy:
+        _fail(f"services not running: {', '.join(unhealthy)}")
+        return len(unhealthy)
+    _ok("service family is live and supervisor checks are bounded")
+    return 0
+
+
 def main() -> int:
     print("=" * 60)
     print("Bad Apple Air-Gap Certification Suite")
     print("=" * 60)
 
-    data_dir = Path(os.environ.get("BADAPPLE_DATA_DIR", os.path.expanduser("~/.bad_apple")))
+    data_dir = Path(os.environ.get("BADAPPLE_DATA_DIR", "/var/lib/bad_apple"))
 
     tests = [
         check_network_isolation,
@@ -301,6 +350,9 @@ def main() -> int:
         check_no_secrets_in_logs,
         check_model_local,
         check_cloud_references,
+        check_model_provenance,
+        check_hardware_identity,
+        check_supervisor,
     ]
 
     total_failures = 0

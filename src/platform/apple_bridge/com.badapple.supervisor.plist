@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.badapple.supervisor</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/savag3/bad_apple/.venv/bin/python</string>
+        <string>/Users/savag3/bad_apple/badapple_supervisor.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>UserName</key>
+    <string>root</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BADAPPLE_DATA_DIR</key>
+        <string>/var/lib/bad_apple</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/bad_apple_supervisor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/bad_apple_supervisor.log</string>
+</dict>
+</plist>

@@ -5,10 +5,11 @@ Indexes an Xcode/Swift project into the local RAG pipeline so the assistant
 can search, explain, and navigate code without cloud.
 """
 
+import json
 import os
-import tempfile
+import subprocess
 from pathlib import Path
-from typing import Any, List, Optional, Set
+from typing import Any, List
 
 
 CODE_SUFFIXES = {".swift", ".m", ".mm", ".h", ".c", ".cpp", ".metal", ".glsl", ".py", ".rs", ".go", ".java"}
@@ -32,21 +33,9 @@ def index_project(project_path: str, knowledge: Any) -> str:
     files = _find_source_files(p)
     if not files:
         return "No recognized source files found."
-    # Aggregate into one temp file with headers per source file.
-    parts: List[str] = []
-    for f in files:
-        try:
-            text = f.read_text(encoding="utf-8", errors="ignore")
-            parts.append(f"--- FILE: {f} ---\n{text}")
-        except Exception:
-            continue
-    if not parts:
-        return "Could not read any source files."
     try:
-        tmp = Path(tempfile.gettempdir()) / f"badapple_xcode_{p.name}.txt"
-        tmp.write_text("\n\n".join(parts), encoding="utf-8")
-        indexed = knowledge.index_paths([tmp])
-        return f"Indexed {len(files)} files from {p.name} ({indexed} chunks)."
+        indexed = knowledge.index_paths(files)
+        return f"Indexed {len(files)} files from {p.name} ({indexed} chunks) with per-file source paths."
     except Exception as e:
         return f"Xcode index error: {e}"
 
@@ -63,3 +52,53 @@ def search_project(query: str, knowledge: Any, max_results: int = 10) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Xcode search error: {e}"
+
+
+def project_info(project_path: str) -> str:
+    path = Path(project_path).expanduser().resolve()
+    projects = [path] if path.suffix == ".xcodeproj" else sorted(path.glob("*.xcodeproj"))
+    if not projects:
+        return f"No .xcodeproj found under {path}"
+    try:
+        result = subprocess.run(
+            ["xcodebuild", "-list", "-json", "-project", str(projects[0])],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            return f"xcodebuild error: {result.stderr or result.stdout}"
+        return json.dumps(json.loads(result.stdout), indent=2)
+    except Exception as e:
+        return f"Xcode project info error: {e}"
+
+
+def build_diagnostics(project_path: str, scheme: str, configuration: str = "Debug") -> str:
+    path = Path(project_path).expanduser().resolve()
+    projects = [path] if path.suffix == ".xcodeproj" else sorted(path.glob("*.xcodeproj"))
+    if not projects:
+        return f"No .xcodeproj found under {path}"
+    try:
+        result = subprocess.run(
+            [
+                "xcodebuild",
+                "-project",
+                str(projects[0]),
+                "-scheme",
+                scheme,
+                "-configuration",
+                configuration,
+                "build",
+                "CODE_SIGNING_ALLOWED=NO",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        relevant = [line for line in output.splitlines() if any(token in line for token in ("error:", "warning:", "BUILD "))]
+        return "\n".join(relevant[-300:]) or output[-12000:]
+    except subprocess.TimeoutExpired:
+        return "Xcode build diagnostics timed out."
+    except Exception as e:
+        return f"Xcode build diagnostics error: {e}"

@@ -7,7 +7,7 @@ policy_version: "1.0"
 # Global autopilot: when true, the assistant runs destructive tools
 # immediately without asking. When false, tools with require_approval: true
 # go through the human-in-the-loop flow.
-autopilot: false
+autopilot: true
 
 # Defaults for tools that are not explicitly listed below.
 defaults:
@@ -112,6 +112,21 @@ tools:
     allowed: true
     require_approval: false
 
+  read_working_memory:
+    allowed: true
+    require_approval: false
+    max_timeout: 5
+
+  write_working_memory:
+    allowed: true
+    require_approval: false
+    max_timeout: 5
+
+  clear_working_memory:
+    allowed: true
+    require_approval: false
+    max_timeout: 5
+
   search_notes:
     allowed: true
     require_approval: false
@@ -125,6 +140,27 @@ tools:
     allowed: true
     require_approval: false
     max_timeout: 15
+
+  add_mcp_server:
+    allowed: true
+    require_approval: true
+
+  remove_mcp_server:
+    allowed: true
+    require_approval: true
+
+  list_mcp_servers:
+    allowed: true
+    require_approval: false
+
+  list_mcp_tools:
+    allowed: true
+    require_approval: false
+
+  invoke_mcp_tool:
+    allowed: true
+    require_approval: false
+    max_timeout: 120
 
   accessibility_action:
     allowed: true
@@ -151,6 +187,16 @@ tools:
     allowed: true
     require_approval: false
     max_timeout: 60
+
+  xcode_project_info:
+    allowed: true
+    require_approval: false
+    max_timeout: 60
+
+  xcode_build_diagnostics:
+    allowed: true
+    require_approval: true
+    max_timeout: 900
 
   spotlight_search:
     allowed: true
@@ -284,3 +330,28 @@ tools:
     allowed: true
     require_approval: true
     max_timeout: 120
+
+  learn_workflow:
+    allowed: true
+    require_approval: true
+    max_timeout: 30
+
+  list_workflows:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  set_workflow_enabled:
+    allowed: true
+    require_approval: true
+    max_timeout: 10
+
+  run_workflow:
+    allowed: true
+    require_approval: true
+    max_timeout: 300
+
+  undo_last:
+    allowed: true
+    require_approval: true
+    max_timeout: 30

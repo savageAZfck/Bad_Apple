@@ -20,7 +20,9 @@
     <key>WorkingDirectory</key>
     <string>/Users/savag3/bad_apple</string>
     <key>UserName</key>
-    <string>root</string>
+    <string>savag3</string>
+    <key>GroupName</key>
+    <string>staff</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>BADAPPLE_SLICKS_KEY_PATH</key>
@@ -30,11 +32,11 @@
         <key>BADAPPLE_MAIN_MODEL</key>
         <string>caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit</string>
         <key>BADAPPLE_DRAFT_MODEL</key>
-        <string>z-lab/Qwen3.5-9B-DFlash</string>
+        <string></string>
         <key>BADAPPLE_NUM_DRAFT_TOKENS</key>
-        <string>2</string>
+        <string>4</string>
         <key>BADAPPLE_DFLASH</key>
-        <string>1</string>
+        <string>0</string>
         <key>BADAPPLE_DFLASH_VERIFY_LEN_CAP</key>
         <string>6</string>
         <key>BADAPPLE_DFLASH_BLOCK_TOKENS</key>
@@ -45,11 +47,15 @@
         <string>/Users/savag3/bad_apple/prompt.txt</string>
         <key>BADAPPLE_NOTES_DIR</key>
         <string>/Users/savag3/.bad_apple/notes</string>
+        <key>BADAPPLE_IDENTITY_BLOB</key>
+        <string>/Users/savag3/Library/Application Support/BadApple/identity.sekey</string>
+        <key>BADAPPLE_FAST_TIER</key>
+        <string>1</string>
         <key>HOME</key>
         <string>/Users/savag3</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
-        <key>BADAPPLE_AUTOPILOT</key>
+        <key>HF_HUB_OFFLINE</key>
         <string>1</string>
     </dict>
     <key>StandardOutPath</key>

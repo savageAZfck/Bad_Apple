@@ -11,6 +11,7 @@ single-brain MLX server:
 """
 
 import datetime
+import fcntl
 import hashlib
 import hmac
 import json
@@ -18,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from collections import deque
@@ -73,6 +75,7 @@ class PersonaPack:
             else Path(__file__).with_name("personas.json")
         )
         self.personas = dict(self.DEFAULT_PERSONAS)
+        self._last_mtime: Optional[float] = None
         self._load_personas()
         self.active = os.environ.get("BADAPPLE_PERSONA", "default").lower().strip()
         if self.active not in self.personas:
@@ -81,11 +84,19 @@ class PersonaPack:
     def _load_personas(self):
         if self.personas_file.is_file():
             try:
+                mtime = self.personas_file.stat().st_mtime
+                if self._last_mtime is not None and mtime <= self._last_mtime:
+                    return
                 data = json.loads(self.personas_file.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
+                    self.personas = dict(self.DEFAULT_PERSONAS)
                     self.personas.update(data)
+                    self._last_mtime = mtime
             except Exception as e:
                 print(f"[persona] could not load personas: {e}", flush=True)
+
+    def reload_personas(self):
+        self._load_personas()
 
     def _resolve_prompt(self, persona: Dict[str, Any]) -> str:
         path = persona.get("system_prompt_file")
@@ -118,6 +129,7 @@ class PersonaPack:
         )
 
     def get_system_prompt(self, voice_mode: bool = False) -> str:
+        self._load_personas()
         persona = self.personas.get(self.active, self.personas["default"])
         if voice_mode:
             vp = self._resolve_voice_prompt(persona)
@@ -341,8 +353,10 @@ class AuditLedger:
     def __init__(self, data_dir: Path, genesis: str = "bad-apple-genesis-v1"):
         self.data_dir = data_dir
         self.ledger_path = data_dir / "ledger.jsonl"
+        self.lock_path = data_dir / "ledger.lock"
         self.genesis = genesis
         self._secret = os.environ.get("BADAPPLE_LEDGER_SECRET", "").encode()
+        self._lock = threading.RLock()
 
     def _last_hash(self) -> str:
         if not self.ledger_path.is_file():
@@ -350,19 +364,16 @@ class AuditLedger:
         try:
             with open(self.ledger_path, "rb") as f:
                 f.seek(0, os.SEEK_END)
-                while f.tell() > 0:
-                    f.seek(-1, os.SEEK_CUR)
-                    if f.read(1) == b"\n":
-                        line_start = f.tell()
-                        line = f.readline().decode("utf-8")
-                        if line.strip():
-                            try:
-                                return json.loads(line)["hash"]
-                            except Exception:
-                                pass
-                        f.seek(line_start - 1)
-                    else:
-                        f.seek(-1, os.SEEK_CUR)
+                position = f.tell()
+                buffer = b""
+                while position > 0:
+                    size = min(8192, position)
+                    position -= size
+                    f.seek(position)
+                    buffer = f.read(size) + buffer
+                    lines = [line for line in buffer.splitlines() if line.strip()]
+                    if lines and (position == 0 or len(lines) > 1):
+                        return json.loads(lines[-1])["hash"]
         except Exception:
             pass
         return hashlib.sha256(self.genesis.encode()).hexdigest()
@@ -400,37 +411,30 @@ class AuditLedger:
     def record(self, event_type: str, data: Any):
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
-            safe = self.redact(data)
-            prev = self._last_hash()
-            payload = {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": event_type,
-                "data": safe,
-                "prev_hash": prev,
-            }
-            raw = _safe_json(payload)
-            if self._secret:
-                raw_hash = hmac.new(self._secret, raw.encode(), hashlib.sha256).hexdigest()
-            else:
-                raw_hash = hashlib.sha256(raw.encode()).hexdigest()
-            payload["hash"] = raw_hash
-            line = _safe_json(payload)
-            fd, tmp = tempfile.mkstemp(prefix="ledger_", dir=str(self.data_dir))
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(line + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            # Append atomically.
-            with open(tmp, "r", encoding="utf-8") as f:
-                line = f.read()
-            with open(self.ledger_path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
-            try:
-                os.unlink(tmp)
-            except Exception:
-                pass
+            with self._lock, open(self.lock_path, "a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                safe = self.redact(data)
+                prev = self._last_hash()
+                payload = {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": event_type,
+                    "data": safe,
+                    "prev_hash": prev,
+                }
+                raw = _safe_json(payload)
+                if self._secret:
+                    raw_hash = hmac.new(self._secret, raw.encode(), hashlib.sha256).hexdigest()
+                else:
+                    raw_hash = hashlib.sha256(raw.encode()).hexdigest()
+                payload["hash"] = raw_hash
+                line = (_safe_json(payload) + "\n").encode("utf-8")
+                fd = os.open(self.ledger_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                try:
+                    os.write(fd, line)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as e:
             print(f"[audit] ledger write failed: {e}", flush=True)
 
@@ -599,6 +603,16 @@ class SemanticCache:
             self._entries = sorted(self._entries, key=lambda e: e.get("hits", 0))[-self.MAX_CACHE_SIZE :]
         self._save()
 
+    def clear(self) -> str:
+        """Clear all in-memory and on-disk semantic cache entries."""
+        self._entries = []
+        try:
+            if self.cache_path.is_file():
+                self.cache_path.unlink()
+        except Exception as e:
+            print(f"[cache] could not clear cache file: {e}", flush=True)
+        return "Semantic cache cleared."
+
     def classify_intent(self, query: str) -> Optional[str]:
         """Compare query to a small fixed set of example phrases and return label."""
         examples = {
@@ -682,22 +696,47 @@ class Workspace:
         if not p:
             return "No active workspace."
 
-        files = []
+        # Build system detection.
+        build_system = []
+        build_files = {
+            "Cargo.toml": "Rust/Cargo",
+            "package.json": "Node/npm",
+            "pyproject.toml": "Python",
+            "setup.py": "Python setuptools",
+            "Package.swift": "Swift Package",
+            "Makefile": "Make",
+            "CMakeLists.txt": "CMake",
+            "build.gradle": "Gradle",
+            "pom.xml": "Maven",
+            "*.xcodeproj": "Xcode project",
+            "*.xcworkspace": "Xcode workspace",
+        }
+        for pattern, name in build_files.items():
+            if pattern.startswith("*"):
+                if any(p.glob(pattern)):
+                    build_system.append(name)
+            elif (p / pattern).is_file():
+                build_system.append(name)
+
+        # Recent files (top 10 by mtime).
+        recent = []
         try:
-            files = [f.name for f in sorted(p.iterdir()) if f.is_file()][:30]
+            all_files = [f for f in p.rglob("*") if f.is_file() and not f.name.startswith(".")]
+            all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            recent = [str(f.relative_to(p)) for f in all_files[:10]]
         except Exception:
             pass
 
         git_info = ""
         try:
-            result = subprocess.run(
+            status = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=str(p),
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            dirty = len(result.stdout.strip().splitlines()) if result.stdout.strip() else 0
+            dirty = len(status.stdout.strip().splitlines()) if status.stdout.strip() else 0
             branch = subprocess.run(
                 ["git", "branch", "--show-current"],
                 cwd=str(p),
@@ -705,12 +744,31 @@ class Workspace:
                 text=True,
                 timeout=5,
             ).stdout.strip() or "unknown"
-            git_info = f"git branch: {branch}, dirty files: {dirty}. "
+            last_commit = subprocess.run(
+                ["git", "log", "-1", "--oneline"],
+                cwd=str(p),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip() or "no commits"
+            git_info = f"git branch: {branch}, dirty: {dirty}, last: {last_commit}. "
         except Exception:
             pass
 
-        file_list = f"Files: {', '.join(files)}" if files else "(empty)"
-        return f"Workspace: {p}. {git_info}{file_list}"
+        readme_summary = ""
+        for readme_name in ["README.md", "readme.md", "README.rst"]:
+            readme = p / readme_name
+            if readme.is_file():
+                try:
+                    text = readme.read_text(encoding="utf-8", errors="ignore").strip()
+                    readme_summary = f"README: {text[:160].replace(chr(10), ' ')}... "
+                except Exception:
+                    pass
+                break
+
+        build = f"Build system: {', '.join(build_system)}. " if build_system else ""
+        files = f"Recent files: {', '.join(recent)}." if recent else "No files found."
+        return f"Workspace: {p}. {build}{git_info}{readme_summary}{files}"
 
     def resolve_path(self, maybe_path: Optional[str]) -> Path:
         if maybe_path:
@@ -735,6 +793,7 @@ class MemoryGraph:
     MAX_FACTS = 200
     MAX_EPISODES = 50
     MAX_ENTITIES = 100
+    MAX_WORKFLOWS = 50
 
     ENTITY_PATTERNS = [
         re.compile(r"\bmy ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})\b"),
@@ -748,11 +807,13 @@ class MemoryGraph:
         self.data_dir = data_dir
         self.memory_file = data_dir / "memory_graph.json"
         self.encoder = encoder
+        self._lock = threading.RLock()
         self._state: Dict[str, Any] = {
             "facts": [],
             "entities": [],
             "relations": [],
             "episodes": [],
+            "workflows": [],
         }
         self._load()
 
@@ -770,8 +831,12 @@ class MemoryGraph:
     def _save(self):
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.memory_file, "w", encoding="utf-8") as f:
+            tmp = self.memory_file.with_name(f".{self.memory_file.name}.{os.getpid()}.tmp")
+            with self._lock, open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.memory_file)
         except Exception as e:
             print(f"[memory] could not save: {e}", flush=True)
 
@@ -805,6 +870,7 @@ class MemoryGraph:
         self._state["facts"] = self._state["facts"][-self.MAX_FACTS:]
         self._state["episodes"] = self._state["episodes"][-self.MAX_EPISODES:]
         self._state["entities"] = self._state["entities"][-self.MAX_ENTITIES:]
+        self._state["workflows"] = self._state["workflows"][-self.MAX_WORKFLOWS:]
 
     def remember(self, text: str, source: str = "user"):
         """Extract and store a fact from user or assistant text."""
@@ -824,12 +890,14 @@ class MemoryGraph:
         self._trim()
         self._save()
 
-    def add_episode(self, user_text: str, assistant_text: str):
+    def add_episode(self, user_text: str, assistant_text: str, context: Optional[Dict[str, Any]] = None):
         """Store a brief episodic record of a turn."""
         self._state["episodes"].append({
             "user": user_text[:300],
             "assistant": assistant_text[:300],
             "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "context": context or {},
+            "embedding": self._embed(user_text[:300]),
         })
         self._trim()
         self._save()
@@ -843,17 +911,62 @@ class MemoryGraph:
             self._state["relations"].append(triple)
             self._save()
 
+    def learn_workflow(self, name: str, trigger: str, steps: List[Dict[str, Any]]) -> str:
+        name, trigger = name.strip(), trigger.strip()
+        if not name or not trigger or not steps:
+            return "Workflow name, trigger, and at least one step are required."
+        if any(not isinstance(step, dict) or not step.get("tool") for step in steps):
+            return "Every workflow step must contain a tool name."
+        workflow = {
+            "name": name,
+            "trigger": trigger,
+            "steps": steps,
+            "enabled": False,
+            "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "embedding": self._embed(trigger),
+        }
+        self._state["workflows"] = [item for item in self._state["workflows"] if item.get("name") != name]
+        self._state["workflows"].append(workflow)
+        self._trim()
+        self._save()
+        return f"Learned workflow '{name}' in disabled review mode."
+
+    def set_workflow_enabled(self, name: str, enabled: bool) -> str:
+        for workflow in self._state["workflows"]:
+            if workflow.get("name") == name:
+                workflow["enabled"] = bool(enabled)
+                self._save()
+                return f"Workflow '{name}' enabled={bool(enabled)}."
+        return f"Workflow '{name}' not found."
+
+    def workflows(self) -> List[Dict[str, Any]]:
+        return [dict(workflow) for workflow in self._state["workflows"]]
+
     def search(self, query: str, k: int = 3) -> List[str]:
         """Return the most relevant fact and episode texts for a query."""
         if not (self._state["facts"] or self._state["episodes"]):
             return []
+
+        low = query.lower()
+        # Direct fact patterns should always win over episode recall.
+        direct_patterns = [
+            (r"\bmy name\b", r"\bmy name is\b"),
+            (r"\bmy (?:favorite|favourite)\b", r"\bmy (?:favorite|favourite)\s+\w+\s+is\b"),
+            (r"\bwhat do i (?:like|love|prefer|hate)\b", r"\bi (?:like|love|prefer|hate)\b"),
+            (r"\bwhat do i\b", r"\bmy\s+\w+\s+is\b"),
+        ]
+        for query_pat, fact_pat in direct_patterns:
+            if re.search(query_pat, low):
+                for f in self._state["facts"]:
+                    if re.search(fact_pat, f.get("text", ""), re.IGNORECASE):
+                        return [f.get("text", "")]
 
         combined = []
         for f in self._state["facts"]:
             combined.append(("fact", f.get("text", ""), f.get("embedding")))
         for e in self._state["episodes"]:
             # Treat the user side of an episode as a memory target.
-            combined.append(("episode", f"You previously asked: {e['user']}", None))
+            combined.append(("episode", f"You previously asked: {e['user']}", e.get("embedding")))
 
         if self.encoder and any(emb for _, _, emb in combined):
             try:
@@ -896,8 +1009,42 @@ class MemoryGraph:
             f"Memory graph: {len(self._state['facts'])} facts, "
             f"{len(self._state['entities'])} entities, "
             f"{len(self._state['relations'])} relations, "
-            f"{len(self._state['episodes'])} episodes."
+            f"{len(self._state['episodes'])} episodes, "
+            f"{len(self._state['workflows'])} workflows."
         )
+
+    def consolidate(self) -> str:
+        """Offline dream pass: deduplicate facts, prune orphaned entities, refresh embeddings."""
+        with self._lock:
+            # Deduplicate facts by text (keep newest).
+            seen: set = set()
+            unique = []
+            for f in reversed(self._state["facts"]):
+                text = f.get("text", "").strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    unique.append(f)
+            self._state["facts"] = list(reversed(unique))
+
+            # Re-embed stale facts.
+            for f in self._state["facts"]:
+                if not f.get("embedding") and self.encoder:
+                    f["embedding"] = self._embed(f["text"])
+
+            # Prune entities no longer referenced by any fact.
+            referenced = set()
+            for f in self._state["facts"]:
+                for pat in self.ENTITY_PATTERNS:
+                    for m in pat.finditer(f["text"]):
+                        referenced.add(m.group(1).strip().lower())
+            self._state["entities"] = [
+                e for e in self._state["entities"]
+                if (e if isinstance(e, str) else e.get("name", "")).lower() in referenced
+            ]
+
+            self._trim()
+            self._save()
+        return self.get_summary()
 
 
 # =============================================================================
@@ -965,6 +1112,9 @@ class Policy:
     def autopilot(self) -> bool:
         return bool(self._policy.get("autopilot", self.DEFAULT_POLICY["autopilot"]))
 
+    def set_autopilot(self, enabled: bool) -> None:
+        self._policy["autopilot"] = bool(enabled)
+
     def _tool_cfg(self, tool_name: str) -> Dict[str, Any]:
         tools = self._policy.get("tools", self.DEFAULT_POLICY["tools"])
         defaults = self._policy.get("defaults", self.DEFAULT_POLICY["defaults"])
@@ -981,6 +1131,9 @@ class Policy:
         if self.autopilot:
             return False
         return bool(self._tool_cfg(tool_name).get("require_approval", True))
+
+    def timeout(self, tool_name: str, default: int = 30) -> int:
+        return int(self._tool_cfg(tool_name).get("max_timeout", default))
 
     def _denied(self, value: str, patterns: List[str]) -> Optional[str]:
         if not patterns:
@@ -1108,6 +1261,10 @@ class ApprovalGate:
                 json.dump(self.pending, f, indent=2)
         except Exception as e:
             print(f"[approval] could not save pending: {e}", flush=True)
+
+    @property
+    def autopilot(self) -> bool:
+        return bool(self.policy.autopilot)
 
     def needs_approval(self, tool_name: str) -> bool:
         return self.policy.needs_approval(tool_name)

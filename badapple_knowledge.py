@@ -8,6 +8,7 @@ user's own documents without the cloud.
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -44,6 +45,7 @@ class BadAppleKnowledge:
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.max_chunk_chars = max_chunk_chars
+        self._lock = threading.RLock()
         self.batch_size = batch_size
 
         self.tokenizer = None
@@ -112,6 +114,10 @@ class BadAppleKnowledge:
 
     def index_paths(self, paths: List[Path], extensions: Optional[set] = None) -> int:
         """Index the given files or directories. Returns number of chunks."""
+        with self._lock:
+            return self._index_paths_unsafe(paths, extensions)
+
+    def _index_paths_unsafe(self, paths: List[Path], extensions: Optional[set] = None) -> int:
         extensions = extensions or {".txt", ".md", ".rs", ".swift", ".py", ".sh", ".toml"}
 
         new_chunks = []
@@ -133,6 +139,16 @@ class BadAppleKnowledge:
         if not new_chunks:
             return 0
 
+        # Remove stale chunks for any source we are about to re-index.
+        new_sources_set = set(new_sources)
+        if self.sources and self.chunks:
+            keep = [i for i, s in enumerate(self.sources) if s not in new_sources_set]
+            if len(keep) < len(self.sources):
+                self.chunks = [self.chunks[i] for i in keep]
+                self.sources = [self.sources[i] for i in keep]
+                if self.embeddings is not None:
+                    self.embeddings = self.embeddings[keep, :]
+
         start = time.perf_counter()
         embeddings = self._encode_texts(new_chunks)
         print(f"Indexed {len(new_chunks)} chunks in {time.perf_counter() - start:.2f}s", flush=True)
@@ -148,18 +164,20 @@ class BadAppleKnowledge:
         return len(new_chunks)
 
     def search(self, query: str, k: int = 3, threshold: float = 0.45) -> List[Tuple[str, float]]:
-        if self.embeddings is None or not self.chunks:
-            return []
-        self._load_model()
-        q_emb = self._encode_texts([query])
-        scores = (q_emb @ self.embeddings.T)[0]
-        top_idx = np.argpartition(scores, -k)[-k:]
-        top_idx = top_idx[np.argsort(-scores[top_idx])]
-        results = []
-        for idx in top_idx:
-            if scores[idx] >= threshold:
-                results.append((f"[{self.sources[idx]}] {self.chunks[idx]}", float(scores[idx])))
-        return results
+        with self._lock:
+            if self.embeddings is None or not self.chunks:
+                return []
+            self._load_model()
+            q_emb = self._encode_texts([query])
+            scores = (q_emb @ self.embeddings.T)[0]
+            k = min(k, len(scores))
+            top_idx = np.argpartition(scores, -k)[-k:]
+            top_idx = top_idx[np.argsort(-scores[top_idx])]
+            results = []
+            for idx in top_idx:
+                if scores[idx] >= threshold:
+                    results.append((f"[{self.sources[idx]}] {self.chunks[idx]}", float(scores[idx])))
+            return results
 
     def _save_index(self):
         path = self.index_dir / self.DEFAULT_INDEX_NAME
@@ -170,7 +188,7 @@ class BadAppleKnowledge:
                 "embeddings": self.embeddings.tolist() if self.embeddings is not None else [],
             }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, separators=(",", ":"))
         except Exception as e:
             print(f"Warning: could not save index: {e}", flush=True)
 

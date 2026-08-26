@@ -19,10 +19,11 @@ import json
 import os
 import queue
 import random
-import tempfile
 import re
 import shlex
 import subprocess
+import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -42,9 +43,24 @@ import badapple_git
 import badapple_dashboard
 import badapple_scheduler
 import badapple_ambient
+import badapple_working_memory
+import badapple_tier
+import badapple_tool_router
+import badapple_model_registry
+import badapple_fact_extractor
+import badapple_workspace_watcher
+import badapple_mcp_marketplace
+import badapple_fast_model
+import badapple_aqua_helper
 import badapple_spotlight
 import badapple_xcode
 import badapple_keychain
+import badapple_identity
+import badapple_undo
+from badapple_plugins import PluginRegistry
+from badapple_runtime import CircuitBreaker, HealthRegistry, ResourceGovernor, RuntimeControl
+from badapple_vault import GenerationStore
+import badapple_macos_apps
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -439,6 +455,69 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "read_working_memory",
+            "description": "Read the assistant's working memory scratchpad. Use this to recall intermediate state the model wrote earlier.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum characters to return. Default 5000.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_working_memory",
+            "description": "Write or append to the assistant's working memory scratchpad. Use this to hold intermediate state or show your work.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["replace", "append", "prepend"],
+                        "description": "How to write. Default replace.",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_working_memory",
+            "description": "Clear the assistant's working memory scratchpad.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consolidate_memory",
+            "description": "Run the offline dream/consolidation pass on the long-term memory graph.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "screen_capture",
             "description": "Capture the main Mac screen to a PNG and return the local file path.",
             "parameters": {
@@ -461,6 +540,27 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max output tokens. Default 256.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_and_describe_screen",
+            "description": "Capture the main screen and describe what is visible using the local MLX vision model. Use this when the user asks what is on their screen or to summarize the current view.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The question or instruction for the vision model. Default: 'Describe what is on the screen.'",
+                    },
                     "max_tokens": {
                         "type": "integer",
                         "description": "Max output tokens. Default 256.",
@@ -567,6 +667,74 @@ TOOLS = [
                     },
                 },
                 "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_mcp_server",
+            "description": "Register a local MCP (Model Context Protocol) stdio server command.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Short name for the server."},
+                    "command": {"type": "string", "description": "Shell-style command string, e.g. 'python -m mcp_server_time'."},
+                    "env": {"type": "object", "description": "Optional environment variables."},
+                },
+                "required": ["name", "command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_mcp_server",
+            "description": "Remove a registered MCP server.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_mcp_servers",
+            "description": "List registered MCP servers.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_mcp_tools",
+            "description": "List tools exposed by a registered MCP server.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "The registered MCP server name."},
+                },
+                "required": ["server"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "invoke_mcp_tool",
+            "description": "Call a tool on a registered MCP server.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string"},
+                    "tool": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["server", "tool"],
             },
         },
     },
@@ -771,6 +939,18 @@ TOOLS = [
         "function": {
             "name": "system_dashboard",
             "description": "Return a local power and performance dashboard: CPU, memory, swap, disk, battery, thermal pressure, Bad Apple process stats, and the latest log perf line.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_status",
+            "description": "Return the active workspace summary: build system, recent files, git state, README summary.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -1059,6 +1239,232 @@ TOOLS = [
     },
 ]
 
+TOOLS.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "learn_workflow",
+            "description": "Learn a reviewed compound workflow from named local tool steps. New workflows are disabled until explicitly enabled.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "trigger": {"type": "string"},
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": {"type": "string"},
+                                "args": {"type": "object"},
+                            },
+                            "required": ["tool"],
+                        },
+                    },
+                },
+                "required": ["name", "trigger", "steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_workflows",
+            "description": "List locally learned workflows and whether each is enabled.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_workflow_enabled",
+            "description": "Enable or disable a reviewed learned workflow.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "enabled": {"type": "boolean"}},
+                "required": ["name", "enabled"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_workflow",
+            "description": "Run an enabled learned workflow through normal policy and approval checks.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "xcode_project_info",
+            "description": "List targets, configurations, and schemes for a local Xcode project.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_path": {"type": "string"}},
+                "required": ["project_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "xcode_build_diagnostics",
+            "description": "Run a local unsigned Xcode build and return focused errors and warnings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "scheme": {"type": "string"},
+                    "configuration": {"type": "string"},
+                },
+                "required": ["project_path", "scheme"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "undo_last",
+            "description": "Undo the most recent reversible Bad Apple file mutation from its verified snapshot.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "today_events",
+            "description": "List today's Calendar events from the local macOS Calendar app.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "upcoming_events",
+            "description": "List upcoming Calendar events for the next N days.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Number of days ahead to look. Default 7."},
+                    "limit": {"type": "integer", "description": "Maximum events. Default 20."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reminders",
+            "description": "List local macOS Reminders.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "list_name": {"type": "string", "description": "Optional list name."},
+                    "completed": {"type": "boolean", "description": "Show completed reminders. Default false."},
+                    "limit": {"type": "integer", "description": "Max reminders. Default 20."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unread_emails",
+            "description": "Show sender and subject lines of unread Mail messages.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "Max messages. Default 10."}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_mail",
+            "description": "Search local Mail by subject or sender.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Text to search for in subject or sender."},
+                    "limit": {"type": "integer", "description": "Max messages. Default 10."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_reminder",
+            "description": "Add a reminder to the local macOS Reminders app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Text of the reminder."},
+                    "list_name": {"type": "string", "description": "Optional target list name."},
+                    "due": {"type": "string", "description": "Optional due date string AppleScript can parse, e.g. 'today at 5pm'."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ui_action",
+            "description": "Control the foreground macOS application via the accessibility UI. Actions: 'info' returns the frontmost app, window, and named UI elements; 'click' clicks a named element; 'type' sets text into a named text field.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["info", "click", "type"],
+                        "description": "The UI action to perform.",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "For click/type, the accessible name of the target element.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "For type, the text to enter.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+])
+
+
+def _compact_tool_schema(tool: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a token-light tool schema for the 9B chat template.
+
+    The full TOOLS schemas are still used for API discovery and execution.
+    In the prompt we only expose the tool name; the system prompt already
+    describes what each tool does, so prefill latency stays low while the
+    model still knows the tool is available.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["function"]["name"],
+            "description": "tool",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+COMPACT_TOOLS = [_compact_tool_schema(t) for t in TOOLS]
+
 TOOL_KEYWORDS = [
     "what time", "current time", "time is it", "date and time", "today's date",
     "list files", "show files", "files in", "directory", "folder", "what's in",
@@ -1070,7 +1476,65 @@ TOOL_KEYWORDS = [
     "write file", "save to file", "create a file", "append to file", "write a note",
     "run command", "run shell", "execute command", "shell command", "run git", "git status",
     "search content", "search in", "grep", "find text", "find in files",
+    "screen", "screenshot", "what's on my screen", "describe my screen", "what do you see",
+    "image", "describe this image", "what is in this image", "extract text from image",
+    "capture screen",
+    "workspace", "project status", "build system", "workspace status",
+    "calendar", "events", "meetings", "reminders", "unread mail", "email", "mail",
+    "working memory", "scratchpad",
+    "consolidate memory", "dream", "offline consolidation",
+    "mcp", "model context protocol", "mcp server", "mcp tool",
 ]
+
+# Map query keywords to the most relevant tool names.  This lets the 9B chat
+# template receive a small, focused tool schema instead of all 60+ tools,
+# which keeps prefill latency fast while still letting the model pick the right tool.
+KEYWORD_TOOL_MAP = [
+    (["what time", "current time", "time is it", "date and time", "today's date"], ["get_current_time", "run_applescript"]),
+    (["list files", "show files", "files in", "directory", "folder", "what's in"], ["list_directory"]),
+    (["search for", "find file", "mdfind", "spotlight"], ["search_local_files"]),
+    (["read file", "read the file", "contents of", "show me the file"], ["read_file"]),
+    (["write file", "save to file", "create a file", "append to file", "write a note"], ["write_file"]),
+    (["run command", "run shell", "execute command", "shell command"], ["run_shell"]),
+    (["git status", "run git", "git diff", "git log", "git commit"], ["git_status", "git_diff", "git_log", "git_commit"]),
+    (["search content", "search in", "grep", "find text", "find in files"], ["search_content"]),
+    (["index documents", "index my", "index files"], ["index_documents"]),
+    (["search my notes", "search notes", "what do I have", "what did I write"], ["search_notes"]),
+    (["screen", "screenshot", "what's on my screen", "describe my screen", "what do you see", "capture screen"], ["capture_and_describe_screen", "capture_and_extract_screen", "screen_capture", "describe_image", "extract_text_from_image"]),
+    (["image", "describe this image", "what is in this image", "extract text from image"], ["describe_image", "extract_text_from_image"]),
+    (["workspace", "project status", "build system", "workspace status"], ["workspace_status", "run_shell"]),
+    (["project status"], ["workspace_status"]),
+    (["calendar", "events", "meetings"], ["today_events", "upcoming_events"]),
+    (["reminders"], ["list_reminders", "add_reminder"]),
+    (["unread mail", "email", "mail"], ["unread_emails", "search_mail"]),
+    (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
+    (["consolidate memory", "dream", "offline consolidation"], ["consolidate_memory"]),
+    (["run shortcut", "list shortcuts", "shortcut"], ["run_shortcut"]),
+    (["run applescript", "run script", "applescript"], ["run_applescript"]),
+    (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
+    (["mcp", "model context protocol", "mcp server", "mcp tool"], ["list_mcp_servers", "add_mcp_server", "list_mcp_tools", "invoke_mcp_tool"]),
+]
+
+
+# Fallback tools for queries that look like commands but don't match a specific keyword.
+DEFAULT_TOOL_NAMES = {
+    "get_current_time", "list_directory", "read_file", "write_file", "run_shell",
+    "run_applescript", "run_shortcut", "search_content", "search_local_files",
+    "git_status", "index_documents", "search_notes", "read_working_memory",
+    "capture_and_describe_screen", "workspace_status", "ui_action",
+}
+
+
+def tools_for_prompt(prompt: str) -> List[Dict[str, Any]]:
+    """Return a small, focused tool schema for the 9B chat template."""
+    low = prompt.lower()
+    selected = set()
+    for keywords, names in KEYWORD_TOOL_MAP:
+        if any(k in low for k in keywords):
+            selected.update(names)
+    if not selected:
+        selected = set(DEFAULT_TOOL_NAMES)
+    return [t for t in TOOLS if t.get("function", {}).get("name") in selected]
 
 
 def load_slicks_secret() -> bytes:
@@ -1287,6 +1751,43 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
     def _rt(name, args):
         return run_tool(name, args, knowledge, approval=approval, policy=policy, workspace=workspace)
 
+    # Working memory read/clear are deterministic; writes use quoted or trailing text.
+    if re.search(r"\b(working memory|scratchpad)\b", low):
+        if re.search(r"\b(clear|erase|reset)\b", low):
+            return _rt("clear_working_memory", {})
+        m = re.search(r"['\"](.+?)['\"]", low)
+        content = m.group(1).strip() if m else None
+        if not content:
+            m = re.search(r"(?:write|add)\s+(?:to\s+)?(?:working memory|scratchpad)\s*[:-]?\s*(.+?)$", low, re.IGNORECASE)
+            content = m.group(1).strip() if m else None
+        if content:
+            return _rt("write_working_memory", {
+                "content": content,
+                "mode": "append" if "add" in low else "replace",
+            })
+        return _rt("read_working_memory", {})
+
+    # Workspace status.
+    if re.search(r"\b(project status|workspace status|active workspace)\b", low):
+        return _rt("workspace_status", {})
+
+    # Local macOS app integrations.
+    if re.search(r"\b(calendar|events|meetings|today's schedule)\b", low):
+        if "upcoming" in low or "next" in low:
+            m = re.search(r"\b(\d+)\s+days?\b", low)
+            return _rt("upcoming_events", {"days": int(m.group(1)) if m else 7})
+        return _rt("today_events", {})
+    if re.search(r"\b(reminders?|todo)\b", low):
+        if re.search(r"\b(add|create)\b", low):
+            m = re.search(r"(?:add|create)\s+a?\s*(?:reminder|todo)\s*[:-]?\s*['\"]?(.+?)['\"]?$", low, re.IGNORECASE)
+            return _rt("add_reminder", {"name": m.group(1).strip() if m else low})
+        return _rt("list_reminders", {"completed": "completed" in low or "done" in low})
+    if re.search(r"\b(unread mail|unread emails?|new mail|new emails?)\b", low):
+        return _rt("unread_emails", {})
+    if re.search(r"\b(search mail|search email|find email|find mail)\b", low):
+        m = re.search(r"(?:search|find)\s+(?:mail|email)\s+(?:for\s+)?['\"]?(.+?)['\"]?$", low, re.IGNORECASE)
+        return _rt("search_mail", {"query": m.group(1).strip() if m else low})
+
     # Multi-step: find ... and save to ...
     m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+in\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
     if m:
@@ -1326,10 +1827,11 @@ def fast_execute(prompt: str, knowledge: Optional[BadAppleKnowledge] = None, app
         written = _rt("write_file", {"filename": m.group(2).strip(), "content": f"Files in {path}:\n\n{listed}"})
         return f"{written}\n\nFiles:\n{listed[:500]}"
 
-    # list files
-    m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)(?!\s+(?:and|or)\b)$", low, re.IGNORECASE)
-    if m:
-        return _rt("list_directory", {"path": _resolve_common_path(m.group(1))})
+    # list files (but not MCP commands, which the tool router handles)
+    if "mcp" not in low:
+        m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)(?!\s+(?:and|or)\b)$", low, re.IGNORECASE)
+        if m:
+            return _rt("list_directory", {"path": _resolve_common_path(m.group(1))})
 
     # read file
     m = re.search(r"\bread\b(?:\s+file)?\s+(.+)$", low, re.IGNORECASE)
@@ -1450,13 +1952,19 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             if not str(p.resolve()).startswith(str(notes_dir.resolve())):
                 return "Error: filename is not allowed"
             content = args.get("content", "")
+            undo = badapple_undo.UndoJournal(Path(os.environ.get("BADAPPLE_DATA_DIR", "/var/lib/bad_apple")))
+            undo_id = undo.capture_file(p, "append_file" if args.get("append") else "write_file")
             if args.get("append"):
                 with open(p, "a", encoding="utf-8") as f:
                     f.write(content + "\n")
-                return f"Appended to {p.name}"
+                return f"Appended to {p.name} (undo {undo_id[:8]})"
             with open(p, "w", encoding="utf-8") as f:
                 f.write(content)
-            return f"Wrote {p}"
+            return f"Wrote {p} (undo {undo_id[:8]})"
+        if name == "undo_last":
+            return badapple_undo.UndoJournal(
+                Path(os.environ.get("BADAPPLE_DATA_DIR", "/var/lib/bad_apple"))
+            ).undo_last()
         if name == "search_content":
             query = args.get("query", "")
             p = _resolve_tool_path(args, "path", workspace)
@@ -1486,14 +1994,57 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
         if name == "run_shortcut":
             shortcut_name = args.get("name", "")
             shortcut_input = args.get("input", "")
+            aqua = badapple_aqua_helper.call_aqua(
+                "run_shortcut",
+                name=shortcut_name,
+                input=shortcut_input or "",
+                timeout=60,
+            )
+            if aqua and aqua.get("ok"):
+                return aqua.get("output") or "done"
+            if aqua:
+                return f"Error running shortcut: {aqua.get('error')}"
+            # Fallback: try from the daemon's context (usually fails without Aqua).
             result = _run_as_user(["shortcuts", "run", shortcut_name], input_text=shortcut_input or "", timeout=60)
             return (result.stdout or result.stderr or "done").strip()
+        if name == "ui_action":
+            action = args.get("action", "info")
+            aqua = badapple_aqua_helper.call_aqua(
+                f"ui_{action}",
+                target=args.get("target", ""),
+                text=args.get("text", ""),
+                timeout=30,
+            )
+            if aqua and aqua.get("ok"):
+                if action == "info":
+                    return json.dumps(aqua, indent=2, default=str)
+                return aqua.get("result") or "done"
+            if aqua:
+                return f"UI action error: {aqua.get('error')}"
+            return "UI action failed (Aqua helper not available)"
         if name == "list_shortcuts":
+            aqua = badapple_aqua_helper.call_aqua("list_shortcuts", timeout=15)
+            if aqua and aqua.get("ok"):
+                shortcuts = aqua.get("shortcuts") or []
+                return "\n".join(shortcuts) or "No shortcuts found"
+            if aqua:
+                return f"Error listing shortcuts: {aqua.get('error')}"
+            # Fallback.
             result = _run_as_user(["shortcuts", "list"], timeout=15)
             if result.returncode != 0:
                 return f"Error listing shortcuts: {result.stderr or result.stdout}"
             lines = [l for l in (result.stdout or "").splitlines() if l][:100]
             return "\n".join(lines) or "No shortcuts found"
+        if name == "read_working_memory":
+            return badapple_working_memory.read_memory(int(args.get("limit") or 5000))
+        if name == "write_working_memory":
+            return badapple_working_memory.write_memory(
+                args.get("content", ""),
+                mode=args.get("mode", "replace"),
+            )
+        if name == "clear_working_memory":
+            return badapple_working_memory.clear_memory()
+
         if name == "accessibility_action":
             action = args.get("action", "")
             target = args.get("target", "")
@@ -1543,6 +2094,14 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
                 args.get("query", ""),
                 knowledge,
                 max_results=int(args.get("max_results") or 10),
+            )
+        if name == "xcode_project_info":
+            return badapple_xcode.project_info(args.get("project_path", ""))
+        if name == "xcode_build_diagnostics":
+            return badapple_xcode.build_diagnostics(
+                args.get("project_path", ""),
+                args.get("scheme", ""),
+                args.get("configuration", "Debug"),
             )
         if name == "slicks_keychain_store":
             return badapple_keychain.store_secret(
@@ -1630,6 +2189,8 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return badapple_git.commit(args.get("repo"), args.get("message", ""))
         if name == "system_dashboard":
             return badapple_dashboard.snapshot()
+        if name == "workspace_status":
+            return workspace.summary()
         if name == "schedule_task":
             return badapple_scheduler.add_task(
                 when=args.get("when", ""),
@@ -1652,6 +2213,13 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             max_tokens = int(args.get("max_tokens") or 256)
             host = badapple_vision.get_vision_host()
             return host.extract_text(p, max_tokens)
+        if name == "capture_and_describe_screen":
+            p = Path(tempfile.gettempdir()) / "badapple_screen.png"
+            badapple_vision.capture_screen(p)
+            prompt = args.get("prompt", "Describe what is on the screen.")
+            max_tokens = int(args.get("max_tokens") or 256)
+            host = badapple_vision.get_vision_host()
+            return host.describe(p, prompt, max_tokens)
         if name == "describe_image":
             path = Path(args.get("path", "")).expanduser()
             prompt = args.get("prompt", "Describe this image.")
@@ -1663,6 +2231,32 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             max_tokens = int(args.get("max_tokens") or 256)
             host = badapple_vision.get_vision_host()
             return host.extract_text(path, max_tokens)
+        if name == "today_events":
+            return badapple_macos_apps.today_events()
+        if name == "upcoming_events":
+            return badapple_macos_apps.upcoming_events(
+                days=int(args.get("days") or 7),
+                limit=int(args.get("limit") or 20),
+            )
+        if name == "list_reminders":
+            return badapple_macos_apps.list_reminders(
+                list_name=args.get("list_name", ""),
+                completed=bool(args.get("completed", False)),
+                limit=int(args.get("limit") or 20),
+            )
+        if name == "unread_emails":
+            return badapple_macos_apps.unread_emails(limit=int(args.get("limit") or 10))
+        if name == "search_mail":
+            return badapple_macos_apps.search_mail(
+                query=args.get("query", ""),
+                limit=int(args.get("limit") or 10),
+            )
+        if name == "add_reminder":
+            return badapple_macos_apps.add_reminder(
+                name=args.get("name", ""),
+                list_name=args.get("list_name", ""),
+                due=args.get("due", ""),
+            )
         if name == "search_local_files":
             query = args.get("query", "")
             result = subprocess.run(
@@ -1690,22 +2284,68 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             if not results:
                 return "No relevant notes found."
             return "\n\n".join(f"(score: {s:.2f})\n{c}" for c, s in results)
+        if name == "add_mcp_server":
+            return badapple_mcp_marketplace.add_mcp_server(
+                args.get("name", ""), args.get("command", ""), args.get("env")
+            )
+        if name == "remove_mcp_server":
+            return badapple_mcp_marketplace.remove_mcp_server(args.get("name", ""))
+        if name == "list_mcp_servers":
+            return badapple_mcp_marketplace.list_mcp_servers()
+        if name == "list_mcp_tools":
+            return badapple_mcp_marketplace.list_mcp_tools(args.get("server", ""))
+        if name == "invoke_mcp_tool":
+            return badapple_mcp_marketplace.invoke_mcp_tool(
+                args.get("server", ""), args.get("tool", ""), args.get("arguments") or {}
+            )
     except Exception as e:
         return f"Tool error: {e}"
     return "Unknown tool"
 
 
 def extract_tool_calls(text: str):
-    pattern = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+    """Extract tool calls from the model output.
+
+    Supports two formats:
+      - Bad Apple JSON: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+      - Qwen XML:       <tool_call> <function=name> {"arg":...} </function> </tool_call>
+    """
     calls = []
-    for m in pattern.finditer(text):
+
+    # Bad Apple JSON format.
+    json_pattern = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+    for m in json_pattern.finditer(text):
         try:
             obj = json.loads(m.group(1))
             if isinstance(obj, dict) and "name" in obj:
                 calls.append(obj)
         except json.JSONDecodeError:
             continue
-    cleaned = pattern.sub("", text).strip()
+
+    # Qwen XML function-call format.
+    xml_pattern = re.compile(r"<tool_call>\s*<function=(\w+)>\s*(.*?)\s*</function>\s*</tool_call>", re.DOTALL)
+    for m in xml_pattern.finditer(text):
+        name = m.group(1)
+        arg_text = m.group(2).strip()
+        args = {}
+        if arg_text:
+            try:
+                parsed = json.loads(arg_text)
+                if isinstance(parsed, dict):
+                    args = parsed
+            except json.JSONDecodeError:
+                # Some models omit braces; wrap to make it parseable JSON.
+                try:
+                    parsed = json.loads("{" + arg_text + "}")
+                    if isinstance(parsed, dict):
+                        args = parsed
+                except json.JSONDecodeError:
+                    pass
+        calls.append({"name": name, "arguments": args})
+
+    # Remove all recognized call blocks from the returned text.
+    cleaned = json_pattern.sub("", text)
+    cleaned = xml_pattern.sub("", cleaned).strip()
     return calls, cleaned
 
 
@@ -1828,6 +2468,16 @@ def postprocess_output(text: str, sign_off: str = "") -> str:
     text = re.sub(r"\s+([.!?])", r"\1", text)
     text = re.sub(r"([.!?])([—-])", r"\1 \2", text)
 
+    # Collapse immediately repeated sentences (the 9B sometimes echoes itself).
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", text) if s.strip()]
+    deduped: List[str] = []
+    for s in sentences:
+        low = s.lower().strip(".!?")
+        if deduped and low == deduped[-1].lower().strip(".!?"):
+            continue
+        deduped.append(s)
+    text = " ".join(deduped)
+
     if not sign_off:
         return text.strip()
     if text.endswith("—"):
@@ -1867,9 +2517,6 @@ class MLXServer:
             os.environ.get("BADAPPLE_PROMPT_FILE") or DEFAULT_PROMPT_FILE
         ).expanduser()
         self.prompt_mtime: Optional[float] = self.prompt_file.stat().st_mtime if self.prompt_file.is_file() else None
-        self.knowledge = BadAppleKnowledge()
-        self._roast_index = 0
-        self.last_metrics: Optional[Dict[str, Any]] = None
 
         # OS extras: persona packs, output firewall, audit ledger, semantic cache,
         # and human-in-the-loop approvals.
@@ -1877,11 +2524,28 @@ class MLXServer:
             os.environ.get("BADAPPLE_DATA_DIR") or "/var/lib/bad_apple"
         ).expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.knowledge = BadAppleKnowledge()
+        self.tool_router = badapple_tool_router.ToolRouter(
+            self.data_dir,
+            encoder=self.knowledge._encode_texts,
+        )
+        self.model_registry = badapple_model_registry.ModelRegistry(self.data_dir)
+        self._roast_index = 0
+        self.last_metrics: Optional[Dict[str, Any]] = None
+
+        # Runtime/health/breakers
+        self.runtime = RuntimeControl(self.data_dir)
+        self.health = HealthRegistry()
+        self.resources = ResourceGovernor()
+        self.breakers = {
+            name: CircuitBreaker(name)
+            for name in ("main_model", "dflash", "embedding", "tts", "tools", "ledger", "p2p")
+        }
+        self.generations = GenerationStore(self.data_dir)
+        self.plugins = PluginRegistry(self.data_dir)
+        registered = {item.get("function", {}).get("name") for item in TOOLS}
+        TOOLS.extend(schema for schema in self.plugins.tool_schemas() if schema["function"]["name"] not in registered)
         self.memory = MemoryGraph(self.data_dir, encoder=self.knowledge._encode_texts)
-        # P2P sync shares the SLICKS secret and the memory graph, but only on
-        # local interfaces and only with authenticated peers.
-        self.p2p = badapple_p2p.P2PDaemon(secret, self.data_dir, memory=self.memory)
-        badapple_p2p.set_p2p_daemon(self.p2p)
         # legacy short-term memory is folded into the memory graph
         self.personas = PersonaPack(self.data_dir, self.prompt_file)
         self.firewall = StreamingFirewall(self.data_dir)
@@ -1889,8 +2553,15 @@ class MLXServer:
         self.cache = SemanticCache(self.data_dir)
         self.policy = Policy(self.data_dir)
         self.workspace = Workspace(self.data_dir)
+        self.workspace_watcher = badapple_workspace_watcher.WorkspaceWatcher(self.knowledge)
         if os.environ.get("BADAPPLE_WORKSPACE_DIR"):
             self.workspace.set(os.environ["BADAPPLE_WORKSPACE_DIR"])
+            self.workspace_watcher.set_workspace(Path(os.environ["BADAPPLE_WORKSPACE_DIR"]).expanduser())
+        self.workspace_watcher.start()
+        # P2P sync is created and started unless BADAPPLE_P2P=0. It shares
+        # memory and workspace context with peers on the local network.
+        self.p2p = badapple_p2p.P2PDaemon(secret, self.data_dir, memory=self.memory, workspace=self.workspace)
+        badapple_p2p.set_p2p_daemon(self.p2p)
         self.approval = ApprovalGate(self.data_dir, policy=self.policy)
 
         # Keep the last few turns in context. When it grows, older turns are
@@ -1898,7 +2569,7 @@ class MLXServer:
         self.max_history_turns = 3
 
         # Restore the last conversation, but always use the current system prompt.
-        loaded = load_conversation()
+        loaded = [] if self.runtime.private_mode else load_conversation()
         if loaded and loaded[0]["role"] == "system":
             loaded[0]["content"] = system_prompt
             self.messages = loaded
@@ -1936,11 +2607,13 @@ class MLXServer:
                 print(f"Loading Bad Apple MLX brain ({MAIN_MODEL})...", flush=True)
                 self.model, self.tokenizer = load(MAIN_MODEL)
                 print("Bad Apple MLX brain loaded.", flush=True)
+                self.model_registry.set_current(MAIN_MODEL)
                 self.draft_model = None
         else:
             print(f"Loading Bad Apple MLX brain ({MAIN_MODEL})...", flush=True)
             self.model, self.tokenizer = load(MAIN_MODEL)
             print("Bad Apple MLX brain loaded.", flush=True)
+            self.model_registry.set_current(MAIN_MODEL)
 
             self.draft_model = None
             if DRAFT_MODEL:
@@ -1954,13 +2627,142 @@ class MLXServer:
         # Each executor worker thread needs to know the device the model was
         # loaded on; capture it from the main (load) thread.
         self.mlx_device = mx.default_device()
+        self.health.register("process", "liveness", lambda: True)
+        self.health.register("main_model", "readiness", lambda: self.model is not None and self.tokenizer is not None)
+        self.health.register("slicks_secret", "correctness", lambda: len(self.secret) >= 16)
+        self.health.register("secure_enclave_identity", "correctness", lambda: badapple_identity.status().startswith("secure-enclave:"))
+        self.health.register("audit_ledger", "correctness", lambda: all(item.get("valid", False) for item in self.audit.verify()))
+
+        # Dynamic tiering gate.  Fast tier runs deterministic handlers for
+        # greetings, time, simple math, and identity without waking the 9B model.
+        # It can also fall through to a tiny local MLX model for short chitchat.
+        self.tier_router = badapple_tier.TieringRouter(
+            fast_model_enabled=badapple_fast_model.fast_model_path() is not None
+        )
+        self.fast_tier_enabled = os.environ.get("BADAPPLE_FAST_TIER", "0") == "1"
+        # Idle hibernation: after this many seconds with no user request, the
+        # daemon unloads optional models and flushes the Metal cache to reclaim RAM.
+        self.hibernate_after = float(os.environ.get("BADAPPLE_HIBERNATE_AFTER", "300"))
+        self.hibernating = False
+        self.last_activity = time.time()
+        self.fast_model_info = None
+        if badapple_fast_model.fast_model_path():
+            try:
+                self.fast_model, self.fast_tokenizer = badapple_fast_model.load_fast_model()
+                self.fast_model_info = {
+                    "path": badapple_fast_model.fast_model_path(),
+                    "loaded": self.fast_model is not None,
+                }
+            except Exception as e:
+                print(f"[fast_model] failed to load: {e}", flush=True)
+                self.fast_model_info = {"path": badapple_fast_model.fast_model_path(), "loaded": False, "error": str(e)}
+        else:
+            self.fast_model_info = {"path": None, "loaded": False}
+
+        self.runtime.set_ready()
+
+    def flush_vram(self) -> Dict[str, Any]:
+        """Clear the Metal allocation cache instantly."""
+        try:
+            before = mx.get_cache_memory() / (1024 ** 2)
+            mx.clear_cache()
+            after = mx.get_cache_memory() / (1024 ** 2)
+            return {"ok": True, "cache_memory_mb": {"before": round(before, 2), "after": round(after, 2)}}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def unload_model(self, model_type: str = "vision") -> Dict[str, Any]:
+        """Unload heavy optional models to reclaim RAM without killing the daemon."""
+        results: Dict[str, Any] = {}
+        if model_type in ("vision", "all"):
+            results["vision"] = badapple_vision.unload_vision_model()
+        if model_type in ("image", "all"):
+            # mflux is invoked as an external process; terminate any stale one.
+            try:
+                import psutil
+                killed = 0
+                for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                    cmd = " ".join(proc.info.get("cmdline") or [])
+                    if "mflux" in proc.info.get("name", "").lower() or "mflux" in cmd:
+                        proc.terminate()
+                        killed += 1
+                results["image"] = {"killed": killed}
+            except Exception as e:
+                results["image"] = {"error": str(e)}
+        if model_type == "all":
+            flush = self.flush_vram()
+            results["flush"] = flush
+        return {"ok": True, "unloaded": results}
+
+    def touch_activity(self) -> None:
+        """Mark a user action so hibernation does not fire during active use."""
+        self.last_activity = time.time()
+        if self.hibernating:
+            self.hibernating = False
+            print("[hibernate] resumed from hibernation", flush=True)
+
+    def _is_passive_method(self, method: Optional[str], prompt: str = "") -> bool:
+        """Return True for status/monitoring requests that should not reset idle."""
+        if method:
+            return method in {
+                "runtime_status", "discover_tools", "audit_tail", "p2p_peers", "p2p_sync",
+                "get_workspace", "get_pending_approvals", "identity_status",
+                "flush_vram", "unload_model",
+            }
+        return prompt.strip().lower() in {"runtime status", "health status", "bad apple status"}
+
+    async def hibernation_watcher(self) -> None:
+        """Background task that unloads optional models after user inactivity."""
+        while not self.runtime.killed:
+            await asyncio.sleep(0.5)
+            if self.hibernating:
+                continue
+            idle = time.time() - self.last_activity
+            if idle >= self.hibernate_after:
+                print(f"[hibernate] idle for {idle:.0f}s; hibernating", flush=True)
+                self.unload_model("all")
+                self.hibernating = True
+
+    def active_models(self) -> List[str]:
+        """Return a list of currently resident heavy models."""
+        models = ["main_9b"]
+        if self.draft_model is not None:
+            models.append("dflash")
+        if getattr(self, "fast_model", None) is not None:
+            models.append("fast_0.5b")
+        if badapple_vision.is_loaded():
+            models.append("vision_2b")
+        return models
 
     def reset_conversation(self):
         self.messages = [{"role": "system", "content": self.personas.get_system_prompt()}]
+        if self.runtime.private_mode:
+            return
         try:
             conversation_path().unlink(missing_ok=True)
         except Exception:
             pass
+
+    def _audit_record(self, event_type: str, data: Any):
+        if not self.runtime.private_mode:
+            self.audit.record(event_type, data)
+
+    def _save_conversation(self):
+        if not self.runtime.private_mode:
+            save_conversation(self.messages)
+
+    def _cache_store(self, prompt: str, response: str):
+        if not self.runtime.private_mode:
+            self.cache.store(
+                prompt,
+                response,
+                persona=self.personas.active,
+                intent=self.cache.classify_intent(prompt),
+            )
+
+    def _add_episode(self, prompt: str, response: str):
+        if not self.runtime.private_mode:
+            self.memory.add_episode(prompt, response)
 
     def _creator_answer(self) -> str:
         """Return a direct, persona-flavored creator answer."""
@@ -1978,8 +2780,10 @@ class MLXServer:
     def _capabilities_answer(self) -> str:
         """Return a concise, persona-flavored capability list."""
         base = (
-            "I can answer questions, look up and search your files, write notes, "
-            "run shell commands and AppleScript, index documents for RAG, "
+            "I can answer questions, explain, summarize, brainstorm, roast cloud AI, "
+            "look up and search your files, write notes, run shell commands and AppleScript, "
+            "run macOS Shortcuts, index documents for RAG, search your indexed knowledge, "
+            "read and write working memory, see your screen and describe images, "
             "speak responses through the local TTS server, switch personas, "
             "run benchmarks, and stream JSON — all on your Mac, no cloud."
         )
@@ -2029,10 +2833,11 @@ class MLXServer:
             print(f"[daemon] prompt reload failed: {e}", flush=True)
 
     def record_fact(self, text: str, source: str = "user"):
-        low = text.lower()
+        if self.runtime.private_mode:
+            return
         if source == "user":
-            if any(phrase in low for phrase in ("my name is", "my name's", "i like", "i love", "i prefer", "i hate", "remember that")):
-                self.memory.remember(text, source="user")
+            for fact in badapple_fact_extractor.extract_facts(text):
+                self.memory.remember(fact, source="user")
         elif source == "assistant" and "your name is" in low:
             # Trust the assistant when it confirms a user fact
             self.memory.remember(text, source="assistant")
@@ -2104,7 +2909,7 @@ class MLXServer:
         # No SAY step: just return the last tool result with persona polish.
         return postprocess_output(last_tool_result)
 
-    def render_prompt(self, messages: List[Dict[str, str]], use_tools: bool = False, voice_mode: bool = False) -> str:
+    def render_prompt(self, messages: List[Dict[str, str]], use_tools: bool = False, voice_mode: bool = False, benchmark: bool = False) -> str:
         # Build retrieved context from long-term memory and local documents.
         # Keep it tight: prompt encoding is the biggest latency hit on Apple Silicon.
         t0 = time.time()
@@ -2118,6 +2923,20 @@ class MLXServer:
         else:
             patched = list(messages)
             patched[0]["content"] = self.personas.get_system_prompt(voice_mode=False)
+
+        # Benchmark mode wants the leanest possible prompt: no memory, no
+        # retrieved documents, no workspace context. This isolates 9B generation
+        # and gives honest throughput numbers.
+        if benchmark:
+            rendered = self.tokenizer.apply_chat_template(
+                patched,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+                tools=tools_for_prompt(patched[-1]["content"]) if use_tools else None,
+            )
+            print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
+            return rendered
 
         # For identity/roast questions, rotate a subtle vibe hint so DFlash's
         # deterministic sampler picks a different cloud target/insult on repeats.
@@ -2137,19 +2956,20 @@ class MLXServer:
                     "content": f"{last['content']}\n\n(Vibe: {mood} — this turn's roast target is {target}.)",
                 }
 
-        rel_mem = self.memory.search(messages[-1]["content"], k=3)
+        # Tight context fetches to keep prompt tokens and prefill latency low.
+        rel_mem = [] if self.runtime.private_mode else self.memory.search(messages[-1]["content"], k=1)
 
         # If a user-fact is already remembered, answer from that instead of
         # getting distracted by unrelated documents.
         rel_know = []
         if not rel_mem and not voice_mode:
-            rel_know = self.knowledge.search(messages[-1]["content"], k=1, threshold=0.85)
+            rel_know = self.knowledge.search(messages[-1]["content"], k=1, threshold=0.92)
 
         # Put user memories right in the current user message so the assistant
-        # can't ignore them.
+        # can't ignore them. Keep snippets short so prefill stays fast.
         if rel_mem:
             memory_text = "Things you remember about the user:\n" + "\n".join(
-                f"- {m[:200]}" for m in rel_mem[:2]
+                f"- {m[:80]}" for m in rel_mem[:1]
             )
             last = patched[-1]
             if last["role"] == "user":
@@ -2159,13 +2979,14 @@ class MLXServer:
                 }
 
         # Put local documents right before the user question (long, retrieved).
+        # Cap snippet length to avoid ballooning the prompt and killing TTFT.
         if rel_know:
             docs_text = "Relevant local documents:\n" + "\n".join(
-                f"- {c[:500]}" for c, _ in rel_know[:1]
+                f"- {c[:160]}" for c, _ in rel_know[:1]
             )
             patched.insert(-1, {
                 "role": "user",
-                "content": f"Use this context to answer:\n\n{docs_text}",
+                "content": f"Use this context if relevant:\n\n{docs_text}",
             })
 
         # Include the active workspace/project context.
@@ -2181,7 +3002,7 @@ class MLXServer:
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
-            tools=TOOLS if use_tools else None,
+            tools=tools_for_prompt(patched[-1]["content"]) if use_tools else None,
         )
         print(f"[perf] render_prompt in {time.time() - t0:.2f}s", flush=True)
         # DFlash/Qwen3.5 thinking-aware chat templates end with a pre-filled
@@ -2194,79 +3015,84 @@ class MLXServer:
         max_tokens: int,
         voice_mode: bool = False,
         stream_queue: Optional[queue.Queue] = None,
+        benchmark: bool = False,
     ) -> str:
+        self.touch_activity()
         self.check_prompt_reload()
 
         # Workspace commands (set workspace to ... / clear workspace) are handled
-        # without the 9B model.
-        ws_low = user_prompt.strip().lower()
-        if ws_low.startswith("set workspace to "):
-            resp = self.workspace.set(user_prompt[16:].strip())
-            self.audit.record("workspace", {"prompt": user_prompt, "response": resp})
-            self.messages.append({"role": "user", "content": user_prompt})
-            self.messages.append({"role": "assistant", "content": resp})
-            self.prune_history()
-            save_conversation(self.messages)
-            return resp
-        if ws_low in ("clear workspace", "unset workspace"):
-            resp = self.workspace.clear()
-            self.audit.record("workspace", {"prompt": user_prompt, "response": resp})
-            self.messages.append({"role": "user", "content": user_prompt})
-            self.messages.append({"role": "assistant", "content": resp})
-            self.prune_history()
-            save_conversation(self.messages)
-            return resp
-
-        # Persona commands (switch, teach) are handled without the 9B model.
-        persona_resp = self.personas.handle_command(user_prompt)
-        if persona_resp is not None:
-            self.audit.record("persona_command", {
-                "prompt": user_prompt,
-                "active_persona": self.personas.active,
-                "response": persona_resp,
-            })
-            self.messages.append({"role": "user", "content": user_prompt})
-            self.messages.append({"role": "assistant", "content": persona_resp})
-            self.prune_history()
-            save_conversation(self.messages)
-            return persona_resp
-
-        # Capability and creator questions are answered directly so the 9B does
-        # not fall back into generic model identity or skip the useful part.
-        lower = user_prompt.strip().lower()
-        if any(phrase in lower for phrase in ("what can you do", "what are you capable of", "what do you do", "what can you do on")):
-            resp = self._capabilities_answer()
-            self.audit.record("capabilities", {"prompt": user_prompt, "response": resp})
-            self.messages.append({"role": "user", "content": user_prompt})
-            self.messages.append({"role": "assistant", "content": resp})
-            self.prune_history()
-            save_conversation(self.messages)
-            if stream_queue is not None:
-                stream_queue.put(resp)
-            return resp
-        if any(phrase in lower for phrase in ("who created you", "who is your creator", "who made you", "who built you")):
-            resp = self._creator_answer()
-            self.audit.record("creator", {"prompt": user_prompt, "response": resp})
-            self.messages.append({"role": "user", "content": user_prompt})
-            self.messages.append({"role": "assistant", "content": resp})
-            self.prune_history()
-            save_conversation(self.messages)
-            if stream_queue is not None:
-                stream_queue.put(resp)
-            return resp
-
-        # Semantic cache: bypass the 9B for repeated questions.
-        if not voice_mode and not should_use_tools(user_prompt):
-            cached = self.cache.lookup(user_prompt, persona=self.personas.active)
-            if cached:
-                if self.firewall.check_full(cached):
-                    cached = "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
-                self.audit.record("cache_hit", {"prompt": user_prompt, "response": cached[:500], "persona": self.personas.active})
+        # without the 9B model (unless benchmarking, where we want to force generation).
+        if not benchmark:
+            ws_low = user_prompt.strip().lower()
+            if ws_low.startswith("set workspace to "):
+                path = user_prompt[16:].strip()
+                resp = self.workspace.set(path)
+                self.workspace_watcher.set_workspace(Path(path).expanduser() if path else None)
+                self._audit_record("workspace", {"prompt": user_prompt, "response": resp})
                 self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": cached})
+                self.messages.append({"role": "assistant", "content": resp})
                 self.prune_history()
-                save_conversation(self.messages)
-                return cached
+                self._save_conversation()
+                return resp
+            if ws_low in ("clear workspace", "unset workspace"):
+                resp = self.workspace.clear()
+                self._audit_record("workspace", {"prompt": user_prompt, "response": resp})
+                self.messages.append({"role": "user", "content": user_prompt})
+                self.messages.append({"role": "assistant", "content": resp})
+                self.prune_history()
+                self._save_conversation()
+                return resp
+
+            # Persona commands (switch, teach) are handled without the 9B model.
+            persona_resp = self.personas.handle_command(user_prompt)
+            if persona_resp is not None:
+                self._audit_record("persona_command", {
+                    "prompt": user_prompt,
+                    "active_persona": self.personas.active,
+                    "response": persona_resp,
+                })
+                self.messages.append({"role": "user", "content": user_prompt})
+                self.messages.append({"role": "assistant", "content": persona_resp})
+                self.prune_history()
+                self._save_conversation()
+                return persona_resp
+
+            # Capability and creator questions are answered directly so the 9B does
+            # not fall back into generic model identity or skip the useful part.
+            lower = user_prompt.strip().lower()
+            if any(phrase in lower for phrase in ("what can you do", "what are you capable of", "what do you do", "what can you do on")):
+                resp = self._capabilities_answer()
+                self._audit_record("capabilities", {"prompt": user_prompt, "response": resp})
+                self.messages.append({"role": "user", "content": user_prompt})
+                self.messages.append({"role": "assistant", "content": resp})
+                self.prune_history()
+                self._save_conversation()
+                if stream_queue is not None:
+                    stream_queue.put(resp)
+                return resp
+            if any(phrase in lower for phrase in ("who created you", "who is your creator", "who made you", "who built you")):
+                resp = self._creator_answer()
+                self._audit_record("creator", {"prompt": user_prompt, "response": resp})
+                self.messages.append({"role": "user", "content": user_prompt})
+                self.messages.append({"role": "assistant", "content": resp})
+                self.prune_history()
+                self._save_conversation()
+                if stream_queue is not None:
+                    stream_queue.put(resp)
+                return resp
+
+            # Semantic cache: bypass the 9B for repeated questions.
+            if not self.runtime.private_mode and not voice_mode and not should_use_tools(user_prompt):
+                cached = self.cache.lookup(user_prompt, persona=self.personas.active)
+                if cached:
+                    if self.firewall.check_full(cached):
+                        cached = "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
+                    self._audit_record("cache_hit", {"prompt": user_prompt, "response": cached[:500], "persona": self.personas.active})
+                    self.messages.append({"role": "user", "content": user_prompt})
+                    self.messages.append({"role": "assistant", "content": cached})
+                    self.prune_history()
+                    self._save_conversation()
+                    return cached
 
         if user_prompt.strip().lower() == "new chat":
             self.reset_conversation()
@@ -2274,9 +3100,9 @@ class MLXServer:
             user_prompt = "Greet me"
         self.record_fact(user_prompt, source="user")
         messages = self.build_messages(user_prompt)
-        use_tools = should_use_tools(user_prompt)
+        use_tools = should_use_tools(user_prompt) and not benchmark
 
-        self.audit.record("query", {
+        self._audit_record("query", {
             "prompt": user_prompt,
             "persona": self.personas.active,
             "voice_mode": voice_mode,
@@ -2307,7 +3133,7 @@ class MLXServer:
 
         if not tool_calls:
             final = clean(raw)
-            self.cache.store(user_prompt, final, persona=self.personas.active, intent=self.cache.classify_intent(user_prompt))
+            self._cache_store(user_prompt, final)
             return final
 
         # Tool loop (multi-step task execution; allow more chained tool calls)
@@ -2315,11 +3141,10 @@ class MLXServer:
             for call in tool_calls:
                 result = self._run_approved_tool(call["name"], call.get("arguments", {}), user_prompt)
                 self.messages.append({
-                    "role": "tool",
-                    "content": json.dumps({"name": call["name"], "result": result}),
-                    "name": call["name"],
+                    "role": "user",
+                    "content": f"Tool result for {call['name']}:\n{result}",
                 })
-                self.audit.record("tool_result", {
+                self._audit_record("tool_result", {
                     "prompt": user_prompt,
                     "tool": call["name"],
                     "result": result[:500],
@@ -2329,15 +3154,34 @@ class MLXServer:
             tool_calls, _ = extract_tool_calls(raw)
             if not tool_calls:
                 final = clean(raw)
-                self.cache.store(user_prompt, final, persona=self.personas.active, intent=self.cache.classify_intent(user_prompt))
+                self._cache_store(user_prompt, final)
                 return final
 
         final = clean(raw)
-        self.cache.store(user_prompt, final, persona=self.personas.active, intent=self.cache.classify_intent(user_prompt))
+        self._cache_store(user_prompt, final)
         return final
 
     def _run_approved_tool(self, name: str, args: Dict[str, Any], user_prompt: str) -> str:
         """Run a tool, but gate destructive tools behind the approval workflow."""
+        if not self.runtime.allows_mutation():
+            return "Runtime is stopped or in safe mode; tool execution is disabled."
+        capability = {
+            "generate_image": "image_generation",
+            "lora_train": "lora_training",
+            "index_documents": "document_index",
+            "xcode_index_project": "document_index",
+            "describe_image": "vision",
+            "capture_and_describe_screen": "vision",
+            "capture_and_extract_screen": "vision",
+            "screen_capture": "vision",
+            "extract_text_from_image": "vision",
+            "translate_text": "translation",
+        }.get(name, "routine")
+        admitted, reason, _ = self.resources.admit(capability)
+        if not admitted:
+            return f"Resource governor: {reason}."
+        if not self.breakers["tools"].allow():
+            return "Tool circuit breaker is open; retry after the cooldown."
         if not self.policy.is_allowed(name):
             return f"Policy: tool '{name}' is not allowed."
         error = self.policy.validate(name, args)
@@ -2350,8 +3194,78 @@ class MLXServer:
                 f"Reply with 'approve {proposal_id}' to proceed. "
                 f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
             )
-        result = run_tool(name, args, self.knowledge, policy=self.policy, workspace=self.workspace)
-        return result
+        try:
+            if name == "learn_workflow":
+                result = self.memory.learn_workflow(args.get("name", ""), args.get("trigger", ""), args.get("steps") or [])
+            elif name == "list_workflows":
+                result = json.dumps(self.memory.workflows(), indent=2, default=str)
+            elif name == "consolidate_memory":
+                result = self.memory.consolidate()
+            elif name == "set_workflow_enabled":
+                result = self.memory.set_workflow_enabled(args.get("name", ""), bool(args.get("enabled")))
+            elif name == "run_workflow":
+                workflow = next((item for item in self.memory.workflows() if item.get("name") == args.get("name")), None)
+                if workflow is None:
+                    result = f"Workflow '{args.get('name', '')}' not found."
+                elif not workflow.get("enabled"):
+                    result = f"Workflow '{args.get('name', '')}' is disabled pending review."
+                else:
+                    outputs = []
+                    for step in workflow.get("steps", [])[:20]:
+                        if step.get("tool") == "run_workflow":
+                            outputs.append("Nested workflows are not allowed.")
+                            break
+                        output = self._run_approved_tool(step.get("tool", ""), step.get("args") or {}, user_prompt)
+                        outputs.append(f"{step.get('tool')}: {output}")
+                        if output.startswith(("Approval required", "Policy:", "Runtime", "Tool error")):
+                            break
+                    result = "\n".join(outputs)
+            elif self.plugins.has_tool(name):
+                result = self.plugins.invoke(name, args, timeout=self.policy.timeout(name))
+            else:
+                result = run_tool(name, args, self.knowledge, policy=self.policy, workspace=self.workspace)
+            if result.lower().startswith("error"):
+                self.breakers["tools"].failure()
+            else:
+                self.breakers["tools"].success()
+            return result
+        except Exception as e:
+            self.breakers["tools"].failure()
+            return f"Tool error: {e}"
+
+    def load_main_model(self, model_ref: str) -> str:
+        """Load a new main LLM on the fly and replace the current one.
+
+        This unloads the existing model first so the Mac isn't holding two
+        full model weights in memory at once.  Returns a status string.
+        """
+        import gc
+
+        print(f"[model_registry] unloading current model...", flush=True)
+        try:
+            del self.model
+            del self.tokenizer
+            if getattr(self, "draft_model", None) is not None:
+                del self.draft_model
+            self.draft_model = None
+            self.dflash_bundle = None
+            self.dflash_runtime_context = None
+        except Exception:
+            pass
+        gc.collect()
+        mx.clear_cache()
+        mx.metal.clear_cache()
+
+        print(f"[model_registry] loading {model_ref}...", flush=True)
+        try:
+            self.model, self.tokenizer = load(model_ref)
+            print("[model_registry] model loaded.", flush=True)
+        except Exception as e:
+            return f"Error loading {model_ref}: {e}"
+
+        self.model_registry.set_current(model_ref)
+        self.mlx_device = mx.default_device()
+        return f"Loaded {model_ref}. Current model updated."
 
     def _stream(
         self,
@@ -2394,12 +3308,11 @@ class MLXServer:
         if _SESSION_SEED is not None:
             mx.random.seed(_SESSION_SEED)
 
-        sampler = make_sampler(temp=0.5, top_p=0.9, top_k=40, min_p=0.05)
-        logits_processors = make_logits_processors(
-            repetition_penalty=1.12,
-            presence_penalty=0.1,
-            repetition_context_size=24,
-        )
+        # Minimal sampler and no logits processors to maximize decode throughput.
+        # Quality is still bounded by the system prompt and output firewall.
+        # Greedy/argmax with top-p guardrail: fastest sampler path, no repetition
+        # logits processors, and minimal decode overhead.
+        sampler = make_sampler(temp=0.0, top_p=0.9, top_k=0, min_p=0.0)
         accumulated = ""
         stream_buffer = ""
         final_metrics = None
@@ -2411,7 +3324,10 @@ class MLXServer:
             "prompt": tokens,
             "max_tokens": max_tokens,
             "sampler": sampler,
-            "logits_processors": logits_processors,
+            # Largest possible prefill chunks to reduce prompt-cache overhead.
+            # A max KV cap keeps the cache trimmable and memory bounded.
+            "prefill_step_size": 4096,
+            "max_kv_size": 4096,
         }
         if self.draft_model is not None:
             gen_kwargs["draft_model"] = self.draft_model
@@ -2419,6 +3335,9 @@ class MLXServer:
         gen_t0 = time.time()
         first_token_logged = False
         for response in stream_generate(**gen_kwargs):
+            if self.runtime.cancel_event.is_set():
+                accumulated = accumulated or "Generation cancelled by kill switch."
+                break
             if not first_token_logged:
                 print(f"[perf] first token after {time.time() - gen_t0:.2f}s", flush=True)
                 first_token_logged = True
@@ -2461,6 +3380,8 @@ class MLXServer:
         # No sign-off injection.
         if final_metrics is not None:
             pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
+            total_time = time.time() - gen_t0
+            total_tps = final_metrics.generation_tokens / total_time if total_time > 0 else 0.0
             print(
                 f"[perf] {final_metrics.generation_tokens} tokens @ "
                 f"{final_metrics.generation_tps:.1f} t/s, "
@@ -2472,7 +3393,7 @@ class MLXServer:
             self.last_metrics = {
                 "tokens": int(final_metrics.generation_tokens),
                 "decode_tps": float(final_metrics.generation_tps),
-                "total_tps": float(final_metrics.generation_tps),
+                "total_tps": float(total_tps),
                 "draft_accept_pct": float(pct),
                 "peak_memory_gb": float(final_metrics.peak_memory),
             }
@@ -2548,6 +3469,9 @@ class MLXServer:
             quantize_kv_cache=self.dflash_quantsize_kv,
             runtime_context=runtime_context,
         ):
+            if self.runtime.cancel_event.is_set():
+                accumulated = accumulated or "Generation cancelled by kill switch."
+                break
             if isinstance(event, TokenEvent):
                 if not first_token_logged:
                     first_token_time = time.time()
@@ -2705,25 +3629,98 @@ class MLXServer:
         method = req.get("method")
         params = req.get("params") or {}
 
+        if not self._is_passive_method(method):
+            self.touch_activity()
+
+        if method == "set_hibernate_after":
+            seconds = float(params.get("seconds", 300))
+            self.hibernate_after = max(0, seconds)
+            await _respond(req_id, {"hibernate_after": self.hibernate_after})
+            return
+
+        if method == "runtime_status":
+            ambient = None
+            try:
+                ambient = json.loads(badapple_ambient.get_context()) if badapple_ambient._CONTEXT_FILE.is_file() else None
+            except Exception:
+                pass
+            ambient_running = badapple_ambient.is_running()
+            await _respond(req_id, {
+                "runtime": self.runtime.status(),
+                "health": self.health.snapshot(),
+                "resources": self.resources.snapshot(),
+                "active_models": self.active_models(),
+                "breakers": {name: vars(breaker.snapshot()) for name, breaker in self.breakers.items()},
+                "autopilot": self.policy.autopilot,
+                "fast_tier": self.fast_tier_enabled,
+                "ambient_running": ambient_running,
+                "ambient": ambient,
+                "workspace": str(self.workspace.path) if self.workspace.path else None,
+                "p2p_enabled": self.p2p is not None and self.p2p.is_running(),
+                "p2p_peers": self.p2p.get_peers() if self.p2p is not None and self.p2p.is_running() else [],
+                "mcp_socket": os.environ.get("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock"),
+                "fast_model": self.fast_model_info,
+                "hibernating": self.hibernating,
+                "idle_seconds": round(time.time() - self.last_activity, 1),
+            })
+            return
+
+        if method == "identity_status":
+            await _respond(req_id, {"status": badapple_identity.status(), "public_key": badapple_identity.public_key()})
+            return
+
+        if method == "identity_sign":
+            challenge = str(params.get("challenge", ""))
+            if not challenge or len(challenge) > 4096:
+                await _respond(req_id, None, "identity_sign requires a challenge up to 4096 characters")
+                return
+            await _respond(req_id, {"signature": badapple_identity.sign(challenge.encode("utf-8"))})
+            return
+
+        if method == "kill_switch":
+            enabled = bool(params.get("enabled", True))
+            if enabled:
+                state = self.runtime.engage_kill_switch(params.get("reason", "agent requested"))
+            else:
+                state = self.runtime.reset_kill_switch()
+                if state.get("safe_mode_reason"):
+                    state = self.runtime.leave_safe_mode()
+            await _respond(req_id, {"runtime": state})
+            return
+
+        if method == "private_mode":
+            state = self.runtime.set_private_mode(bool(params.get("enabled", True)))
+            await _respond(req_id, {"runtime": state})
+            return
+
         if method == "discover_tools":
             await _respond(req_id, {"tools": TOOLS})
             return
 
         if method == "invoke_tool":
+            if not self.runtime.allows_mutation():
+                await _respond(req_id, None, "runtime is stopped or in safe mode")
+                return
             tool_name = params.get("name", "")
             tool_args = params.get("args") or {}
-            result = run_tool(
-                tool_name,
-                tool_args,
-                self.knowledge,
-                approval=self.approval,
-                policy=self.policy,
-                workspace=self.workspace,
-            )
+            result = self._run_approved_tool(tool_name, tool_args, "agent request")
             await _respond(req_id, {"tool": tool_name, "result": result})
             return
 
+        if method == "set_fast_tier":
+            self.fast_tier_enabled = bool(params.get("enabled", True))
+            await _respond(req_id, {"fast_tier": self.fast_tier_enabled})
+            return
+
+        if method == "set_autopilot":
+            self.policy.set_autopilot(bool(params.get("enabled", False)))
+            await _respond(req_id, {"autopilot": self.policy.autopilot})
+            return
+
         if method == "inference":
+            if not self.runtime.allows_generation():
+                await _respond(req_id, None, "kill switch is engaged")
+                return
             prompt = params.get("prompt", "")
             max_tokens = int(params.get("max_new_tokens", 120))
             if not prompt:
@@ -2733,9 +3730,29 @@ class MLXServer:
 
             def _gen():
                 mx.set_default_device(self.mlx_device)
-                mx.set_default_stream(mx.new_stream(self.mlx_device))
                 try:
-                    return self.polish_response(self.generate_with_tools(prompt, max_tokens))
+                    # The inference API is stateless: it must not mutate the
+                    # conversational turn cache or return a cached conversational
+                    # response. Build a single-turn prompt and stream directly.
+                    messages = [
+                        {"role": "system", "content": self.personas.get_system_prompt()},
+                        {"role": "user", "content": prompt},
+                    ]
+                    rendered = self.render_prompt(messages, use_tools=False, voice_mode=False)
+                    raw = self._stream(rendered, max_tokens, voice_mode=False)
+                    text = self.polish_response(raw)
+                    self._audit_record("query", {
+                        "prompt": prompt,
+                        "persona": self.personas.active,
+                        "voice_mode": False,
+                        "use_tools": False,
+                    })
+                    self._audit_record("response", {
+                        "prompt": prompt,
+                        "response": text[:500],
+                        "persona": self.personas.active,
+                    })
+                    return text
                 except Exception as e:
                     traceback.print_exc()
                     return f"Error generating response: {e}"
@@ -2767,6 +3784,28 @@ class MLXServer:
             await _respond(req_id, {"workspace": str(self.workspace.path) if self.workspace.path else None, "summary": summary})
             return
 
+        if method == "set_p2p":
+            enabled = bool(params.get("enabled", False))
+            if self.p2p is None:
+                await _respond(req_id, None, "P2P is not available")
+                return
+            try:
+                if enabled:
+                    await self.p2p.start()
+                else:
+                    await self.p2p.stop()
+            except Exception as e:
+                await _respond(req_id, None, f"P2P toggle failed: {e}")
+                return
+            await _respond(req_id, {"p2p_enabled": self.p2p.is_running()})
+            return
+
+        if method == "set_ambient":
+            enabled = bool(params.get("enabled", False))
+            text = badapple_ambient.start() if enabled else badapple_ambient.stop()
+            await _respond(req_id, {"ambient_running": badapple_ambient.is_running(), "message": text})
+            return
+
         if method == "audit_tail":
             n = int(params.get("n", 20))
             entries = []
@@ -2779,6 +3818,17 @@ class MLXServer:
                     await _respond(req_id, None, f"could not read ledger: {e}")
                     return
             await _respond(req_id, {"entries": entries})
+            return
+
+        if method == "flush_vram":
+            result = self.flush_vram()
+            await _respond(req_id, {"result": result})
+            return
+
+        if method == "unload_model":
+            model_type = str(params.get("type", "vision"))
+            result = self.unload_model(model_type)
+            await _respond(req_id, {"result": result})
             return
 
         if method == "get_pending_approvals":
@@ -2869,6 +3919,13 @@ class MLXServer:
                         await _write_frame(writer, {"type": "done", "text": f"Unknown persona '{name}'."})
                         return
 
+            # Benchmark clients prepend this sentinel. It strips before any work
+            # is done and bypasses fast tier, semantic cache, and tool fast paths
+            # so the benchmark measures the 9B model and gets real metrics.
+            benchmark_mode = prompt.startswith("__BADAPPLE_BENCHMARK__ ")
+            if benchmark_mode:
+                prompt = prompt[len("__BADAPPLE_BENCHMARK__ "):]
+
             if prompt in ("__BADAPPLE_SWITCH_DEEP__", "__BADAPPLE_SWITCH_FAST__"):
                 await _write_frame(writer, {"type": "done", "text": ""})
                 return
@@ -2876,6 +3933,152 @@ class MLXServer:
             if prompt.lower() in ("__badapple_new_chat__", "new chat", "clear conversation"):
                 self.reset_conversation()
                 await _write_frame(writer, {"type": "done", "text": "Okay, so... fresh start."})
+                return
+
+            control = prompt.strip().lower()
+            if not self._is_passive_method(None, prompt):
+                self.touch_activity()
+
+            if control in ("stop everything", "emergency stop", "kill switch"):
+                state = self.runtime.engage_kill_switch("user requested")
+                badapple_ambient.stop()
+                await _write_frame(writer, {"type": "done", "text": f"Kill switch engaged. Runtime mode: {state['mode']}."})
+                return
+            if control in ("resume bad apple", "reset kill switch", "resume everything"):
+                state = self.runtime.reset_kill_switch()
+                if state.get("safe_mode_reason"):
+                    state = self.runtime.leave_safe_mode()
+                await _write_frame(writer, {"type": "done", "text": f"Kill switch reset. Runtime mode: {state['mode']}."})
+                return
+            if control in ("safe mode off", "leave safe mode", "clear safe mode"):
+                state = self.runtime.leave_safe_mode()
+                await _write_frame(writer, {"type": "done", "text": f"Safe mode cleared. Runtime mode: {state['mode']}."})
+                return
+            if control in ("private mode on", "enable private mode"):
+                self.runtime.set_private_mode(True)
+                self.messages = [{"role": "system", "content": self.personas.get_system_prompt()}]
+                await _write_frame(writer, {"type": "done", "text": "Private mode enabled. Memory, cache, conversation, and audit persistence are paused."})
+                return
+            if control in ("private mode off", "disable private mode"):
+                self.runtime.set_private_mode(False)
+                await _write_frame(writer, {"type": "done", "text": "Private mode disabled. Local persistence is active again."})
+                return
+            if control in ("runtime status", "health status", "bad apple status"):
+                ambient = None
+                try:
+                    ambient = json.loads(badapple_ambient.get_context()) if badapple_ambient._CONTEXT_FILE.is_file() else None
+                except Exception:
+                    pass
+                status = {
+                    "runtime": self.runtime.status(),
+                    "ambient_running": badapple_ambient.is_running(),
+                    "health": self.health.snapshot(),
+                    "resources": self.resources.snapshot(),
+                    "active_models": self.active_models(),
+                    "autopilot": self.policy.autopilot,
+                    "fast_tier": self.fast_tier_enabled,
+                    "ambient": ambient,
+                    "workspace": str(self.workspace.path) if self.workspace.path else None,
+                    "p2p_enabled": self.p2p is not None and self.p2p.is_running(),
+                    "p2p_peers": self.p2p.get_peers() if self.p2p is not None and self.p2p.is_running() else [],
+                    "mcp_socket": os.environ.get("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock"),
+                    "hibernating": self.hibernating,
+                    "idle_seconds": round(time.time() - self.last_activity, 1),
+                }
+                await _write_frame(writer, {"type": "done", "text": json.dumps(status, indent=2)})
+                return
+            if re.match(r"^hibernate after \d+$", control):
+                seconds = int(control.split()[-1])
+                self.hibernate_after = float(seconds)
+                await _write_frame(writer, {"type": "done", "text": f"Hibernate after {seconds}s of inactivity."})
+                return
+            if control in ("flush vram", "purge vram", "clear metal cache"):
+                result = self.flush_vram()
+                await _write_frame(writer, {"type": "done", "text": json.dumps(result, indent=2)})
+                return
+            if control in ("unload vision model", "unload image model", "unload all models"):
+                model_type = "vision" if "vision" in control else ("image" if "image" in control else "all")
+                result = self.unload_model(model_type)
+                await _write_frame(writer, {"type": "done", "text": json.dumps(result, indent=2)})
+                return
+            if control in ("fast tier on", "enable fast tier"):
+                self.fast_tier_enabled = True
+                await _write_frame(writer, {"type": "done", "text": "Fast tier enabled. Simple queries will bypass the 9B model when possible."})
+                return
+            if control in ("fast tier off", "disable fast tier"):
+                self.fast_tier_enabled = False
+                await _write_frame(writer, {"type": "done", "text": "Fast tier disabled. All queries route through the 9B model."})
+                return
+            if control in ("autopilot on", "enable autopilot"):
+                self.policy.set_autopilot(True)
+                await _write_frame(writer, {"type": "done", "text": "Autopilot enabled. I can run destructive tools without asking, babe."})
+                return
+            if control in ("autopilot off", "disable autopilot"):
+                self.policy.set_autopilot(False)
+                await _write_frame(writer, {"type": "done", "text": "Autopilot disabled. I'll ask before running destructive tools again."})
+                return
+            if control in ("start ambient", "enable ambient", "ambient on"):
+                text = badapple_ambient.start()
+                await _write_frame(writer, {"type": "done", "text": text})
+                return
+            if control in ("stop ambient", "disable ambient", "ambient off"):
+                text = badapple_ambient.stop()
+                await _write_frame(writer, {"type": "done", "text": text})
+                return
+            if control.startswith("set workspace to "):
+                path = prompt[16:].strip()
+                result = self.workspace.set(path)
+                self.workspace_watcher.set_workspace(Path(path).expanduser() if path else None)
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if control in ("consolidate memory", "dream", "offline consolidation"):
+                result = self.memory.consolidate()
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if control in ("clear cache", "clear semantic cache", "flush cache"):
+                result = self.cache.clear()
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if re.search(r"\b(?:what'?s my name|what is my name|who am i)\b", control):
+                name = ""
+                for f in self.memory._state.get("facts", []):
+                    text = f.get("text", "")
+                    if re.search(r"\bmy name is\b", text, re.IGNORECASE):
+                        name = text.split("my name is", 1)[-1].strip().strip(".!?,")
+                        break
+                if name:
+                    await _write_frame(writer, {"type": "done", "text": f"Your name is {name}, babe.", "metrics": self.last_metrics})
+                    return
+            if re.search(r"\bwhat do i (?:like|love|prefer|hate)\b", control):
+                for f in self.memory._state.get("facts", []):
+                    text = f.get("text", "")
+                    if re.search(r"\bi (?:like|love|prefer|hate)\b", text, re.IGNORECASE):
+                        await _write_frame(writer, {"type": "done", "text": text, "metrics": self.last_metrics})
+                        return
+            if control in ("open workspace", "show workspace"):
+                path = str(self.workspace.path) if self.workspace.path else ""
+                await _write_frame(writer, {"type": "done", "text": path or "No workspace set."})
+                return
+            if control in ("p2p on", "enable p2p"):
+                if self.p2p is None:
+                    await _write_frame(writer, {"type": "error", "message": "P2P is not available."})
+                    return
+                try:
+                    await self.p2p.start()
+                except Exception as e:
+                    await _write_frame(writer, {"type": "error", "message": f"P2P start failed: {e}"})
+                    return
+                await _write_frame(writer, {"type": "done", "text": "P2P discovery and sync started, bestie."})
+                return
+            if control in ("p2p off", "disable p2p"):
+                if self.p2p is None:
+                    await _write_frame(writer, {"type": "error", "message": "P2P is not available."})
+                    return
+                await self.p2p.stop()
+                await _write_frame(writer, {"type": "done", "text": "P2P discovery and sync stopped."})
+                return
+            if not self.runtime.allows_generation():
+                await _write_frame(writer, {"type": "error", "message": "Bad Apple kill switch is engaged. Say 'resume bad apple' to reset it."})
                 return
 
             # Persona commands are intercepted before any model or tool work.
@@ -2887,9 +4090,12 @@ class MLXServer:
             # Approval command: execute a previously proposed destructive tool.
             approval_action = self.approval.handle_approve_command(prompt)
             if approval_action:
+                if not self.runtime.allows_mutation():
+                    await _write_frame(writer, {"type": "error", "message": "Runtime is stopped or in safe mode; approval execution is disabled."})
+                    return
                 tool_name, args = approval_action
                 result = run_tool(tool_name, args, self.knowledge, policy=self.policy, workspace=self.workspace)
-                self.audit.record("approval_execute", {"tool": tool_name, "args": args, "result": result[:500]})
+                self._audit_record("approval_execute", {"tool": tool_name, "args": args, "result": result[:500]})
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
 
@@ -2912,19 +4118,126 @@ class MLXServer:
                     return
                 await _write_frame(writer, {"type": "done", "text": self.p2p.get_peers()})
                 return
+            if low.startswith("p2p add peer "):
+                spec = low[13:].strip()
+                if self.p2p is None:
+                    await _write_frame(writer, {"type": "done", "text": "P2P daemon is not running."})
+                    return
+                host, _, port = spec.rpartition(":")
+                if not host or not port.isdigit():
+                    await _write_frame(writer, {"type": "error", "message": "Usage: p2p add peer <host>:<port>"})
+                    return
+                text = self.p2p.add_peer(host, int(port))
+                await _write_frame(writer, {"type": "done", "text": text})
+                return
+            if low.startswith("p2p remove peer "):
+                spec = low[17:].strip()
+                if self.p2p is None:
+                    await _write_frame(writer, {"type": "done", "text": "P2P daemon is not running."})
+                    return
+                self.p2p.remove_peer(spec)
+                await _write_frame(writer, {"type": "done", "text": f"Removed peer {spec} if it existed."})
+                return
+
+            # Model registry commands.
+            if low == "scan models":
+                result = self.model_registry.scan()
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if low in ("list models", "show models", "what models do i have"):
+                result = self.model_registry.list_models()
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if low.startswith("model info "):
+                result = self.model_registry.info(low[11:].strip())
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            m = re.match(r"^(?:use|load|switch to)\s+model\s+(.+)$", low)
+            if m:
+                model_ref = m.group(1).strip()
+                # Resolve short name to cached path/id.
+                ref_lower = model_ref.lower()
+                for model in self.model_registry._state.get("models", []):
+                    if model["id"].lower() == ref_lower:
+                        model_ref = model["path"]
+                        break
+                result = await asyncio.get_event_loop().run_in_executor(self.executor, self.load_main_model, model_ref)
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+
+            # Tiered fast path: greetings, identity, time, and simple math return
+            # immediately without waking the 9B model when fast tier is enabled.
+            # If a tiny fast model is loaded, short chitchat also goes through it.
+            # Benchmark mode bypasses this so the benchmark measures the 9B path.
+            if not benchmark_mode and not self.runtime.safe_mode and self.fast_tier_enabled:
+                tier, payload = self.tier_router.select_tier(prompt)
+                # Vision tier: go straight to the local VLM; no need to ask the 9B to call a tool.
+                if tier == "vision":
+                    result = self._run_approved_tool("capture_and_describe_screen", {"prompt": "Describe what is on the screen."}, prompt)
+                    if not result.startswith(("Approval required", "Policy:", "Runtime", "Tool error")):
+                        text = self.polish_response(postprocess_output(result))
+                        self.record_fact(prompt, source="user")
+                        self._add_episode(prompt, text)
+                        self.messages.append({"role": "user", "content": prompt})
+                        self.messages.append({"role": "assistant", "content": text})
+                        self.prune_history()
+                        self._save_conversation()
+                        self._audit_record("response", {
+                            "prompt": prompt,
+                            "vision_path": True,
+                            "response": text[:500],
+                            "persona": self.personas.active,
+                        })
+                        await _write_frame(writer, {"type": "done", "text": text, "metrics": self.last_metrics})
+                        return
+                if tier == "fast" and payload is not None:
+                    if payload.get("fast_model") and getattr(self, "fast_model", None) is not None and self.fast_tokenizer is not None:
+                        text = badapple_fast_model.generate_fast(
+                            self.fast_model,
+                            self.fast_tokenizer,
+                            prompt,
+                            system_prompt=self.personas.get_system_prompt(),
+                            max_tokens=48,
+                            temperature=0.0,
+                        )
+                        text = self.polish_response(postprocess_output(text))
+                    else:
+                        text = self.polish_response(postprocess_output(payload["text"]))
+                    self.record_fact(prompt, source="user")
+                    self._add_episode(prompt, text)
+                    self.messages.append({"role": "user", "content": prompt})
+                    self.messages.append({"role": "assistant", "content": text})
+                    self.prune_history()
+                    self._save_conversation()
+                    self._audit_record("response", {
+                        "prompt": prompt,
+                        "fast_path": True,
+                        "tier": "fast",
+                        "fast_model": payload.get("fast_model", False),
+                        "response": text[:500],
+                        "persona": self.personas.active,
+                    })
+                    await _write_frame(writer, {"type": "done", "text": text})
+                    return
 
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
             # This avoids a full 8B generation for simple local actions and stays air-gapped.
-            fast = fast_execute(prompt, self.knowledge, approval=self.approval, policy=self.policy, workspace=self.workspace)
+            fast = None if (benchmark_mode or self.runtime.safe_mode) else fast_execute(
+                prompt,
+                self.knowledge,
+                approval=self.approval,
+                policy=self.policy,
+                workspace=self.workspace,
+            )
             if fast:
                 fast = self.polish_response(postprocess_output(fast))
                 self.record_fact(prompt, source="user")
-                self.memory.add_episode(prompt, fast)
+                self._add_episode(prompt, fast)
                 self.messages.append({"role": "user", "content": prompt})
                 self.messages.append({"role": "assistant", "content": fast})
                 self.prune_history()
-                save_conversation(self.messages)
-                self.audit.record("response", {
+                self._save_conversation()
+                self._audit_record("response", {
                     "prompt": prompt,
                     "fast_path": True,
                     "response": fast[:500],
@@ -2934,18 +4247,45 @@ class MLXServer:
                 await _write_frame(writer, {"type": "done", "text": fast, "metrics": metrics})
                 return
 
+            # Natural-language tool router: if the prompt clearly maps to a known
+            # tool, run it directly without waiting for the 9B to emit a tool_call.
+            if not benchmark_mode and not self.runtime.safe_mode:
+                routed = self.tool_router.resolve(prompt)
+                if routed:
+                    tool_name, args, conf = routed
+                    result = self._run_approved_tool(tool_name, args, prompt)
+                    if not result.startswith(("Approval required", "Policy:", "Runtime", "Tool error")):
+                        text = self.polish_response(postprocess_output(result))
+                        self.tool_router.record_success(prompt, tool_name)
+                        self.record_fact(prompt, source="user")
+                        self._add_episode(prompt, text)
+                        self.messages.append({"role": "user", "content": prompt})
+                        self.messages.append({"role": "assistant", "content": text})
+                        self.prune_history()
+                        self._save_conversation()
+                        self._audit_record("response", {
+                            "prompt": prompt,
+                            "fast_path": True,
+                            "routed": True,
+                            "tool": tool_name,
+                            "confidence": conf,
+                            "response": text[:500],
+                            "persona": self.personas.active,
+                        })
+                        await _write_frame(writer, {"type": "done", "text": text, "metrics": self.last_metrics})
+                        return
+
             loop = asyncio.get_event_loop()
 
             # Multi-step task planning for requests that combine actions.
-            if is_multi_step(prompt):
+            if not benchmark_mode and is_multi_step(prompt):
                 def _plan():
                     mx.set_default_device(self.mlx_device)
-                    mx.set_default_stream(mx.new_stream(self.mlx_device))
                     try:
                         result = self.plan_and_execute(prompt, max_new_tokens, voice_mode=voice_mode)
                         if result:
                             return self.polish_response(result)
-                        return self.polish_response(self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode))
+                        return self.polish_response(self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode, benchmark=benchmark_mode))
                     except Exception as e:
                         traceback.print_exc()
                         return f"Error: {e}"
@@ -2953,12 +4293,12 @@ class MLXServer:
                 if not text:
                     text = "Ugh, like, I couldn't make a plan."
                 self.record_fact(prompt, source="user")
-                self.memory.add_episode(prompt, text)
+                self._add_episode(prompt, text)
                 self.messages.append({"role": "user", "content": prompt})
                 self.messages.append({"role": "assistant", "content": text})
                 self.prune_history()
-                save_conversation(self.messages)
-                self.audit.record("response", {
+                self._save_conversation()
+                self._audit_record("response", {
                     "prompt": prompt,
                     "multi_step": True,
                     "response": text[:500],
@@ -2971,12 +4311,21 @@ class MLXServer:
             stream_queue = queue.Queue()
 
             def _gen():
-                # The asyncio executor worker thread may not inherit the main
-                # thread's default device / stream, which breaks DFlash/MLX.
+                # The asyncio executor worker thread is the same thread the model
+                # was loaded on, so its default device/stream are already correct.
                 mx.set_default_device(self.mlx_device)
-                mx.set_default_stream(mx.new_stream(self.mlx_device))
                 try:
-                    raw = self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode, stream_queue=stream_queue)
+                    if benchmark_mode:
+                        # Benchmark needs a clean, single 9B generation with metrics:
+                        # no tools, cache, fast paths, multi-step loops, or retrieved context.
+                        messages = [
+                            {"role": "system", "content": self.personas.get_system_prompt()},
+                            {"role": "user", "content": prompt},
+                        ]
+                        rendered = self.render_prompt(messages, use_tools=False, voice_mode=False, benchmark=True)
+                        raw = self._stream(rendered, max_new_tokens, stream_queue=stream_queue, voice_mode=False)
+                        return self.polish_response(raw)
+                    raw = self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode, stream_queue=stream_queue, benchmark=benchmark_mode)
                     return self.polish_response(raw)
                 except Exception as e:
                     traceback.print_exc()
@@ -2998,10 +4347,10 @@ class MLXServer:
             # Store final assistant response in conversation; only user statements
             # become long-term memory, not the assistant's own rephrasings.
             self.messages.append({"role": "assistant", "content": text})
-            self.memory.add_episode(prompt, text)
+            self._add_episode(prompt, text)
             self.prune_history()
-            save_conversation(self.messages)
-            self.audit.record("response", {
+            self._save_conversation()
+            self._audit_record("response", {
                 "prompt": prompt,
                 "response": text[:500],
                 "persona": self.personas.active,
@@ -3022,6 +4371,28 @@ class MLXServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+
+class DashboardServer:
+    """Start the local-only observability dashboard in a daemon thread.
+
+    This wraps badapple_dashboard.DashboardWebServer and hands it the running
+    MLXServer instance so /api/status can read live daemon state.
+    """
+
+    def __init__(
+        self,
+        mlx_server: "MLXServer",
+        host: str = "127.0.0.1",
+        port: int = 8787,
+    ):
+        self.mlx_server = mlx_server
+        self.host = host
+        self.port = port
+        self._web = badapple_dashboard.DashboardWebServer(host, port)
+
+    def start(self) -> None:
+        self._web.start(self.mlx_server)
 
 
 async def main():
@@ -3057,11 +4428,21 @@ async def main():
         pass
     print(f"Bad Apple MLX server listening on {socket_path}", flush=True)
 
-    # Start the local-only P2P sync daemon on the same event loop.
+    # Start the local-only observability dashboard (127.0.0.1 only).
     try:
-        await server.p2p.start()
+        dashboard = DashboardServer(server)
+        dashboard.start()
+        print(f"[main] Dashboard available at http://{dashboard.host}:{dashboard.port}/", flush=True)
     except Exception as e:
-        print(f"[main] P2P daemon failed to start: {e}", flush=True)
+        print(f"[main] Dashboard failed to start: {e}", flush=True)
+
+    # Start the local-only P2P sync daemon on the same event loop.
+    # P2P is on by default; set BADAPPLE_P2P=0 to keep the daemon air-gapped.
+    if server.p2p is not None and os.environ.get("BADAPPLE_P2P", "1") != "0":
+        try:
+            await server.p2p.start()
+        except Exception as e:
+            print(f"[main] P2P daemon failed to start: {e}", flush=True)
 
     # Start the local task scheduler background thread.
     try:
@@ -3070,8 +4451,32 @@ async def main():
     except Exception as e:
         print(f"[main] Scheduler failed to start: {e}", flush=True)
 
-    async with srv:
-        await srv.serve_forever()
+    # Start the local MCP server (Unix socket only; uses the same SLICKS agent channel).
+    mcp_process: Optional[subprocess.Popen] = None
+    try:
+        mcp_env = os.environ.copy()
+        mcp_env.setdefault("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock")
+        mcp_process = subprocess.Popen(
+            [sys.executable, "-u", str(Path(__file__).with_name("badapple_mcp_server.py"))],
+            cwd=str(Path(__file__).resolve().parent),
+            env=mcp_env,
+            start_new_session=True,
+        )
+        print(f"[main] MCP server started on {mcp_env['BADAPPLE_MCP_SOCKET']}", flush=True)
+    except Exception as e:
+        print(f"[main] MCP server failed to start: {e}", flush=True)
+
+    try:
+        asyncio.create_task(server.hibernation_watcher())
+        async with srv:
+            await srv.serve_forever()
+    finally:
+        if mcp_process is not None:
+            try:
+                mcp_process.terminate()
+                mcp_process.wait(timeout=5)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

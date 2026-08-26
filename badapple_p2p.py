@@ -115,11 +115,13 @@ class P2PDaemon:
         memory: Optional[Any] = None,
         broadcast_port: int = P2P_BROADCAST_PORT,
         sync_port: int = P2P_SYNC_PORT,
+        workspace: Optional[Any] = None,
     ):
         self.enc_key, self.mac_key = _derive_keys(secret)
         self.origin_id = _origin_id(secret)
         self.data_dir = data_dir
         self.memory = memory
+        self.workspace = workspace
         self.broadcast_port = broadcast_port
         self.sync_port = sync_port
         self.peers: Dict[str, Peer] = {}
@@ -185,14 +187,18 @@ class P2PDaemon:
         ]
         print(f"[p2p] listening on udp {self.broadcast_port} / tcp {self.sync_port}", flush=True)
 
+    def is_running(self) -> bool:
+        return self._running
+
     async def stop(self):
         self._running = False
         for t in self._tasks:
             t.cancel()
-        if self._tcp_server:
+        if getattr(self, "_tcp_server", None):
             self._tcp_server.close()
             await self._tcp_server.wait_closed()
-        self._udp_sock.close()
+        if getattr(self, "_udp_sock", None):
+            self._udp_sock.close()
 
     # ------------------------------------------------------------------
     # Networking
@@ -207,7 +213,20 @@ class P2PDaemon:
 
     async def _send_beacon(self):
         timestamp_ms = int(time.time() * 1000)
-        nonce_b64, payload_b64 = self._encrypt(b"hello")
+        # Include our TCP sync port and workspace/project context in the beacon
+        # so peers can see the same project on the local mesh.
+        workspace = ""
+        workspace_summary = ""
+        if self.workspace is not None:
+            workspace = str(getattr(self.workspace, "path", ""))
+            workspace_summary = getattr(self.workspace, "summary", lambda: "")() or ""
+        plaintext = json.dumps({
+            "sync_port": self.sync_port,
+            "msg": "hello",
+            "workspace": workspace,
+            "workspace_summary": workspace_summary,
+        }).encode()
+        nonce_b64, payload_b64 = self._encrypt(plaintext)
         frame = P2PFrame(
             frame_type="beacon",
             origin_id=self.origin_id,
@@ -246,16 +265,40 @@ class P2PDaemon:
             return
 
         if frame.frame_type == "beacon":
-            self._remember_peer(addr[0], frame.origin_id)
+            remote_sync_port = self.sync_port
+            plaintext = self._decrypt(frame.nonce_b64, frame.payload_b64)
+            if plaintext:
+                try:
+                    remote_sync_port = int(json.loads(plaintext.decode()).get("sync_port", self.sync_port))
+                except Exception:
+                    pass
+            self._remember_peer(addr[0], frame.origin_id, remote_sync_port)
 
-    def _remember_peer(self, host: str, origin_id: str):
+    def _remember_peer(self, host: str, origin_id: str, sync_port: int):
         peer_id = f"{origin_id}@{host}"
         self.peers[peer_id] = Peer(
             host=host,
-            port=self.sync_port,
+            port=sync_port,
             origin_id=origin_id,
             last_seen=time.time(),
         )
+
+    def add_peer(self, host: str, port: int) -> str:
+        """Manually add a static peer for testing or known neighbors."""
+        peer_id = f"manual@{host}:{port}"
+        self.peers[peer_id] = Peer(
+            host=host,
+            port=port,
+            origin_id="manual",
+            last_seen=time.time(),
+        )
+        return f"Added peer {host}:{port}."
+
+    def remove_peer(self, peer_id: str) -> None:
+        self.peers.pop(peer_id, None)
+        for key in list(self.peers.keys()):
+            if peer_id in key:
+                self.peers.pop(key, None)
 
     async def _prune_peers_loop(self):
         while self._running:
@@ -325,10 +368,17 @@ class P2PDaemon:
         if not facts:
             return "No facts to sync."
 
+        workspace = ""
+        workspace_summary = ""
+        if self.workspace is not None:
+            workspace = str(getattr(self.workspace, "path", ""))
+            workspace_summary = getattr(self.workspace, "summary", lambda: "")() or ""
         plaintext = json.dumps({
             "origin_id": self.origin_id,
             "ts": int(time.time() * 1000),
             "facts": facts,
+            "workspace": workspace,
+            "workspace_summary": workspace_summary,
         }).encode()
         nonce_b64, payload_b64 = self._encrypt(plaintext)
         frame = P2PFrame(

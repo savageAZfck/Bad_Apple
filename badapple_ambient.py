@@ -116,8 +116,12 @@ def stop() -> str:
     return "Ambient capture stopped."
 
 
+def is_running() -> bool:
+    return _thread is not None and _thread.is_alive()
+
+
 def status() -> str:
-    running = _thread is not None and _thread.is_alive()
+    running = is_running()
     if not _CONTEXT_FILE.is_file():
         return f"Ambient capture running={running}; no snapshots yet."
     try:

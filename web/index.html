@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bad Apple</title>
+  <link rel="stylesheet" href="/static/styles.css?v=4">
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">BA</div>
+        <div>
+          <div class="title">Bad Apple</div>
+          <div class="subtitle">sovereign local AI</div>
+        </div>
+      </div>
+      <nav>
+        <a class="nav-item active" data-view="dashboard" href="/dashboard"><span class="icon">◈</span> Dashboard</a>
+        <a class="nav-item" data-view="chat" href="/chat"><span class="icon">💬</span> Chat</a>
+        <a class="nav-item" data-view="persona" href="/persona"><span class="icon">✦</span> Persona</a>
+        <a class="nav-item" data-view="settings" href="/settings"><span class="icon">⚙</span> Settings</a>
+        <a class="nav-item" data-view="logs" href="/logs"><span class="icon">⌘</span> Logs</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot"></span>
+        <span class="status-text">Checking daemon...</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h2 id="view-title">Dashboard</h2>
+        <div class="right">
+          <span class="persona-pill" id="top-persona">default</span>
+          <button class="secondary" onclick="toggleTheme()" id="theme-btn" title="Toggle theme">🌙</button>
+        </div>
+      </header>
+
+      <!-- Dashboard -->
+      <section class="view" id="view-dashboard">
+        <div class="cards" id="dashboard-cards">
+          <div class="card"><h3>Runtime</h3><div class="value">—</div></div>
+        </div>
+        <div class="panel">
+          <h3>P2P Peers</h3>
+          <div id="p2p-peers"><span class="text-tertiary">Loading...</span></div>
+        </div>
+        <div class="panel">
+          <h3>MCP Servers</h3>
+          <div id="mcp-status"><span class="text-tertiary">Loading...</span></div>
+        </div>
+        <div class="panel" style="grid-column: 1 / -1;">
+          <h3>Recent Tool Calls</h3>
+          <div id="tool-calls"><span class="text-tertiary">Loading...</span></div>
+        </div>
+        <div class="panel" style="grid-column: 1 / -1;">
+          <h3>Voice Activity</h3>
+          <div id="voice-activity"><span class="text-tertiary">Loading...</span></div>
+        </div>
+        <div class="panel">
+          <h3>Latest Performance</h3>
+          <div id="latest-perf" class="sub">—</div>
+        </div>
+        <div class="panel" style="grid-column: 1 / -1;">
+          <h3>Live Metrics</h3>
+          <canvas id="metrics-chart" height="80"></canvas>
+        </div>
+        <div class="panel">
+          <h3>Log Tail</h3>
+          <pre class="log" id="log-tail">Loading...</pre>
+        </div>
+      </section>
+
+      <!-- Chat -->
+      <section class="view hidden chat-view" id="view-chat">
+        <div class="chat-header">
+          <button class="secondary" onclick="newChat()">New chat</button>
+          <select id="chat-history-select" onchange="loadChatHistory(this.value)">
+            <option value="">Current chat</option>
+          </select>
+          <button class="secondary" onclick="deleteCurrentChat()" title="Delete chat">🗑</button>
+        </div>
+        <div class="chat-messages" id="chat-messages"></div>
+        <div class="prompt-suggestions" id="prompt-suggestions">
+          <button class="suggestion" onclick="useSuggestion('What can you do on my Mac?')">What can you do?</button>
+          <button class="suggestion" onclick="useSuggestion('Generate an image of a dark forest')">Generate an image</button>
+          <button class="suggestion" onclick="useSuggestion('Set workspace to my current project')">Set workspace</button>
+          <button class="suggestion" onclick="useSuggestion('Run a benchmark')">Run benchmark</button>
+        </div>
+        <div class="chat-input">
+          <textarea id="chat-input" placeholder="Say something to Bad Apple..." rows="1"></textarea>
+          <button id="chat-send" onclick="sendChat()">Send</button>
+        </div>
+      </section>
+
+      <!-- Persona -->
+      <section class="view hidden" id="view-persona">
+        <div class="panel" style="max-width: 900px;">
+          <h3>Persona Editor</h3>
+          <div class="form-row">
+            <label for="persona-select">Active persona</label>
+            <select id="persona-select"></select>
+          </div>
+          <div class="form-row">
+            <label for="persona-prompt">System prompt</label>
+            <textarea id="persona-prompt" placeholder="System prompt..."></textarea>
+          </div>
+          <div class="form-actions">
+            <button onclick="savePersona()">Save &amp; switch</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section class="view hidden" id="view-settings">
+        <div class="panel" style="max-width: 900px;">
+          <h3>Appearance</h3>
+          <label class="toggle">
+            <input type="checkbox" id="theme-toggle" onchange="toggleTheme(this.checked)">
+            <span class="slider"></span>
+            <span class="label">Light mode</span>
+          </label>
+        </div>
+
+        <div class="panel" style="max-width: 900px;">
+          <h3>Runtime Toggles</h3>
+          <div class="toggle-row">
+            <label class="toggle">
+              <input type="checkbox" id="auto-pilot" onchange="toggleControl('autopilot', this.checked ? 'autopilot on' : 'autopilot off', this)">
+              <span class="slider"></span>
+              <span class="label">Autopilot</span>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="fast-tier" onchange="toggleControl('fast tier', this.checked ? 'fast tier on' : 'fast tier off', this)">
+              <span class="slider"></span>
+              <span class="label">Fast tier</span>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="p2p-enabled" onchange="toggleControl('p2p', this.checked ? 'p2p on' : 'p2p off', this)">
+              <span class="slider"></span>
+              <span class="label">P2P sync</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="panel" style="max-width: 900px;">
+          <h3>Workspace</h3>
+          <div class="form-row">
+            <label for="ws-path">Workspace path</label>
+            <input id="ws-path" type="text" placeholder="/path/to/project">
+          </div>
+          <div class="form-actions">
+            <button onclick="saveWorkspace()">Set workspace</button>
+          </div>
+        </div>
+
+        <div class="panel" style="max-width: 900px;">
+          <h3>MCP Marketplace</h3>
+          <div style="display: grid; grid-template-columns: 1fr 2fr auto; gap: 0.75rem; margin-bottom: 1rem; align-items: end;">
+            <div><label for="mcp-name">Name</label><input id="mcp-name" type="text" placeholder="time"></div>
+            <div><label for="mcp-command">Command</label><input id="mcp-command" type="text" placeholder="python3 -m mcp_server_time"></div>
+            <button onclick="addMcpServer()">Add server</button>
+          </div>
+          <table id="mcp-table">
+            <thead><tr><th>Name</th><th>Command</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="panel" style="max-width: 900px;">
+          <h3>Active Models</h3>
+          <div id="model-list"><span class="text-tertiary">Loading...</span></div>
+          <div class="form-row" style="margin-top: 1rem;">
+            <label for="model-select">Switch model</label>
+            <select id="model-select"></select>
+          </div>
+          <div class="form-actions">
+            <button onclick="switchModel()">Switch model</button>
+          </div>
+        </div>
+
+        <div class="panel" style="max-width: 900px;">
+          <h3>Invoke MCP Tool</h3>
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 0.75rem; align-items: end;">
+            <div><label for="mcp-invoke-server">Server</label><input id="mcp-invoke-server" type="text" placeholder="time"></div>
+            <div><label for="mcp-invoke-tool">Tool</label><input id="mcp-invoke-tool" type="text" placeholder="get_time"></div>
+            <div><label for="mcp-invoke-arg">Argument</label><input id="mcp-invoke-arg" type="text" placeholder="UTC"></div>
+            <button onclick="invokeMcpTool()">Invoke</button>
+          </div>
+          <pre class="log" id="mcp-invoke-result" style="margin-top: 1rem; min-height: 3rem;">Result will appear here...</pre>
+        </div>
+      </section>
+
+      <!-- Logs -->
+      <section class="view hidden" id="view-logs">
+        <div class="panel">
+          <h3>Server Log Tail</h3>
+          <pre class="log" id="log-view">Loading...</pre>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="tour" class="modal" style="display:none;">
+    <div class="modal-backdrop" onclick="closeTour()"></div>
+    <div class="modal-card" style="max-width: 560px;">
+      <h2 id="tour-title">Tour</h2>
+      <p id="tour-body">Tour body</p>
+      <div class="form-actions" style="justify-content: space-between;">
+        <button class="secondary" onclick="prevTour()" id="tour-prev">Back</button>
+        <button onclick="nextTour()" id="tour-next">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="help" class="modal" style="display:none;">
+    <div class="modal-backdrop" onclick="closeHelp()"></div>
+    <div class="modal-card" style="max-width: 560px;">
+      <h2>Keyboard Shortcuts</h2>
+      <ul>
+        <li><strong>?</strong> — Show this help</li>
+        <li><strong>Cmd/Ctrl + 1</strong> — Dashboard</li>
+        <li><strong>Cmd/Ctrl + 2</strong> — Chat</li>
+        <li><strong>Cmd/Ctrl + 3</strong> — Persona</li>
+        <li><strong>Cmd/Ctrl + 4</strong> — Settings</li>
+        <li><strong>Cmd/Ctrl + 5</strong> — Logs</li>
+        <li><strong>Cmd/Ctrl + N</strong> — New chat</li>
+        <li><strong>Cmd/Ctrl + Enter</strong> — Send message</li>
+        <li><strong>Esc</strong> — Close modals</li>
+      </ul>
+      <div class="form-actions" style="justify-content: flex-end;">
+        <button onclick="closeHelp()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="onboarding" class="modal" style="display:none;">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <h2>Welcome to Bad Apple</h2>
+      <p>Your sovereign, local AI running on this Mac. No cloud, no subscriptions, no data leaving the machine.</p>
+      <ul>
+        <li><strong>Chat</strong> — talk, ask, run local tools, generate images.</li>
+        <li><strong>Persona</strong> — switch voices and edit the system prompt.</li>
+        <li><strong>Settings</strong> — set workspace, add MCP servers, toggle modes.</li>
+        <li><strong>Dashboard</strong> — watch memory, models, P2P, and performance.</li>
+      </ul>
+      <div class="form-actions" style="justify-content: flex-end;">
+        <button class="secondary" onclick="startTour()">Take tour</button>
+        <button onclick="dismissOnboarding()">Get started</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=4"></script>
+</body>
+</html>

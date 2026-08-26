@@ -91,7 +91,7 @@ plutil -lint "${EMBED_PLIST}"
     -o "${SCRATCH_DIR}/native/BadAppleMenuBar" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
     -lBadAppleBridge -ldl \
-    -framework AppKit -framework AVFoundation -framework Speech \
+    -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "${EMBED_PLIST}"
 
 install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${MACOS_DIR}/BadApple"
@@ -99,6 +99,26 @@ install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${BUILD_DIR}/BadAppleMen
 install -m 755 "${BUILD_DIR}/libBadAppleBridge.dylib" "${FRAMEWORKS_DIR}/libBadAppleBridge.dylib"
 install -d "${CONTENTS_DIR}/Helpers"
 install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev/null || true
+
+# Screen capture helper runs as a child of the Bad Apple bundle so it uses
+# Bad Apple's Screen Recording permission instead of the Python Aqua helper.
+"${SWIFTC}" \
+    -parse-as-library -swift-version 5 -O \
+    -target "${TARGET}" -sdk "${SDK_PATH}" \
+    -o "${SCRATCH_DIR}/native/BadAppleScreenCapture" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleScreenCapture.swift" \
+    -framework AppKit -framework Foundation -framework ScreenCaptureKit
+install -m 755 "${SCRATCH_DIR}/native/BadAppleScreenCapture" "${CONTENTS_DIR}/Helpers/BadAppleScreenCapture"
+
+# UI automation helper runs as a child of the Bad Apple bundle so it uses
+# Bad Apple's Accessibility permission to drive other apps via System Events.
+"${SWIFTC}" \
+    -parse-as-library -swift-version 5 -O \
+    -target "${TARGET}" -sdk "${SDK_PATH}" \
+    -o "${SCRATCH_DIR}/native/BadAppleUI" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUI.swift" \
+    -framework Foundation
+install -m 755 "${SCRATCH_DIR}/native/BadAppleUI" "${CONTENTS_DIR}/Helpers/BadAppleUI"
 if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
     install -m 755 "${BUILD_DIR}/libbad_apple.dylib" "${FRAMEWORKS_DIR}/libbad_apple.dylib"
     install_name_tool -id "@rpath/libbad_apple.dylib" "${FRAMEWORKS_DIR}/libbad_apple.dylib" 2>/dev/null || true
@@ -143,6 +163,60 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
     <string>Bad Apple uses only Apple’s on-device speech recognizer to transcribe local voice requests.</string>
     <key>NSSiriUsageDescription</key>
     <string>Bad Apple uses Siri to send spoken requests to its local cognitive substrate.</string>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Bad Apple: Rewrite</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>rewriteWithBadApple</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>public.utf8-plain-text</string>
+            </array>
+            <key>NSReturnTypes</key>
+            <array>
+                <string>public.utf8-plain-text</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Bad Apple: Summarize</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>summarizeWithBadApple</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>public.utf8-plain-text</string>
+            </array>
+            <key>NSReturnTypes</key>
+            <array>
+                <string>public.utf8-plain-text</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Bad Apple: Proofread</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>proofreadWithBadApple</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>public.utf8-plain-text</string>
+            </array>
+            <key>NSReturnTypes</key>
+            <array>
+                <string>public.utf8-plain-text</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

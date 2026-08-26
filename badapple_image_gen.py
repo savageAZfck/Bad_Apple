@@ -23,6 +23,13 @@ def _mflux_cmd() -> str:
     return "mflux-generate-flux2"
 
 
+def _output_dir() -> Path:
+    data_dir = Path(os.environ.get("BADAPPLE_DATA_DIR", "/var/lib/bad_apple"))
+    out_dir = data_dir / "generated_images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
 def generate(
     prompt: str,
     output: Optional[str] = None,
@@ -41,7 +48,7 @@ def generate(
         return "Error: prompt is required"
 
     if output is None:
-        output = str(Path(tempfile.gettempdir()) / f"badapple_gen_{(seed or 0)}_{os.getpid()}.png")
+        output = str(_output_dir() / f"badapple_gen_{(seed or 0)}_{os.getpid()}.png")
 
     cmd = [
         exe,

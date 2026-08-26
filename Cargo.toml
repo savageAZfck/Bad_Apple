@@ -7,26 +7,14 @@ repository = "https://github.com/savageAZfck/Bad_Apple"
 license = "LicenseRef-Proprietary"
 description = "Bad Apple — an air-gapped, ANE-sharded cognitive substrate"
 build = "build.rs"
-default-run = "badappled"
+default-run = "badapple"
 
 [lib]
-crate-type = ["rlib", "cdylib"]
-
-[[bin]]
-name = "badappled"
-path = "src/main.rs"
+crate-type = ["rlib"]
 
 [[bin]]
 name = "badapple"
 path = "src/bin/badapple.rs"
-
-[[bin]]
-name = "bench_tensor_brain"
-path = "src/bin/bench_tensor_brain.rs"
-
-[[bin]]
-name = "diag_brain"
-path = "src/bin/diag_brain.rs"
 
 [[bin]]
 name = "train_gatekeeper"

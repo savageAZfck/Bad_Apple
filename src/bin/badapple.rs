@@ -88,7 +88,11 @@ fn main() -> Result<()> {
     }
 
     let prompt = wrap(prompt);
-    let tts = if speak_stream { Some(TtsQueue::new()) } else { None };
+    let tts = if speak_stream {
+        Some(TtsQueue::new())
+    } else {
+        None
+    };
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     let mut emitted = String::new();
@@ -139,17 +143,21 @@ fn main() -> Result<()> {
 
 struct TtsQueue {
     tx: Option<Sender<String>>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl TtsQueue {
     fn new() -> Self {
         let (tx, rx) = channel::<String>();
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             while let Ok(text) = rx.recv() {
                 speak_chunk(&text);
             }
         });
-        Self { tx: Some(tx) }
+        Self {
+            tx: Some(tx),
+            worker: Some(worker),
+        }
     }
     fn push(&self, text: &str) {
         if let Some(ref tx) = self.tx {
@@ -161,13 +169,18 @@ impl TtsQueue {
 impl Drop for TtsQueue {
     fn drop(&mut self) {
         self.tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
 /// Send a chunk to the local Piper TTS server and play it with afplay.
 fn speak_chunk(text: &str) {
-    let voice = std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "en_US-amy-medium".to_string());
-    let socket = std::env::var("BADAPPLE_TTS_SOCKET").unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());
+    let voice =
+        std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "en_US-amy-medium".to_string());
+    let socket = std::env::var("BADAPPLE_TTS_SOCKET")
+        .unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());
     let request = format!(
         "{{\"text\":{},\"voice\":{}}}\n",
         serde_json::to_string(text).unwrap_or_default(),
@@ -200,21 +213,30 @@ fn run_benchmark(single_prompt: Option<&str>, max_new_tokens: usize) -> Result<(
             "What is the capital of France?".to_string(),
             "Tell me about Rome.".to_string(),
             "What do you think of Siri?".to_string(),
-            "What time is it?".to_string(),
+            "How does a car engine work?".to_string(),
         ]
     };
 
-    println!("Bad Apple benchmark — {} prompt(s), max_tokens={}", prompts.len(), max_new_tokens);
-    println!("{:<38} {:>8} {:>10} {:>10} {:>10} {:>10}", "prompt", "tok", "ttft(s)", "decode", "total", "mem(GB)");
+    println!(
+        "Bad Apple benchmark — {} prompt(s), max_tokens={}",
+        prompts.len(),
+        max_new_tokens
+    );
+    println!(
+        "{:<38} {:>8} {:>10} {:>10} {:>10} {:>10}",
+        "prompt", "tok", "ttft(s)", "decode", "total", "mem(GB)"
+    );
 
     let mut total_tokens = 0usize;
     let mut total_elapsed = 0.0;
     let mut all_metrics = Vec::new();
 
+    const BENCH: &str = "__BADAPPLE_BENCHMARK__ ";
     for prompt in &prompts {
         let start = Instant::now();
         let mut first_token_at: Option<Instant> = None;
-        let (text, metrics) = query_with_metrics(prompt, max_new_tokens, |_token| {
+        let bench_prompt = BENCH.to_string() + prompt;
+        let (text, metrics) = query_with_metrics(&bench_prompt, max_new_tokens, |_token| {
             if first_token_at.is_none() {
                 first_token_at = Some(Instant::now());
             }
@@ -236,7 +258,15 @@ fn run_benchmark(single_prompt: Option<&str>, max_new_tokens: usize) -> Result<(
             );
             all_metrics.push(m);
         } else {
-            println!("{:<38} {:>8} {:>10.2} {:>10} {:>10} {:>10}", truncate(prompt, 37), 0, ttft, "-", "-", "-");
+            println!(
+                "{:<38} {:>8} {:>10.2} {:>10} {:>10} {:>10}",
+                truncate(prompt, 37),
+                0,
+                ttft,
+                "-",
+                "-",
+                "-"
+            );
         }
         // Avoid cache hits polluting the benchmark.
         if text.len() < 500 {
@@ -245,12 +275,19 @@ fn run_benchmark(single_prompt: Option<&str>, max_new_tokens: usize) -> Result<(
     }
 
     if !all_metrics.is_empty() {
-        let avg_decode = all_metrics.iter().map(|m| m.decode_tps).sum::<f64>() / all_metrics.len() as f64;
-        let avg_total = all_metrics.iter().map(|m| m.total_tps).sum::<f64>() / all_metrics.len() as f64;
-        let max_mem = all_metrics.iter().map(|m| m.peak_memory_gb).fold(0.0, f64::max);
+        let avg_decode =
+            all_metrics.iter().map(|m| m.decode_tps).sum::<f64>() / all_metrics.len() as f64;
+        let avg_total =
+            all_metrics.iter().map(|m| m.total_tps).sum::<f64>() / all_metrics.len() as f64;
+        let max_mem = all_metrics
+            .iter()
+            .map(|m| m.peak_memory_gb)
+            .fold(0.0, f64::max);
         println!("{:-<90}", "");
-        println!("{:<38} {:>8} {:>10} {:>10.1} {:>10.1} {:>10.2}",
-            "AVERAGE / MAX", total_tokens, "", avg_decode, avg_total, max_mem);
+        println!(
+            "{:<38} {:>8} {:>10} {:>10.1} {:>10.1} {:>10.2}",
+            "AVERAGE / MAX", total_tokens, "", avg_decode, avg_total, max_mem
+        );
         println!("Total wall time: {:.2}s", total_elapsed);
     }
     Ok(())

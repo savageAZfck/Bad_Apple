@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bad_apple::tensor_brain::{text_to_grounded_embedding, CandleBrain};
-use rand::{seq::SliceRandom, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{seq::SliceRandom, SeedableRng};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -70,7 +70,13 @@ fn fast_templates() -> Vec<String> {
         "/Users/savag3/bad_apple/test_hello.wasm",
     ];
     let prefixes = [
-        "", "can you", "please", "hey bad apple", "papi", "mi amor", "corazon",
+        "",
+        "can you",
+        "please",
+        "hey bad apple",
+        "papi",
+        "mi amor",
+        "corazon",
     ];
 
     for a in &actions {
@@ -104,8 +110,14 @@ fn fast_templates() -> Vec<String> {
         out.push(format!("create file {}", path));
         out.push(format!("create directory {}", path));
         out.push(format!("list files in {}", path));
-        out.push(format!("copy {} to /Users/savag3/bad_apple/test_cage/copy", path));
-        out.push(format!("move {} to /Users/savag3/bad_apple/test_cage/moved", path));
+        out.push(format!(
+            "copy {} to /Users/savag3/bad_apple/test_cage/copy",
+            path
+        ));
+        out.push(format!(
+            "move {} to /Users/savag3/bad_apple/test_cage/moved",
+            path
+        ));
     }
     out
 }
@@ -201,11 +213,17 @@ fn main() -> Result<()> {
     let corpus_path: PathBuf = "data/gatekeeper_corpus.jsonl".into();
     let mut corpus_file = fs::File::create(&corpus_path)?;
     for text in &fast {
-        serde_json::to_writer(&mut corpus_file, &serde_json::json!({"text": text, "label": 0}))?;
+        serde_json::to_writer(
+            &mut corpus_file,
+            &serde_json::json!({"text": text, "label": 0}),
+        )?;
         corpus_file.write_all(b"\n")?;
     }
     for text in &deep {
-        serde_json::to_writer(&mut corpus_file, &serde_json::json!({"text": text, "label": 1}))?;
+        serde_json::to_writer(
+            &mut corpus_file,
+            &serde_json::json!({"text": text, "label": 1}),
+        )?;
         corpus_file.write_all(b"\n")?;
     }
     println!("Corpus written to {}", corpus_path.display());
@@ -220,7 +238,9 @@ fn main() -> Result<()> {
 
     let axes = [0.0, 0.0, 0.0, 0.0];
     let mut rng = StdRng::seed_from_u64(SEED);
-    let mut all: Vec<(&str, usize)> = fast.iter().map(|s| (s.as_str(), 0))
+    let mut all: Vec<(&str, usize)> = fast
+        .iter()
+        .map(|s| (s.as_str(), 0))
         .chain(deep.iter().map(|s| (s.as_str(), 1)))
         .collect();
 

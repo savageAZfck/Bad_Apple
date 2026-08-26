@@ -214,7 +214,11 @@ where
     query_with_metrics(prompt, max_new_tokens, on_token).map(|(text, _)| text)
 }
 
-pub fn query_with_metrics<F>(prompt: &str, max_new_tokens: usize, mut on_token: F) -> Result<(String, Option<Metrics>)>
+pub fn query_with_metrics<F>(
+    prompt: &str,
+    max_new_tokens: usize,
+    mut on_token: F,
+) -> Result<(String, Option<Metrics>)>
 where
     F: FnMut(&str),
 {

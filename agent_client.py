@@ -115,7 +115,7 @@ def call_agent(method: str, params: dict = None, prompt_text: str = None, max_to
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | p2p_sync | p2p_peers>")
+        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | status | kill | resume | private <on|off> | identity | p2p_sync | p2p_peers | p2p <on|off|peers|sync> | flush | unload <vision|image|all> | dashboard [--open] | work <read|write|clear> [content] | tier <on|off> | autopilot <on|off> | ambient <on|off>>")
         return 1
 
     cmd = sys.argv[1]
@@ -136,10 +136,77 @@ def main():
     elif cmd == "infer":
         prompt = " ".join(sys.argv[2:])
         print(json.dumps(call_agent("inference", {"prompt": prompt, "max_new_tokens": 120}), indent=2))
+    elif cmd == "status":
+        print(json.dumps(call_agent("runtime_status"), indent=2))
+    elif cmd == "kill":
+        print(json.dumps(call_agent("kill_switch", {"enabled": True, "reason": "CLI requested"}), indent=2))
+    elif cmd == "resume":
+        print(json.dumps(call_agent("kill_switch", {"enabled": False}), indent=2))
+    elif cmd == "private":
+        if len(sys.argv) != 3 or sys.argv[2] not in ("on", "off"):
+            print("Usage: agent_client.py private <on|off>")
+            return 1
+        print(json.dumps(call_agent("private_mode", {"enabled": sys.argv[2] == "on"}), indent=2))
+    elif cmd == "identity":
+        print(json.dumps(call_agent("identity_status"), indent=2))
     elif cmd == "p2p_sync":
         print(json.dumps(call_agent("p2p_sync"), indent=2))
     elif cmd == "p2p_peers":
         print(json.dumps(call_agent("p2p_peers"), indent=2))
+    elif cmd == "flush":
+        print(json.dumps(call_agent("flush_vram"), indent=2))
+    elif cmd == "unload":
+        model_type = sys.argv[2] if len(sys.argv) > 2 else "vision"
+        print(json.dumps(call_agent("unload_model", {"type": model_type}), indent=2))
+    elif cmd == "work":
+        if len(sys.argv) < 3:
+            print("Usage: agent_client.py work <read|write|clear> [content]")
+            return 1
+        sub = sys.argv[2]
+        if sub == "read":
+            print(json.dumps(call_agent("invoke_tool", {"name": "read_working_memory", "args": {}}), indent=2))
+        elif sub == "write":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py work write <content>")
+                return 1
+            print(json.dumps(call_agent("invoke_tool", {"name": "write_working_memory", "args": {"content": " ".join(sys.argv[3:])}}), indent=2))
+        elif sub == "clear":
+            print(json.dumps(call_agent("invoke_tool", {"name": "clear_working_memory", "args": {}}), indent=2))
+        else:
+            print(f"Unknown work command: {sub}")
+            return 1
+    elif cmd == "tier":
+        if len(sys.argv) < 3 or sys.argv[2] not in ("on", "off"):
+            print("Usage: agent_client.py tier <on|off>")
+            return 1
+        print(json.dumps(call_agent("set_fast_tier", {"enabled": sys.argv[2] == "on"}), indent=2))
+    elif cmd == "autopilot":
+        if len(sys.argv) < 3 or sys.argv[2] not in ("on", "off"):
+            print("Usage: agent_client.py autopilot <on|off>")
+            return 1
+        print(json.dumps(call_agent("set_autopilot", {"enabled": sys.argv[2] == "on"}), indent=2))
+    elif cmd == "p2p":
+        if len(sys.argv) < 3 or sys.argv[2] not in ("on", "off", "peers", "sync"):
+            print("Usage: agent_client.py p2p <on|off|peers|sync>")
+            return 1
+        if sys.argv[2] in ("on", "off"):
+            print(json.dumps(call_agent("set_p2p", {"enabled": sys.argv[2] == "on"}), indent=2))
+        elif sys.argv[2] == "peers":
+            print(json.dumps(call_agent("p2p_peers", {}), indent=2))
+        else:
+            print(json.dumps(call_agent("p2p_sync", {}), indent=2))
+    elif cmd == "ambient":
+        if len(sys.argv) < 3 or sys.argv[2] not in ("on", "off"):
+            print("Usage: agent_client.py ambient <on|off>")
+            return 1
+        print(json.dumps(call_agent("set_ambient", {"enabled": sys.argv[2] == "on"}), indent=2))
+    elif cmd == "dashboard":
+        url = "http://127.0.0.1:8787/"
+        print(url)
+        if len(sys.argv) > 2 and sys.argv[2] == "--open":
+            import webbrowser
+
+            webbrowser.open(url)
     else:
         print(f"Unknown command: {cmd}")
         return 1

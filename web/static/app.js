@@ -1,0 +1,1022 @@
+const $ = (sel, el = document) => el.querySelector(sel);
+const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
+
+const ROUTES = {
+  dashboard: 'Dashboard',
+  chat: 'Chat',
+  persona: 'Persona',
+  settings: 'Settings',
+  logs: 'Logs',
+};
+
+let currentView = 'dashboard';
+
+function initTheme() {
+  const saved = localStorage.getItem('badapple-theme');
+  if (saved === 'light') document.body.classList.add('light');
+  const checkbox = $('#theme-toggle');
+  if (checkbox) checkbox.checked = document.body.classList.contains('light');
+  updateThemeIcon();
+}
+function toggleTheme(force) {
+  const light = typeof force === 'boolean' ? force : !document.body.classList.contains('light');
+  document.body.classList.toggle('light', light);
+  localStorage.setItem('badapple-theme', light ? 'light' : 'dark');
+  const checkbox = $('#theme-toggle');
+  if (checkbox) checkbox.checked = light;
+  updateThemeIcon();
+}
+function updateThemeIcon() {
+  const btn = $('#theme-btn');
+  if (btn) btn.textContent = document.body.classList.contains('light') ? '☀️' : '🌙';
+}
+
+function init() {
+  initTheme();
+  setupNav();
+  setupKeyboard();
+  window.addEventListener('popstate', route);
+  if (location.pathname === '/splash') {
+    runSplash();
+  } else {
+    route();
+    maybeShowOnboarding();
+  }
+  initStatusDot();
+}
+
+function setupKeyboard() {
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      closeHelp();
+      const modal = document.getElementById('onboarding');
+      if (modal) modal.style.display = 'none';
+      return;
+    }
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      showHelp();
+      return;
+    }
+    const meta = e.metaKey || e.ctrlKey;
+    if (!meta) return;
+    if (e.key === 'n') { e.preventDefault(); newChat(); }
+    if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+    if (e.key >= '1' && e.key <= '5') {
+      e.preventDefault();
+      const map = { '1': 'dashboard', '2': 'chat', '3': 'persona', '4': 'settings', '5': 'logs' };
+      navigate(map[e.key]);
+    }
+  });
+}
+function showHelp() { const h = $('#help'); if (h) h.style.display = 'flex'; }
+function closeHelp() { const h = $('#help'); if (h) h.style.display = 'none'; }
+
+const tourSteps = [
+  { title: 'Dashboard', body: 'See runtime mode, memory, models, P2P, MCP status, tool calls, and live charts.', view: 'dashboard' },
+  { title: 'Chat', body: 'Talk to Bad Apple. Conversations are saved locally, and you can copy code, retry, or delete messages.', view: 'chat' },
+  { title: 'Persona', body: 'Switch voices and edit the system prompt. Changes apply on the next query.', view: 'persona' },
+  { title: 'Settings', body: 'Set workspace, add MCP servers, switch models, toggle autopilot/fast-tier/P2P, and change theme.', view: 'settings' },
+  { title: 'Logs', body: 'Tail the daemon log for debugging and performance details.', view: 'logs' },
+];
+let tourIndex = 0;
+function startTour() {
+  dismissOnboarding();
+  tourIndex = 0;
+  showTourStep();
+}
+function showTourStep() {
+  const step = tourSteps[tourIndex];
+  const modal = document.getElementById('tour');
+  $('#tour-title').textContent = step.title;
+  $('#tour-body').textContent = step.body;
+  $('#tour-prev').style.visibility = tourIndex === 0 ? 'hidden' : 'visible';
+  $('#tour-next').textContent = tourIndex === tourSteps.length - 1 ? 'Finish' : 'Next';
+  modal.style.display = 'flex';
+  navigate(step.view);
+}
+function nextTour() {
+  if (tourIndex < tourSteps.length - 1) { tourIndex++; showTourStep(); }
+  else closeTour();
+}
+function prevTour() {
+  if (tourIndex > 0) { tourIndex--; showTourStep(); }
+}
+function closeTour() { const t = $('#tour'); if (t) t.style.display = 'none'; }
+
+function maybeShowOnboarding() {
+  if (localStorage.getItem('badapple-onboarded')) return;
+  const modal = document.getElementById('onboarding');
+  if (modal) modal.style.display = 'flex';
+}
+
+function dismissOnboarding() {
+  localStorage.setItem('badapple-onboarded', '1');
+  const modal = document.getElementById('onboarding');
+  if (modal) modal.style.display = 'none';
+}
+
+function setupNav() {
+  $$('.nav-item').forEach(el => {
+    el.addEventListener('click', e => {
+      e.preventDefault();
+      const view = el.dataset.view;
+      navigate(view);
+    });
+  });
+}
+
+function navigate(view) {
+  if (!ROUTES[view]) return;
+  currentView = view;
+  history.pushState({}, '', '/' + view);
+  route();
+}
+
+function route() {
+  const path = location.pathname.replace(/^\//, '') || 'dashboard';
+  currentView = ROUTES[path] ? path : 'dashboard';
+  $$('.view').forEach(v => v.classList.add('hidden'));
+  const view = $('#view-' + currentView);
+  if (view) view.classList.remove('hidden');
+  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === currentView));
+  $('h2#view-title').textContent = ROUTES[currentView];
+  onViewEnter(currentView);
+}
+
+function onViewEnter(view) {
+  if (view === 'dashboard') loadDashboard();
+  if (view === 'chat') setupChat();
+  if (view === 'persona') loadPersona();
+  if (view === 'settings') loadSettings();
+  if (view === 'logs') loadLogs();
+}
+
+/* ---------- UI helpers ---------- */
+function toast(message, type = 'ok') {
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.textContent = message;
+  document.body.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 250); }, 3000);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    const txt = await r.text();
+    throw new Error(txt || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+function formatBytes(bytes) {
+  if (bytes == null) return '—';
+  const gb = bytes / 1024 / 1024 / 1024;
+  return `${gb.toFixed(2)} GB`;
+}
+
+function simpleMarkdown(text) {
+  if (!text) return '';
+  const codeBlocks = [];
+  const saveCode = (code) => {
+    codeBlocks.push(code);
+    return `\x00CODE\x00${codeBlocks.length - 1}\x00`;
+  };
+
+  // Escape HTML
+  let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // Code blocks
+  html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (m, lang, code) => {
+    const unescaped = code.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    return saveCode(`<pre><code>${unescaped}</code></pre>`);
+  });
+
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, (m, code) => saveCode(`<code>${code}</code>`));
+
+  // Bold/italic
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+  // Blockquote
+  html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // Lists
+  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.+<\/li>\n?)+/g, '<ul>$&</ul>');
+  html = html.replace(/<\/ul>\n?<ul>/g, '');
+
+  // Paragraphs (only for lines that are not already tags)
+  html = html.split('\n\n').map(p => {
+    p = p.trim();
+    if (!p) return '';
+    if (/^<[a-zA-Z]/.test(p)) return p;
+    return `<p>${p.replace(/\n/g, '<br>')}</p>`;
+  }).join('\n');
+
+  // Restore code placeholders
+  codeBlocks.forEach((code, i) => {
+    html = html.replace(`\x00CODE\x00${i}\x00`, code);
+  });
+
+  return html;
+}
+
+/* ---------- Status dot ---------- */
+async function initStatusDot() {
+  const dot = $('.sidebar-footer .status-dot');
+  const text = $('.sidebar-footer .status-text');
+  async function check() {
+    try {
+      const s = await api('/api/status');
+      const ok = s.runtime && !s.runtime.killed && !s.runtime.safe_mode_reason;
+      dot.className = 'status-dot ' + (ok ? 'ok' : 'warn');
+      text.textContent = ok ? 'Daemon online' : (s.runtime?.safe_mode_reason || 'Check daemon');
+    } catch (e) {
+      dot.className = 'status-dot bad';
+      text.textContent = 'Daemon offline';
+    }
+  }
+  check();
+  setInterval(check, 5000);
+}
+
+/* ---------- Dashboard ---------- */
+let dashboardInterval;
+async function loadDashboard() {
+  if (dashboardInterval) clearInterval(dashboardInterval);
+  await updateDashboard();
+  dashboardInterval = setInterval(updateDashboard, 2000);
+}
+
+async function updateDashboard() {
+  try {
+    const [status, snap, tail, ledger, mcp, voice] = await Promise.all([
+      api('/api/status'),
+      api('/api/snapshot'),
+      api('/api/tail?n=20'),
+      api('/api/ledger?n=50'),
+      api('/api/mcp_servers'),
+      api('/api/voice?n=12'),
+    ]);
+    renderDashboard(status, snap, tail, ledger, mcp, voice);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderDashboard(status, snap, tail, ledger, mcp, voice) {
+  const rt = status.runtime || {};
+  const flags = [];
+  if (rt.killed) flags.push('killed');
+  if (rt.private_mode) flags.push('private');
+  if (rt.safe_mode_reason) flags.push(`safe: ${rt.safe_mode_reason}`);
+  if (status.autopilot) flags.push('autopilot');
+  if (status.fast_tier) flags.push('fast tier');
+  if (status.p2p_enabled) flags.push('p2p on');
+
+  const memUsed = snap.memory ? (snap.memory.used_gb ?? 0) : 0;
+  const memTotal = snap.memory ? (snap.memory.total_gb ?? 0) : 0;
+  const memPct = snap.memory ? (snap.memory.percent ?? 0) : 0;
+
+  const rows = [
+    { label: 'Runtime', value: rt.mode || 'unknown', sub: flags.join(' · ') || 'normal' },
+    { label: 'Memory', value: `${memUsed.toFixed(2)} / ${memTotal.toFixed(2)} GB`, sub: `${memPct}% used` },
+    { label: 'Active models', value: (status.active_models || []).join(', ') || 'none', sub: `${(status.active_models || []).length} loaded` },
+    { label: 'Battery', value: snap.battery ? `${snap.battery.percent}%` : '—', sub: snap.battery?.source === 'ac' ? 'AC power' : 'on battery' },
+    { label: 'Workspace', value: status.workspace ? status.workspace.replace(/^\//, '').split('/').pop() : 'No workspace set', sub: status.workspace || '' },
+    { label: 'P2P Mesh', value: status.p2p_enabled ? 'on' : 'off', sub: status.p2p_peers || 'No peers on the local network.' },
+    { label: 'Ambient', value: (status.ambient_running && status.ambient?.app) ? status.ambient.app : 'off', sub: (status.ambient_running && status.ambient?.window) ? status.ambient.window : '' },
+    { label: 'Hibernation', value: status.hibernating ? 'asleep' : 'awake', sub: status.hibernating ? `idle for ${Math.round(status.idle_seconds || 0)}s` : `idle ${Math.round(status.idle_seconds || 0)}s / ${Math.round(status.hibernate_after || 300)}s` },
+  ];
+
+  const cards = $('#dashboard-cards');
+  cards.innerHTML = rows.map(r => `
+    <div class="card">
+      <h3>${r.label}</h3>
+      <div class="value">${r.value}</div>
+      <div class="sub">${r.sub}</div>
+    </div>
+  `).join('');
+
+  if (status.active_persona) {
+    $('#top-persona').textContent = status.active_persona;
+  }
+
+  const peers = status.p2p_peers || [];
+  $('#p2p-peers').innerHTML = peers.length
+    ? peers.map(p => `<span class="persona-pill">${p}</span>`).join(' ')
+    : '<span class="text-tertiary">No peers connected</span>';
+
+  const perf = snap.latest_log_perf?.raw || '—';
+  $('#latest-perf').textContent = perf;
+
+  $('#log-tail').textContent = (tail.lines || []).join('') || '—';
+
+  const mcpList = mcp?.servers || [];
+  $('#mcp-status').innerHTML = mcpList.length
+    ? mcpList.map(s => `<span class="persona-pill" title="${s.command.join(' ')}">${s.name}</span>`).join(' ')
+    : '<span class="text-tertiary">No MCP servers</span>';
+
+  const toolEvents = (ledger?.entries || []).filter(e => e.event_type === 'tool' || e.type === 'tool').slice(0, 12);
+  $('#tool-calls').innerHTML = toolEvents.length
+    ? toolEvents.map(e => `<div class="tool-call"><span class="name">⚡ ${e.tool || e.name || 'tool'}</span> <span class="muted">${e.timestamp || ''}</span></div>`).join('')
+    : '<span class="text-tertiary">No recent tools</span>';
+
+  const voiceEvents = voice?.events || [];
+  $('#voice-activity').innerHTML = voiceEvents.length
+    ? voiceEvents.map(e => {
+        const icon = { transcript: '🎤', command: '▶', response: '💬', spoken: '🔊', error: '⚠' }[e.type] || '•';
+        const cls = e.type === 'error' ? 'bad' : 'muted';
+        const text = e.text.length > 120 ? e.text.slice(0, 120) + '…' : e.text;
+        return `<div class="tool-call"><span class="name">${icon} ${e.type}</span> <span class="${cls}">${text}</span></div>`;
+      }).join('')
+    : '<span class="text-tertiary">No voice activity yet</span>';
+
+  updateMetricsChart(snap, status);
+}
+
+/* ---------- Metrics chart ---------- */
+const metricsHistory = { labels: [], memory: [], tps: [] };
+const maxPoints = 60;
+function parseTPS(perf) {
+  if (!perf || !perf.raw) return 0;
+  const m = perf.raw.match(/decode t\/s[:\s]+([\d.]+)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+function updateMetricsChart(snap, status) {
+  const canvas = $('#metrics-chart');
+  if (!canvas) return;
+  const now = new Date().toLocaleTimeString();
+  const mem = snap.memory ? (snap.memory.percent ?? 0) : 0;
+  const tps = parseTPS(snap.latest_log_perf);
+  metricsHistory.labels.push(now);
+  metricsHistory.memory.push(mem);
+  metricsHistory.tps.push(tps);
+  if (metricsHistory.labels.length > maxPoints) {
+    metricsHistory.labels.shift();
+    metricsHistory.memory.shift();
+    metricsHistory.tps.shift();
+  }
+  drawChart(canvas, metricsHistory);
+}
+function drawChart(canvas, data) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height;
+  const pad = 24;
+  const chartW = w - pad * 2;
+  const chartH = h - pad * 2;
+  ctx.clearRect(0, 0, w, h);
+
+  // grid
+  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--border-subtle').trim() || '#1f1f22';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + chartH / 4 * i;
+    ctx.moveTo(pad, y);
+    ctx.lineTo(w - pad, y);
+  }
+  ctx.stroke();
+
+  const maxMem = Math.max(10, ...data.memory);
+  const maxTps = Math.max(1, ...data.tps);
+
+  function drawLine(values, color, max) {
+    if (values.length < 2) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    values.forEach((v, i) => {
+      const x = pad + (chartW / (maxPoints - 1)) * i;
+      const y = pad + chartH - (v / max) * chartH;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  drawLine(data.memory, '#4ade80', maxMem);
+  drawLine(data.tps, '#3b82f6', maxTps);
+
+  // legend
+  ctx.fillStyle = '#4ade80'; ctx.fillRect(pad, 8, 10, 10);
+  ctx.fillStyle = '#fff'; ctx.fillText('Mem %', pad + 14, 16);
+  ctx.fillStyle = '#3b82f6'; ctx.fillRect(pad + 70, 8, 10, 10);
+  ctx.fillStyle = '#fff'; ctx.fillText('Decode t/s', pad + 84, 16);
+}
+
+/* ---------- Chat / conversation ---------- */
+let chatReady = false;
+let chatHistory = [];
+let currentChatId = null;
+let conversations = {};
+
+function generateId() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+function storageKey() { return 'badapple-chats'; }
+function loadConversations() {
+  try { return JSON.parse(localStorage.getItem(storageKey()) || '{}'); }
+  catch (e) { return {}; }
+}
+function saveConversations() {
+  try { localStorage.setItem(storageKey(), JSON.stringify(conversations)); }
+  catch (e) { console.warn('Could not save conversations', e); }
+}
+function chatTitle(messages) {
+  const first = messages.find(m => m.role === 'user');
+  if (!first) return 'New chat';
+  return first.text.slice(0, 40) + (first.text.length > 40 ? '…' : '');
+}
+function saveCurrentChat() {
+  if (!currentChatId) currentChatId = generateId();
+  if (chatHistory.length === 0) return;
+  conversations[currentChatId] = {
+    id: currentChatId,
+    title: chatTitle(chatHistory),
+    updated: Date.now(),
+    messages: chatHistory,
+  };
+  saveConversations();
+  updateHistorySelect();
+}
+function deleteCurrentChat() {
+  if (currentChatId && conversations[currentChatId]) {
+    delete conversations[currentChatId];
+    saveConversations();
+  }
+  newChat();
+}
+function newChat() {
+  currentChatId = generateId();
+  chatHistory = [];
+  renderChat();
+  updateHistorySelect();
+}
+function loadChatHistory(id) {
+  if (!id || id === currentChatId) return;
+  if (!conversations[id]) return;
+  currentChatId = id;
+  chatHistory = JSON.parse(JSON.stringify(conversations[id].messages));
+  renderChat();
+  updateHistorySelect();
+}
+function updateHistorySelect() {
+  const sel = $('#chat-history-select');
+  if (!sel) return;
+  const sorted = Object.values(conversations).sort((a, b) => b.updated - a.updated);
+  const options = ['<option value="">Current chat</option>', ...sorted.map(c =>
+    `<option value="${c.id}" ${c.id === currentChatId ? 'selected' : ''}>${escapeHtml(c.title)}</option>`
+  )];
+  sel.innerHTML = options.join('');
+}
+function useSuggestion(text) {
+  const input = $('#chat-input');
+  input.value = text;
+  input.focus();
+}
+
+function setupChat() {
+  if (chatReady) return;
+  chatReady = true;
+  conversations = loadConversations();
+  const input = $('#chat-input');
+  const sendBtn = $('#chat-send');
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); sendChat(); }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+  });
+  document.body.addEventListener('dragover', e => { e.preventDefault(); });
+  document.body.addEventListener('drop', handleFileDrop);
+  if (!currentChatId) newChat();
+  else renderChat();
+}
+
+function handleFileDrop(e) {
+  if (!e.target.closest('#view-chat')) return;
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  if (file.type.startsWith('image/')) {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const dataUrl = ev.target.result;
+      addMessage('user', '[image] ' + file.name, { image: dataUrl, local: true });
+      sendChat(`Describe this image: ${file.name}`, true);
+    };
+    reader.readAsDataURL(file);
+  } else if (file.size < 100000) {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const text = ev.target.result;
+      addMessage('user', '[file] ' + file.name, { fileText: text });
+      sendChat(`Summarize this file (${file.name}):\n\n${text}`, true);
+    };
+    reader.readAsText(file);
+  } else {
+    toast('File too large. Try a text or image file under ~100 KB.', 'error');
+  }
+}
+
+function addMessage(role, text, extra = {}) {
+  const msg = { id: generateId(), role, text, ...extra };
+  chatHistory.push(msg);
+  const el = renderMessage(msg);
+  $('#chat-messages').appendChild(el);
+  scrollChat();
+  return msg;
+}
+
+function renderMessage(msg) {
+  const chatEl = $('#chat-messages');
+  const d = document.createElement('div');
+  d.className = `message ${msg.role}`;
+  d.dataset.id = msg.id;
+  const isUser = msg.role === 'user';
+  const html = isUser ? escapeHtml(msg.text) : simpleMarkdown(msg.text || '');
+  d.innerHTML = `
+    <div class="avatar">${isUser ? 'You' : 'BA'}</div>
+    <div class="bubble">
+      <div class="bubble-content">${html}</div>
+      ${msg.error ? `<div class="msg-error">Error: ${escapeHtml(msg.error)}</div>` : ''}
+      <div class="msg-actions">
+        ${isUser ? `<button onclick="editMessage('${msg.id}')">Edit</button>` : `<button onclick="copyMessage('${msg.id}')">Copy</button><button onclick="retryMessage('${msg.id}')">Retry</button>`}
+        <button onclick="deleteMessage('${msg.id}')">Delete</button>
+      </div>
+    </div>
+  `;
+  const bubble = $('.bubble', d);
+  if (msg.image) {
+    const img = document.createElement('img');
+    img.src = msg.image;
+    img.alt = '';
+    bubble.appendChild(img);
+  }
+  if (msg.tool) {
+    const tc = document.createElement('div');
+    tc.className = 'tool-call';
+    tc.innerHTML = `<span class="name">⚡ ${msg.tool}</span>`;
+    bubble.appendChild(tc);
+  }
+  if (msg.metrics) {
+    const m = document.createElement('div');
+    m.className = 'metrics';
+    m.textContent = JSON.stringify(msg.metrics);
+    bubble.appendChild(m);
+  }
+  attachCopyButtons(bubble);
+  chatEl.appendChild(d);
+  return d;
+}
+
+function attachCopyButtons(bubble) {
+  $$('pre', bubble).forEach(pre => {
+    if (pre.querySelector('.copy-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.textContent = 'Copy';
+    btn.onclick = () => navigator.clipboard.writeText(pre.textContent).then(() => toast('Copied'));
+    pre.style.position = 'relative';
+    pre.appendChild(btn);
+  });
+}
+
+function renderChat() {
+  const chatEl = $('#chat-messages');
+  chatEl.innerHTML = '';
+  if (chatHistory.length === 0) {
+    addMessage('bot', "Hey, babe. I'm here. Ask me anything or tell me what to do on your Mac.");
+    return;
+  }
+  chatHistory.forEach(msg => chatEl.appendChild(renderMessage(msg)));
+  scrollChat();
+}
+
+function escapeHtml(t) {
+  return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function updateMessage(id, updates) {
+  const msg = chatHistory.find(m => m.id === id);
+  if (!msg) return;
+  Object.assign(msg, updates);
+  const el = document.querySelector(`.message[data-id="${id}"]`);
+  if (el) {
+    el.replaceWith(renderMessage(msg));
+  }
+  saveCurrentChat();
+}
+
+function deleteMessage(id) {
+  const idx = chatHistory.findIndex(m => m.id === id);
+  if (idx < 0) return;
+  chatHistory.splice(idx, 1);
+  const el = document.querySelector(`.message[data-id="${id}"]`);
+  if (el) el.remove();
+  saveCurrentChat();
+}
+
+function editMessage(id) {
+  const msg = chatHistory.find(m => m.id === id);
+  if (!msg) return;
+  const newText = prompt('Edit message:', msg.text);
+  if (newText === null) return;
+  msg.text = newText.trim();
+  renderChat();
+  saveCurrentChat();
+  // Remove all messages after this one and re-send
+  const idx = chatHistory.findIndex(m => m.id === id);
+  chatHistory.splice(idx + 1);
+  sendChat(msg.text, false);
+}
+
+function copyMessage(id) {
+  const msg = chatHistory.find(m => m.id === id);
+  if (!msg) return;
+  navigator.clipboard.writeText(msg.text).then(() => toast('Copied to clipboard'));
+}
+
+async function retryMessage(id) {
+  const idx = chatHistory.findIndex(m => m.id === id);
+  if (idx <= 0) return;
+  const promptMsg = chatHistory[idx - 1];
+  if (promptMsg.role !== 'user') return;
+  // Remove the bot response and resend
+  chatHistory.splice(idx);
+  const el = document.querySelectorAll('.message');
+  if (el[idx]) el[idx].remove();
+  await sendChat(promptMsg.text, false);
+}
+
+async function sendChat(textOverride, isSystem) {
+  const input = $('#chat-input');
+  const sendBtn = $('#chat-send');
+  let p;
+  if (textOverride !== undefined && isSystem) {
+    p = textOverride;
+  } else if (textOverride !== undefined) {
+    p = textOverride;
+    input.value = '';
+  } else {
+    p = input.value.trim();
+    if (!p) return;
+    input.value = '';
+  }
+  input.style.height = 'auto';
+
+  if (!isSystem) {
+    // Check if this is a new continuation or a new message
+    const lastUser = chatHistory.length && chatHistory[chatHistory.length - 1].role === 'user' && chatHistory[chatHistory.length - 1].text === p;
+    if (!lastUser) addMessage('user', p);
+  }
+  sendBtn.disabled = true;
+
+  const botMsg = { id: generateId(), role: 'bot', text: '', typing: true };
+  chatHistory.push(botMsg);
+  const el = renderMessage(botMsg);
+  const bubble = $('.bubble', el);
+  const content = $('.bubble-content', bubble);
+  content.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+
+  let finalText = '';
+  try {
+    const r = await fetch(window.location.origin + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: p, stream: true }),
+    });
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let started = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop();
+      for (const chunk of chunks) {
+        const line = chunk.split('\n').find(l => l.startsWith('data:'));
+        if (!line) continue;
+        const data = line.slice(5).trim();
+        if (!data) continue;
+        let msg;
+        try { msg = JSON.parse(data); } catch (e) { continue; }
+
+        if (!started) { content.innerHTML = '<span class="stream"></span>'; started = true; }
+        const streamSpan = $('.stream', content);
+
+        if (msg.type === 'token') {
+          if (streamSpan) streamSpan.textContent += msg.text;
+          finalText += msg.text;
+          scrollChat();
+        } else if (msg.type === 'tool') {
+          botMsg.tool = msg.tool;
+          const tc = document.createElement('div');
+          tc.className = 'tool-call';
+          tc.innerHTML = `<span class="name">⚡ ${msg.tool}</span>`;
+          bubble.appendChild(tc);
+          scrollChat();
+        } else if (msg.type === 'done') {
+          const imgMatch = (msg.text || '').match(/^Generated image:\s*(.+\.png)$/);
+          if (imgMatch) {
+            botMsg.text = 'Generated image:';
+            botMsg.image = '/api/image/' + encodeURIComponent(imgMatch[1].split('/').pop());
+          } else {
+            finalText = msg.text || finalText;
+            botMsg.text = finalText;
+          }
+          botMsg.metrics = msg.metrics;
+          botMsg.typing = false;
+          if (imgMatch) {
+            content.innerHTML = '';
+            const t = document.createElement('div');
+            t.textContent = botMsg.text;
+            content.appendChild(t);
+            const img = document.createElement('img');
+            img.src = botMsg.image;
+            img.alt = 'generated image';
+            content.appendChild(img);
+          } else {
+            content.innerHTML = simpleMarkdown(botMsg.text);
+            attachCopyButtons(bubble);
+          }
+          if (msg.metrics) {
+            const m = document.createElement('div');
+            m.className = 'metrics';
+            m.textContent = JSON.stringify(msg.metrics);
+            bubble.appendChild(m);
+          }
+          scrollChat();
+        } else if (msg.type === 'error') {
+          botMsg.error = msg.error;
+          botMsg.typing = false;
+          content.innerHTML = '';
+          const err = document.createElement('div');
+          err.className = 'msg-error';
+          err.textContent = 'Error: ' + msg.error;
+          content.appendChild(err);
+          scrollChat();
+        }
+      }
+    }
+  } catch (e) {
+    botMsg.error = e.message;
+    botMsg.typing = false;
+    const err = document.createElement('div');
+    err.className = 'msg-error';
+    err.textContent = 'Error: ' + e.message;
+    if (content) content.appendChild(err);
+    toast('Send failed: ' + e.message, 'error');
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+    delete botMsg.typing;
+    saveCurrentChat();
+  }
+}
+
+function scrollChat() {
+  const chatEl = $('#chat-messages');
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+/* ---------- Persona ---------- */
+async function loadPersona() {
+  const sel = $('#persona-select');
+  const ta = $('#persona-prompt');
+  const data = await api('/api/personas');
+  sel.innerHTML = data.personas.map(n => `<option value="${n}" ${n === data.active ? 'selected' : ''}>${n}</option>`).join('');
+  ta.value = data.prompt || '';
+}
+
+async function savePersona() {
+  const sel = $('#persona-select');
+  const ta = $('#persona-prompt');
+  try {
+    await api('/api/personas', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: sel.value, prompt: ta.value }),
+    });
+    toast('Persona saved. Active next query.');
+    loadPersona();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+/* ---------- Settings ---------- */
+async function loadSettings() {
+  const status = await api('/api/status');
+  $('#ws-path').value = status.workspace || '';
+  $('#auto-pilot').checked = !!status.autopilot;
+  $('#fast-tier').checked = !!status.fast_tier;
+  $('#p2p-enabled').checked = !!status.p2p_enabled;
+  renderModels(status.active_models || []);
+  await loadMcpServers();
+  await loadModelList(status.active_models?.[0]);
+}
+
+function renderModels(models) {
+  const el = $('#model-list');
+  el.innerHTML = models.length
+    ? models.map(m => `<div class="persona-pill">${m}</div>`).join(' ')
+    : '<span class="text-tertiary">No active models</span>';
+}
+
+async function loadModelList(active) {
+  const sel = $('#model-select');
+  try {
+    const r = await api('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'list models' }),
+    });
+    const lines = (r.result || '').split('\n');
+    const models = lines.map(l => l.trim()).filter(l => l && !l.startsWith('Local') && !l.startsWith('Available'));
+    sel.innerHTML = models.map(m => {
+      const id = m.split(' —')[0].trim();
+      return `<option value="${id}" ${id === active ? 'selected' : ''}>${m}</option>`;
+    }).join('');
+  } catch (e) {
+    sel.innerHTML = '<option>Error loading models</option>';
+  }
+}
+
+async function switchModel() {
+  const sel = $('#model-select');
+  try {
+    const r = await api('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: `use model ${sel.value}` }),
+    });
+    toast(r.result || 'Model switched');
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+async function invokeMcpTool() {
+  const server = $('#mcp-invoke-server').value.trim();
+  const tool = $('#mcp-invoke-tool').value.trim();
+  const arg = $('#mcp-invoke-arg').value.trim();
+  const out = $('#mcp-invoke-result');
+  if (!server || !tool) { out.textContent = 'Server and tool are required'; return; }
+  const command = arg ? `invoke mcp tool ${tool} on server ${server} with text ${arg}` : `invoke mcp tool ${tool} on server ${server}`;
+  try {
+    const r = await api('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    out.textContent = r.result || 'No output';
+  } catch (e) {
+    out.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function loadMcpServers() {
+  try {
+    const data = await api('/api/mcp_servers');
+    const tbody = $('#mcp-table tbody');
+    tbody.innerHTML = (data.servers || []).map(s => `
+      <tr>
+        <td>${s.name}</td>
+        <td>${s.command.join(' ')}</td>
+        <td><button class="secondary" onclick="removeMcpServer('${s.name}')">Remove</button></td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    $('#mcp-table tbody').innerHTML = `<tr><td colspan="3" class="text-tertiary">${e.message}</td></tr>`;
+  }
+}
+
+async function addMcpServer() {
+  const name = $('#mcp-name').value.trim();
+  const cmd = $('#mcp-command').value.trim();
+  if (!name || !cmd) return toast('Name and command required', 'error');
+  try {
+    await api('/api/mcp_servers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'add', name, command: cmd }),
+    });
+    toast('MCP server added');
+    $('#mcp-name').value = '';
+    $('#mcp-command').value = '';
+    loadMcpServers();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+async function removeMcpServer(name) {
+  if (!confirm(`Remove ${name}?`)) return;
+  try {
+    await api('/api/mcp_servers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', name }),
+    });
+    toast('MCP server removed');
+    loadMcpServers();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+async function toggleControl(name, command, checkbox) {
+  try {
+    const r = await api('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    toast(`${name}: ${r.result || 'ok'}`);
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+    if (checkbox) checkbox.checked = !checkbox.checked;
+  }
+}
+
+async function saveWorkspace() {
+  const path = $('#ws-path').value.trim();
+  try {
+    await api('/api/workspace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    toast('Workspace updated');
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+/* ---------- Logs ---------- */
+let logsInterval;
+async function loadLogs() {
+  if (logsInterval) clearInterval(logsInterval);
+  await updateLogs();
+  logsInterval = setInterval(updateLogs, 3000);
+}
+
+async function updateLogs() {
+  try {
+    const tail = await api('/api/tail?n=50');
+    $('#log-view').textContent = (tail.lines || []).join('') || '—';
+  } catch (e) {
+    $('#log-view').textContent = 'Error loading log';
+  }
+}
+
+/* ---------- Splash ---------- */
+function runSplash() {
+  const splash = document.getElementById('splash');
+  const bar = $('.splash-bar .fill', splash);
+  let progress = 0;
+  const steps = [
+    'Waking up the brain...',
+    'Loading embedding model...',
+    'Checking local tools...',
+    'Mounting file watcher...',
+    'Ready.',
+  ];
+  const text = $('#splash-status', splash);
+  let i = 0;
+  const timer = setInterval(async () => {
+    progress += 20;
+    bar.style.width = progress + '%';
+    text.textContent = steps[i++] || '';
+    if (progress >= 100) {
+      clearInterval(timer);
+      try {
+        await fetch('/api/status');
+        setTimeout(() => location.href = '/', 500);
+      } catch (e) {
+        text.textContent = 'Waiting for daemon... retrying';
+        setTimeout(runSplash, 1500);
+      }
+    }
+  }, 400);
+}
+
+document.addEventListener('DOMContentLoaded', init);

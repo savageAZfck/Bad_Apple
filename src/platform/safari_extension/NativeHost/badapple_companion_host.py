@@ -6,12 +6,15 @@ Connects to the local Bad Apple SLICKS socket for on-device answers.
 """
 
 import json
-import socket
 import struct
 import sys
 from pathlib import Path
 
-SOCKET_PATH = "/var/run/badapple/substrate.sock"
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from agent_client import call_agent
 
 
 def read_message():
@@ -32,16 +35,11 @@ def write_message(message):
 
 def ask_badapple(text: str) -> str:
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(SOCKET_PATH)
-        sock.sendall((text + "\n").encode("utf-8"))
-        parts = []
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            parts.append(chunk)
-        return b"".join(parts).decode("utf-8", "ignore") or "No response."
+        response = call_agent("inference", {"prompt": text, "max_new_tokens": 320})
+        if response.get("type") == "error":
+            return f"Bad Apple connection error: {response.get('message', response)}"
+        result = response.get("result", {})
+        return result.get("text") or response.get("text") or "No response."
     except Exception as e:
         return f"Bad Apple connection error: {e}"
 
@@ -54,6 +52,13 @@ def main():
         prompt = msg.get("prompt", "")
         if msg.get("type") == "summarize_page" and not prompt:
             prompt = f"Summarize this page in three bullets:\nTitle: {msg.get('title','')}\nURL: {msg.get('url','')}\nText: {msg.get('text','')[:4000]}"
+        elif msg.get("type") == "query":
+            page = msg.get("page") or {}
+            prompt = (
+                f"Answer the question using only this local page context.\n"
+                f"Question: {prompt}\nTitle: {page.get('title', '')}\n"
+                f"URL: {page.get('url', '')}\nText: {page.get('text', '')[:6000]}"
+            )
         answer = ask_badapple(prompt)
         write_message({"text": answer[:4000]})
 

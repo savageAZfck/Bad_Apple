@@ -1,5 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
-use bad_apple::automation_cage::{parse_actions as parse_cage_actions, Action as CageAction, AutomationCage};
+use bad_apple::automation_cage::{
+    parse_actions as parse_cage_actions, Action as CageAction, AutomationCage,
+};
 use bad_apple::bad_apple_ipc::{
     client_proof, load_slicks_secret, now_unix_ms, random_nonce, read_frame, server_proof,
     socket_path, validate_request, verify_client_proof, verify_server_proof, ClientFrame,
@@ -7,12 +9,14 @@ use bad_apple::bad_apple_ipc::{
 };
 use bad_apple::tensor_brain::{text_to_grounded_embedding, CandleBrain};
 use bad_apple::wasm_cage::WasmCage;
+use base64::{engine::general_purpose, Engine as _};
+use rand::Rng;
 use regex::Regex;
 use std::fs;
 use std::io::{BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{channel, Sender};
 use std::time::{Duration, Instant};
@@ -38,15 +42,17 @@ impl SemanticRouter {
         let (request_tx, request_rx) = channel::<ClassifyRequest>();
 
         std::thread::spawn(move || {
-            let mut brain = match CandleBrain::new("gatekeeper", 2, &bad_apple::tensor_brain::layer_dims()) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("[gatekeeper] failed to initialize CandleBrain: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let mut brain =
+                match CandleBrain::new("gatekeeper", 2, &bad_apple::tensor_brain::layer_dims()) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[gatekeeper] failed to initialize CandleBrain: {e}");
+                        std::process::exit(1);
+                    }
+                };
 
-            let weights_path = std::path::PathBuf::from("/Users/savag3/bad_apple/data/gatekeeper.safetensors");
+            let weights_path =
+                std::path::PathBuf::from("/Users/savag3/bad_apple/data/gatekeeper.safetensors");
             if let Err(e) = brain.load_weights(&weights_path) {
                 eprintln!("[gatekeeper] no trained weights at {weights_path:?}: {e} (using untrained brain)");
             } else {
@@ -140,7 +146,7 @@ impl FastActionResolver {
             copy_file: Regex::new(r"(?i)\bcopy\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
             move_file: Regex::new(r"(?i)\b(move)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
             run_wasm: Regex::new(r"(?i)\b(?:run|execute)\b(?:\s+\w+){0,3}\s+(?:wasm\s+)?script\s+([~/a-z0-9_\.\-\s/]+\.wasm)").unwrap(),
-            time: Regex::new(r"(?i)\b(time|clock|hora|qu[eé] hora)\b").unwrap(),
+            time: Regex::new(r"(?i)^(what'?s?\s+(?:the\s+)?time|what\s+time\s+is\s+it|current\s+time|time\s+is\s+it|clock|what\s+hour\s+is\s+it|qu[eé]\s+hora\s+es)\b").unwrap(),
         }
     }
 
@@ -161,7 +167,9 @@ impl FastActionResolver {
             } else {
                 home.join(name)
             };
-            return Some(FastAction::OpenWorkspace(candidate.to_string_lossy().into_owned()));
+            return Some(FastAction::OpenWorkspace(
+                candidate.to_string_lossy().into_owned(),
+            ));
         }
 
         if let Some(cap) = self.open_app.captures(prompt) {
@@ -174,7 +182,9 @@ impl FastActionResolver {
         }
 
         if let Some(cap) = self.create_dir.captures(prompt) {
-            return Some(FastAction::CreateDirectory(expand_path(cap.get(1)?.as_str())));
+            return Some(FastAction::CreateDirectory(expand_path(
+                cap.get(1)?.as_str(),
+            )));
         }
 
         if let Some(cap) = self.list_dir.captures(prompt) {
@@ -226,8 +236,12 @@ fn is_allowed_path(path: &str, cage: &AutomationCage) -> bool {
     let target = PathBuf::from(&expanded);
     let Ok(canon) = target.canonicalize() else {
         // For non-existent files, canonicalize the parent.
-        let Some(parent) = target.parent() else { return false };
-        let Ok(parent_canon) = parent.canonicalize() else { return false };
+        let Some(parent) = target.parent() else {
+            return false;
+        };
+        let Ok(parent_canon) = parent.canonicalize() else {
+            return false;
+        };
         return cage.roots().iter().any(|r| parent_canon.starts_with(r));
     };
     cage.roots().iter().any(|r| canon.starts_with(r))
@@ -244,7 +258,7 @@ fn list_directory_safe(path: &str, cage: &AutomationCage) -> Result<String> {
         .take(20)
         .collect();
     if entries.is_empty() {
-        Ok("Nothing there, mi amor.".to_string())
+        Ok("Nothing there, babe.".to_string())
     } else {
         Ok(format!("In {expanded}: {}", entries.join(", ")))
     }
@@ -255,29 +269,51 @@ fn execute_fast(action: FastAction, cage: &AutomationCage) -> Result<String> {
         FastAction::Time => {
             let out = Command::new("date").arg("+%I:%M %p").output()?;
             let time = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            format!("{time}, papi.")
+            let tails = [
+                format!("It's {time}, babe."),
+                format!("{time}, bestie."),
+                format!("{time}, hun."),
+            ];
+            let idx = rand::thread_rng().gen_range(0..tails.len());
+            tails[idx].clone()
         }
         FastAction::OpenWorkspace(path) | FastAction::OpenApp(path) => {
             Command::new("open").arg(&path).spawn()?;
             format!("Opening {path}...")
         }
         FastAction::CreateFile(path) => {
-            let action = CageAction::CreateFile { path: PathBuf::from(expand_path(&path)) };
+            let action = CageAction::CreateFile {
+                path: PathBuf::from(expand_path(&path)),
+            };
             let report = cage.execute(&action)?;
-            format!("Created file in {} ({})", report.paths[0].display(), report.result)
+            format!(
+                "Created file in {} ({})",
+                report.paths[0].display(),
+                report.result
+            )
         }
         FastAction::CreateDirectory(path) => {
-            let action = CageAction::CreateDirectory { path: PathBuf::from(expand_path(&path)) };
+            let action = CageAction::CreateDirectory {
+                path: PathBuf::from(expand_path(&path)),
+            };
             let report = cage.execute(&action)?;
-            format!("Created directory in {} ({})", report.paths[0].display(), report.result)
+            format!(
+                "Created directory in {} ({})",
+                report.paths[0].display(),
+                report.result
+            )
         }
-        FastAction::ListDirectory(path) => {
-            list_directory_safe(&path, cage)?
-        }
+        FastAction::ListDirectory(path) => list_directory_safe(&path, cage)?,
         FastAction::Delete(path) => {
-            let action = CageAction::MoveToTrash { path: PathBuf::from(expand_path(&path)) };
+            let action = CageAction::MoveToTrash {
+                path: PathBuf::from(expand_path(&path)),
+            };
             let report = cage.execute(&action)?;
-            format!("Moved {} to the Trash ({}).", report.paths[0].display(), report.result)
+            format!(
+                "Moved {} to the Trash ({}).",
+                report.paths[0].display(),
+                report.result
+            )
         }
         FastAction::CopyFile { from, to } => {
             let action = CageAction::CopyFile {
@@ -285,7 +321,12 @@ fn execute_fast(action: FastAction, cage: &AutomationCage) -> Result<String> {
                 destination: PathBuf::from(expand_path(&to)),
             };
             let report = cage.execute(&action)?;
-            format!("Copied {} to {} ({}).", report.paths[0].display(), report.paths[1].display(), report.result)
+            format!(
+                "Copied {} to {} ({}).",
+                report.paths[0].display(),
+                report.paths[1].display(),
+                report.result
+            )
         }
         FastAction::MoveFile { from, to } => {
             let action = CageAction::MoveFile {
@@ -293,18 +334,25 @@ fn execute_fast(action: FastAction, cage: &AutomationCage) -> Result<String> {
                 destination: PathBuf::from(expand_path(&to)),
             };
             let report = cage.execute(&action)?;
-            format!("Moved {} to {} ({}).", report.paths[0].display(), report.paths[1].display(), report.result)
+            format!(
+                "Moved {} to {} ({}).",
+                report.paths[0].display(),
+                report.paths[1].display(),
+                report.result
+            )
         }
         FastAction::RunWasm(path) => {
             let wasm_bytes = fs::read(&path).with_context(|| format!("cannot read WASM {path}"))?;
-            let mut cage = WasmCage::new().map_err(|e| anyhow!("WasmCage init failed: {}", e.reason))?;
-            cage.compile(&wasm_bytes).map_err(|e| anyhow!("WASM compile failed: {}", e.reason))?;
-            let output = cage.run_with_input(b"").map_err(|e| anyhow!("WASM run failed: {}", e.reason))?;
+            let mut cage =
+                WasmCage::new().map_err(|e| anyhow!("WasmCage init failed: {}", e.reason))?;
+            cage.compile(&wasm_bytes)
+                .map_err(|e| anyhow!("WASM compile failed: {}", e.reason))?;
+            let output = cage
+                .run_with_input(b"")
+                .map_err(|e| anyhow!("WASM run failed: {}", e.reason))?;
             format!("WASM ran: {output}")
         }
-        FastAction::NewChat => {
-            "new chat".to_string()
-        }
+        FastAction::NewChat => "new chat".to_string(),
     };
     Ok(reply)
 }
@@ -321,7 +369,12 @@ fn execute_cage_blocks(text: &str, cage: &AutomationCage) -> String {
                     Ok(report) => reports.push(format!(
                         "{} {} -> {} ({} ms)",
                         report.operation,
-                        report.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" "),
+                        report
+                            .paths
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(" "),
                         report.result,
                         report.elapsed_ms
                     )),
@@ -344,15 +397,21 @@ fn execute_wasm_blocks(text: &str) -> String {
     for cap in re.captures_iter(text) {
         let body = cap.get(1).unwrap().as_str().trim();
         let result: Result<String> = (|| {
-            let bytes = if body.starts_with('/') || body.starts_with('~') || body.ends_with(".wasm") {
+            let bytes = if body.starts_with('/') || body.starts_with('~') || body.ends_with(".wasm")
+            {
                 let path = expand_path(body);
                 fs::read(&path).with_context(|| format!("cannot read WASM {path}"))?
             } else {
-                base64::decode(body).context("invalid base64 in badapple-wasm block")?
+                general_purpose::STANDARD
+                    .decode(body)
+                    .context("invalid base64 in badapple-wasm block")?
             };
             let mut cage = WasmCage::new().map_err(|e| anyhow!("WasmCage init: {}", e.reason))?;
-            cage.compile(&bytes).map_err(|e| anyhow!("WASM compile: {}", e.reason))?;
-            let out = cage.run_with_input(b"").map_err(|e| anyhow!("WASM run: {}", e.reason))?;
+            cage.compile(&bytes)
+                .map_err(|e| anyhow!("WASM compile: {}", e.reason))?;
+            let out = cage
+                .run_with_input(b"")
+                .map_err(|e| anyhow!("WASM run: {}", e.reason))?;
             Ok(out)
         })();
 
@@ -602,7 +661,13 @@ fn handle_client(
                 }
                 Ok(reply) => {
                     write_frame(&mut stream, &ServerFrame::Accepted)?;
-                    write_frame(&mut stream, &ServerFrame::Done { text: reply, metrics: None })?;
+                    write_frame(
+                        &mut stream,
+                        &ServerFrame::Done {
+                            text: reply,
+                            metrics: None,
+                        },
+                    )?;
                     return Ok(());
                 }
                 Err(e) => {

@@ -1,8 +1,12 @@
 import AppKit
+import ApplicationServices
+import AudioToolbox
 import AVFoundation
 import BadAppleBridge
+import Carbon
 import Darwin
 import Foundation
+import ServiceManagement
 import Speech
 
 private let badAppleVoiceLogURL = URL(fileURLWithPath: "/tmp/badapple_voice_debug.log")
@@ -365,6 +369,11 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         case speaking
         case unavailable(String)
 
+        var isUnavailable: Bool {
+            if case .unavailable = self { return true }
+            return false
+        }
+
         var label: String {
             switch self {
             case .disabled: return "Voice: Off"
@@ -395,23 +404,39 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     // such as "at", "my", "and" between "hey", "bad", and "apple".
     // Wake pattern: optional "hey"-like prefix, then "bad apple".
     // Case-insensitive and tolerant of filler words in between.
-    private let wakePattern = try! NSRegularExpression(
-        pattern: "(?i)(?:^|\\b)(?:(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+)?bad(?:\\s+\\w+){0,2}\\s+apple(?:\\b|$)"
+    private var wakePattern = try! NSRegularExpression(
+        pattern: "(?i)^(?:(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+)?bad(?:\\s+\\w+){0,2}\\s+apple\\b"
     )
     private var promptTimer: Timer?
     private var stablePrompt = ""
     private var recognitionTimer: Timer?
     private var lastTranscript = ""
+    private var sessionId = 0
+    private var attenuator: AVAudioMixerNode?
 
     var state: State = .disabled {
-        didSet { DispatchQueue.main.async { [weak self] in self?.onStateChange?(self?.state ?? .disabled) } }
+        didSet {
+            guard oldValue != state else { return }
+            if state == .awaitingPrompt, stablePrompt.isEmpty,
+               UserDefaults.standard.object(forKey: "BadAppleWakeSoundEnabled") as? Bool ?? true {
+                // Short "Tink" chime to confirm the wake phrase was heard.
+                AudioServicesPlaySystemSound(1113)
+            }
+            DispatchQueue.main.async { [weak self] in self?.onStateChange?(self?.state ?? .disabled) }
+        }
     }
     var onStateChange: ((State) -> Void)?
     var onPrompt: ((String) -> Void)?
+    var onTranscript: ((String) -> Void)?
+    var onError: ((String) -> Void)?
+    var onWaveform: ((Float) -> Void)?
 
     override init() {
         super.init()
         synthesizer.delegate = self
+        if let phrase = UserDefaults.standard.string(forKey: "BadAppleWakePhrase") {
+            setWakePhrase(phrase)
+        }
     }
 
     func setEnabled(_ shouldEnable: Bool) {
@@ -430,6 +455,35 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             return
         }
         requestPermissionsAndStart()
+    }
+
+    func setMicGain(_ gain: Float) {
+        UserDefaults.standard.set(gain, forKey: "BadAppleMicMixerGain")
+        attenuator?.volume = gain
+    }
+
+    func triggerShortcut() {
+        guard enabled else {
+            setEnabled(true)
+            return
+        }
+        stablePrompt = ""
+        lastTranscript = ""
+        scheduleRestart(after: 0.05)
+    }
+
+    func setWakePhrase(_ phrase: String) {
+        UserDefaults.standard.set(phrase, forKey: "BadAppleWakePhrase")
+        let words = phrase
+            .components(separatedBy: .whitespacesAndNewlines)
+            .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        guard !words.isEmpty else { return }
+        let escaped = words.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "(?:\\\\s+\\\\w+){0,2}\\\\s+")
+        let pattern = "(?i)^\\\\b" + escaped + "\\\\b"
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            wakePattern = regex
+        }
     }
 
     private func requestPermissionsAndStart() {
@@ -483,6 +537,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             return
         }
         stopRecognition()
+        sessionId += 1
+        let currentSession = sessionId
 
         let recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         recognitionRequest.requiresOnDeviceRecognition = true
@@ -501,10 +557,17 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             return
         }
 
-        // Keep the audio engine running by wiring input -> mixer -> output, but
-        // mute the mixer so the user doesn't hear the microphone fed back.
+        // Keep the audio engine running by wiring input -> attenuator -> mixer -> output,
+        // but mute the mixer so the user doesn't hear the microphone fed back.
+        // The attenuator lowers the mic level so the recognizer gets clean audio.
+        let mixer = AVAudioMixerNode()
+        mixer.volume = 1.0
+        audioEngine.attach(mixer)
+        attenuator = mixer
+        audioEngine.connect(input, to: mixer, format: inputFormat)
+
         let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 2, interleaved: false)!
-        audioEngine.connect(input, to: audioEngine.mainMixerNode, format: inputFormat)
+        audioEngine.connect(mixer, to: audioEngine.mainMixerNode, format: inputFormat)
         audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: outputFormat)
         audioEngine.mainMixerNode.volume = 0.0
         audioEngine.mainMixerNode.outputVolume = 0.0
@@ -517,17 +580,57 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         badAppleVoiceLog("startRecognition: inputFormat sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount) target sampleRate=16000 channels=1")
 
         let target = targetFormat
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak recognitionRequest] buffer, _ in
+        mixer.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self, weak recognitionRequest] buffer, _ in
             guard let request = recognitionRequest else { return }
+            if let data = buffer.floatChannelData?[0], buffer.frameLength > 0 {
+                let frames = Int(buffer.frameLength)
+                var sum: Float = 0
+                for i in 0..<frames { sum += data[i] * data[i] }
+                let rms = sqrt(sum / Float(frames))
+                let gain = UserDefaults.standard.object(forKey: "BadAppleMicMixerGain") as? Float ?? 1.0
+                let level = min(1.0, rms * 4.0 * gain)
+                DispatchQueue.main.async { [weak self] in
+                    self?.onWaveform?(level)
+                }
+            }
             let expectedFrames = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / inputFormat.sampleRate)
             let outputFrames = expectedFrames + 1024
             guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outputFrames) else { return }
             // The converter does not always reset frameLength; tell it the capacity and then clamp to actual.
             outputBuffer.frameLength = outputBuffer.frameCapacity
             var error: NSError?
-            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            var consumedFrames: AVAudioFrameCount = 0
+            let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+                let remaining = buffer.frameLength - consumedFrames
+                guard remaining > 0 else {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                let frames = min(inNumPackets, remaining)
+                guard frames > 0, let slice = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: frames) else {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                slice.frameLength = frames
+                if let src = buffer.floatChannelData, let dst = slice.floatChannelData {
+                    for ch in 0..<Int(buffer.format.channelCount) {
+                        memcpy(dst[ch], src[ch].advanced(by: Int(consumedFrames)), Int(frames) * MemoryLayout<Float>.size)
+                    }
+                } else if let src = buffer.int16ChannelData, let dst = slice.int16ChannelData {
+                    for ch in 0..<Int(buffer.format.channelCount) {
+                        memcpy(dst[ch], src[ch].advanced(by: Int(consumedFrames)), Int(frames) * MemoryLayout<Int16>.size)
+                    }
+                } else if let src = buffer.int32ChannelData, let dst = slice.int32ChannelData {
+                    for ch in 0..<Int(buffer.format.channelCount) {
+                        memcpy(dst[ch], src[ch].advanced(by: Int(consumedFrames)), Int(frames) * MemoryLayout<Int32>.size)
+                    }
+                } else {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                consumedFrames += frames
                 outStatus.pointee = .haveData
-                return buffer
+                return slice
             }
             let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
             outputBuffer.frameLength = min(outputBuffer.frameLength, expectedFrames)
@@ -546,8 +649,11 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         lastTranscript = ""
         startRecognitionTimer()
 
-        task = recognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
-            DispatchQueue.main.async { self?.consume(result: result, error: error) }
+        task = recognizer.recognitionTask(with: recognitionRequest) { [weak self, currentSession] result, error in
+            DispatchQueue.main.async {
+                guard let self = self, self.sessionId == currentSession else { return }
+                self.consume(result: result, error: error)
+            }
         }
         do {
             audioEngine.prepare()
@@ -562,71 +668,97 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     private func consume(result: SFSpeechRecognitionResult?, error: Error?) {
         guard enabled, state != .processing, state != .speaking else { return }
+        // Each partial or error means the recognition task is alive; reset the
+        // watchdog so it does not tear down a session while the user is still
+        // speaking or the recognizer is still thinking.
+        startRecognitionTimer()
+
         if let result = result {
             let transcript = result.bestTranscription.formattedString
-            lastTranscript = transcript
-            badAppleVoiceLog("consume: isFinal=\(result.isFinal) transcript='\(transcript)' awaitingNextUtterance=\(awaitingNextUtterance)")
+            if !transcript.isEmpty {
+                lastTranscript = transcript
+                onTranscript?(lastTranscript)
+            }
+            badAppleVoiceLog("consume: isFinal=\(result.isFinal) transcript='\(transcript)' last='\(lastTranscript)' awaitingNextUtterance=\(awaitingNextUtterance)")
 
             if awaitingNextUtterance {
                 let prompt = (wakeSuffix(in: transcript) ?? transcript)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .trimmingCharacters(in: .punctuationCharacters)
-                if !prompt.isEmpty {
-                    if prompt != stablePrompt {
-                        stablePrompt = prompt
+                if prompt != stablePrompt {
+                    // Always refresh stablePrompt and reset the prompt timer, even when
+                    // the prompt becomes empty, so a stale command is never delivered
+                    // after the recognizer revises the transcript back to the wake phrase.
+                    stablePrompt = prompt
+                    if !prompt.isEmpty {
                         state = .awaitingPrompt
-                        startPromptTimer()
                     }
-                    if result.isFinal {
-                        stopPromptTimer()
-                        awaitingNextUtterance = false
-                        stablePrompt = ""
-                        deliver(prompt)
-                        return
-                    }
+                    startPromptTimer()
                 }
                 if result.isFinal {
                     stopPromptTimer()
                     awaitingNextUtterance = false
+                    let finalPrompt = stablePrompt
                     stablePrompt = ""
-                    scheduleRestart(after: 0.15)
+                    if !finalPrompt.isEmpty {
+                        deliver(finalPrompt)
+                    } else {
+                        scheduleRestart(after: 0.15)
+                    }
                     return
                 }
-            } else if let suffix = wakeSuffix(in: transcript) {
-                state = .awaitingPrompt
-                if suffix.isEmpty {
-                    awaitingNextUtterance = true
-                    stablePrompt = ""
-                    if result.isFinal {
-                        // Wake phrase heard. Restart quickly so the prompt is captured
-                        // in a fresh request without stale audio context.
+            } else if !result.isFinal, let suffix = wakeSuffix(in: transcript) {
+                // A wake phrase appeared in a partial result. Enter command mode and
+                // let the user finish the command in the same or a fresh session.
+                if suffix != stablePrompt {
+                    if suffix.isEmpty {
+                        awaitingNextUtterance = true
+                        stablePrompt = ""
+                        state = .awaitingPrompt
+                    } else {
+                        awaitingNextUtterance = true
+                        stablePrompt = suffix
+                        state = .awaitingPrompt
+                    }
+                    startPromptTimer()
+                }
+                return
+            } else if result.isFinal {
+                // The final transcript is often empty when the task is ended for a
+                // restart, so fall back to the last non-empty partial.
+                let source = transcript.isEmpty ? lastTranscript : transcript
+                if let suffix = wakeSuffix(in: source) {
+                    if suffix.isEmpty {
+                        awaitingNextUtterance = true
+                        stablePrompt = ""
+                        state = .awaitingPrompt
+                        // Restart quickly so the following command starts in a fresh
+                        // recognition request without stale audio context.
                         scheduleRestart(after: 0.05)
-                        return
+                    } else {
+                        deliver(suffix)
                     }
                 } else {
-                    awaitingNextUtterance = true
-                    stablePrompt = ""
-                    if result.isFinal {
-                        stopPromptTimer()
-                        awaitingNextUtterance = false
-                        deliver(suffix)
-                        return
-                    }
+                    scheduleRestart(after: 0.15)
                 }
-            } else if result.isFinal {
-                scheduleRestart(after: 0.15)
                 return
             }
         }
         if let error = error {
             badAppleVoiceLog("consume error: \(error)")
+            let nsError = error as NSError
+            if nsError.localizedDescription.contains("No speech detected") {
+                onError?(nsError.localizedDescription)
+            }
             scheduleRestart(after: 0.5)
         }
     }
 
     private func startPromptTimer() {
         promptTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+        // Give the user a couple of seconds to finish the command after the
+        // wake phrase; the timer resets each time the transcript changes.
+        let timer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
             guard let self = self, self.enabled, self.awaitingNextUtterance, !self.stablePrompt.isEmpty else { return }
             let prompt = self.stablePrompt
             self.stopPromptTimer()
@@ -644,7 +776,10 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     private func startRecognitionTimer() {
         recognitionTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
+        // 12 s is long enough for full commands like "hey bad apple open the
+        // dashboard and then run the benchmark"; the timer is reset every time
+        // the recognizer reports a partial or an error.
+        let timer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: false) { [weak self] _ in
             guard let self = self, self.enabled else { return }
             badAppleVoiceLog("recognition timer fired, lastTranscript='\(self.lastTranscript)' stablePrompt='\(self.stablePrompt)'")
             if self.awaitingNextUtterance, !self.stablePrompt.isEmpty {
@@ -656,6 +791,20 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             } else if let suffix = self.wakeSuffix(in: self.lastTranscript), !suffix.isEmpty {
                 self.stopRecognitionTimer()
                 self.deliver(suffix)
+            } else if let suffix = self.wakeSuffix(in: self.lastTranscript), suffix.isEmpty {
+                // Wake phrase only; restart quickly to capture the command in a clean
+                // recognition request.
+                self.stopRecognitionTimer()
+                self.awaitingNextUtterance = true
+                self.stablePrompt = ""
+                self.scheduleRestart(after: 0.05)
+            } else if self.awaitingNextUtterance {
+                // Wake phrase was heard but no command followed. Stop waiting so
+                // later unrelated speech is not misinterpreted as a command.
+                self.stopRecognitionTimer()
+                self.awaitingNextUtterance = false
+                self.stablePrompt = ""
+                self.scheduleRestart(after: 0.15)
             } else {
                 self.stopRecognitionTimer()
                 self.scheduleRestart(after: 0.15)
@@ -928,12 +1077,16 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         task = nil
         request = nil
         if audioEngine.isRunning { audioEngine.stop() }
-        if tapInstalled {
-            audioEngine.inputNode.removeTap(onBus: 0)
+        if tapInstalled, let attenuator = attenuator {
+            attenuator.removeTap(onBus: 0)
             tapInstalled = false
         }
         audioEngine.disconnectNodeOutput(audioEngine.inputNode)
+        if let attenuator = attenuator {
+            audioEngine.disconnectNodeOutput(attenuator)
+        }
         audioEngine.disconnectNodeOutput(audioEngine.mainMixerNode)
+        attenuator = nil
     }
 
     private func failClosed(_ reason: String) {
@@ -945,6 +1098,75 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             self?.stablePrompt = ""
             self?.lastTranscript = ""
             self?.state = .unavailable(reason)
+            self?.onError?(reason)
+        }
+    }
+}
+
+// MARK: - Global shortcuts
+
+private func globalShortcutCallback(_ nextHandler: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
+    guard let userData = userData else { return noErr }
+    let shortcut = Unmanaged<BadAppleGlobalShortcut>.fromOpaque(userData).takeUnretainedValue()
+    shortcut.trigger()
+    return noErr
+}
+
+private final class BadAppleGlobalShortcut {
+    private var eventHandler: EventHandlerRef?
+    private var hotKey: EventHotKeyRef?
+    private let hotKeyID: EventHotKeyID
+    private let name: String
+    private let keyCode: UInt32
+    private let modifiers: UInt32
+    private let action: () -> Void
+
+    init(name: String, keyCode: UInt32, modifiers: UInt32, id: UInt32, action: @escaping () -> Void) {
+        self.name = name
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+        self.hotKeyID = EventHotKeyID(signature: OSType(0x42415641), id: id)
+        self.action = action
+        register()
+    }
+
+    deinit {
+        unregister()
+    }
+
+    func register() {
+        let target = GetApplicationEventTarget()
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var handler: EventHandlerRef?
+        let userData = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(target, globalShortcutCallback, 1, &spec, userData, &handler)
+        eventHandler = handler
+
+        var hk: EventHotKeyRef?
+        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, target, 0, &hk)
+        if status == noErr {
+            hotKey = hk
+            badAppleVoiceLog("registered \(name) shortcut")
+        } else {
+            badAppleVoiceLog("failed to register \(name) shortcut: \(status)")
+        }
+    }
+
+    func unregister() {
+        if let hotKey = hotKey {
+            UnregisterEventHotKey(hotKey)
+            self.hotKey = nil
+        }
+        if let eventHandler = eventHandler {
+            RemoveEventHandler(eventHandler)
+            self.eventHandler = nil
+        }
+    }
+
+    func trigger() {
+        badAppleVoiceLog("\(name) shortcut triggered")
+        DispatchQueue.main.async { [weak self] in
+            self?.action()
         }
     }
 }
@@ -1436,6 +1658,74 @@ private final class BadAppleActionExecutor {
     }
 }
 
+// MARK: - Memory governor telemetry
+
+private func systemMemorySnapshot() -> (usedGB: Double, totalGB: Double, pressure: String) {
+    var size = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+    var stats = vm_statistics64_data_t()
+    let result = withUnsafeMutablePointer(to: &stats) { statsPtr -> kern_return_t in
+        statsPtr.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { rawPtr in
+            host_statistics64(mach_host_self(), HOST_VM_INFO64, rawPtr, &size)
+        }
+    }
+    let totalGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_000_000_000.0
+    var usedGB = totalGB
+    var pressure = "normal"
+    if result == KERN_SUCCESS {
+        let pageSize = Double(vm_page_size)
+        let freePages = UInt64(stats.free_count) + UInt64(stats.inactive_count) + UInt64(stats.speculative_count) + UInt64(stats.purgeable_count)
+        let freeGB = Double(freePages) * pageSize / 1_000_000_000.0
+        usedGB = max(0.0, totalGB - freeGB)
+        let critical = Double(ProcessInfo.processInfo.environment["BADAPPLE_MEMORY_CRITICAL"] ?? "") ?? 0.95
+        let unhealthy = Double(ProcessInfo.processInfo.environment["BADAPPLE_MEMORY_UNHEALTHY"] ?? "") ?? 0.90
+        let elevated = Double(ProcessInfo.processInfo.environment["BADAPPLE_MEMORY_ELEVATED"] ?? "") ?? 0.80
+        let ratio = usedGB / totalGB
+        if ratio >= critical { pressure = "critical" }
+        else if ratio >= unhealthy { pressure = "unhealthy" }
+        else if ratio >= elevated { pressure = "elevated" }
+    }
+    return (usedGB, totalGB, pressure)
+}
+
+private final class MemoryGovernor {
+    private var timer: Timer?
+    private var pressureSource: DispatchSourceMemoryPressure?
+    var autoPurge = true
+    var onUpdate: ((Double, Double, String) -> Void)?
+    var onCritical: (() -> Void)?
+
+    func start() {
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.sample()
+        }
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: DispatchQueue.global(qos: .utility))
+        source.setEventHandler { [weak self] in
+            let data = source.data
+            if data.contains(.critical) {
+                self?.onCritical?()
+            }
+        }
+        source.resume()
+        pressureSource = source
+        sample()
+    }
+
+    func stop() {
+        timer?.invalidate()
+        pressureSource?.cancel()
+    }
+
+    private func sample() {
+        let (used, total, pressure) = systemMemorySnapshot()
+        DispatchQueue.main.async { [weak self] in
+            self?.onUpdate?(used, total, pressure)
+            if pressure == "critical" && self?.autoPurge == true {
+                self?.onCritical?()
+            }
+        }
+    }
+}
+
 // MARK: - Menu-bar application
 
 @main
@@ -1452,10 +1742,1354 @@ struct BadAppleMenuBarApp {
 private enum BadAppleBrain {
     static let fastSocket = "/var/run/badapple/substrate_fast.sock"
     static let deepSocket = "/var/run/badapple/substrate.sock"
+    static let directSocket = "/var/run/badapple/substrate_mlx.sock"
     static let keyPath = "/var/lib/bad_apple/slicks.key"
+    static let generatedImagesDir = "/var/lib/bad_apple/generated_images"
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+// MARK: - Voice HUD
+
+/// Floating HUD that appears near the menu bar while voice is active.
+/// Shows state (listening / awaiting prompt / processing / speaking) and the
+/// live transcript, then fades out when the interaction ends.
+private final class BadAppleVoiceHUD: NSWindow {
+    private let statusDot = NSView()
+    private let stateLabel = NSTextField(labelWithString: "Listening")
+    private let transcriptLabel = NSTextField(wrappingLabelWithString: "")
+    private var idleTimer: Timer?
+    private var statusButton: NSButton?
+    private var isFadingIn = false
+    private var idleTimeout: TimeInterval = 2.5
+    private var currentState: BadAppleVoiceHost.State = .disabled
+    private var waveformSamples: [Float] = []
+    private let waveLayer = CAShapeLayer()
+
+    private var hudEnabled: Bool {
+        UserDefaults.standard.object(forKey: "BadAppleVoiceHUDEnabled") as? Bool ?? true
+    }
+
+    private static let windowWidth: CGFloat = 360
+    private static let baseHeight: CGFloat = 56
+
+    init() {
+        let rect = NSRect(
+            x: 0,
+            y: 0,
+            width: BadAppleVoiceHUD.windowWidth,
+            height: BadAppleVoiceHUD.baseHeight
+        )
+        super.init(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
+        isOpaque = false
+        hasShadow = true
+        backgroundColor = .clear
+        level = .mainMenu
+        collectionBehavior = [.canJoinAllSpaces, .transient]
+        ignoresMouseEvents = true
+
+        let visual = NSVisualEffectView(frame: rect)
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+        visual.layer?.cornerRadius = 16
+        visual.layer?.borderWidth = 0.5
+        visual.layer?.borderColor = NSColor.systemGray.withAlphaComponent(0.3).cgColor
+
+        visual.wantsLayer = true
+        visual.layer?.addSublayer(waveLayer)
+        waveLayer.frame = NSRect(x: 0, y: 0, width: rect.width, height: 8)
+        waveLayer.fillColor = NSColor.systemGreen.withAlphaComponent(0.5).cgColor
+        waveLayer.isHidden = true
+        waveLayer.autoresizingMask = [.layerWidthSizable]
+
+        contentView = visual
+
+        statusDot.frame = NSRect(x: 16, y: 24, width: 8, height: 8)
+        statusDot.wantsLayer = true
+        statusDot.layer?.cornerRadius = 4
+        statusDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        visual.addSubview(statusDot)
+
+        stateLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        stateLabel.textColor = NSColor.labelColor
+        stateLabel.frame = NSRect(x: 34, y: 34, width: 120, height: 18)
+        visual.addSubview(stateLabel)
+
+        transcriptLabel.font = .systemFont(ofSize: 14)
+        transcriptLabel.textColor = NSColor.secondaryLabelColor
+        transcriptLabel.alignment = .left
+        transcriptLabel.lineBreakMode = .byWordWrapping
+        transcriptLabel.isHidden = true
+        transcriptLabel.frame = NSRect(x: 16, y: 8, width: BadAppleVoiceHUD.windowWidth - 32, height: 24)
+        transcriptLabel.maximumNumberOfLines = 2
+        visual.addSubview(transcriptLabel)
+
+        alphaValue = 0
+    }
+
+    func attach(statusButton: NSButton?) {
+        self.statusButton = statusButton
+    }
+
+    func updateState(_ state: BadAppleVoiceHost.State) {
+        currentState = state
+        stateLabel.stringValue = state.displayName
+        statusDot.layer?.backgroundColor = state.tintColor.cgColor
+
+        if !hudEnabled, state != .disabled, !state.isUnavailable {
+            hideAnimated()
+            return
+        }
+
+        switch state {
+        case .disabled, .unavailable:
+            hideAnimated()
+        case .listening:
+            if transcriptLabel.isHidden || transcriptLabel.stringValue.isEmpty {
+                transcriptLabel.isHidden = true
+                resizeToBase()
+            }
+            startIdleTimer()
+        case .requestingPermission:
+            showAnimated()
+            cancelIdleTimer()
+        case .awaitingPrompt:
+            showAnimated()
+            startIdleTimer()
+        default:
+            showAnimated()
+            cancelIdleTimer()
+        }
+    }
+
+    func updateTranscript(_ transcript: String) {
+        guard !transcript.isEmpty, hudEnabled else { return }
+        transcriptLabel.stringValue = transcript
+        transcriptLabel.isHidden = false
+        resizeToFitTranscript()
+        if alphaValue == 0, !isFadingIn {
+            showAnimated()
+        }
+        if currentState == .awaitingPrompt {
+            stateLabel.stringValue = "Hearing command"
+        }
+        startIdleTimer()
+    }
+
+    func updateCommand(_ prompt: String) {
+        guard !prompt.isEmpty, hudEnabled else { return }
+        stateLabel.stringValue = "Command"
+        transcriptLabel.stringValue = prompt
+        transcriptLabel.isHidden = false
+        resizeToFitTranscript()
+        showAnimated()
+    }
+
+    func updateResponse(_ response: String) {
+        guard !response.isEmpty, hudEnabled else { return }
+        stateLabel.stringValue = BadAppleVoiceHost.State.speaking.displayName
+        transcriptLabel.stringValue = response
+        transcriptLabel.isHidden = false
+        resizeToFitTranscript()
+        showAnimated()
+    }
+
+    func showError(_ message: String) {
+        guard hudEnabled else { return }
+        stateLabel.stringValue = "Error"
+        statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        transcriptLabel.stringValue = message
+        transcriptLabel.isHidden = false
+        resizeToFitTranscript()
+        showAnimated()
+        cancelIdleTimer()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.startIdleTimer()
+        }
+    }
+
+    func setIdleTimeout(_ timeout: TimeInterval) {
+        idleTimeout = timeout
+    }
+
+    func addWaveform(_ level: Float) {
+        guard currentState == .listening || currentState == .awaitingPrompt else {
+            waveLayer.isHidden = true
+            return
+        }
+        if !hudEnabled { return }
+        waveLayer.isHidden = false
+        if waveformSamples.count > 80 { waveformSamples.removeFirst() }
+        waveformSamples.append(level)
+        updateWaveformPath()
+    }
+
+    private func updateWaveformPath() {
+        let bounds = waveLayer.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let maxBars = max(1, Int(bounds.width / 6))
+        let bars = Array(waveformSamples.suffix(maxBars))
+        let barWidth = bounds.width / CGFloat(bars.count)
+        let path = CGMutablePath()
+        for (i, level) in bars.enumerated() {
+            let x = CGFloat(i) * barWidth
+            let height = CGFloat(level) * bounds.height
+            let rect = CGRect(x: x, y: 0, width: barWidth - 1, height: height)
+            path.addRect(rect, transform: .identity)
+        }
+        waveLayer.path = path
+    }
+
+    private func positionNearStatusBar() {
+        guard let button = statusButton, let window = button.window else { return }
+        let buttonRect = button.convert(button.bounds, to: nil)
+        let screenRect = window.convertToScreen(buttonRect)
+        let x = screenRect.midX - (frame.width / 2)
+        let y = screenRect.minY - frame.height - 8
+        setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    private func resizeToBase() {
+        let rect = NSRect(x: frame.origin.x, y: frame.origin.y, width: BadAppleVoiceHUD.windowWidth, height: BadAppleVoiceHUD.baseHeight)
+        setFrame(rect, display: true)
+        (contentView as? NSVisualEffectView)?.frame = contentView?.bounds ?? .zero
+        stateLabel.frame = NSRect(x: 34, y: 34, width: 120, height: 18)
+        statusDot.frame = NSRect(x: 16, y: 39, width: 8, height: 8)
+        transcriptLabel.isHidden = true
+    }
+
+    private func resizeToFitTranscript() {
+        let width = BadAppleVoiceHUD.windowWidth - 32
+        let attributed = NSAttributedString(
+            string: transcriptLabel.stringValue,
+            attributes: [.font: transcriptLabel.font as Any]
+        )
+        let size = attributed.boundingRect(
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        let textHeight = min(max(size.height, 20), 48)
+        let newHeight = BadAppleVoiceHUD.baseHeight + textHeight - 20
+
+        var frame = self.frame
+        frame.size.width = BadAppleVoiceHUD.windowWidth
+        frame.size.height = newHeight
+        setFrame(frame, display: true)
+        (contentView as? NSVisualEffectView)?.frame = contentView?.bounds ?? .zero
+
+        stateLabel.frame = NSRect(x: 34, y: newHeight - 34, width: 120, height: 18)
+        statusDot.frame = NSRect(x: 16, y: newHeight - 30, width: 8, height: 8)
+        transcriptLabel.frame = NSRect(x: 16, y: 10, width: width, height: textHeight)
+    }
+
+    private func showAnimated() {
+        cancelIdleTimer()
+        guard alphaValue == 0 else { return }
+        isFadingIn = true
+        positionNearStatusBar()
+        orderFront(nil)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.18
+            self.animator().alphaValue = 1.0
+        }, completionHandler: { [weak self] in
+            self?.isFadingIn = false
+        })
+    }
+
+    private func hideAnimated() {
+        cancelIdleTimer()
+        guard alphaValue > 0 else {
+            orderOut(nil)
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.18
+            self.animator().alphaValue = 0.0
+        }, completionHandler: { [weak self] in
+            self?.orderOut(nil)
+        })
+    }
+
+    private func startIdleTimer() {
+        cancelIdleTimer()
+        idleTimer = Timer.scheduledTimer(withTimeInterval: idleTimeout, repeats: false) { [weak self] _ in
+            self?.hideAnimated()
+        }
+    }
+
+    private func cancelIdleTimer() {
+        idleTimer?.invalidate()
+        idleTimer = nil
+    }
+}
+
+private extension BadAppleVoiceHost.State {
+    var displayName: String {
+        switch self {
+        case .disabled: return "Voice Off"
+        case .requestingPermission: return "Requesting Permission"
+        case .listening: return "Listening"
+        case .awaitingPrompt: return "Heard Wake"
+        case .processing: return "Thinking"
+        case .speaking: return "Speaking"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    var tintColor: NSColor {
+        switch self {
+        case .disabled: return .systemGray
+        case .requestingPermission: return .systemOrange
+        case .listening: return .systemGreen
+        case .awaitingPrompt: return .systemYellow
+        case .processing: return .systemPurple
+        case .speaking: return .systemBlue
+        case .unavailable: return .systemRed
+        }
+    }
+}
+
+private final class BadAppleSplashWindow {
+    private var window: NSWindow?
+
+    func show() {
+        let size = NSSize(width: 420, height: 240)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        let w = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        w.backgroundColor = NSColor(red: 0.04, green: 0.04, blue: 0.04, alpha: 1.0)
+        w.isReleasedWhenClosed = true
+        w.isOpaque = false
+        w.hasShadow = true
+        w.level = .statusBar
+
+        let view = NSView(frame: NSRect(origin: .zero, size: size))
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 16
+        view.layer?.backgroundColor = CGColor(red: 0.04, green: 0.04, blue: 0.04, alpha: 1.0)
+
+        let logo = NSTextField(labelWithString: "🍎")
+        logo.font = NSFont.systemFont(ofSize: 56)
+        logo.alignment = .center
+        logo.textColor = NSColor.white
+        logo.frame = NSRect(x: (size.width - 80) / 2, y: 120, width: 80, height: 64)
+
+        let title = NSTextField(labelWithString: "Bad Apple")
+        title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        title.alignment = .center
+        title.textColor = NSColor.white
+        title.frame = NSRect(x: 0, y: 85, width: size.width, height: 28)
+
+        let status = NSTextField(labelWithString: "Starting local AI...")
+        status.font = NSFont.systemFont(ofSize: 13)
+        status.alignment = .center
+        status.textColor = NSColor(red: 0.6, green: 0.6, blue: 0.6, alpha: 1.0)
+        status.frame = NSRect(x: 0, y: 55, width: size.width, height: 20)
+
+        let progress = NSProgressIndicator()
+        progress.style = .bar
+        progress.isIndeterminate = false
+        progress.doubleValue = 0
+        progress.minValue = 0
+        progress.maxValue = 100
+        progress.frame = NSRect(x: 80, y: 30, width: size.width - 160, height: 6)
+
+        view.addSubview(logo)
+        view.addSubview(title)
+        view.addSubview(status)
+        view.addSubview(progress)
+        w.contentView = view
+
+        window = w
+        w.makeKeyAndOrderFront(nil)
+
+        var pct: Double = 0
+        Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] timer in
+            pct += 2
+            progress.doubleValue = min(pct, 95)
+            if pct >= 100 {
+                timer.invalidate()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self?.close()
+                }
+            }
+        }
+    }
+
+    func close() {
+        window?.close()
+        window = nil
+    }
+}
+
+// MARK: - Voice onboarding
+
+/// First-run onboarding panel that explains the wake phrase, asks for mic/
+/// speech-recognition permission, and lets the user skip if they want.
+private final class BadAppleVoiceOnboarding {
+    private var window: NSWindow?
+    var onEnableVoice: (() -> Void)?
+    var onNotNow: (() -> Void)?
+
+    func showIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: "BadAppleVoiceOnboarded") else { return }
+
+        let size = NSSize(width: 480, height: 380)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        let w = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        w.backgroundColor = .clear
+        w.isReleasedWhenClosed = false
+        w.isOpaque = false
+        w.hasShadow = true
+        w.level = .statusBar
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+        visual.layer?.cornerRadius = 20
+        visual.layer?.borderWidth = 0.5
+        visual.layer?.borderColor = NSColor.systemGray.withAlphaComponent(0.3).cgColor
+
+        let logo = NSTextField(labelWithString: "🎙")
+        logo.font = .systemFont(ofSize: 48)
+        logo.alignment = .center
+        logo.textColor = .labelColor
+        logo.frame = NSRect(x: (size.width - 80) / 2, y: 270, width: 80, height: 56)
+
+        let title = NSTextField(labelWithString: "Talk to Bad Apple")
+        title.font = .systemFont(ofSize: 22, weight: .semibold)
+        title.alignment = .center
+        title.textColor = .labelColor
+        title.frame = NSRect(x: 0, y: 235, width: size.width, height: 28)
+
+        let body = NSTextField(wrappingLabelWithString: "")
+        body.font = .systemFont(ofSize: 14)
+        body.textColor = .secondaryLabelColor
+        body.alignment = .center
+        body.stringValue = """
+        Bad Apple can listen for “Hey bad apple” and answer out loud.
+
+        Voice processing is done on this Mac, but macOS still requires permission to use the microphone and on-device speech recognition.
+
+        Say your command, pause briefly, and let Bad Apple reply.
+        """
+        body.frame = NSRect(x: 40, y: 100, width: size.width - 80, height: 120)
+
+        let enable = NSButton(title: "Enable Voice", target: self, action: #selector(enableVoice(_:)))
+        enable.bezelStyle = .rounded
+        enable.keyEquivalent = "\r"
+        enable.frame = NSRect(x: 90, y: 30, width: 130, height: 32)
+
+        let later = NSButton(title: "Not Now", target: self, action: #selector(dismiss(_:)))
+        later.bezelStyle = .rounded
+        later.frame = NSRect(x: size.width - 220, y: 30, width: 130, height: 32)
+
+        visual.addSubview(logo)
+        visual.addSubview(title)
+        visual.addSubview(body)
+        visual.addSubview(enable)
+        visual.addSubview(later)
+        w.contentView = visual
+
+        window = w
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func dismiss(_ sender: NSButton) {
+        UserDefaults.standard.set(true, forKey: "BadAppleVoiceOnboarded")
+        window?.orderOut(nil)
+        onNotNow?()
+    }
+
+    @objc private func enableVoice(_ sender: NSButton) {
+        UserDefaults.standard.set(true, forKey: "BadAppleVoiceOnboarded")
+        window?.orderOut(nil)
+        onEnableVoice?()
+    }
+}
+
+// MARK: - Voice help window
+
+/// Cheat sheet of useful voice commands. Opened from Voice > Voice Help…
+private final class BadAppleVoiceHelpWindow: NSObject, NSWindowDelegate {
+    private var window: NSWindow?
+
+    func show() {
+        if let window = window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let size = NSSize(width: 520, height: 440)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        let w = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Voice Help"
+        w.isReleasedWhenClosed = false
+        w.level = .normal
+        w.delegate = self
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+
+        let scroll = NSScrollView(frame: NSRect(x: 20, y: 20, width: size.width - 40, height: size.height - 40))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        scroll.borderType = .noBorder
+        scroll.autoresizingMask = [.width, .height]
+
+        let textView = NSTextView(frame: scroll.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textColor = .labelColor
+        textView.font = .systemFont(ofSize: 14)
+        textView.autoresizingMask = [.width]
+
+        let helpText = """
+Wake phrase
+  “Hey bad apple”
+
+The status dot turns yellow and the HUD appears. Then say your command and pause briefly so the recognizer finalizes.
+
+Examples
+  • “Hey bad apple, what is the capital of France?”
+  • “Hey bad apple, tell me a joke.”
+  • “Hey bad apple, open Safari.”
+  • “Hey bad apple, open my workspace.”
+  • “Hey bad apple, create a folder called notes in /tmp.”
+  • “Hey bad apple, what can you do on my Mac?”
+
+Personas
+  • “Hey bad apple, switch to wicket.”
+  • “Hey bad apple, switch to drill.”
+  • “Hey bad apple, switch to genz.”
+  • “Hey bad apple, switch to midwest.”
+
+System control
+  • “Hey bad apple, run a benchmark.”
+  • “Hey bad apple, flush vram.”
+  • “Hey bad apple, unload all models.”
+  • “Hey bad apple, enable private mode.”
+  • “Hey bad apple, kill switch.”
+
+Tips
+  • Speak at a normal volume; the input gain is already optimized.
+  • Pause after the command. If the HUD says “Heard Wake,” wait for it to flip to “Thinking.”
+  • You can turn off the wake sound or HUD in Voice > Voice Settings later.
+"""
+
+        textView.string = helpText
+        scroll.documentView = textView
+        visual.addSubview(scroll)
+        w.contentView = visual
+
+        window = w
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        window = nil
+    }
+}
+
+// MARK: - Voice log window
+
+private final class BadAppleVoiceLogWindow: NSWindow {
+    private let textView = NSTextView()
+    private let logPath = "/tmp/badapple_voice.log"
+    private var refreshTimer: Timer?
+
+    init() {
+        let size = NSSize(width: 640, height: 420)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        super.init(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        title = "Voice Log"
+        isReleasedWhenClosed = false
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+
+        let scroll = NSScrollView(frame: NSRect(x: 12, y: 48, width: size.width - 24, height: size.height - 60))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        scroll.autoresizingMask = [.width, .height]
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textColor = .labelColor
+        textView.autoresizingMask = [.width]
+        scroll.documentView = textView
+        visual.addSubview(scroll)
+
+        let refreshButton = NSButton(title: "Refresh", target: self, action: #selector(refresh(_:)))
+        refreshButton.bezelStyle = .rounded
+        refreshButton.frame = NSRect(x: size.width - 92, y: 12, width: 80, height: 28)
+        refreshButton.autoresizingMask = [.minXMargin]
+        visual.addSubview(refreshButton)
+
+        contentView = visual
+        refresh(nil)
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        startTimer()
+    }
+
+    override func orderOut(_ sender: Any?) {
+        super.orderOut(sender)
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+
+    private func startTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.refresh(nil)
+        }
+    }
+
+    @objc private func refresh(_ sender: Any?) {
+        guard FileManager.default.fileExists(atPath: logPath) else {
+            textView.string = "No voice log found."
+            return
+        }
+        guard let data = FileManager.default.contents(atPath: logPath),
+              let text = String(data: data, encoding: .utf8) else { return }
+        let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        textView.string = lines.suffix(500).joined(separator: "\n")
+        textView.scrollToEndOfDocument(nil)
+    }
+}
+
+// MARK: - Daily briefing window
+
+private final class BadAppleBriefingWindow: NSWindow {
+    private let textView = NSTextView()
+    private let spinner = NSProgressIndicator()
+    private var isRunning = false
+    var onRun: ((@escaping (String) -> Void, @escaping () -> Void) -> Void)?
+
+    init() {
+        let size = NSSize(width: 560, height: 440)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 700) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 500) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        super.init(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        title = "Daily Briefing"
+        isReleasedWhenClosed = false
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 56, width: size.width - 32, height: size.height - 72))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        scroll.autoresizingMask = [.width, .height]
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.font = .systemFont(ofSize: 14)
+        textView.textColor = .labelColor
+        textView.autoresizingMask = [.width]
+        scroll.documentView = textView
+        visual.addSubview(scroll)
+
+        let runButton = NSButton(title: "Run Briefing", target: self, action: #selector(run(_:)))
+        runButton.bezelStyle = .rounded
+        runButton.frame = NSRect(x: size.width - 130, y: 16, width: 110, height: 28)
+        runButton.autoresizingMask = [.minXMargin]
+        visual.addSubview(runButton)
+
+        spinner.style = .spinning
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.frame = NSRect(x: size.width - 150, y: 18, width: 18, height: 18)
+        spinner.autoresizingMask = [.minXMargin]
+        visual.addSubview(spinner)
+
+        contentView = visual
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        if textView.string.isEmpty { run(nil) }
+    }
+
+    @objc private func run(_ sender: Any?) {
+        guard !isRunning else { return }
+        isRunning = true
+        spinner.startAnimation(nil)
+        let append: (String) -> Void = { [weak self] chunk in
+            guard let self = self else { return }
+            self.textView.string += chunk
+            self.textView.scrollToEndOfDocument(nil)
+        }
+        let finish: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.isRunning = false
+            self.spinner.stopAnimation(nil)
+        }
+        onRun?(append, finish)
+    }
+}
+
+// MARK: - Image playground window
+
+private final class BadAppleImagePlaygroundWindow: NSWindow, NSTextFieldDelegate {
+    private let textField = NSTextField()
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let imageView = NSImageView()
+    private let spinner = NSProgressIndicator()
+    private var isRunning = false
+    var onGenerate: ((String, @escaping (String, String?) -> Void) -> Void)?
+
+    init() {
+        let size = NSSize(width: 520, height: 540)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 700) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 500) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        super.init(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        title = "Image Playground"
+        isReleasedWhenClosed = false
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+
+        textField.placeholderString = "A dark forest with a glowing path..."
+        textField.bezelStyle = .roundedBezel
+        textField.delegate = self
+        textField.frame = NSRect(x: 16, y: size.height - 52, width: size.width - 120, height: 28)
+        textField.autoresizingMask = [.width]
+        visual.addSubview(textField)
+
+        let generate = NSButton(title: "Generate", target: self, action: #selector(generate(_:)))
+        generate.bezelStyle = .rounded
+        generate.frame = NSRect(x: size.width - 96, y: size.height - 52, width: 80, height: 28)
+        generate.autoresizingMask = [.minXMargin]
+        visual.addSubview(generate)
+
+        spinner.style = .spinning
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.frame = NSRect(x: size.width - 88, y: size.height - 50, width: 18, height: 18)
+        spinner.autoresizingMask = [.minXMargin]
+        visual.addSubview(spinner)
+
+        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.frame = NSRect(x: 16, y: size.height - 84, width: size.width - 32, height: 20)
+        statusLabel.autoresizingMask = [.width]
+        visual.addSubview(statusLabel)
+
+        imageView.imageFrameStyle = .none
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.frame = NSRect(x: 16, y: 16, width: size.width - 32, height: size.height - 112)
+        imageView.autoresizingMask = [.width, .height]
+        visual.addSubview(imageView)
+
+        contentView = visual
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        textField.becomeFirstResponder()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            generate(nil)
+            return true
+        }
+        return false
+    }
+
+    @objc private func generate(_ sender: Any?) {
+        guard !isRunning else { return }
+        let prompt = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        isRunning = true
+        spinner.startAnimation(nil)
+        statusLabel.stringValue = "Generating..."
+        imageView.image = nil
+
+        onGenerate?(prompt) { [weak self] status, imagePath in
+            DispatchQueue.main.async {
+                self?.isRunning = false
+                self?.spinner.stopAnimation(nil)
+                self?.statusLabel.stringValue = status
+                if let path = imagePath, let image = NSImage(contentsOfFile: path) {
+                    self?.imageView.image = image
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Screen actions window
+
+private final class BadAppleScreenActionsWindow: NSWindow, NSTextFieldDelegate {
+    private let textField = NSTextField()
+    private let responseView = NSTextView()
+    private let spinner = NSProgressIndicator()
+    private var isRunning = false
+    var onRun: ((String, @escaping (String) -> Void, @escaping () -> Void) -> Void)?
+
+    init() {
+        let size = NSSize(width: 560, height: 460)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 700) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 500) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        super.init(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        title = "Screen Actions"
+        isReleasedWhenClosed = false
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+
+        let context = NSTextField(wrappingLabelWithString: "Ask Bad Apple to look at the current screen, describe it, read text, or perform an action.")
+        context.font = .systemFont(ofSize: 13)
+        context.textColor = .secondaryLabelColor
+        context.frame = NSRect(x: 16, y: size.height - 72, width: size.width - 32, height: 44)
+        context.autoresizingMask = [.width]
+        visual.addSubview(context)
+
+        textField.placeholderString = "e.g. What’s on my screen? or Click the OK button"
+        textField.bezelStyle = .roundedBezel
+        textField.delegate = self
+        textField.frame = NSRect(x: 16, y: size.height - 108, width: size.width - 120, height: 28)
+        textField.autoresizingMask = [.width]
+        visual.addSubview(textField)
+
+        let runButton = NSButton(title: "Run", target: self, action: #selector(run(_:)))
+        runButton.bezelStyle = .rounded
+        runButton.frame = NSRect(x: size.width - 96, y: size.height - 108, width: 80, height: 28)
+        runButton.autoresizingMask = [.minXMargin]
+        visual.addSubview(runButton)
+
+        spinner.style = .spinning
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.frame = NSRect(x: size.width - 88, y: size.height - 106, width: 18, height: 18)
+        spinner.autoresizingMask = [.minXMargin]
+        visual.addSubview(spinner)
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 16, width: size.width - 32, height: size.height - 136))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        scroll.autoresizingMask = [.width, .height]
+
+        responseView.isEditable = false
+        responseView.isSelectable = true
+        responseView.drawsBackground = false
+        responseView.font = .systemFont(ofSize: 14)
+        responseView.textColor = .labelColor
+        responseView.autoresizingMask = [.width]
+        scroll.documentView = responseView
+        visual.addSubview(scroll)
+
+        contentView = visual
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        textField.becomeFirstResponder()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            run(nil)
+            return true
+        }
+        return false
+    }
+
+    @objc private func run(_ sender: Any?) {
+        guard !isRunning else { return }
+        let prompt = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        isRunning = true
+        spinner.startAnimation(nil)
+
+        let append: (String) -> Void = { [weak self] chunk in
+            guard let self = self else { return }
+            self.responseView.string += chunk
+            self.responseView.scrollToEndOfDocument(nil)
+        }
+        let finish: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.isRunning = false
+            self.spinner.stopAnimation(nil)
+        }
+        onRun?(prompt, append, finish)
+    }
+}
+
+// MARK: - Ask palette
+
+private final class BadAppleAskPalette: NSWindow, NSTextFieldDelegate {
+    private let textField = NSTextField()
+    private let responseView = NSTextView()
+    private let sendButton = NSButton()
+    private let spinner = NSProgressIndicator()
+    private var isSubmitting = false
+    var onSubmit: ((String, @escaping (String) -> Void, @escaping () -> Void) -> Void)?
+
+    init() {
+        let size = NSSize(width: 560, height: 420)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 700) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 500) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        super.init(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        title = "Ask Bad Apple"
+        isReleasedWhenClosed = false
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+        visual.layer?.cornerRadius = 18
+
+        textField.placeholderString = "Ask Bad Apple anything..."
+        textField.bezelStyle = .roundedBezel
+        textField.delegate = self
+        textField.frame = NSRect(x: 16, y: size.height - 52, width: size.width - 120, height: 28)
+        textField.autoresizingMask = [.width]
+        visual.addSubview(textField)
+
+        sendButton.title = "Ask"
+        sendButton.bezelStyle = .rounded
+        sendButton.target = self
+        sendButton.action = #selector(ask(_:))
+        sendButton.frame = NSRect(x: size.width - 96, y: size.height - 52, width: 80, height: 28)
+        sendButton.keyEquivalent = "\r"
+        sendButton.autoresizingMask = [.minXMargin]
+        visual.addSubview(sendButton)
+
+        spinner.style = .spinning
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.frame = NSRect(x: size.width - 88, y: size.height - 52, width: 20, height: 20)
+        spinner.autoresizingMask = [.minXMargin]
+        visual.addSubview(spinner)
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 16, width: size.width - 32, height: size.height - 80))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        scroll.autoresizingMask = [.width, .height]
+
+        responseView.isEditable = false
+        responseView.isSelectable = true
+        responseView.drawsBackground = false
+        responseView.font = .systemFont(ofSize: 14)
+        responseView.textColor = .labelColor
+        responseView.autoresizingMask = [.width]
+        scroll.documentView = responseView
+        visual.addSubview(scroll)
+
+        contentView = visual
+    }
+
+    func show() {
+        if isVisible {
+            makeKeyAndOrderFront(nil)
+            textField.becomeFirstResponder()
+            return
+        }
+        responseView.string = ""
+        textField.stringValue = ""
+        center()
+        makeKeyAndOrderFront(nil)
+        textField.becomeFirstResponder()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            ask(nil)
+            return true
+        }
+        return false
+    }
+
+    @objc private func ask(_ sender: Any?) {
+        guard !isSubmitting else { return }
+        let prompt = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        isSubmitting = true
+        sendButton.isHidden = true
+        spinner.startAnimation(nil)
+        responseView.string = ""
+
+        let append: (String) -> Void = { [weak self] chunk in
+            guard let self = self else { return }
+            self.responseView.string += chunk
+            self.responseView.scrollToEndOfDocument(nil)
+        }
+
+        let finish: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.isSubmitting = false
+            self.sendButton.isHidden = false
+            self.spinner.stopAnimation(nil)
+            self.textField.becomeFirstResponder()
+        }
+
+        onSubmit?(prompt, append, finish)
+    }
+}
+
+// MARK: - Voice settings window
+
+private final class BadAppleVoiceSettingsWindow: NSWindow {
+    private weak var voiceHost: BadAppleVoiceHost?
+    private weak var voiceHUD: BadAppleVoiceHUD?
+    private var micGainSlider: NSSlider?
+    private var micGainLabel: NSTextField?
+    private var idleSlider: NSSlider?
+    private var idleLabel: NSTextField?
+
+    init(voiceHost: BadAppleVoiceHost, voiceHUD: BadAppleVoiceHUD) {
+        let size = NSSize(width: 460, height: 520)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        super.init(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        self.voiceHost = voiceHost
+        self.voiceHUD = voiceHUD
+        title = "Voice Settings"
+        isReleasedWhenClosed = false
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+        visual.layer?.cornerRadius = 16
+
+        let stack = NSStackView(frame: NSRect(x: 24, y: 24, width: size.width - 48, height: size.height - 48))
+        stack.orientation = .vertical
+        stack.alignment = .left
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = true
+
+        stack.addArrangedSubview(label("Voice"))
+        stack.addArrangedSubview(checkbox("Enable voice listening", key: "BadAppleVoiceEnabled", action: #selector(toggleVoiceDefault(_:))))
+        stack.addArrangedSubview(checkbox("Show voice HUD", key: "BadAppleVoiceHUDEnabled", action: #selector(hudChanged(_:))))
+        stack.addArrangedSubview(checkbox("Play wake sound", key: "BadAppleWakeSoundEnabled"))
+
+        stack.addArrangedSubview(label("Microphone"))
+        let micRow = NSStackView()
+        micRow.orientation = .horizontal
+        micRow.spacing = 12
+        micRow.alignment = .centerY
+        let micSlider = NSSlider(value: 1.0, minValue: 0.1, maxValue: 2.0, target: self, action: #selector(micGainChanged(_:)))
+        micSlider.numberOfTickMarks = 0
+        micRow.addArrangedSubview(micSlider)
+        let micValue = NSTextField(labelWithString: "1.0x")
+        micValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        micValue.textColor = .secondaryLabelColor
+        micValue.alignment = .right
+        micValue.frame = NSRect(x: 0, y: 0, width: 48, height: 18)
+        micRow.addArrangedSubview(micValue)
+        stack.addArrangedSubview(micRow)
+        micGainSlider = micSlider
+        micGainLabel = micValue
+
+        stack.addArrangedSubview(label("HUD"))
+        let idleRow = NSStackView()
+        idleRow.orientation = .horizontal
+        idleRow.spacing = 12
+        idleRow.alignment = .centerY
+        let idleSlider = NSSlider(value: 2.5, minValue: 1.0, maxValue: 10.0, target: self, action: #selector(idleTimeoutChanged(_:)))
+        idleSlider.numberOfTickMarks = 0
+        idleRow.addArrangedSubview(idleSlider)
+        let idleValue = NSTextField(labelWithString: "2.5s")
+        idleValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        idleValue.textColor = .secondaryLabelColor
+        idleValue.alignment = .right
+        idleValue.frame = NSRect(x: 0, y: 0, width: 48, height: 18)
+        idleRow.addArrangedSubview(idleValue)
+        stack.addArrangedSubview(idleRow)
+        self.idleSlider = idleSlider
+        idleLabel = idleValue
+
+        stack.addArrangedSubview(label("Wake Phrase"))
+        let wakeField = NSTextField(string: UserDefaults.standard.string(forKey: "BadAppleWakePhrase") ?? "Hey bad apple")
+        wakeField.target = self
+        wakeField.action = #selector(wakePhraseChanged(_:))
+        wakeField.bezelStyle = .roundedBezel
+        wakeField.cell?.sendsActionOnEndEditing = true
+        stack.addArrangedSubview(wakeField)
+
+        let hint = NSTextField(wrappingLabelWithString: "Mic gain applies on the next wake. The wake phrase can contain multiple words; a small number of filler words between them is allowed.")
+        hint.font = .systemFont(ofSize: 12)
+        hint.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(hint)
+
+        let doneButton = NSButton(title: "Done", target: self, action: #selector(closeSettings(_:)))
+        doneButton.bezelStyle = .rounded
+        stack.addArrangedSubview(doneButton)
+
+        visual.addSubview(stack)
+        contentView = visual
+
+        loadDefaults()
+    }
+
+    private func loadDefaults() {
+        let micGain = UserDefaults.standard.object(forKey: "BadAppleMicMixerGain") as? Float ?? 1.0
+        micGainSlider?.floatValue = micGain
+        micGainLabel?.stringValue = String(format: "%.1fx", micGain)
+
+        let idle = UserDefaults.standard.object(forKey: "BadAppleVoiceHUDIdleTimeout") as? Double ?? 2.5
+        idleSlider?.doubleValue = idle
+        idleLabel?.stringValue = String(format: "%.1fs", idle)
+    }
+
+    private func label(_ text: String) -> NSTextField {
+        let tf = NSTextField(labelWithString: text)
+        tf.font = .systemFont(ofSize: 14, weight: .semibold)
+        tf.textColor = .labelColor
+        return tf
+    }
+
+    private func checkbox(_ title: String, key: String, action: Selector? = #selector(anyCheckboxChanged(_:))) -> NSButton {
+        let cb = NSButton(checkboxWithTitle: title, target: self, action: action)
+        cb.state = UserDefaults.standard.bool(forKey: key) ? .on : .off
+        cb.tag = key.hash
+        cb.identifier = NSUserInterfaceItemIdentifier(key)
+        return cb
+    }
+
+    @objc private func toggleVoiceDefault(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: "BadAppleVoiceEnabled")
+        if !enabled {
+            voiceHost?.setEnabled(false)
+        } else {
+            voiceHost?.setEnabled(true)
+        }
+    }
+
+    @objc private func hudChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "BadAppleVoiceHUDEnabled")
+    }
+
+    @objc private func micGainChanged(_ sender: NSSlider) {
+        let gain = sender.floatValue
+        UserDefaults.standard.set(gain, forKey: "BadAppleMicMixerGain")
+        micGainLabel?.stringValue = String(format: "%.1fx", gain)
+        voiceHost?.setMicGain(gain)
+    }
+
+    @objc private func idleTimeoutChanged(_ sender: NSSlider) {
+        let timeout = sender.doubleValue
+        UserDefaults.standard.set(timeout, forKey: "BadAppleVoiceHUDIdleTimeout")
+        idleLabel?.stringValue = String(format: "%.1fs", timeout)
+        voiceHUD?.setIdleTimeout(timeout)
+    }
+
+    @objc private func wakePhraseChanged(_ sender: NSTextField) {
+        let phrase = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !phrase.isEmpty else { return }
+        UserDefaults.standard.set(phrase, forKey: "BadAppleWakePhrase")
+        voiceHost?.setWakePhrase(phrase)
+    }
+
+    @objc private func closeSettings(_ sender: NSButton) {
+        close()
+    }
+
+    @objc private func anyCheckboxChanged(_ sender: NSButton) {
+        guard let key = sender.identifier?.rawValue else { return }
+        UserDefaults.standard.set(sender.state == .on, forKey: key)
+    }
+}
+
+// MARK: - Focus / Do Not Disturb manager
+
+private final class BadAppleFocusManager {
+    private static let assertionPath = NSHomeDirectory() + "/Library/DoNotDisturb/DB/Assertions.json"
+    private static let dndMode = "com.apple.donotdisturb.mode.default"
+    private static let clientID = "com.apple.focus.activity-manager"
+    private static let appleEpoch = 978_307_200.0
+
+    static var isEnabled: Bool {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: assertionPath)) else { return false }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        guard let dataArr = json["data"] as? [[String: Any]], let store = dataArr.first else { return false }
+        let records = store["storeAssertionRecords"] as? [[String: Any]] ?? []
+        return records.contains { record in
+            guard let details = record["assertionDetails"] as? [String: Any] else { return false }
+            return details["assertionDetailsModeIdentifier"] as? String == dndMode
+        }
+    }
+
+    static func setEnabled(_ enabled: Bool) -> String {
+        do {
+            var root: [String: Any]
+            if FileManager.default.fileExists(atPath: assertionPath),
+               let data = try? Data(contentsOf: URL(fileURLWithPath: assertionPath)),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                root = parsed
+            } else {
+                root = ["data": [["storeAssertionRecords": [], "storeInvalidationRecords": [], "storeInvalidationRequestRecords": []]]]
+            }
+
+            guard var dataArr = root["data"] as? [[String: Any]] else {
+                return "Focus: could not parse assertion database."
+            }
+            if dataArr.isEmpty {
+                dataArr = [["storeAssertionRecords": [], "storeInvalidationRecords": [], "storeInvalidationRequestRecords": []]]
+            }
+
+            var store = dataArr[0]
+            var records = store["storeAssertionRecords"] as? [[String: Any]] ?? []
+
+            if enabled {
+                records = [buildRecord()]
+            } else {
+                records = records.filter { record in
+                    guard let details = record["assertionDetails"] as? [String: Any] else { return true }
+                    return details["assertionDetailsModeIdentifier"] as? String != dndMode
+                }
+            }
+
+            store["storeAssertionRecords"] = records
+            dataArr[0] = store
+            root["data"] = dataArr
+
+            let version = (root["header"] as? [String: Any])?["version"] as? Int ?? 8
+            root["header"] = ["version": version, "timestamp": Date().timeIntervalSinceReferenceDate]
+
+            let outData = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .prettyPrinted])
+            try outData.write(to: URL(fileURLWithPath: assertionPath), options: .atomic)
+
+            postNotifications(enabled: enabled)
+            restartDNDDaemon()
+
+            return enabled ? "Focus enabled (Do Not Disturb)." : "Focus disabled."
+        } catch {
+            return "Focus error: \(error.localizedDescription)"
+        }
+    }
+
+    private static func buildRecord() -> [String: Any] {
+        let uuid = UUID().uuidString.uppercased()
+        let now = Date().timeIntervalSinceReferenceDate
+        return [
+            "assertionDetails": [
+                "assertionDetailsIdentifier": clientID,
+                "assertionDetailsModeIdentifier": dndMode,
+                "assertionDetailsReason": "user-action"
+            ],
+            "assertionSource": [
+                "assertionClientIdentifier": clientID
+            ],
+            "assertionStartDateTimestamp": now,
+            "assertionUUID": uuid
+        ]
+    }
+
+    private static func postNotifications(enabled: Bool) {
+        let name = enabled ? "_NSDoNotDisturbEnabledNotification" : "_NSDoNotDisturbDisabledNotification"
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name(name),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+    }
+
+    private static func restartDNDDaemon() {
+        let uid = getuid()
+        let domain = "gui/\(uid)"
+        for label in ["com.apple.donotdisturbd", "com.apple.ControlCenter"] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["kickstart", "-k", "\(domain)/\(label)"]
+            try? process.run()
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unchecked Sendable {
     private var statusItem: NSStatusItem?
     private var menu: NSMenu?
     private var timer: Timer?
@@ -1466,7 +3100,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var lastPrompt = ""
     private var lastError: String?
     private var isSubmittingVoicePrompt = false
-    private var voiceBuffer = ""
+    private var lastSpoken: String?
+    private var openMenuCount = 0
+    private var needsMenuRebuild = false
+    private let memoryGovernor = MemoryGovernor()
+    private var memoryUsedGB = 0.0
+    private var memoryTotalGB = 0.0
+    private var memoryPressure = "normal"
+    private var activeModels: [String] = ["main_9b"]
+    private var lastTelemetryTime: TimeInterval = 0
+    private var autoPurgeEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "BadAppleAutoPurge") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "BadAppleAutoPurge") }
+    }
+    private var fastTierOnly: Bool {
+        get { UserDefaults.standard.object(forKey: "BadAppleFastTierOnly") as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: "BadAppleFastTierOnly") }
+    }
+    private var autopilotEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "BadAppleAutopilot") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "BadAppleAutopilot") }
+    }
+    private var focusEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "BadAppleFocusEnabled") as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: "BadAppleFocusEnabled") }
+    }
+    private let voiceHUD = BadAppleVoiceHUD()
+    private let voiceOnboarding = BadAppleVoiceOnboarding()
+    private let voiceHelp = BadAppleVoiceHelpWindow()
+    private let voiceLog = BadAppleVoiceLogWindow()
+    private lazy var voiceShortcut = BadAppleGlobalShortcut(name: "voice", keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(cmdKey | shiftKey), id: 1) { [weak self] in
+        self?.voiceHost.triggerShortcut()
+    }
+    private lazy var askShortcut = BadAppleGlobalShortcut(name: "ask-palette", keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | shiftKey | optionKey), id: 2) { [weak self] in
+        self?.askPalette.show()
+    }
+    private let askPalette = BadAppleAskPalette()
+    private let briefingWindow = BadAppleBriefingWindow()
+    private let screenActionsWindow = BadAppleScreenActionsWindow()
+    private let imagePlayground = BadAppleImagePlaygroundWindow()
+    private lazy var voiceSettings: BadAppleVoiceSettingsWindow = {
+        BadAppleVoiceSettingsWindow(voiceHost: voiceHost, voiceHUD: voiceHUD)
+    }()
     private var voiceEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "BadAppleVoiceEnabled") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleVoiceEnabled") }
@@ -1479,26 +3154,554 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         get { UserDefaults.standard.object(forKey: "BadAppleSelectedPersona") as? String ?? "default" }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleSelectedPersona") }
     }
+    private var aquaHelperProcess: Process?
+    private let splash = BadAppleSplashWindow()
+    private var runtimeState: [String: Any] {
+        let path = URL(fileURLWithPath: "/var/lib/bad_apple/runtime_state.json")
+        guard let data = try? Data(contentsOf: path),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return state
+    }
+
+    private func systemBootTime() -> Date? {
+        var bootTime = timeval()
+        var mib = [CTL_KERN, KERN_BOOTTIME]
+        var size = MemoryLayout<timeval>.size
+        let result = sysctl(&mib, u_int(mib.count), &bootTime, &size, nil, 0)
+        guard result == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(bootTime.tv_sec))
+    }
+
+    private var shouldShowBootSplash: Bool {
+        guard let bootTime = systemBootTime() else { return true }
+        let defaults = UserDefaults.standard
+        if let lastBoot = defaults.object(forKey: "BadAppleSplashBootTime") as? Date,
+           lastBoot.compare(bootTime) == .orderedSame {
+            return false
+        }
+        defaults.set(bootTime, forKey: "BadAppleSplashBootTime")
+        return true
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if shouldShowBootSplash {
+            splash.show()
+        }
         BadAppleFFI.shared.load()
+        startAquaHelper()
+        registerSMAppService()
+        removeLegacyLaunchAgent()
+        // Prevent AppKit from treating this LSUIElement as idle and terminating it.
+        ProcessInfo.processInfo.disableAutomaticTermination("Bad Apple menu bar host")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.title = "🍎"
         menu = NSMenu(title: "Bad Apple")
+        menu?.delegate = self
         statusItem?.menu = menu
 
-        voiceHost.onStateChange = { [weak self] _ in self?.rebuildMenu() }
-        voiceHost.onPrompt = { [weak self] prompt in self?.submitVoicePrompt(prompt) }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        voiceHUD.attach(statusButton: statusItem?.button)
+        voiceHost.onStateChange = { [weak self] state in
             self?.rebuildMenu()
+            self?.updateStatusIcon()
+            self?.voiceHUD.updateState(state)
+        }
+        voiceHost.onTranscript = { [weak self] transcript in
+            self?.voiceHUD.updateTranscript(transcript)
+        }
+        voiceHost.onWaveform = { [weak self] level in
+            self?.voiceHUD.addWaveform(level)
+        }
+        voiceHost.onError = { [weak self] message in
+            self?.voiceHUD.showError(message)
+        }
+        _ = voiceShortcut
+        _ = askShortcut
+        voiceHost.onPrompt = { [weak self] prompt in
+            self?.voiceHUD.updateCommand(prompt)
+            self?.submitVoicePrompt(prompt)
+        }
+        askPalette.onSubmit = { [weak self] prompt, append, finish in
+            guard let self = self else { finish(); return }
+            Task {
+                do {
+                    _ = try await self.runBadAppleCLIStreaming(
+                        prompt: prompt,
+                        socketPath: BadAppleBrain.deepSocket,
+                        maxTokens: 300
+                    ) { chunk in
+                        DispatchQueue.main.async { append(chunk) }
+                    }
+                } catch {
+                    DispatchQueue.main.async { append("\n\nError: \(error.localizedDescription)") }
+                }
+                DispatchQueue.main.async { finish() }
+            }
+        }
+        briefingWindow.onRun = { [weak self] append, finish in
+            guard let self = self else { finish(); return }
+            let formatter = DateFormatter()
+            formatter.dateStyle = .full
+            formatter.timeStyle = .short
+            let today = formatter.string(from: Date())
+            let prompt = "Give me a concise daily briefing for \(today). Use local tools to check today’s calendar events, upcoming events, reminders, unread emails, the current workspace, and any relevant context. Summarize what’s coming up and what I should prioritize."
+            Task {
+                do {
+                    _ = try await self.runBadAppleCLIStreaming(
+                        prompt: prompt,
+                        socketPath: BadAppleBrain.deepSocket,
+                        maxTokens: 500
+                    ) { chunk in
+                        DispatchQueue.main.async { append(chunk) }
+                    }
+                } catch {
+                    DispatchQueue.main.async { append("\n\nError: \(error.localizedDescription)") }
+                }
+                DispatchQueue.main.async { finish() }
+            }
+        }
+        screenActionsWindow.onRun = { [weak self] prompt, append, finish in
+            guard let self = self else { finish(); return }
+            let context = self.currentScreenContext()
+            let fullPrompt = """
+            Current Mac context:
+            \(context)
+
+            User request about the screen or current app:
+            \(prompt)
+            """
+            Task {
+                do {
+                    _ = try await self.runBadAppleCLIStreaming(
+                        prompt: fullPrompt,
+                        socketPath: BadAppleBrain.deepSocket,
+                        maxTokens: 400
+                    ) { chunk in
+                        DispatchQueue.main.async { append(chunk) }
+                    }
+                } catch {
+                    DispatchQueue.main.async { append("\n\nError: \(error.localizedDescription)") }
+                }
+                DispatchQueue.main.async { finish() }
+            }
+        }
+        imagePlayground.onGenerate = { [weak self] prompt, completion in
+            guard let self = self else { completion("Cancelled", nil); return }
+            let fullPrompt = "generate an image of \(prompt)"
+            let before = Date().timeIntervalSince1970
+            Task {
+                do {
+                    let result = try await self.runBadAppleCLI(
+                        prompt: fullPrompt,
+                        socketPath: BadAppleBrain.directSocket,
+                        maxTokens: 160,
+                        timeout: 900,
+                        extraEnv: ["BADAPPLE_FAST_TIER": "0"]
+                    )
+                    var path = self.extractImagePath(from: result)
+                    if path == nil {
+                        path = self.latestGeneratedImage(since: before)
+                    }
+                    DispatchQueue.main.async { completion(result, path) }
+                } catch {
+                    DispatchQueue.main.async { completion("Error: \(error.localizedDescription)", nil) }
+                }
+            }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            let now = Date().timeIntervalSince1970
+            if now - (self?.lastTelemetryTime ?? 0) >= 5.0 {
+                self?.lastTelemetryTime = now
+                self?.refreshTelemetry()
+            }
         }
         rebuildMenu()
-        voiceHost.setEnabled(voiceEnabled)
+        voiceOnboarding.onEnableVoice = { [weak self] in
+            UserDefaults.standard.set(true, forKey: "BadAppleVoiceEnabled")
+            self?.voiceHost.setEnabled(true)
+            self?.rebuildMenu()
+        }
+        voiceOnboarding.onNotNow = { [weak self] in
+            UserDefaults.standard.set(false, forKey: "BadAppleVoiceEnabled")
+            self?.voiceHost.setEnabled(false)
+            self?.rebuildMenu()
+        }
+        if voiceEnabled {
+            if UserDefaults.standard.bool(forKey: "BadAppleVoiceOnboarded") {
+                voiceHost.setEnabled(true)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.voiceOnboarding.showIfNeeded()
+                }
+            }
+        } else {
+            voiceHost.setEnabled(false)
+        }
+
+        memoryGovernor.autoPurge = autoPurgeEnabled
+        memoryGovernor.onUpdate = { [weak self] used, total, pressure in
+            guard let self = self else { return }
+            self.memoryUsedGB = used
+            self.memoryTotalGB = total
+            self.memoryPressure = pressure
+            self.rebuildMenu()
+        }
+        memoryGovernor.onCritical = { [weak self] in
+            guard let self = self else { return }
+            self.autoPurgeVRAM()
+            self.unloadOptionalModels()
+        }
+        memoryGovernor.start()
+        refreshTelemetry()
+
+        NSApp.servicesProvider = self
+
+        // Pause voice when the screen locks or the Mac sleeps; resume on unlock/wake.
+        let dnc = DistributedNotificationCenter.default
+        dnc.addObserver(self, selector: #selector(screenLocked), name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        dnc.addObserver(self, selector: #selector(screenUnlocked), name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc private func screenLocked() {
+        badAppleVoiceLog("screen locked; pausing voice")
+        voiceHost.setEnabled(false)
+    }
+
+    @objc private func screenUnlocked() {
+        guard voiceEnabled else { return }
+        badAppleVoiceLog("screen unlocked; resuming voice")
+        voiceHost.setEnabled(true)
+    }
+
+    @objc private func willSleep() {
+        badAppleVoiceLog("Mac will sleep; pausing voice")
+        voiceHost.setEnabled(false)
+    }
+
+    @objc private func didWake() {
+        guard voiceEnabled else { return }
+        badAppleVoiceLog("Mac woke; resuming voice")
+        voiceHost.setEnabled(true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         voiceHost.setEnabled(false)
         timer?.invalidate()
+        memoryGovernor.stop()
+        stopAquaHelper()
+    }
+
+    private func startAquaHelper() {
+        guard aquaHelperProcess == nil else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/Users/savag3/bad_apple/.venv/bin/python3")
+        process.arguments = ["-u", "/Users/savag3/bad_apple/badapple_aqua_helper.py"]
+        process.environment = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+            "BADAPPLE_AQUA_SOCKET": "/var/run/badapple/aqua_helper.sock",
+        ]
+        do {
+            try process.run()
+            aquaHelperProcess = process
+            print("Started Aqua helper for Shortcuts", terminator: "\n")
+        } catch {
+            print("Failed to start Aqua helper: \(error)", terminator: "\n")
+        }
+    }
+
+    private func stopAquaHelper() {
+        guard let process = aquaHelperProcess, process.isRunning else { return }
+        process.terminate()
+        aquaHelperProcess = nil
+    }
+
+    private func registerSMAppService() {
+        Task {
+            let service = SMAppService.mainApp
+            let status = service.status
+            badAppleVoiceLog("SMAppService status: \(status)")
+            if status == .enabled || status == .notRegistered {
+                do {
+                    try service.register()
+                    badAppleVoiceLog("SMAppService registered successfully")
+                } catch {
+                    badAppleVoiceLog("SMAppService register error: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func removeLegacyLaunchAgent() {
+        let label = "com.badapple.menubar"
+        let plistPath = (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents/\(label).plist")
+        guard FileManager.default.fileExists(atPath: plistPath) else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            try? FileManager.default.removeItem(atPath: plistPath)
+            badAppleVoiceLog("Removed legacy LaunchAgent")
+        } catch {
+            badAppleVoiceLog("Could not remove legacy LaunchAgent: \(error.localizedDescription)")
+        }
+    }
+
+    private func refreshTelemetry() {
+        Task {
+            do {
+                let output = try await runBadAppleCLI(prompt: "runtime status", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+                if let data = output.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    await MainActor.run {
+                        if let active = json["active_models"] as? [String] {
+                            self.activeModels = active
+                        }
+                        self.rebuildMenu()
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    private func autoPurgeVRAM() {
+        badAppleVoiceLog("Memory critical: auto-purging VRAM")
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "flush vram", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+        }
+    }
+
+    private func unloadOptionalModels() {
+        badAppleVoiceLog("Memory critical: unloading optional models")
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "unload all models", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+        }
+    }
+
+    @objc private func purgeVRAM() {
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "flush vram", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+            await MainActor.run { self.refreshTelemetry() }
+        }
+    }
+
+    @objc private func unloadModels() {
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "unload all models", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+            await MainActor.run { self.refreshTelemetry() }
+        }
+    }
+
+    @objc private func toggleAutoPurge() {
+        autoPurgeEnabled.toggle()
+        memoryGovernor.autoPurge = autoPurgeEnabled
+        rebuildMenu()
+    }
+
+    @objc private func openDashboard() {
+        if let url = URL(string: "http://127.0.0.1:8787") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func viewWorkingMemory() {
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "read working memory", socketPath: BadAppleBrain.deepSocket, maxTokens: 120)
+            await MainActor.run { self.rebuildMenu() }
+        }
+    }
+
+    @objc private func clearWorkingMemory() {
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "clear working memory", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+            await MainActor.run { self.rebuildMenu() }
+        }
+    }
+
+    @objc private func listShortcuts() {
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "list shortcuts", socketPath: BadAppleBrain.deepSocket, maxTokens: 120)
+            await MainActor.run { self.rebuildMenu() }
+        }
+    }
+
+    @objc private func runShortcutPrompt() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Run macOS Shortcut"
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        alert.accessoryView = textField
+        alert.addButton(withTitle: "Run")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            let name = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                Task {
+                    _ = try? await runBadAppleCLI(prompt: "run shortcut \(name)", socketPath: BadAppleBrain.deepSocket, maxTokens: 120)
+                    await MainActor.run { self.rebuildMenu() }
+                }
+            }
+        }
+    }
+
+    @objc private func toggleFastTier() {
+        fastTierOnly.toggle()
+        Task {
+            _ = try? await runBadAppleCLI(prompt: fastTierOnly ? "fast tier on" : "fast tier off", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+            await MainActor.run { self.rebuildMenu() }
+        }
+    }
+
+    @objc private func toggleAutopilot() {
+        autopilotEnabled.toggle()
+        Task {
+            _ = try? await runBadAppleCLI(prompt: autopilotEnabled ? "autopilot on" : "autopilot off", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+            await MainActor.run { self.rebuildMenu() }
+        }
+    }
+
+    @objc private func toggleFocus() {
+        focusEnabled.toggle()
+        applyFocusMode(focusEnabled)
+        rebuildMenu()
+    }
+
+    private func applyFocusMode(_ enabled: Bool) {
+        let result = BadAppleFocusManager.setEnabled(enabled)
+        badAppleVoiceLog(result)
+        if result.hasPrefix("Focus error") {
+            // Fallback: try a user-created Shortcuts action. macOS hides the
+            // DoNotDisturb database from TCC if Full Disk Access is missing.
+            let shortcutName = enabled ? "Bad Apple Focus On" : "Bad Apple Focus Off"
+            if runFocusShortcut(named: shortcutName) {
+                badAppleVoiceLog("Focus toggled via Shortcuts: \(shortcutName)")
+                return
+            }
+            focusEnabled = !enabled
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Focus Mode"
+            alert.informativeText = """
+            \(result)
+
+            Option 1: Grant Bad Apple Full Disk Access in System Settings > Privacy & Security > Full Disk Access, then toggle again.
+
+            Option 2: Create a Shortcut named "\(shortcutName)" with a "Set Focus" action (Do Not Disturb), and Bad Apple will run it for you.
+            """
+            alert.alertStyle = .warning
+            alert.runModal()
+        } else if !result.hasPrefix("Focus:") {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Focus Mode"
+            alert.informativeText = result
+            alert.alertStyle = .informational
+            alert.runModal()
+        }
+    }
+
+    private func runFocusShortcut(named: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+        process.arguments = ["run", named]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            badAppleVoiceLog("Focus shortcut '\(named)' error: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @objc private func toggleAmbient() {
+        let ambientRunning = runtimeState["ambient_running"] as? Bool ?? false
+        Task { @MainActor in
+            do {
+                _ = try await runBadAppleCLI(
+                    prompt: ambientRunning ? "stop ambient" : "start ambient",
+                    socketPath: BadAppleBrain.deepSocket,
+                    maxTokens: 32
+                )
+                self.rebuildMenu()
+            } catch {
+                self.lastError = error.localizedDescription
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    @objc private func setWorkspacePrompt() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Set Workspace"
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
+        textField.placeholderString = "/path/to/workspace"
+        alert.accessoryView = textField
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let path = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return }
+        Task { @MainActor in
+            do {
+                let output = try await runBadAppleCLI(
+                    prompt: "set workspace to \(path)",
+                    socketPath: BadAppleBrain.deepSocket,
+                    maxTokens: 80
+                )
+                let info = NSAlert()
+                info.messageText = "Workspace Set"
+                info.informativeText = output
+                info.alertStyle = .informational
+                _ = info.runModal()
+                self.rebuildMenu()
+            } catch {
+                self.lastError = error.localizedDescription
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    @objc private func openCurrentWorkspace() {
+        guard let path = runtimeState["workspace"] as? String, !path.isEmpty else {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "No Workspace Set"
+            alert.informativeText = "There is no current workspace to open."
+            alert.alertStyle = .warning
+            _ = alert.runModal()
+            return
+        }
+        let url = URL(fileURLWithPath: path)
+        if !NSWorkspace.shared.open(url) {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Could Not Open Workspace"
+            alert.informativeText = "macOS could not open \"\(path)\"."
+            alert.alertStyle = .critical
+            _ = alert.runModal()
+        }
+    }
+
+    @objc private func toggleP2P() {
+        let p2pEnabled = runtimeState["p2p_enabled"] as? Bool ?? false
+        Task { @MainActor in
+            do {
+                _ = try await runBadAppleCLI(
+                    prompt: p2pEnabled ? "p2p off" : "p2p on",
+                    socketPath: BadAppleBrain.deepSocket,
+                    maxTokens: 32
+                )
+                self.rebuildMenu()
+            } catch {
+                self.lastError = error.localizedDescription
+                self.rebuildMenu()
+            }
+        }
     }
 
     private func submitVoicePrompt(_ prompt: String) {
@@ -1511,7 +3714,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         lastPrompt = prompt
         lastError = nil
         streamedTokenCount = 0
-        voiceBuffer = ""
         voiceHost.stopAllAudio()
         rebuildMenu()
 
@@ -1541,13 +3743,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             do {
                 let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens, extraArgs: extraArgs) { chunk in
                     DispatchQueue.main.async {
-                        self.voiceBuffer += chunk
                         self.streamedTokenCount += chunk.count
                         self.rebuildMenu()
                     }
                 }
                 await MainActor.run {
-                    self.completeVoiceResponse(finalText, skipSpeak: true)
+                    self.completeVoiceResponse(finalText)
                     self.isSubmittingVoicePrompt = false
                 }
             } catch {
@@ -1649,6 +3850,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 environment["BADAPPLE_VOICE"] = "1"
                 process.environment = environment
 
+                let sync = NSLock()
                 var timeoutTimer: Timer?
                 timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
                     badAppleVoiceLog("runBadAppleCLIStreaming: timeout, terminating")
@@ -1659,9 +3861,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 var fullText = ""
                 var resumed = false
 
+                func finish(result: Result<String, Error>) {
+                    sync.lock()
+                    guard !resumed else { sync.unlock(); return }
+                    resumed = true
+                    timeoutTimer?.invalidate()
+                    outputPipe.fileHandleForReading.readabilityHandler = nil
+                    sync.unlock()
+                    switch result {
+                    case .success(let text):
+                        continuation.resume(returning: text)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+
                 outputPipe.fileHandleForReading.readabilityHandler = { handle in
                     guard let str = String(data: handle.availableData, encoding: .utf8) else { return }
+                    sync.lock()
                     buffer += str
+                    var localFullText = ""
                     while let newlineIndex = buffer.firstIndex(of: "\n") {
                         let line = String(buffer[..<newlineIndex])
                         buffer = String(buffer[buffer.index(after: newlineIndex)...])
@@ -1670,7 +3889,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                                 if let type = json["type"] as? String, type == "token", let text = json["text"] as? String {
                                     fullText += text
-                                    onChunk(text)
+                                    localFullText += text
                                 } else if let type = json["type"] as? String, type == "done", let text = json["text"] as? String {
                                     fullText = text
                                 }
@@ -1679,33 +3898,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                             badAppleVoiceLog("runBadAppleCLIStreaming: ignoring non-JSON line: \(line.prefix(100))")
                         }
                     }
+                    sync.unlock()
+                    if !localFullText.isEmpty {
+                        onChunk(localFullText)
+                    }
                 }
 
                 process.terminationHandler = { _ in
-                    guard !resumed else { return }
-                    resumed = true
-                    timeoutTimer?.invalidate()
-                    outputPipe.fileHandleForReading.readabilityHandler = nil
-                    if process.terminationStatus != 0, fullText.isEmpty {
-                        continuation.resume(throwing: BadAppleMenuBarError("The Bad Apple helper exited with code \(process.terminationStatus)."))
+                    sync.lock()
+                    let code = process.terminationStatus
+                    let text = fullText
+                    sync.unlock()
+                    if code != 0, text.isEmpty {
+                        finish(result: .failure(BadAppleMenuBarError("The Bad Apple helper exited with code \(code).")))
                     } else {
-                        continuation.resume(returning: fullText)
+                        finish(result: .success(text))
                     }
                 }
 
                 do {
                     try process.run()
                 } catch {
-                    guard !resumed else { return }
-                    resumed = true
-                    timeoutTimer?.invalidate()
-                    continuation.resume(throwing: error)
+                    finish(result: .failure(error))
                 }
             }
         }
     }
 
-    private func runBadAppleCLI(prompt: String, socketPath: String, maxTokens: Int) async throws -> String {
+    private func runBadAppleCLI(prompt: String, socketPath: String, maxTokens: Int, timeout: TimeInterval = 120.0, extraEnv: [String: String] = [:]) async throws -> String {
         let binary = Bundle.main.bundleURL
             .appendingPathComponent("Contents")
             .appendingPathComponent("Helpers")
@@ -1727,10 +3947,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 environment["BADAPPLE_SOCKET_PATH"] = socketPath
                 environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
                 environment["BADAPPLE_VOICE"] = "1"
+                for (k, v) in extraEnv {
+                    environment[k] = v
+                }
                 process.environment = environment
 
                 var timeoutTimer: Timer?
-                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
+                timeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
                     badAppleVoiceLog("runBadAppleCLI: timeout, terminating")
                     process.terminate()
                 }
@@ -1807,21 +4030,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         init(_ message: String) { self.errorDescription = message }
     }
 
-    private func completeVoiceResponse(_ response: String, skipSpeak: Bool = false) {
+    private func completeVoiceResponse(_ response: String) {
         badAppleVoiceLog("completeVoiceResponse: \(response.prefix(200))")
         let parsed = BadAppleActionParser.parse(response)
+        lastSpoken = parsed.spoken
+        voiceHUD.updateResponse(parsed.spoken)
         badAppleVoiceLog("parsed actions: \(parsed.actions.count) error: \(parsed.error ?? "nil") spoken: \(parsed.spoken)")
-        if !skipSpeak {
-            voiceHost.speak(parsed.spoken)
-        } else if !voiceBuffer.isEmpty {
-            voiceHost.speak(voiceBuffer)
-            voiceBuffer = ""
-        } else {
-            // No streaming chunks were received (e.g. short-circuit answers).
-            // Speak the final response so the voice host leaves the
-            // "Generating" state.
-            voiceHost.speak(parsed.spoken)
-        }
+        voiceHost.speak(parsed.spoken)
         if let parseError = parsed.error {
             actionExecutor.showParsingFailure(parseError)
         } else {
@@ -1832,8 +4047,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         rebuildMenu()
     }
 
+    private func updateStatusIcon() {
+        guard let button = statusItem?.button else { return }
+        let dotColor: NSColor
+        switch voiceHost.state {
+        case .disabled, .unavailable:
+            dotColor = .systemGray
+        default:
+            dotColor = voiceHost.state.tintColor
+        }
+
+        let title = NSMutableAttributedString()
+        title.append(NSAttributedString(string: "🍎 ", attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+        title.append(NSAttributedString(string: "●", attributes: [
+            .font: NSFont.systemFont(ofSize: 8),
+            .foregroundColor: dotColor,
+            .baselineOffset: -2
+        ]))
+        button.attributedTitle = title
+    }
+
     func rebuildMenu() {
         guard let menu = menu else { return }
+        // Rebuilding while any menu or submenu is displayed can tear down items
+        // the user is about to click and cause use-after-free crashes. Defer
+        // until all menus close instead.
+        if openMenuCount > 0 {
+            needsMenuRebuild = true
+            return
+        }
+        needsMenuRebuild = false
         menu.removeAllItems()
         let header = NSMenuItem(title: "Bad Apple — 9B MLX + RAG", action: nil, keyEquivalent: "")
         header.isEnabled = false
@@ -1842,9 +4085,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let voiceStatus = NSMenuItem(title: voiceHost.state.label.truncated(to: 90), action: nil, keyEquivalent: "")
         voiceStatus.isEnabled = false
         menu.addItem(voiceStatus)
+
+        if !lastPrompt.isEmpty {
+            let lastCommand = NSMenuItem(title: "Last command: \(lastPrompt.truncated(to: 60))", action: nil, keyEquivalent: "")
+            lastCommand.isEnabled = false
+            menu.addItem(lastCommand)
+        }
+        if let lastSpoken, !lastSpoken.isEmpty {
+            let lastResponse = NSMenuItem(title: "Last response: \(lastSpoken.truncated(to: 60))", action: nil, keyEquivalent: "")
+            lastResponse.isEnabled = false
+            menu.addItem(lastResponse)
+        }
+        if let lastError, !lastError.isEmpty {
+            let errorItem = NSMenuItem(title: "Last error: \(lastError.truncated(to: 60))", action: nil, keyEquivalent: "")
+            menu.addItem(errorItem)
+        }
+
         let mode = NSMenuItem(title: "Brain: Qwen3.5 9B MLX + RAG", action: nil, keyEquivalent: "")
         mode.isEnabled = false
         menu.addItem(mode)
+        let runtime = runtimeState
+        let runtimeMode = runtime["mode"] as? String ?? "UNKNOWN"
+        let runtimeItem = NSMenuItem(title: "Runtime: \(runtimeMode)", action: nil, keyEquivalent: "")
+        runtimeItem.isEnabled = false
+        menu.addItem(runtimeItem)
+
+        let usedStr = String(format: "%.1f", memoryUsedGB)
+        let totalStr = String(format: "%.1f", memoryTotalGB)
+        let memTitle = memoryTotalGB > 0 ? "Memory: \(usedStr) / \(totalStr) GB — \(memoryPressure)" : "Memory: calibrating..."
+        let memoryItem = NSMenuItem(title: memTitle, action: nil, keyEquivalent: "")
+        memoryItem.isEnabled = false
+        menu.addItem(memoryItem)
+
+        let activeTitle = "Active models: \(activeModels.joined(separator: ", "))"
+        let activeItem = NSMenuItem(title: activeTitle, action: nil, keyEquivalent: "")
+        activeItem.isEnabled = false
+        menu.addItem(activeItem)
+
+        let purgeItem = NSMenuItem(title: "Purge VRAM", action: #selector(purgeVRAM), keyEquivalent: "")
+        menu.addItem(purgeItem)
+        let unloadItem = NSMenuItem(title: "Unload Optional Models", action: #selector(unloadModels), keyEquivalent: "")
+        menu.addItem(unloadItem)
+        let autoPurgeItem = NSMenuItem(title: "Auto-Purge on Critical", action: #selector(toggleAutoPurge), keyEquivalent: "")
+        autoPurgeItem.state = autoPurgeEnabled ? .on : .off
+        menu.addItem(autoPurgeItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let privateMode = runtime["private_mode"] as? Bool ?? false
+        let privateToggle = NSMenuItem(title: "Private Mode", action: #selector(togglePrivateMode), keyEquivalent: "")
+        privateToggle.state = privateMode ? .on : .off
+        menu.addItem(privateToggle)
+        if runtime["killed"] as? Bool ?? false {
+            menu.addItem(NSMenuItem(title: "Resume Bad Apple", action: #selector(resetKillSwitch), keyEquivalent: ""))
+        } else {
+            menu.addItem(NSMenuItem(title: "Emergency Stop", action: #selector(engageKillSwitch), keyEquivalent: ""))
+        }
+        menu.addItem(NSMenuItem(title: "System Health...", action: #selector(showSystemHealth), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n"))
         menu.addItem(NSMenuItem(title: "Chat History", action: #selector(showChatHistory), keyEquivalent: "h"))
         let toggle = NSMenuItem(title: "Voice Listening", action: #selector(toggleVoice), keyEquivalent: "v")
@@ -1869,7 +4165,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         menu.addItem(NSMenuItem(title: "Restart Voice Recognition", action: #selector(restartVoice), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Benchmark", action: #selector(runBenchmark), keyEquivalent: "b"))
 
+        let toolsMenu = NSMenu(title: "Tools")
+        toolsMenu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d"))
+        toolsMenu.addItem(NSMenuItem(title: "Daily Briefing", action: #selector(showBriefing), keyEquivalent: ""))
+        toolsMenu.addItem(NSMenuItem(title: "Screen Actions...", action: #selector(showScreenActions), keyEquivalent: ""))
+        toolsMenu.addItem(NSMenuItem(title: "Image Playground...", action: #selector(showImagePlayground), keyEquivalent: ""))
+        toolsMenu.addItem(NSMenuItem(title: "View Working Memory", action: #selector(viewWorkingMemory), keyEquivalent: ""))
+        toolsMenu.addItem(NSMenuItem(title: "Clear Working Memory", action: #selector(clearWorkingMemory), keyEquivalent: ""))
+        toolsMenu.addItem(NSMenuItem.separator())
+        toolsMenu.addItem(NSMenuItem(title: "List Shortcuts", action: #selector(listShortcuts), keyEquivalent: ""))
+        toolsMenu.addItem(NSMenuItem(title: "Run Shortcut...", action: #selector(runShortcutPrompt), keyEquivalent: ""))
+        let fastTierItem = NSMenuItem(title: "Fast Tier Only", action: #selector(toggleFastTier), keyEquivalent: "")
+        fastTierItem.state = fastTierOnly ? .on : .off
+        toolsMenu.addItem(fastTierItem)
+        let autopilotItem = NSMenuItem(title: "Autopilot", action: #selector(toggleAutopilot), keyEquivalent: "")
+        autopilotItem.state = autopilotEnabled ? .on : .off
+        toolsMenu.addItem(autopilotItem)
+        let focusItem = NSMenuItem(title: "Focus Mode", action: #selector(toggleFocus), keyEquivalent: "")
+        focusItem.state = focusEnabled ? .on : .off
+        toolsMenu.addItem(focusItem)
+        let toolsParent = NSMenuItem(title: "Tools", action: nil, keyEquivalent: "")
+        toolsParent.submenu = toolsMenu
+        menu.addItem(toolsParent)
+
+        let meshMenu = NSMenu(title: "Mesh")
+        let ambientRunning = runtime["ambient_running"] as? Bool ?? false
+        let ambientItem = NSMenuItem(title: ambientRunning ? "Stop Ambient" : "Start Ambient", action: #selector(toggleAmbient), keyEquivalent: "")
+        ambientItem.state = ambientRunning ? .on : .off
+        meshMenu.addItem(ambientItem)
+        meshMenu.addItem(NSMenuItem(title: "Set Workspace...", action: #selector(setWorkspacePrompt), keyEquivalent: ""))
+        meshMenu.addItem(NSMenuItem(title: "Open Workspace", action: #selector(openCurrentWorkspace), keyEquivalent: ""))
+        let p2pEnabled = runtime["p2p_enabled"] as? Bool ?? false
+        let p2pItem = NSMenuItem(title: "P2P Sync", action: #selector(toggleP2P), keyEquivalent: "")
+        p2pItem.state = p2pEnabled ? .on : .off
+        meshMenu.addItem(p2pItem)
+        let peers = runtime["p2p_peers"] as? [String] ?? []
+        let peersItem = NSMenuItem(title: "Peers: \(peers.count)", action: nil, keyEquivalent: "")
+        peersItem.isEnabled = false
+        meshMenu.addItem(peersItem)
+        let mcpSocket = runtime["mcp_socket"] as? String
+        let mcpTitle: String
+        if let socket = mcpSocket, !socket.isEmpty {
+            mcpTitle = "MCP: \(socket)".truncated(to: 60)
+        } else {
+            mcpTitle = "MCP: not connected"
+        }
+        let mcpItem = NSMenuItem(title: mcpTitle, action: nil, keyEquivalent: "")
+        mcpItem.isEnabled = false
+        mcpItem.toolTip = mcpSocket
+        meshMenu.addItem(mcpItem)
+        let meshParent = NSMenuItem(title: "Mesh", action: nil, keyEquivalent: "")
+        meshParent.submenu = meshMenu
+        menu.addItem(meshParent)
+
         let voiceMenu = NSMenu(title: "Voice")
+
+        let settingsItem = NSMenuItem(title: "Voice Settings…", action: #selector(showVoiceSettings), keyEquivalent: ",")
+        voiceMenu.addItem(settingsItem)
+        let helpItem = NSMenuItem(title: "Voice Help…", action: #selector(showVoiceHelp), keyEquivalent: "")
+        voiceMenu.addItem(helpItem)
+        let logItem = NSMenuItem(title: "Voice Log…", action: #selector(showVoiceLog), keyEquivalent: "")
+        voiceMenu.addItem(logItem)
+        voiceMenu.addItem(NSMenuItem.separator())
 
         let usePiper = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
         let engineToggle = NSMenuItem(title: "Use Piper TTS (experimental)", action: #selector(togglePiperTTS), keyEquivalent: "")
@@ -1965,7 +4322,161 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             menu.addItem(NSMenuItem(title: "Push Pursuit...", action: #selector(pushPursuit), keyEquivalent: "p"))
         }
         menu.addItem(NSMenuItem.separator())
+        let startAtLoginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: "")
+        startAtLoginItem.state = isStartAtLoginEnabled() ? .on : .off
+        menu.addItem(startAtLoginItem)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(terminate), keyEquivalent: "q"))
+        assignMenuTargets(menu)
+    }
+
+    private var launchAgentPlist: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.badapple.menubar.plist")
+    }
+
+    private func launchAgentPlistContents() -> String {
+        let appPath = Bundle.main.bundlePath
+        return """
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>com.badapple.menubar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>\(appPath)/Contents/MacOS/BadApple</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/badapple_menubar.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/badapple_menubar.log</string>
+</dict>
+</plist>
+"""
+    }
+
+    private func isStartAtLoginEnabled() -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: launchAgentPlist.path) else { return false }
+        let task = Process()
+        task.launchPath = "/bin/launchctl"
+        task.arguments = ["list", "com.badapple.menubar"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    @objc private func toggleStartAtLogin() {
+        let task = Process()
+        task.launchPath = "/bin/launchctl"
+
+        if isStartAtLoginEnabled() {
+            task.arguments = ["unload", "-w", launchAgentPlist.path]
+            do {
+                try task.run()
+                task.waitUntilExit()
+                try? FileManager.default.removeItem(at: launchAgentPlist)
+            } catch {
+                lastError = "Failed to disable start at login: \(error)"
+            }
+        } else {
+            let fm = FileManager.default
+            let agentsDir = launchAgentPlist.deletingLastPathComponent()
+            try? fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+            let contents = launchAgentPlistContents()
+            do {
+                try contents.write(to: launchAgentPlist, atomically: true, encoding: .utf8)
+                let load = Process()
+                load.launchPath = "/bin/launchctl"
+                load.arguments = ["load", "-w", launchAgentPlist.path]
+                try load.run()
+                load.waitUntilExit()
+            } catch {
+                lastError = "Failed to enable start at login: \(error)"
+            }
+        }
+        rebuildMenu()
+    }
+
+    @objc private func togglePrivateMode() {
+        let enabled = runtimeState["private_mode"] as? Bool ?? false
+        Task {
+            do {
+                _ = try await runBadAppleCLI(
+                    prompt: enabled ? "private mode off" : "private mode on",
+                    socketPath: BadAppleBrain.deepSocket,
+                    maxTokens: 32
+                )
+                await MainActor.run { self.rebuildMenu() }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.rebuildMenu()
+                }
+            }
+        }
+    }
+
+    @objc private func engageKillSwitch() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Stop Bad Apple?"
+        alert.informativeText = "This cancels generation, stops ambient capture, and blocks tools until you resume."
+        alert.addButton(withTitle: "Stop Everything")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "stop everything", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+            await MainActor.run {
+                self.voiceHost.stopAllAudio()
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    @objc private func resetKillSwitch() {
+        Task {
+            _ = try? await runBadAppleCLI(prompt: "resume bad apple", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+            await MainActor.run { self.rebuildMenu() }
+        }
+    }
+
+    @objc private func showSystemHealth() {
+        Task {
+            do {
+                let output = try await runBadAppleCLI(prompt: "runtime status", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+                await MainActor.run {
+                    let alert = NSAlert()
+                    alert.messageText = "Bad Apple System Health"
+                    alert.informativeText = output
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.rebuildMenu()
+                }
+            }
+        }
     }
 
     @objc private func toggleVoice() {
@@ -1995,6 +4506,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         rebuildMenu()
     }
 
+    @objc private func showVoiceHelp() {
+        voiceHelp.show()
+    }
+
+    @objc private func showVoiceLog() {
+        voiceLog.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showBriefing() {
+        briefingWindow.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showScreenActions() {
+        screenActionsWindow.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showImagePlayground() {
+        imagePlayground.makeKeyAndOrderFront(nil)
+    }
+
+    private func extractImagePath(from text: String) -> String? {
+        let pattern = "\\S+\\.(png|jpg|jpeg|webp)"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let swiftRange = Range(match.range, in: text) else { return nil }
+        let path = String(text[swiftRange])
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    private func latestGeneratedImage(since: TimeInterval) -> String? {
+        let dir = URL(fileURLWithPath: BadAppleBrain.generatedImagesDir)
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: []) else { return nil }
+        var best: (url: URL, mtime: TimeInterval)?
+        for url in files where url.pathExtension.lowercased() == "png" {
+            guard let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
+                  let mtime = vals.contentModificationDate?.timeIntervalSince1970,
+                  mtime >= since else { continue }
+            if best == nil || mtime > best!.mtime {
+                best = (url, mtime)
+            }
+        }
+        return best?.url.path
+    }
+
+    private func currentScreenContext() -> String {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return "No frontmost application." }
+        let appName = app.localizedName ?? "Unknown"
+        let pid = app.processIdentifier
+        let appElement = AXUIElementCreateApplication(pid)
+        var out: CFTypeRef?
+        var title = ""
+        let result = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &out)
+        if result == .success, let window = out {
+            var titleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &titleRef)
+            title = (titleRef as? String) ?? ""
+        }
+        let context = title.isEmpty ? "Application: \(appName)" : "Application: \(appName)\nWindow: \(title)"
+        return context
+    }
+
+    @objc private func runWritingToolService(_ pboard: NSPasteboard, instruction: String, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        guard let text = pboard.string(forType: .string), !text.isEmpty else {
+            error.pointee = "No text was selected." as NSString
+            return
+        }
+        let prompt = "\(instruction):\n\n\(text)"
+        guard let result = runServiceSync(prompt: prompt) else {
+            error.pointee = "Bad Apple did not return a response." as NSString
+            return
+        }
+        pboard.clearContents()
+        pboard.setString(result, forType: .string)
+    }
+
+    @objc private func rewriteWithBadApple(_ pboard: NSPasteboard, userData: String, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        runWritingToolService(pboard, instruction: "Rewrite the following text to be clearer and more natural", error: error)
+    }
+
+    @objc private func summarizeWithBadApple(_ pboard: NSPasteboard, userData: String, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        runWritingToolService(pboard, instruction: "Summarize the following text in one or two sentences", error: error)
+    }
+
+    @objc private func proofreadWithBadApple(_ pboard: NSPasteboard, userData: String, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        runWritingToolService(pboard, instruction: "Proofread the following text and return only the corrected version", error: error)
+    }
+
+    private func runServiceSync(prompt: String) -> String? {
+        var result: String?
+        let sem = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                result = try await runBadAppleCLI(prompt: prompt, socketPath: BadAppleBrain.deepSocket, maxTokens: 300)
+            } catch {
+                badAppleVoiceLog("service prompt error: \(error)")
+            }
+            sem.signal()
+        }
+        sem.wait()
+        return result
+    }
+
+    @objc private func showVoiceSettings() {
+        voiceSettings.makeKeyAndOrderFront(nil)
+    }
+
     @objc private func selectAccent(_ sender: NSMenuItem) {
         guard let accent = sender.representedObject as? String else { return }
         UserDefaults.standard.set(accent, forKey: "BadAppleTTSAccent")
@@ -2016,6 +4634,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             if !text.isEmpty { _ = BadAppleFFI.shared.pushPursuit(text) }
         }
         rebuildMenu()
+    }
+
+    // MARK: NSMenuDelegate
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === self.menu {
+            needsMenuRebuild = false
+            rebuildMenu()
+        }
+        openMenuCount += 1
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        openMenuCount = max(0, openMenuCount - 1)
+        if openMenuCount == 0, needsMenuRebuild {
+            rebuildMenu()
+        }
+    }
+
+    private func assignMenuTargets(_ menu: NSMenu) {
+        menu.delegate = self
+        for item in menu.items {
+            if item.action != nil && !item.isSeparatorItem {
+                item.target = self
+            }
+            if let submenu = item.submenu {
+                assignMenuTargets(submenu)
+            }
+        }
     }
 
     @objc private func terminate() { NSApp.terminate(nil) }

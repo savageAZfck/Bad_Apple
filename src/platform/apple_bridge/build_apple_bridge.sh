@@ -63,3 +63,16 @@ swiftc \
     -Xlinker "@rpath/libBadAppleBridge.dylib"
 
 echo "Built: ${BUILD_DIR}/libBadAppleBridge.dylib"
+
+swiftc \
+    -O \
+    -sdk "${SDK_PATH}" \
+    -o "${BUILD_DIR}/badapple-identity" \
+    "${REPO_ROOT}/src/platform/apple_bridge/BadAppleIdentity.swift" \
+    -framework CryptoKit \
+    -framework Foundation \
+    -framework LocalAuthentication \
+    -framework Security \
+    -target arm64-apple-macos26.0
+codesign --force --sign - "${BUILD_DIR}/badapple-identity"
+echo "Built: ${BUILD_DIR}/badapple-identity"

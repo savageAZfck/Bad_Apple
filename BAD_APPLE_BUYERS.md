@@ -2,24 +2,23 @@
 
 ## What it is
 
-Bad Apple is a private, on-device AI assistant for macOS. It runs Qwen 3.5 on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending prompts, responses, or actions to a cloud service after the initial model download.
+Bad Apple is a private, on-device AI assistant for macOS. It runs a Qwen 3.5 9B brain and a Qwen 2.5 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, and speaks responses through a local Piper TTS server — all without sending prompts, responses, or actions to a cloud service after the initial model download.
 
 ## The pitch
 
 - **Air-gapped by default**: no prompt, no action, no memory leaves your Mac.
-- **Single unified 9B brain**: text and voice both route through the same Qwen 3.5 9B 4-bit model; no more dual-model swap lag.
-- **Speculative decoding**: DFlash block-diffusion draft speeds up generation on Qwen 3.5's hybrid attention/GatedDeltaNet architecture.
-- **Local tooling**: search files, list directories, run AppleScript, open apps, get the time, all from the daemon.
+- **Two brains, one daemon**: the 0.5B fast tier handles instant greetings/time/math; the 9B brain handles reasoning.
+- **Local tooling**: search files, run AppleScript, run Shortcuts, get the time, write notes, index documents, git helpers, and more.
 - **Persistent memory + RAG**: remembers user facts and searches indexed local documents.
-- **Hot-reloadable persona**: edit `prompt.txt` without restarting the model.
+- **Hot-reloadable persona**: edit `prompt.txt` without restarting the 9B model.
 - **Authenticated socket**: SLICKS HMAC challenge/response over a Unix socket.
 
 ## Models loaded
 
-| Component | Model | Size (4-bit) | Role |
+| Component | Model | Size | Role |
 |---|---|---|---|
 | Target LLM | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | All text and voice reasoning |
-| DFlash draft | `z-lab/Qwen3.5-9B-DFlash` | ~2.4 GB | Speculative token blocks for the 9B target |
+| Fast tier | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Greetings, identity, time, simple math, deterministic queries |
 | Embeddings | `BAAI/bge-small-en-v1.5` | small | Local document / memory retrieval on CPU |
 | TTS voice | `en_US-amy-medium` (default) | small | Piper neural speech on a local socket |
 
@@ -27,41 +26,83 @@ All models are cached on disk after the first download. Nothing is re-downloaded
 
 ## Performance (live M-series Apple Silicon, 16 GB unified memory)
 
-### Text mode
+### 9B brain
 
-| Prompt tokens | First token | Tokens out | Decode tok/s | Draft acceptance | Peak memory |
-|---|---:|---:|---:|---:|---:|
-| ~460 | 3.1 s | 16 | 13.1 | 44% | 6.22 GB |
-| ~560 | 4.4 s | 35 | 15.8 | 63% | 6.29 GB |
-| ~580 | 5.4 s | 31 | 20.1 | 58% | 5.72 GB |
-| ~620 | 5.7 s | 49 | 25.7 | 82% | 6.37 GB |
-| ~730 | 6.6 s | 36 | 15.9 | 56% | 5.72 GB |
+| Prompt | Prompt tokens | First token | Tokens out | Decode tok/s | Peak memory |
+|---|---|---:|---:|---:|---:|
+| `Who are you?` | ~540 | 9.4 s | 31 | 16.5 | 5.84 GB |
+| `What is the capital of France?` | ~540 | 9.5 s | 25 | 15.9 | 5.85 GB |
+| `Tell me about Rome.` | ~540 | 7.6 s | 48 | 15.6 | 5.85 GB |
+| `What do you think of Siri?` | ~540 | 7.1 s | 41 | 15.6 | 5.85 GB |
+| `How does a car engine work?` | ~540 | 8.3 s | 41 | 15.6 | 5.85 GB |
 
-- Typical first-token latency: **~3.5–6.5 s** for 450–750 token prompts.
-- Typical decode throughput: **~13–25 tok/s**, with spikes to ~36 tok/s on high-acceptance turns.
-- System remains responsive: peak memory stays **~5.7–6.5 GB**, leaving ~78% of 16 GB free.
+- Typical first-token latency: **~7–9.5 s**.
+- Typical decode throughput: **~15.5–16.5 tok/s**.
+- Benchmark total wall time: **~49 s** for the 5-prompt suite.
+- Peak memory: **~5.8–5.9 GB**.
 
-### Voice mode
+### 0.5B fast tier
 
-| Prompt tokens | First token | Tokens out | Decode tok/s | Peak memory |
-|---|---:|---:|---:|---:|
-| ~430 | 2.8 s | 27 | 10.5 | 5.78 GB |
-| ~430 | 3.9 s | 51 | 13.8 | 5.79 GB |
-| ~460 | 3.1 s | 16 | 13.1 | 6.22 GB |
-| ~460 | 5.7 s | 73 | 8.7 | 5.77 GB |
+| Prompt | Prompt tokens | First token | Tokens out | Decode tok/s | Total tok/s | Peak memory |
+|---|---|---:|---:|---:|---:|---:|
+| `Who are you?` | 35 | 0.23 s | 47 | 235.2 | 108.6 | 0.33 GB |
+| `What is the capital of France?` | 38 | 0.19 s | 8 | 152.0 | 32.9 | 0.33 GB |
+| `Tell me about Rome.` | 36 | 0.18 s | 120 | 132.8 | 110.6 | 0.33 GB |
+| `What do you think of Siri?` | 38 | 0.66 s | 94 | 90.6 | 55.6 | 0.33 GB |
+| `How does a car engine work?` | 38 | 0.47 s | 120 | 120.9 | 81.9 | 0.33 GB |
 
-- Voice first-token latency: **~2.8–5.7 s** for the shorter 430–460 token voice prefill.
-- Voice decode: **~9–15 tok/s**.
-- No separate voice model is loaded anymore, so switching from text to voice is now a prompt change, not a model swap.
+- Typical first-token latency: **~0.2–0.7 s**.
+- Typical decode throughput: **~90–235 tok/s**.
+- Peak memory: **~0.33 GB**.
 
-## What changed from the dual-brain setup
+## What Bad Apple can do
 
-The previous build loaded a 9B model for text and a separate 4B model for voice. Switching modes caused a multi-second reload that could hit **16–25 s** and peak at ~10 GB. The current architecture:
+When asked, it should say:
 
-- Keeps one 9B target + one 9B DFlash draft in memory.
-- Eliminates the mode-switching stall.
-- Uses ~4 GB less peak memory.
-- Cuts the worst-case first-token delay after a switch to roughly the prefill time of the new prompt.
+> I can answer questions, run local tools, search files, write notes, run shell/AppleScript/Shortcuts, index documents, manage working memory, switch personas, speak, stream JSON, and run benchmarks — all on your Mac, babe.
+
+### Core capabilities
+
+- Answer questions, explain concepts, summarize text, brainstorm, write short notes
+- Roast cloud AI / Siri / Alexa / Google / ChatGPT / Gemini / etc. when asked about bare metal or identity
+- Switch persona at runtime: `switch to wicket`, `switch to drill`, `switch to genz`, `switch to midwest`, `switch to default`
+- `switch to roast` or `--roast` for drill persona
+- `teach <line>` to store a custom quip
+- `--speak` / voice mode to stream responses through local Piper TTS
+- `--benchmark` to run the prompt suite
+- `--json` to stream tokens as JSON
+- Multi-turn conversation with local JSONL history
+- Persistent user memory and RAG over indexed local documents
+- Hot-reloadable system prompt via `prompt.txt`
+
+### Local tools (no cloud)
+
+- `get_current_time` — local system time
+- `list_directory` — list files in a path
+- `read_file` — read a file with size limit
+- `write_file` — write a note to `~/.bad_apple/notes/`
+- `search_content` — `grep -R` over a directory
+- `search_local_files` — Spotlight search via `mdfind`
+- `run_shell` — sandboxed shell (read-only by default: `ls`, `cat`, `head`, `tail`, `find`, `grep`, `wc`, `file`, `pwd`, `mdfind`, `ps`, `df`, `du`)
+- `run_applescript` — execute AppleScript
+- `run_shortcut` — run a macOS Shortcuts shortcut
+- `index_documents` — index a directory into the local RAG store
+- `git_status`, `git_diff`, `git_log`, `git_commit` — local git helpers
+- `read_working_memory`, `write_working_memory`, `clear_working_memory` — scratchpad at `/var/lib/bad_apple/working_memory.txt`
+
+### Menu bar app
+
+`Bad Apple.app` lives in the macOS status bar. Right-click the apple icon for:
+
+- **New Chat** — clears conversation history
+- **Chat History** — opens the transcript window
+- **Voice Listening** — toggle always-on voice wake
+- **Roast Mode** — alias for the `drill` persona on the next voice query
+- **Persona** — switch between Default, Wicket, Gen Z, Drill, and Midwest Aunt
+- **Fast Tier Only** — toggle the 0.5B fast tier
+- **Benchmark** — runs the default prompt suite and shows results
+- **Voice (Piper / Apple)** and **Accent** — TTS engine and voice selection
+- **Quit**
 
 ## Privacy & security
 
@@ -70,47 +111,5 @@ The previous build loaded a 9B model for text and a separate 4B model for voice.
 - Conversation history and user memory are stored locally, not synced.
 - Client-to-daemon traffic is over a Unix socket with SLICKS HMAC challenge/response.
 - The launchd daemon runs as root and auto-restarts.
-
-## Features
-
-| Feature | Description |
-|---|---|
-| Local Qwen 3.5 inference | 9B 4-bit on Apple Silicon GPU via MLX |
-| Single-brain routing | same 9B for text and speech, no dual load |
-| DFlash speculative decode | block-diffusion draft for faster generation |
-| Streaming output | sentence chunks to terminal or TTS |
-| Multi-turn history | saved locally |
-| User memory | records and recalls facts |
-| Local RAG | indexes text files with `bge-small-en-v1.5` |
-| Tools | time, directory list, AppleScript, Spotlight search |
-| Hot-reload persona | `prompt.txt` edits take effect on the next query |
-| Voice | `badapple --speak` or `__BADAPPLE_VOICE__` mode |
-
-## Use it like this
-
-```bash
-# text
-badapple "What is 2+2?"
-
-# voice (played via local Piper + afplay)
-badapple --speak "What do you think of Siri?"
-```
-
-## Caveats
-
-- **DFlash is deterministic for the same prompt**: identical questions get identical answers. Variance comes from different phrasing or a different seed/temperature, not from the draft path itself.
-- **Roasts are part of the persona**: the model will needle cloud AI/Siri when bragging about bare metal. This can be tuned in `prompt.txt`.
-- **Throughput is workload-dependent**: DFlash acceptance swings from ~45% to ~80%, so tok/s swings with it. Sustained 22–33 tok/s is possible on high-acceptance turns but not guaranteed for every prompt on this hardware.
-- **First token includes prefill**: long prompts or large knowledge chunks push the first token toward the 5–7 s range.
-- **TTS and Piper server must be running separately** for `--speak` to produce audio.
-
-## System requirements
-
-- macOS on Apple Silicon (M1/M2/M3/M4)
-- ~6–7 GB of free unified memory at runtime (9B + DFlash loaded)
-- ~20 GB of disk for the full model cache
-- Initial model downloads require internet; everything after that is local
-
-## Why buy / why build on this
-
-If you want a macOS assistant that is actually yours — no subscriptions, no phone-home, no cloud snitching — and you can tolerate a few seconds of first-token latency, Bad Apple is the local-girl-in-the-machine option. The single 9B brain keeps memory and switching sane, the DFlash draft keeps decode above plain mlx-lm speeds, and the whole thing stays on your bare metal.
+- Output firewall blocks PII, secrets, and custom patterns.
+- Hash-chained audit ledger with redaction at `/var/lib/bad_apple/ledger.jsonl`.

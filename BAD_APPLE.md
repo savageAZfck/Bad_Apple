@@ -11,7 +11,8 @@ The runtime now uses a single Qwen 3.5 9B 4-bit brain for both text and voice. T
 | Component | Model | Size | Role |
 |---|---|---|---|
 | Target LLM | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | All text and voice reasoning |
-| DFlash draft | `z-lab/Qwen3.5-9B-DFlash` | ~2.4 GB | Speculative token blocks for the 9B target |
+| Fast tier / tiny brain | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Instant answers for greetings, identity, time, simple math, and deterministic queries |
+| DFlash draft | `z-lab/Qwen3.5-9B-DFlash` | ~2.4 GB | Installed but currently disabled because it does not reliably beat plain `mlx-lm` |
 | RAG embeddings | `BAAI/bge-small-en-v1.5` | small | Local sentence-transformer on CPU |
 | TTS voice | `en_US-amy-medium` (default) | small | Piper neural TTS server (`badapple_tts_server.py`) |
 
@@ -23,51 +24,68 @@ All models are downloaded and cached on the Mac. At runtime, **no prompt, respon
 
 Live numbers from the daemon log on a 16 GB Apple Silicon M-series Mac with the single 9B brain loaded.
 
-### Text mode
+### Text mode (9B)
 
-| Prompt | Tokens in | First token | Tokens out | Decode t/s | Draft acceptance | Peak memory |
+| Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
+|---|---|---:|---:|---:|---:|
+| `Who are you?` | ~540 | 9.4 s | 31 | 16.5 | 5.84 GB |
+| `What is the capital of France?` | ~540 | 9.5 s | 25 | 15.9 | 5.85 GB |
+| `Tell me about Rome.` | ~540 | 7.6 s | 48 | 15.6 | 5.85 GB |
+| `What do you think of Siri?` | ~540 | 7.1 s | 41 | 15.6 | 5.85 GB |
+| `How does a car engine work?` | ~540 | 8.3 s | 41 | 15.6 | 5.85 GB |
+
+- Typical first-token latency: **~7–9.5 s** for ~540 token prompts.
+- Typical decode throughput: **~15.5–16.5 tok/s**.
+- Benchmark total wall time for the 5-prompt suite: **~49 s** on the M3 Max test Mac.
+- Peak memory stays **~5.8–5.9 GB**.
+- The `total` column in the benchmark is **end-to-end tok/s including TTFT**, not the raw decode rate; look at the `decode` column for the model's actual token generation speed.
+
+### Fast tier (0.5B)
+
+When `BADAPPLE_FAST_TIER=1`, simple queries route through `mlx-community/Qwen2.5-0.5B-Instruct-4bit`.
+
+| Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Total t/s | Peak memory |
 |---|---|---:|---:|---:|---:|---:|
-| `Who are you?` | ~620 | 5.7 s | 49 | 25.7 | 82% | 6.37 GB |
-| `What is 2+2?` | ~580 | 5.4 s | 31 | 20.1 | 58% | 5.72 GB |
-| `What is 7+7?` | ~700 | 5.4 s | 31 | 20.1 | 58% | 5.72 GB |
-| `What is 8+8?` | ~650 | 4.4 s | 40 | 18.4 | 50% | 6.42 GB |
-| `What is the capital of Germany?` | ~560 | 4.4 s | 35 | 15.8 | 63% | 6.29 GB |
-| `Tell me about Rome.` | ~460 | 3.9 s | 51 | 13.8 | 55% | 5.79 GB |
+| `Who are you?` | 35 | 0.23 s | 47 | 235.2 | 108.6 | 0.33 GB |
+| `What is the capital of France?` | 38 | 0.19 s | 8 | 152.0 | 32.9 | 0.33 GB |
+| `Tell me about Rome.` | 36 | 0.18 s | 120 | 132.8 | 110.6 | 0.33 GB |
+| `What do you think of Siri?` | 38 | 0.66 s | 94 | 90.6 | 55.6 | 0.33 GB |
+| `How does a car engine work?` | 38 | 0.47 s | 120 | 120.9 | 81.9 | 0.33 GB |
 
-- Typical first-token latency: **~3.5–6.5 s** for 450–750 token prompts.
-- Typical decode throughput: **~13–25 tok/s**, with spikes to ~36 tok/s on high-acceptance turns.
-- Peak memory stays **~5.7–6.5 GB**, leaving the rest of 16 GB free.
+- Typical first-token latency: **~0.2–0.7 s**.
+- Typical decode throughput: **~90–235 tok/s**.
+- Peak memory: **~0.33 GB**.
+
+Fast tier handles greetings, identity, time, simple math, and other deterministic/patterned queries. Non-trivial reasoning falls through to the 9B brain.
 
 ### Voice mode
 
-| Prompt | Tokens in | First token | Tokens out | Decode t/s | Peak memory |
-|---|---|---:|---:|---:|---:|
-| `What is the capital of Spain?` | ~430 | 2.8 s | 27 | 10.5 | 5.78 GB |
-| `Tell me about Rome.` | ~430 | 3.9 s | 51 | 13.8 | 5.79 GB |
-| `Who are you?` | ~460 | 3.1 s | 16 | 13.1 | 6.22 GB |
+Voice uses the 9B brain by default. When fast tier is on, short voice greetings and commands can also hit the 0.5B model.
 
-- Voice first-token latency: **~2.8–5.7 s** for 430–460 token voice prompts.
-- Voice decode: **~9–15 tok/s**.
-- No separate voice model is loaded, so switching from text to voice is now a prompt change, not a model swap.
+### Inference tuning
 
-### Speculative decoding
-
-DFlash uses a block-diffusion draft model to propose tokens in parallel and the target model to verify them in a single forward pass. This works better with Qwen 3.5's hybrid attention/GatedDeltaNet architecture than the native `mlx-lm` `draft_model` path.
-
-- `BADAPPLE_DFLASH=1`
-- `BADAPPLE_DFLASH_VERIFY_LEN_CAP=6`
-- `BADAPPLE_DFLASH_BLOCK_TOKENS=6`
-- `BADAPPLE_DFLASH_QUANTIZE_KV=1`
+- `BADAPPLE_DFLASH=0` — DFlash is off. The repo log contains one outlier DFlash run at ~48 decode tok/s, but the same config is not reliable, so plain `mlx-lm` is used.
+- `BADAPPLE_FAST_TIER=1` — the 0.5B fast model is enabled for appropriate queries.
+- `prefill_step_size=4096` and `max_kv_size=4096` keep prompt encoding in a single shot and bound KV-cache growth.
+- `prompt.txt` is hot-reloaded and kept compact; the 9B chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
 
 ---
+
+## What Bad Apple can do
+
+Bad Apple is a private, on-device AI assistant for macOS. It runs the Qwen 3.5 9B brain and a 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes files, and speaks responses through a local Piper TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
+
+When asked, it can say:
+
+> I can answer questions, run local tools, search files, write notes, run shell/AppleScript/Shortcuts, index documents, manage working memory, switch personas, speak, stream JSON, and run benchmarks — all on your Mac, babe.
 
 ## Features
 
 ### Core
 
-- **Local Qwen 3.5 inference** on Apple Silicon GPU (MLX)
+- **Local Qwen 3.5 9B inference** on Apple Silicon GPU (MLX)
+- **0.5B fast tier** for instant greetings, identity, time, simple math, and deterministic queries
 - **Single 9B brain** for both text and voice, no dual-model swap
-- **DFlash speculative decoding** for faster generation
 - **Streaming token output** to terminal or TTS
 - **SLICKS authenticated Unix socket** (HMAC-SHA256 challenge-response)
 - **launchd-managed daemon** (`com.badapple.mlx`) that runs as root and auto-restarts
@@ -95,9 +113,32 @@ The server can run these directly, either through a fast deterministic parser or
 - `write_file` — write a note to `~/.bad_apple/notes/`
 - `search_content` — `grep -R` over a directory
 - `search_local_files` — Spotlight search via `mdfind`
-- `run_shell` — run a sandboxed shell command
+- `run_shell` — run a sandboxed shell command (read-only by default; `ls`, `cat`, `head`, `tail`, `find`, `grep`, `wc`, `file`, `pwd`, `mdfind`, `ps`, `df`, `du)
 - `run_applescript` — execute AppleScript on macOS
+- `run_shortcut` — run a macOS Shortcuts shortcut
 - `index_documents` — index a directory into the local RAG store
+- `git_status`, `git_diff`, `git_log`, `git_commit` — local git helpers
+- `read_working_memory`, `write_working_memory`, `clear_working_memory` — scratchpad at `/var/lib/bad_apple/working_memory.txt`
+
+### Feature roadmap status
+
+The current build covers the following roadmap phases:
+
+- **Phase 1 — Vision / screen understanding** ✅: `capture_and_describe_screen`, `screen_capture`, `describe_image`, and `extract_text_from_image` use the local `mlx-vlm` Qwen2-VL-2B model. Screen capture is now routed straight to the VLM, avoiding a full 9B tool-call generation.
+- **Phase 2 — Persistent workspace mode** ✅: `workspace_status` reports build system, git branch, last commit, README summary, and recent files. The active workspace is set via `set workspace to <path>`.
+- **Phase 3 — Local email / calendar / reminders** ✅: `today_events`, `upcoming_events`, `list_reminders`, `add_reminder`, `unread_emails`, and `search_mail` talk to the local macOS Calendar, Reminders, and Mail apps via AppleScript.
+- **Phase 4 — Working memory dashboard** ✅: read/write/clear working memory directly with natural-language commands.
+- **Phase 5 — Plugin / signed tool registry** ✅: `PluginRegistry` in `badapple_plugins.py` loads signed plugin manifests and exposes their tools as first-class `run_tool`/`_run_approved_tool` actions.
+- **Phase 6 — Long-horizon episodic memory graph** ✅: `MemoryGraph` stores facts, entities, relations, episodes, and workflows, and recalls them via semantic search.
+- **Phase 7 — MCP server expansion** ✅: `badapple_mcp_server.py` exposes a Unix-socket MCP transport at `/var/run/badapple/mcp.sock` for external tool clients.
+- **Phase 8 — Encrypted P2P sync** 🔄: `badapple_p2p.py` is implemented but left off by default for the air-gap `cert_suite`; enable with `BADAPPLE_P2P=1`.
+- **Phase 9 — Local image generation** ✅: `generate_image` uses the cached local `mflux` FLUX.2-klein-4B model.
+- **Phase 10 — Streaming first-token preview** ✅: token streaming is live via `--json` and the `stream_queue` in `generate_with_tools`.
+- **Phase 11 — Personal on-device LoRA fine-tuning** ✅: `lora_add_example`, `lora_train`, `lora_adapters`, and `lora_generate` use `mlx-lm` on local datasets.
+- **Phase 12 — Dream / offline consolidation** ✅: `consolidate_memory` runs a memory-graph deduplication and re-embedding pass.
+- **Phase 13 — Policy language for the cage** ✅: `Policy` in `badapple_extras.py` declares which tools are allowed, require approval, and how arguments are validated; loaded from `policy.yaml`.
+- **Phase 14 — Adversarial output classifier** ✅: `StreamingFirewall` blocks PII, secrets, and custom blocklist patterns in generated output with a streaming Aho-Corasick automaton.
+- **Phase 15 — Self-hosting model registry** 🔄: the active model is controlled by `BADAPPLE_MAIN_MODEL`; a pluggable local registry is the next remaining step.
 
 ### Menu bar app
 
