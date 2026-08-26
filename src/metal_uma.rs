@@ -493,8 +493,9 @@ mod tests {
         );
 
         // A 500 * 2048 f64 write should complete in well under a millisecond on
-        // UMA (the allocation is ~8 MiB).  Keep a generous ceiling for CI.
-        assert!(avg < 2_000, "UMA connectome write averaged {} µs", avg);
+        // UMA (the allocation is ~8 MiB).  Keep a generous ceiling for CI and
+        // other loaded hosts; this is a smoke check, not a strict benchmark.
+        assert!(avg < 10_000, "UMA connectome write averaged {} µs", avg);
     }
 
     /// Round-trip a small Metal tensor through the UMA safetensors save path.

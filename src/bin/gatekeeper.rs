@@ -80,7 +80,7 @@ impl SemanticRouter {
                 reply: tx,
             })
             .context("brain worker thread is dead")?;
-        Ok(rx.recv().context("brain worker did not respond")?)
+        rx.recv().context("brain worker did not respond")
     }
 }
 
@@ -438,8 +438,7 @@ fn execute_wasm_blocks(text: &str) -> String {
 /// Combine cage and wasm post-processing.
 fn post_process_response(text: &str, cage: &AutomationCage) -> String {
     let text = execute_cage_blocks(text, cage);
-    let text = execute_wasm_blocks(&text);
-    text
+    execute_wasm_blocks(&text)
 }
 
 /// Forward an execute request to the Python MLX server and stream back responses.

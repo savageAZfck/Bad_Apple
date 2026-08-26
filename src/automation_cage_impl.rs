@@ -308,10 +308,11 @@ impl AutomationCage {
 }
 
 fn home_directory() -> Result<PathBuf> {
-    env::var_os("HOME")
+    let raw = env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("HOME is not set"))
+        .ok_or_else(|| anyhow!("HOME is not set"))?;
+    fs::canonicalize(&raw).context("cannot canonicalize HOME")
 }
 
 fn default_roots(home: &Path) -> Result<Vec<PathBuf>> {
@@ -499,11 +500,12 @@ fn substitute_path_placeholders(path: &Path, home: &Path) -> Result<PathBuf> {
         if let Some(tail) = s.strip_prefix("~/") {
             return Ok(home.join(tail));
         }
-        // Replace /Users/<placeholder>/... with the real home directory.
-        if let Some(rest) = s.strip_prefix("/Users/") {
-            if let Some(slash) = rest.find('/') {
-                let after = &rest[slash + 1..];
-                return Ok(home.join(after));
+        // Only redirect /Users/<current>/... to the actual home directory so a
+        // hallucinated or different user cannot be silently rewritten to HOME.
+        if let Some(user) = home.file_name().and_then(|n| n.to_str()) {
+            let prefix = format!("/Users/{user}/");
+            if let Some(tail) = s.strip_prefix(&prefix) {
+                return Ok(home.join(tail));
             }
         }
     }

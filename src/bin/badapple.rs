@@ -121,9 +121,9 @@ fn main() -> Result<()> {
         );
         stdout.write_all(line.as_bytes())?;
     } else if let Some(suffix) = final_text.strip_prefix(&emitted) {
-        if tts.is_some() {
+        if let Some(tts) = tts.as_ref() {
             if !suffix.trim().is_empty() {
-                tts.as_ref().unwrap().push(suffix);
+                tts.push(suffix);
             }
         } else {
             stdout.write_all(suffix.as_bytes())?;
