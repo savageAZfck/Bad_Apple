@@ -16,6 +16,7 @@ fn main() -> Result<()> {
     let mut voice_mode = std::env::var("BADAPPLE_VOICE").is_ok() || speak_stream;
     let mut persona: Option<String> = None;
     let mut roast_mode = false;
+    let mut doctor_mode = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -35,6 +36,9 @@ fn main() -> Result<()> {
             }
             "--roast" => {
                 roast_mode = true;
+            }
+            "--doctor" => {
+                doctor_mode = true;
             }
             "--persona" => {
                 persona = Some(args.next().context("--persona requires a value")?);
@@ -56,6 +60,10 @@ fn main() -> Result<()> {
 
     if roast_mode && persona.is_none() {
         persona = Some("drill".to_string());
+    }
+
+    if doctor_mode {
+        return run_doctor();
     }
 
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
@@ -301,11 +309,210 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// Run a local support diagnostic and print a redacted report.
+fn run_doctor() -> Result<()> {
+    use std::fmt::Write;
+    use std::process::Command;
+
+    let mut report = String::new();
+    let _ = writeln!(report, "=== Bad Apple Doctor ===");
+
+    // Host
+    let _ = writeln!(report, "\n[host]");
+    if let Ok(out) = Command::new("sw_vers").output() {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if let Ok(out) = Command::new("uname").args(["-m"]).output() {
+        let _ = writeln!(
+            report,
+            "arch: {}",
+            String::from_utf8_lossy(&out.stdout).trim()
+        );
+    }
+
+    // Python / venv
+    let _ = writeln!(report, "\n[python]");
+    if let Ok(out) = Command::new("python3").args(["--version"]).output() {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout).trim());
+    }
+    let venv: std::path::PathBuf = std::env::var("VIRTUAL_ENV")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::current_exe().ok().map(|mut p| {
+                // bad_apple/target/release/badapple -> bad_apple
+                for _ in 0..3 {
+                    p.pop();
+                }
+                p.join(".venv")
+            })
+        })
+        .unwrap_or_default();
+    let _ = writeln!(report, "venv: {}", venv.display());
+    let _ = writeln!(
+        report,
+        "venv python ok: {}",
+        venv.join("bin/python").is_file()
+    );
+
+    // Binaries
+    let _ = writeln!(report, "\n[binaries]");
+    let bin_dirs: Vec<std::path::PathBuf> = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .into_iter()
+        .chain(std::iter::once(std::path::PathBuf::from("/usr/local/bin")))
+        .collect();
+    for bin in ["badapple", "gatekeeper", "badapple-identity"] {
+        let mut found = None;
+        if let Ok(p) = Command::new("which").arg(bin).output() {
+            let path = String::from_utf8_lossy(&p.stdout).trim().to_string();
+            if !path.is_empty() {
+                found = Some(path);
+            }
+        }
+        if found.is_none() {
+            for dir in &bin_dirs {
+                let candidate = dir.join(bin);
+                if candidate.is_file() {
+                    found = Some(candidate.display().to_string());
+                    break;
+                }
+            }
+        }
+        let _ = writeln!(
+            report,
+            "{}: {}",
+            bin,
+            found.unwrap_or_else(|| "not found".to_string())
+        );
+    }
+
+    // Bad Apple.app
+    let _ = writeln!(report, "\n[Bad Apple.app]");
+    let app = std::path::PathBuf::from("/Applications/Bad Apple.app");
+    let _ = writeln!(report, "installed: {}", app.is_dir());
+    let info = app.join("Contents/Info.plist");
+    if info.is_file() {
+        if let Ok(out) = Command::new("defaults")
+            .args([
+                "read",
+                "/Applications/Bad Apple.app/Contents/Info",
+                "CFBundleShortVersionString",
+            ])
+            .output()
+        {
+            let _ = writeln!(
+                report,
+                "version: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            );
+        }
+    }
+
+    // launchd jobs
+    let _ = writeln!(report, "\n[launchd]");
+    for label in [
+        "com.badapple.mlx",
+        "com.badapple.gatekeeper",
+        "com.badapple.supervisor",
+        "com.badapple.tts",
+        "com.badapple.menubar",
+    ] {
+        if let Ok(out) = Command::new("launchctl").args(["list", label]).output() {
+            let _ = writeln!(
+                report,
+                "{}: {}",
+                label,
+                String::from_utf8_lossy(&out.stdout).trim()
+            );
+        }
+    }
+
+    // Sockets
+    let _ = writeln!(report, "\n[sockets]");
+    for sock in [
+        "/var/run/badapple/substrate_mlx.sock",
+        "/var/run/badapple/mcp.sock",
+        "/var/run/badapple/aqua_helper.sock",
+        "/tmp/badapple_tts.sock",
+    ] {
+        let p = std::path::PathBuf::from(sock);
+        let _ = writeln!(
+            report,
+            "{}: {}",
+            sock,
+            if p.is_file() { "present" } else { "missing" }
+        );
+    }
+
+    // Data / logs
+    let _ = writeln!(report, "\n[data]");
+    let data = std::path::PathBuf::from("/var/lib/bad_apple");
+    let _ = writeln!(report, "/var/lib/bad_apple: {}", data.is_dir());
+    if let Ok(home) = std::env::var("HOME") {
+        let _ = writeln!(
+            report,
+            "~/.bad_apple: {}",
+            std::path::PathBuf::from(&home).join(".bad_apple").is_dir()
+        );
+    }
+    for log in [
+        "/var/log/bad_apple_mlx_server.log",
+        "/var/log/bad_apple_supervisor.log",
+    ] {
+        let p = std::path::PathBuf::from(log);
+        let _ = writeln!(
+            report,
+            "{}: {}",
+            log,
+            if p.is_file() { "present" } else { "missing" }
+        );
+    }
+
+    // Model cache
+    let _ = writeln!(report, "\n[model cache]");
+    if let Ok(home) = std::env::var("HOME") {
+        let hub = std::path::PathBuf::from(&home)
+            .join(".cache")
+            .join("huggingface")
+            .join("hub");
+        if hub.is_dir() {
+            let mut found = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&hub) {
+                for e in entries.flatten() {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    if n.starts_with("models--") {
+                        found.push(n);
+                    }
+                }
+            }
+            let _ = writeln!(report, "cached models: {}", found.len());
+            for m in found.iter().take(8) {
+                let _ = writeln!(report, "  - {}", m);
+            }
+        } else {
+            let _ = writeln!(report, "huggingface hub: missing");
+        }
+    }
+
+    // Memory
+    let _ = writeln!(report, "\n[memory]");
+    if let Ok(out) = Command::new("memory_pressure").output() {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
+    } else if let Ok(out) = Command::new("vm_stat").output() {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
+    }
+
+    println!("{}", report);
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
          Usage:\n  badapple [OPTIONS] \"query\"\n\n\
-         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
+         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)"
     );
 }

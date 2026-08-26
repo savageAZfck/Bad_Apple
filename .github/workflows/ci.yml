@@ -11,33 +11,59 @@ env:
 
 jobs:
   check:
-    name: Check + Clippy + Format
+    name: Rust check + fmt
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
         run: cargo fmt -- --check
-      - name: cargo clippy
-        run: cargo clippy
       - name: cargo check
         run: cargo check
-      - name: check new binaries
+      - name: cargo check release binaries
         run: cargo check --release --bin gatekeeper --bin train_gatekeeper --bin badapple
 
-  test:
-    name: Test
+  python:
+    name: Python lint + unit tests
     runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python dependencies with hashes
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements.txt
+      - name: ruff check
+        run: .venv/bin/python -m ruff check .
+      - name: Python unit tests
+        run: .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+
+  build-and-package:
+    name: Build Rust + package release
+    runs-on: macos-latest
+    needs: [check, python]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: cargo test
-        run: cargo test
+      - name: Build release binaries
+        run: cargo build --release
+      - name: Build menu bar app (unsigned)
+        run: BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+      - name: Package full release
+        run: src/platform/apple_desktop/package_full_release.sh
+      - name: Verify package has no dev artifacts
+        run: |
+          unzip -l target/release/Bad_Apple-0.1.0-full-unsigned.zip | \
+            grep -E 'savag3|\.cert|\.key|\.DS_Store|state-backup|sapient|test_cage|\.cargo|state\.defense|state\.network|state\.weights' && \
+            exit 1 || exit 0

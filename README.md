@@ -190,6 +190,21 @@ osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridg
 
 This installs and runs the platform without Apple notarization or a Developer ID. The `--unsigned-install` flag removes the Gatekeeper quarantine flag automatically.
 
+### Signed and notarized release
+
+If you have an Apple Developer ID Application certificate and notarization credentials, build a signed, notarized consumer zip:
+
+```bash
+export CODESIGN_ID="Developer ID Application: Your Name (TEAMID)"
+export APPLE_ID="you@example.com"
+export APPLE_TEAM_ID="TEAMID"
+export APPLE_APP_PASSWORD="abcd-1234-abcd-1234"
+
+src/platform/apple_desktop/package_signed_release.sh
+```
+
+This produces `target/release/Bad_Apple-<version>-full-signed.zip`. See `SIGNING.md` for details.
+
 ### Tests
 
 ```bash

@@ -52,7 +52,7 @@ ensure_venv() {
     echo "Creating Python venv at ${REPO_ROOT}/.venv..."
     python3 -m venv "${REPO_ROOT}/.venv"
     "${REPO_ROOT}/.venv/bin/pip" install -q --upgrade pip
-    "${REPO_ROOT}/.venv/bin/pip" install -r "${req}"
+    "${REPO_ROOT}/.venv/bin/pip" install --require-hashes -r "${req}"
 }
 
 render_plist() {

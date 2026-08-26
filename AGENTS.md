@@ -356,3 +356,24 @@ In `badapple_mlx_server.py`:
   src/platform/apple_desktop/package_full_release.sh
   ```
   Produces `target/release/Bad_Apple-<version>-full-unsigned.zip`.
+- Hash-locked Python dependencies:
+  ```bash
+  .venv/bin/python -m uv pip compile --generate-hashes -o requirements.txt requirements.in
+  .venv/bin/pip install --require-hashes -r requirements.txt
+  ```
+  `requirements.txt` is now a hash-locked artifact; `install_badapple_platform.sh` installs with `--require-hashes`.
+- Support diagnostics:
+  ```bash
+  target/release/badapple --doctor
+  ```
+  Prints a redacted report of host, binaries, sockets, launchd jobs, and model cache.
+- Signed / notarized release:
+  ```bash
+  CODESIGN_ID="Developer ID Application: ..." \
+  APPLE_ID="..." \
+  APPLE_TEAM_ID="..." \
+  APPLE_APP_PASSWORD="..." \
+  src/platform/apple_desktop/package_signed_release.sh
+  ```
+  See `SIGNING.md` for the full code-signing and notarization path.
+- CI: `.github/workflows/ci.yml` runs `cargo fmt`, `cargo build`, `ruff`, Python unit tests, and the full release package on every push/PR.

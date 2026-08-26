@@ -9,6 +9,13 @@ VERSION="$(cd "${REPO_ROOT}" && grep '^version' Cargo.toml | head -n1 | sed -e '
 PKG_DIR="${REPO_ROOT}/target/release/Bad_Apple-${VERSION}-full"
 ZIP_PATH="${REPO_ROOT}/target/release/Bad_Apple-${VERSION}-full-unsigned.zip"
 
+echo "Building release binaries..."
+cd "${REPO_ROOT}"
+cargo build --release
+
+echo "Building Bad Apple.app..."
+BADAPPLE_NO_SIGN=1 "${REPO_ROOT}/src/platform/apple_desktop/build_bad_apple_menu_bar.sh"
+
 rm -rf "${PKG_DIR}"
 mkdir -p "${PKG_DIR}/bad_apple"
 
@@ -27,11 +34,12 @@ rsync -a \
   --exclude='test_cage' --exclude='wild_workspace' --exclude='*.defense' --exclude='*.network' --exclude='*.weights' \
   --exclude='src/platform/apple_bridge/install_daemon.sh' --exclude='src/platform/apple_bridge/com.badapple.substrate*' \
   --exclude='src/platform/apple_desktop/.build' --exclude='src/platform/apple_desktop/.swiftpm' \
+  --exclude='requirements.in' \
   "${REPO_ROOT}/" "${PKG_DIR}/bad_apple/"
 
 # Copy only the release binaries we need for the platform.
 install -d "${PKG_DIR}/bad_apple/target/release"
-for bin in badapple badappled badapple_automation gatekeeper badapple-identity; do
+for bin in badapple gatekeeper badapple-identity; do
     if [[ -x "${REPO_ROOT}/target/release/${bin}" ]]; then
         install -m 755 "${REPO_ROOT}/target/release/${bin}" "${PKG_DIR}/bad_apple/target/release/${bin}"
     fi
