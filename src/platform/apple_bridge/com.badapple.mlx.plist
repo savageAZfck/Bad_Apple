@@ -6,8 +6,8 @@
     <string>com.badapple.mlx</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/savag3/bad_apple/.venv/bin/python</string>
-        <string>/Users/savag3/bad_apple/badapple_mlx_server.py</string>
+        <string>__BADAPPLE_ROOT__/.venv/bin/python</string>
+        <string>__BADAPPLE_ROOT__/badapple_mlx_server.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -18,11 +18,11 @@
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>WorkingDirectory</key>
-    <string>/Users/savag3/bad_apple</string>
+    <string>__BADAPPLE_ROOT__</string>
     <key>UserName</key>
-    <string>savag3</string>
+    <string>__CONSOLE_USER__</string>
     <key>GroupName</key>
-    <string>staff</string>
+    <string>__CONSOLE_GROUP__</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>BADAPPLE_SLICKS_KEY_PATH</key>
@@ -43,16 +43,20 @@
         <string>6</string>
         <key>BADAPPLE_DFLASH_QUANTIZE_KV</key>
         <string>1</string>
+        <key>BADAPPLE_MAX_KV_SIZE</key>
+        <string>4096</string>
+        <key>BADAPPLE_PREFILL_STEP_SIZE</key>
+        <string>4096</string>
         <key>BADAPPLE_PROMPT_FILE</key>
-        <string>/Users/savag3/bad_apple/prompt.txt</string>
+        <string>__BADAPPLE_ROOT__/prompt.txt</string>
         <key>BADAPPLE_NOTES_DIR</key>
-        <string>/Users/savag3/.bad_apple/notes</string>
+        <string>__CONSOLE_HOME__/.bad_apple/notes</string>
         <key>BADAPPLE_IDENTITY_BLOB</key>
-        <string>/Users/savag3/Library/Application Support/BadApple/identity.sekey</string>
+        <string>__CONSOLE_HOME__/Library/Application Support/BadApple/identity.sekey</string>
         <key>BADAPPLE_FAST_TIER</key>
         <string>1</string>
         <key>HOME</key>
-        <string>/Users/savag3</string>
+        <string>__CONSOLE_HOME__</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
         <key>HF_HUB_OFFLINE</key>

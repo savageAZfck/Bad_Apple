@@ -238,6 +238,8 @@ source .venv/bin/activate
 
 Core packages include `mlx-lm`, `dflash-mlx`, `mlx-vlm`, `mlx-audio`, `mflux`, `piper-tts`, `langdetect`, `cryptography`, `psutil`, `PyYAML`, `pdfplumber`, and `EbookLib`.
 
+The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`, `__CONSOLE_HOME__`, and `__CONSOLE_GROUP__` placeholders. `install_badapple_platform.sh` renders them at install time, so the same release can be installed from any path and any user. It also creates the `.venv` from `requirements.txt` if one is not present.
+
 ## Current generation settings
 
 Set in `src/platform/apple_bridge/com.badapple.mlx.plist`:
@@ -299,7 +301,9 @@ In `badapple_mlx_server.py`:
 
 ## Model registry, tool router, chat dashboard, P2P (latest)
 
-- Model registry in `badapple_model_registry.py` with CLI commands `list models`, `scan models`, `model info <id>`, and `use model <id>` for runtime LLM switching.
+- Model registry in `badapple_model_registry.py` with CLI commands `list models`, `scan models`, `model info <id>`, `use model <id>`, and `recommend models` for runtime LLM switching.
+- The MLX server reads `BADAPPLE_MAX_KV_SIZE` and `BADAPPLE_PREFILL_STEP_SIZE` (default 4096). Lower `BADAPPLE_MAX_KV_SIZE` to 1024-2048 before loading 32B+ models to stay within unified memory.
+- `badapple_model_registry.RECOMMENDED_MODELS` includes 9B, 32B, 70B, and 1.5B options with memory guidance.
 - Natural-language tool router in `badapple_tool_router.py` routes common requests directly to tools without waiting for the 9B.
 - Web chat UI at `http://127.0.0.1:8787/chat`; REST endpoint `POST /api/chat`.
 - P2P supports manual `p2p add peer <host>:<port>` and the sync beacon now carries the TCP sync port.

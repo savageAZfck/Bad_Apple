@@ -6,8 +6,8 @@
     <string>com.badapple.supervisor</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/savag3/bad_apple/.venv/bin/python</string>
-        <string>/Users/savag3/bad_apple/badapple_supervisor.py</string>
+        <string>__BADAPPLE_ROOT__/.venv/bin/python</string>
+        <string>__BADAPPLE_ROOT__/badapple_supervisor.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

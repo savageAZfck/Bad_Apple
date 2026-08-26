@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+REPO_ROOT="${BADAPPLE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+CONSOLE_USER="${CONSOLE_USER:-$(stat -f %Su /dev/console)}"
+CONSOLE_UID="$(id -u "${CONSOLE_USER}")"
+CONSOLE_HOME="$(eval echo ~"${CONSOLE_USER}")"
+CONSOLE_GROUP="$(id -gn "${CONSOLE_USER}")"
 
 MODE="--dry-run"
 UNSIGNED=0
@@ -27,23 +32,51 @@ done
 if [[ "${UNSIGNED}" -eq 1 && "${mode_set}" -eq 0 ]]; then
   MODE="--install"
 fi
-CONSOLE_USER="$(stat -f %Su /dev/console)"
-CONSOLE_UID="$(id -u "${CONSOLE_USER}")"
 BACKUP_ROOT="/var/lib/bad_apple/install_backups"
 RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="${BACKUP_ROOT}/${RELEASE_ID}"
 
 [[ "${MODE}" == "--dry-run" || "${MODE}" == "--install" ]] || fail "usage: $0 [--dry-run|--install] [--unsigned-install]"
 [[ "$(uname -s)" == "Darwin" ]] || fail "Bad Apple platform installation requires macOS"
-[[ -x "${REPO_ROOT}/.venv/bin/python" ]] || fail "persistent Python environment is missing"
 [[ -x "${REPO_ROOT}/target/release/badapple" ]] || fail "release CLI is missing"
 [[ -x "${REPO_ROOT}/target/release/gatekeeper" ]] || fail "release gatekeeper is missing"
 [[ -x "${REPO_ROOT}/target/release/badapple-identity" ]] || fail "Secure Enclave helper is missing"
 [[ -x "/Applications/Bad Apple.app/Contents/MacOS/BadApple" ]] || fail "menu bar app is not installed"
 
+ensure_venv() {
+    if [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+        return 0
+    fi
+    local req="${REPO_ROOT}/requirements.txt"
+    [[ -f "${req}" ]] || fail "missing requirements.txt; cannot create .venv"
+    echo "Creating Python venv at ${REPO_ROOT}/.venv..."
+    python3 -m venv "${REPO_ROOT}/.venv"
+    "${REPO_ROOT}/.venv/bin/pip" install -q --upgrade pip
+    "${REPO_ROOT}/.venv/bin/pip" install -r "${req}"
+}
+
+render_plist() {
+    local src="$1" dst="$2"
+    /usr/bin/python3 - "$src" "$dst" "$REPO_ROOT" "$CONSOLE_USER" "$CONSOLE_HOME" "$CONSOLE_GROUP" <<'PY'
+import sys
+src, dst, root, user, home, group = sys.argv[1:7]
+text = open(src).read()
+text = text.replace("__BADAPPLE_ROOT__", root)
+text = text.replace("__CONSOLE_USER__", user)
+text = text.replace("__CONSOLE_HOME__", home)
+text = text.replace("__CONSOLE_GROUP__", group)
+open(dst, "w").write(text)
+PY
+}
+
+ensure_venv
+
 for plist in com.badapple.gatekeeper.plist com.badapple.mlx.plist com.badapple.supervisor.plist; do
-    plutil -lint "${REPO_ROOT}/src/platform/apple_bridge/${plist}" >/dev/null
+    rendered="/tmp/${plist}.rendered.$$"
+    render_plist "${REPO_ROOT}/src/platform/apple_bridge/${plist}" "${rendered}"
+    plutil -lint "${rendered}" >/dev/null
     echo "verified plist: ${plist}"
+    rm -f "${rendered}"
 done
 
 if [[ "${UNSIGNED}" -eq 0 ]]; then
@@ -86,9 +119,10 @@ for plist in com.badapple.gatekeeper.plist com.badapple.mlx.plist com.badapple.s
     target="/Library/LaunchDaemons/${plist}"
     [[ ! -f "${target}" ]] || cp -p "${target}" "${BACKUP_DIR}/${plist}"
     incoming="${target}.incoming.$$"
-    install -o root -g wheel -m 644 "${REPO_ROOT}/src/platform/apple_bridge/${plist}" "${incoming}"
+    render_plist "${REPO_ROOT}/src/platform/apple_bridge/${plist}" "${incoming}"
     plutil -lint "${incoming}" >/dev/null
-    mv -f "${incoming}" "${target}"
+    install -o root -g wheel -m 644 "${incoming}" "${target}"
+    rm -f "${incoming}"
 done
 
 rollback() {

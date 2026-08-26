@@ -111,6 +111,10 @@ MAIN_MODEL = os.environ.get("BADAPPLE_MAIN_MODEL", "caiovicentino1/Qwen3.5-9B-HL
 DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "z-lab/Qwen3.5-9B-DFlash").strip()
 NUM_DRAFT_TOKENS = int(os.environ.get("BADAPPLE_NUM_DRAFT_TOKENS") or "3")
 
+# Generation memory budget. Reduce for larger models (e.g. 32B Qwen at 1024-2048).
+PREFILL_STEP_SIZE = int(os.environ.get("BADAPPLE_PREFILL_STEP_SIZE") or "4096")
+MAX_KV_SIZE = int(os.environ.get("BADAPPLE_MAX_KV_SIZE") or "4096")
+
 # Pinned random seed for reproducible sessions. Set at startup via BADAPPLE_SEED
 # or changed at runtime with the set_session_seed tool. 0 means random.
 _SESSION_SEED: int | None = None
@@ -2669,6 +2673,8 @@ class MLXServer:
             encoder=self.knowledge._encode_texts,
         )
         self.model_registry = badapple_model_registry.ModelRegistry(self.data_dir)
+        self.max_kv_size = MAX_KV_SIZE
+        self.prefill_step_size = PREFILL_STEP_SIZE
         self._roast_index = 0
         self.last_metrics: dict[str, Any] | None = None
 
@@ -3597,8 +3603,9 @@ class MLXServer:
             "sampler": sampler,
             # Largest possible prefill chunks to reduce prompt-cache overhead.
             # A max KV cap keeps the cache trimmable and memory bounded.
-            "prefill_step_size": 4096,
-            "max_kv_size": 4096,
+            # These are tunable at runtime with `set max kv size to N`.
+            "prefill_step_size": self.prefill_step_size,
+            "max_kv_size": self.max_kv_size,
         }
         if self.draft_model is not None:
             gen_kwargs["draft_model"] = self.draft_model
@@ -4419,6 +4426,10 @@ class MLXServer:
                 result = self.model_registry.list_models()
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
+            if low in ("recommend models", "recommended models", "what model should i use"):
+                result = self.model_registry.recommend()
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
             if low.startswith("model info "):
                 result = self.model_registry.info(low[11:].strip())
                 await _write_frame(writer, {"type": "done", "text": result})
@@ -4433,6 +4444,18 @@ class MLXServer:
                         model_ref = model["path"]
                         break
                 result = await asyncio.get_event_loop().run_in_executor(self.executor, self.load_main_model, model_ref)
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            m = re.match(r"^(?:set\s+)?max\s+kv\s+size\s+(?:to\s+)?(\d+)", low)
+            if m:
+                self.max_kv_size = int(m.group(1))
+                result = f"Max KV size set to {self.max_kv_size}. Next model load will use it."
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            m = re.match(r"^(?:set\s+)?prefill\s+step\s+size\s+(?:to\s+)?(\d+)", low)
+            if m:
+                self.prefill_step_size = int(m.group(1))
+                result = f"Prefill step size set to {self.prefill_step_size}."
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
 

@@ -14,6 +14,39 @@ from typing import Any
 HUB_ROOT = Path.home() / ".cache" / "huggingface" / "hub"
 REGISTRY_FILE = "model_registry.json"
 
+# Recommended local-first models for different memory budgets.
+# Download with `huggingface-cli download <id>` or set the MLX loader to pull on first use.
+RECOMMENDED_MODELS = [
+    {
+        "id": "caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit",
+        "name": "Qwen 3.5 9B 4-bit",
+        "size_gb": 5.5,
+        "memory_gb": 8,
+        "notes": "Default brain. Best balance for M1/M2 16GB.",
+    },
+    {
+        "id": "mlx-community/Qwen3.5-32B-MLX-4bit",
+        "name": "Qwen 3.5 32B 4-bit",
+        "size_gb": 19,
+        "memory_gb": 28,
+        "notes": "Stronger reasoning. Set BADAPPLE_MAX_KV_SIZE=1024 or 2048 on 36GB.",
+    },
+    {
+        "id": "mlx-community/DeepSeek-V3-Chat-4bit",
+        "name": "DeepSeek V3 Chat 4-bit",
+        "size_gb": 41,
+        "memory_gb": 64,
+        "notes": "MoE frontier model. Requires M3/M4 Max/Ultra with 64GB+.",
+    },
+    {
+        "id": "mlx-community/Qwen3.5-1.5B-MLX-8bit",
+        "name": "Qwen 3.5 1.5B 8-bit",
+        "size_gb": 1.5,
+        "memory_gb": 4,
+        "notes": "Tiny fast tier or constrained machines.",
+    },
+]
+
 
 def _repo_id_from_dirname(name: str) -> str:
     """Convert `models--foo--bar` back to `foo/bar`."""
@@ -168,3 +201,16 @@ class ModelRegistry:
             if m["id"].lower() == model_id_lower or m["path"].lower() == model_id_lower:
                 return json.dumps(m, indent=2, default=str)
         return f"Model {model_id} not found in local cache."
+
+    def recommend(self) -> str:
+        """List recommended models and whether they are cached."""
+        local = {m["id"].lower() for m in self._state.get("models", [])}
+        lines = ["Recommended models:", ""]
+        for m in RECOMMENDED_MODELS:
+            cached = " (cached)" if m["id"].lower() in local else ""
+            lines.append(
+                f"{m['id']}{cached} — {m['name']}, ~{m['size_gb']} GB, "
+                f"needs ~{m['memory_gb']} GB RAM\n    {m['notes']}"
+            )
+        lines.append("\nUse `use model <id>` after downloading with huggingface-cli or mlx_lm.load.")
+        return "\n".join(lines)

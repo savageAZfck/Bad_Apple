@@ -97,6 +97,41 @@ target/release/badapple "What is 2+2?"
 
 Open the dashboard at `http://127.0.0.1:8787` in your browser.
 
+## One-command consumer install (prebuilt release)
+
+Download `Bad_Apple-<version>-full-unsigned.zip` and run the bundled installer as root:
+
+```bash
+unzip Bad_Apple-<version>-full-unsigned.zip
+cd Bad_Apple-<version>-full
+sudo ./install.sh
+```
+
+This:
+
+1. Copies `Bad Apple.app` into `/Applications`.
+2. Strips the Gatekeeper quarantine flag.
+3. Creates `bad_apple/.venv` and installs Python dependencies from `requirements.txt`.
+4. Renders the platform LaunchDaemon plists for your user and install path.
+5. Loads the gatekeeper, MLX, and supervisor daemons and waits for readiness.
+6. Installs the menu-bar login agent.
+
+No repo checkout or manual `pip install` is required.
+
+## Using larger models
+
+Bad Apple can load any MLX-compatible model. The default is a 9B Qwen 3.5 4-bit. For 32B models, reduce the KV-cache budget to avoid unified-memory pressure:
+
+```bash
+# Ask Bad Apple to shrink the KV cache before switching
+badapple "set max kv size to 1024"
+badapple "use model mlx-community/Qwen3.5-32B-MLX-4bit"
+```
+
+Or change `BADAPPLE_MAX_KV_SIZE` in `src/platform/apple_bridge/com.badapple.mlx.plist` and reload the daemon.
+
+For 70B MoE models such as DeepSeek V3, 64GB+ of unified memory is recommended. Run `badapple "recommend models"` for a curated list.
+
 ## Updating
 
 The menu bar app has a **Check for Updates** item that downloads the latest unsigned release from GitHub and replaces `/Applications/Bad Apple.app`.

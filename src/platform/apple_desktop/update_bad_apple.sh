@@ -112,6 +112,42 @@ else
     xattr -dr com.apple.quarantine "${APP}" 2>/dev/null || true
 fi
 
+# Try to update the full platform if a full release zip is available.
+full_zip=""
+for name in "Bad_Apple-${new_version}-full-unsigned.zip" "Bad_Apple-${TAG}-full-unsigned.zip"; do
+    url="https://github.com/${REPO}/releases/download/${TAG}/${name}"
+    tmp="${stage}/${name}"
+    if curl -fsSL "${url}" -o "${tmp}"; then
+        full_zip="${tmp}"
+        break
+    fi
+done
+
+if [[ -n "${full_zip}" ]]; then
+    echo "Full platform update found; installing..."
+    pkg_dir="${HOME}/.bad_apple/bad_apple-${new_version}"
+    rm -rf "${pkg_dir}"
+    install -d "${pkg_dir}"
+    unzip -q "${full_zip}" -d "${pkg_dir}"
+    # Find the package root inside the zip.
+    pkg_root=$(find "${pkg_dir}" -maxdepth 1 -type d -name 'Bad_Apple-*-full' | head -n1)
+    if [[ -x "${pkg_root}/install.sh" ]]; then
+        "${pkg_root}/install.sh"
+    else
+        echo "Warning: full release package does not contain install.sh; app updated only."
+    fi
+else
+    echo "No full platform update found; app updated only."
+fi
+
+echo "Removing quarantine flag..."
+LOCAL_STRIP="$(cd "$(dirname "$0")" && pwd)/strip_quarantine.sh"
+if [[ -x "${LOCAL_STRIP}" ]]; then
+    "${LOCAL_STRIP}" 2>/dev/null || xattr -dr com.apple.quarantine "${APP}" 2>/dev/null || true
+else
+    xattr -dr com.apple.quarantine "${APP}" 2>/dev/null || true
+fi
+
 echo "Restarting Bad Apple..."
 open -a "Bad Apple"
 
@@ -123,4 +159,3 @@ if [[ -f "${PLIST}" ]]; then
 fi
 
 echo "Updated Bad Apple to ${new_version}."
-echo "Note: this updates the menu-bar app. To update the platform daemons, run the platform installer from the matching release."

@@ -6,7 +6,7 @@
     <string>com.badapple.gatekeeper</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/savag3/bad_apple/target/release/gatekeeper</string>
+        <string>__BADAPPLE_ROOT__/target/release/gatekeeper</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -17,7 +17,7 @@
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>WorkingDirectory</key>
-    <string>/Users/savag3/bad_apple</string>
+    <string>__BADAPPLE_ROOT__</string>
     <key>UserName</key>
     <string>root</string>
     <key>EnvironmentVariables</key>
@@ -29,11 +29,11 @@
         <key>BADAPPLE_MLX_SOCKET_PATH</key>
         <string>/var/run/badapple/substrate_mlx.sock</string>
         <key>BADAPPLE_AUTOMATION_ROOTS</key>
-        <string>/Users/savag3:/Users/savag3/bad_apple:/Users/savag3/firefly_inferno:/Users/savag3/Documents:/Users/savag3/Downloads</string>
+        <string>__CONSOLE_HOME__:__BADAPPLE_ROOT__:__CONSOLE_HOME__/Documents:__CONSOLE_HOME__/Downloads</string>
         <key>BADAPPLE_AUTOMATION_LOG</key>
-        <string>/Users/savag3/.badapple/automation.jsonl</string>
+        <string>__CONSOLE_HOME__/.badapple/automation.jsonl</string>
         <key>HOME</key>
-        <string>/Users/savag3</string>
+        <string>__CONSOLE_HOME__</string>
     </dict>
     <key>StandardOutPath</key>
     <string>/var/log/bad_apple_gatekeeper.log</string>

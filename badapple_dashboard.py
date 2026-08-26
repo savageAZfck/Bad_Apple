@@ -979,6 +979,13 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return
+        if path == "/api/mcp_registry":
+            try:
+                catalog_path = Path(__file__).with_name("mcp_registry.json")
+                self._send_json({"servers": badapple_mcp_marketplace.list_catalog_servers(catalog_path)})
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
         if path.startswith("/api/image/"):
             filename = urllib.parse.unquote(path[11:])
             safe = Path(filename).name
@@ -1070,6 +1077,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     )
                 elif action == "remove":
                     result = badapple_mcp_marketplace.remove_mcp_server(payload.get("name", ""))
+                elif action == "install":
+                    catalog_path = Path(__file__).with_name("mcp_registry.json")
+                    result = badapple_mcp_marketplace.install_catalog_server(payload.get("name", ""), catalog_path)
                 elif action == "list":
                     result = _load_mcp_servers()
                 else:

@@ -1060,6 +1060,7 @@ async function loadSettings() {
   $('#p2p-enabled').checked = !!status.p2p_enabled;
   renderModels(status.active_models || []);
   await loadMcpServers();
+  await loadMcpRegistry();
   await loadModelList(status.active_models?.[0]);
 }
 
@@ -1135,6 +1136,50 @@ async function loadMcpServers() {
     `).join('');
   } catch (e) {
     $('#mcp-table tbody').innerHTML = `<tr><td colspan="3" class="text-tertiary">${e.message}</td></tr>`;
+  }
+}
+
+async function loadMcpRegistry() {
+  try {
+    const data = await api('/api/mcp_registry');
+    const installed = (await api('/api/mcp_servers').catch(() => ({ servers: [] }))).servers || [];
+    const names = new Set(installed.map(s => s.name));
+    const tbody = $('#mcp-registry-table tbody');
+    const servers = data.servers || [];
+    if (!servers.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="text-tertiary">No registry entries yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = servers.map(s => `
+      <tr>
+        <td>${s.name}</td>
+        <td>${s.publisher || '-'}</td>
+        <td>${s.description || ''}</td>
+        <td>${s.install_type || 'command'}</td>
+        <td>
+          ${names.has(s.name)
+            ? '<span class="text-tertiary">Installed</span>'
+            : `<button class="secondary" onclick="installMcpRegistry('${s.name}')">Install</button>`}
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    $('#mcp-registry-table tbody').innerHTML = `<tr><td colspan="5" class="text-tertiary">${e.message}</td></tr>`;
+  }
+}
+
+async function installMcpRegistry(name) {
+  try {
+    const res = await api('/api/mcp_servers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'install', name }),
+    });
+    toast(res.ok ? `Installed ${name}` : res);
+    loadMcpServers();
+    loadMcpRegistry();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
   }
 }
 

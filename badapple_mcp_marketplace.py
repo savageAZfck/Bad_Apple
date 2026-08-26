@@ -13,12 +13,14 @@ cloud dependency.  Servers must be installed locally (npx, uvx, python, etc.).
 import json
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 DEFAULT_REGISTRY = Path("/var/lib/bad_apple/mcp_servers.json")
 DEFAULT_TIMEOUT = 30
+DEFAULT_CATALOG = Path(__file__).with_name("mcp_registry.json")
 
 
 def _load_registry() -> dict[str, Any]:
@@ -34,6 +36,60 @@ def _save_registry(data: dict[str, Any]) -> None:
     DEFAULT_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     with open(DEFAULT_REGISTRY, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+
+def _load_catalog(path: Path | None = None) -> dict[str, Any]:
+    catalog_path = path or DEFAULT_CATALOG
+    if catalog_path.is_file():
+        try:
+            return json.loads(catalog_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+            print(f"[mcp_marketplace] could not load catalog {catalog_path}: {e}", flush=True)
+    return {"servers": []}
+
+
+def _install_pip_server(entry: dict[str, Any]) -> list[str]:
+    pkg = entry.get("pip_package") or entry.get("name")
+    name = entry["name"]
+    venv_dir = Path.home() / ".bad_apple" / "mcp_venvs" / name
+    venv_dir.mkdir(parents=True, exist_ok=True)
+    python = venv_dir / "bin" / "python"
+    if not python.is_file():
+        subprocess.run([sys.executable or "python3", "-m", "venv", str(venv_dir)], check=True)
+    subprocess.run([str(python), "-m", "pip", "install", "-q", "--upgrade", "pip"], check=True)
+    subprocess.run([str(python), "-m", "pip", "install", "-q", pkg], check=True)
+    command = list(entry.get("command", [str(python), "-m", pkg.replace("-", "_")]))
+    # Expand any ~ or $HOME in command strings for this venv.
+    expanded = []
+    for c in command:
+        if c == "python":
+            expanded.append(str(python))
+        elif c.startswith("~/"):
+            expanded.append(str(Path.home() / c[2:]))
+        else:
+            expanded.append(c)
+    return expanded
+
+
+def install_catalog_server(name: str, catalog_path: Path | None = None) -> str:
+    catalog = _load_catalog(catalog_path)
+    for entry in catalog.get("servers", []):
+        if entry.get("name") == name:
+            install_type = entry.get("install_type", "command")
+            if install_type == "pip":
+                command = _install_pip_server(entry)
+            elif install_type == "command":
+                command = list(entry.get("command", []))
+                if not command:
+                    return f"MCP server '{name}' has no command in the catalog."
+            else:
+                return f"MCP server '{name}' has unknown install_type '{install_type}'."
+            return _MARKETPLACE.add_server(name, command, entry.get("env"))
+    return f"MCP server '{name}' not found in catalog."
+
+
+def list_catalog_servers(catalog_path: Path | None = None) -> list[dict[str, Any]]:
+    return _load_catalog(catalog_path).get("servers", [])
 
 
 class MCPClient:
