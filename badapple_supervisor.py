@@ -161,6 +161,24 @@ def check_once(repair: bool = True) -> Dict[str, Any]:
     return report
 
 
+def supervisor_status() -> str:
+    """Return the last supervisor health report as a string."""
+    state = _load_state()
+    report = state.get("last_report")
+    if not report:
+        return "No supervisor report yet."
+    return json.dumps(report, indent=2, sort_keys=True)
+
+
+def heal() -> str:
+    """Run one supervisor check with repair enabled and return the report."""
+    report = check_once(repair=True)
+    healthy = all(s.get("healthy", False) for s in report.get("services", {}).values())
+    if healthy:
+        return "Self-heal check passed. All services healthy."
+    return "Self-heal check performed. Some services may still be recovering:\n" + json.dumps(report, indent=2, sort_keys=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")

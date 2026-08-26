@@ -1070,6 +1070,22 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "supervisor_status",
+            "description": "Get the latest self-healing supervisor health report for gatekeeper, MLX, and TTS services.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "heal",
+            "description": "Run a self-healing check that restarts unhealthy services and returns the health report.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_send_adapter",
             "description": "Send a local LoRA adapter to a discovered Bad Apple peer over the encrypted P2P link. Like AirDrop for models.",
             "parameters": {
@@ -1555,6 +1571,7 @@ TOOL_KEYWORDS = [
     "calendar", "events", "meetings", "reminders", "unread mail", "email", "mail",
     "working memory", "scratchpad",
     "consolidate memory", "dream", "offline consolidation",
+    "supervisor status", "health check", "self healing", "heal services",
     "mcp", "model context protocol", "mcp server", "mcp tool", "mcp marketplace",
     "do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step",
     "set project", "this project is", "project context", "project goals",
@@ -1583,6 +1600,7 @@ KEYWORD_TOOL_MAP = [
     (["unread mail", "email", "mail"], ["unread_emails", "search_mail"]),
     (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
     (["consolidate memory", "dream", "offline consolidation"], ["consolidate_memory"]),
+    (["supervisor status", "health check", "self healing", "heal services"], ["supervisor_status", "heal"]),
     (["run shortcut", "list shortcuts", "shortcut"], ["run_shortcut"]),
     (["run applescript", "run script", "applescript"], ["run_applescript"]),
     (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
@@ -2199,6 +2217,10 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             if daemon is None:
                 return "P2P daemon is not running."
             return daemon.list_local_adapters(badapple_lora.LORA_ADAPTERS_DIR)
+        if name == "supervisor_status":
+            return badapple_supervisor.supervisor_status()
+        if name == "heal":
+            return badapple_supervisor.heal()
         if name == "p2p_send_adapter":
             daemon = badapple_p2p.get_p2p_daemon()
             if daemon is None:
