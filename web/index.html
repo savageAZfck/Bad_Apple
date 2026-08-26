@@ -45,27 +45,38 @@
       <!-- Dashboard -->
       <section class="view" id="view-dashboard">
         <div class="cards" id="dashboard-cards">
-          <div class="card"><h3>Runtime</h3><div class="value">—</div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
+          <div class="card skeleton"><div class="skeleton-title"></div><div class="skeleton-value"></div><div class="skeleton-sub"></div></div>
         </div>
         <div class="panel">
           <h3>P2P Peers</h3>
-          <div id="p2p-peers"><span class="text-tertiary">Loading...</span></div>
+          <div id="p2p-peers"><div class="skeleton-line"></div><div class="skeleton-line short"></div></div>
         </div>
         <div class="panel">
           <h3>MCP Servers</h3>
-          <div id="mcp-status"><span class="text-tertiary">Loading...</span></div>
+          <div id="mcp-status"><div class="skeleton-line"></div><div class="skeleton-line short"></div></div>
         </div>
         <div class="panel" style="grid-column: 1 / -1;">
           <h3>Recent Tool Calls</h3>
-          <div id="tool-calls"><span class="text-tertiary">Loading...</span></div>
+          <div id="tool-calls">
+            <div class="skeleton-line"></div><div class="skeleton-line"></div><div class="skeleton-line"></div><div class="skeleton-line short"></div>
+          </div>
         </div>
         <div class="panel" style="grid-column: 1 / -1;">
           <h3>Voice Activity</h3>
-          <div id="voice-activity"><span class="text-tertiary">Loading...</span></div>
+          <div id="voice-activity">
+            <div class="skeleton-line"></div><div class="skeleton-line"></div><div class="skeleton-line"></div><div class="skeleton-line short"></div>
+          </div>
         </div>
         <div class="panel">
           <h3>Latest Performance</h3>
-          <div id="latest-perf" class="sub">—</div>
+          <div id="latest-perf" class="sub"><span class="skeleton-line short"></span></div>
         </div>
         <div class="panel" style="grid-column: 1 / -1;">
           <h3>Live Metrics</h3>
@@ -73,7 +84,7 @@
         </div>
         <div class="panel">
           <h3>Log Tail</h3>
-          <pre class="log" id="log-tail">Loading...</pre>
+          <pre class="log" id="log-tail"><span class="skeleton-line"></span><span class="skeleton-line"></span><span class="skeleton-line"></span></pre>
         </div>
       </section>
 
@@ -234,26 +245,74 @@
         <li><strong>Cmd/Ctrl + Enter</strong> — Send message</li>
         <li><strong>Esc</strong> — Close modals</li>
       </ul>
-      <div class="form-actions" style="justify-content: flex-end;">
+      <div class="help-actions">
+        <a class="btn secondary" href="https://github.com/savag3/bad_apple" target="_blank" rel="noopener">Need help?</a>
         <button onclick="closeHelp()">Close</button>
       </div>
     </div>
   </div>
 
   <div id="onboarding" class="modal" style="display:none;">
-    <div class="modal-backdrop"></div>
-    <div class="modal-card">
-      <h2>Welcome to Bad Apple</h2>
-      <p>Your sovereign, local AI running on this Mac. No cloud, no subscriptions, no data leaving the machine.</p>
-      <ul>
-        <li><strong>Chat</strong> — talk, ask, run local tools, generate images.</li>
-        <li><strong>Persona</strong> — switch voices and edit the system prompt.</li>
-        <li><strong>Settings</strong> — set workspace, add MCP servers, toggle modes.</li>
-        <li><strong>Dashboard</strong> — watch memory, models, P2P, and performance.</li>
-      </ul>
-      <div class="form-actions" style="justify-content: flex-end;">
-        <button class="secondary" onclick="startTour()">Take tour</button>
-        <button onclick="dismissOnboarding()">Get started</button>
+    <div class="modal-backdrop" onclick="skipWizard()"></div>
+    <div class="modal-card wizard-card">
+      <div class="wizard-step" data-step="0">
+        <h2>Welcome to Bad Apple</h2>
+        <p>Your sovereign, local AI runs entirely on this Mac. No cloud, no subscriptions, and your data never leaves the machine.</p>
+        <ul>
+          <li><strong>Chat</strong> — ask questions, run local tools, generate images.</li>
+          <li><strong>Persona</strong> — switch voices and edit the system prompt.</li>
+          <li><strong>Settings</strong> — set workspace, add MCP servers, toggle modes.</li>
+          <li><strong>Dashboard</strong> — watch memory, models, P2P, and performance.</li>
+        </ul>
+        <div class="form-actions" style="justify-content: space-between;">
+          <button class="secondary" onclick="skipWizard()">Skip setup</button>
+          <button onclick="nextWizard()">Next</button>
+        </div>
+      </div>
+      <div class="wizard-step hidden" data-step="1">
+        <h2>Set your workspace</h2>
+        <p>Pick a project folder Bad Apple should know about. Leave it blank and set it later from Settings.</p>
+        <div class="form-row">
+          <label for="setup-workspace">Workspace path</label>
+          <input id="setup-workspace" type="text" placeholder="/Users/savag3/projects/my-app">
+        </div>
+        <div class="form-actions" style="justify-content: space-between;">
+          <button class="secondary" onclick="prevWizard()">Back</button>
+          <button onclick="nextWizard()">Continue</button>
+        </div>
+      </div>
+      <div class="wizard-step hidden" data-step="2">
+        <h2>Choose your power-ups</h2>
+        <p>Enable the features you want. You can always change these in Settings later.</p>
+        <div class="wizard-toggles">
+          <label class="toggle">
+            <input type="checkbox" id="setup-fast-tier" checked>
+            <span class="slider"></span>
+            <span class="label">Fast tier — route simple queries to a tiny 0.5B model</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="setup-autopilot">
+            <span class="slider"></span>
+            <span class="label">Autopilot — run destructive tools without asking each time</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="setup-p2p">
+            <span class="slider"></span>
+            <span class="label">P2P sync — discover and sync with peers on your local network</span>
+          </label>
+        </div>
+        <div class="form-actions" style="justify-content: space-between;">
+          <button class="secondary" onclick="prevWizard()">Back</button>
+          <button onclick="finishWizard()">Finish setup</button>
+        </div>
+      </div>
+      <div class="wizard-step hidden" data-step="3">
+        <h2>You’re all set</h2>
+        <p>Your preferences have been saved. Press <strong>?</strong> anytime to see keyboard shortcuts or visit the help link.</p>
+        <div class="form-actions" style="justify-content: space-between;">
+          <button class="secondary" onclick="startTour()">Take a tour</button>
+          <button onclick="dismissOnboarding()">Open dashboard</button>
+        </div>
       </div>
     </div>
   </div>

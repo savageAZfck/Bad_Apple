@@ -3109,6 +3109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var memoryPressure = "normal"
     private var activeModels: [String] = ["main_9b"]
     private var lastTelemetryTime: TimeInterval = 0
+    private var lastRuntimeStatus: [String: Any] = [:]
+    private var lastRuntimeReachable = false
     private var autoPurgeEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "BadAppleAutoPurge") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleAutoPurge") }
@@ -3469,10 +3471,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                         if let active = json["active_models"] as? [String] {
                             self.activeModels = active
                         }
+                        self.lastRuntimeStatus = json
+                        self.lastRuntimeReachable = true
+                        self.updateStatusIcon()
                         self.rebuildMenu()
                     }
+                } else {
+                    await MainActor.run {
+                        self.lastRuntimeReachable = false
+                        self.updateStatusIcon()
+                    }
                 }
-            } catch {}
+            } catch {
+                await MainActor.run {
+                    self.lastRuntimeReachable = false
+                    self.updateStatusIcon()
+                }
+            }
         }
     }
 
@@ -4059,11 +4074,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
         let dotColor: NSColor
-        switch voiceHost.state {
-        case .disabled, .unavailable:
-            dotColor = .systemGray
-        default:
-            dotColor = voiceHost.state.tintColor
+        if !lastRuntimeReachable {
+            dotColor = .systemRed
+        } else {
+            let mode = lastRuntimeStatus["mode"] as? String ?? runtimeState["mode"] as? String ?? "UNKNOWN"
+            let killed = lastRuntimeStatus["killed"] as? Bool ?? runtimeState["killed"] as? Bool ?? false
+            let safeReason = lastRuntimeStatus["safe_mode_reason"] as? String ?? runtimeState["safe_mode_reason"] as? String
+            if killed || mode == "SAFE_MODE" || safeReason != nil {
+                dotColor = .systemYellow
+            } else if mode == "READY" {
+                dotColor = .systemGreen
+            } else if mode == "STARTING" {
+                dotColor = .systemYellow
+            } else {
+                dotColor = .systemGray
+            }
         }
 
         let title = NSMutableAttributedString()
@@ -4074,6 +4099,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             .baselineOffset: -2
         ]))
         button.attributedTitle = title
+        let statusText = lastRuntimeReachable ? (lastRuntimeStatus["mode"] as? String ?? "unknown") : "offline"
+        button.toolTip = "Bad Apple daemon status: \(statusText)"
     }
 
     func rebuildMenu() {
@@ -4131,34 +4158,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         activeItem.isEnabled = false
         menu.addItem(activeItem)
 
+        let performanceMenu = NSMenu(title: "Performance")
         let purgeItem = NSMenuItem(title: "Purge VRAM", action: #selector(purgeVRAM), keyEquivalent: "")
-        menu.addItem(purgeItem)
+        purgeItem.toolTip = "Release cached GPU memory and Metal allocations."
+        performanceMenu.addItem(purgeItem)
         let unloadItem = NSMenuItem(title: "Unload Optional Models", action: #selector(unloadModels), keyEquivalent: "")
-        menu.addItem(unloadItem)
+        unloadItem.toolTip = "Unload vision, image, and optional models to free RAM."
+        performanceMenu.addItem(unloadItem)
+        let performanceFastTierItem = NSMenuItem(title: "Fast Tier Only", action: #selector(toggleFastTier), keyEquivalent: "")
+        performanceFastTierItem.state = fastTierOnly ? .on : .off
+        performanceFastTierItem.toolTip = "Route simple queries to the 0.5B fast model."
+        performanceMenu.addItem(performanceFastTierItem)
         let autoPurgeItem = NSMenuItem(title: "Auto-Purge on Critical", action: #selector(toggleAutoPurge), keyEquivalent: "")
         autoPurgeItem.state = autoPurgeEnabled ? .on : .off
-        menu.addItem(autoPurgeItem)
+        autoPurgeItem.toolTip = "Automatically purge VRAM when memory pressure is critical."
+        performanceMenu.addItem(autoPurgeItem)
+        let performanceParent = NSMenuItem(title: "Performance", action: nil, keyEquivalent: "")
+        performanceParent.submenu = performanceMenu
+        menu.addItem(performanceParent)
         menu.addItem(NSMenuItem.separator())
 
         let privateMode = runtime["private_mode"] as? Bool ?? false
+        let privacyMenu = NSMenu(title: "Privacy")
         let privateToggle = NSMenuItem(title: "Private Mode", action: #selector(togglePrivateMode), keyEquivalent: "")
         privateToggle.state = privateMode ? .on : .off
-        menu.addItem(privateToggle)
+        privateToggle.toolTip = "Pause persistence and audit logging for this session."
+        privacyMenu.addItem(privateToggle)
+        let autopilotItem = NSMenuItem(title: "Autopilot", action: #selector(toggleAutopilot), keyEquivalent: "")
+        autopilotItem.state = autopilotEnabled ? .on : .off
+        autopilotItem.toolTip = "Allow destructive tools to run without approval prompts."
+        privacyMenu.addItem(autopilotItem)
+        let focusItem = NSMenuItem(title: "Focus Mode", action: #selector(toggleFocus), keyEquivalent: "")
+        focusItem.state = focusEnabled ? .on : .off
+        focusItem.toolTip = "Toggle Do Not Disturb / Focus while Bad Apple is active."
+        privacyMenu.addItem(focusItem)
+        let privacyParent = NSMenuItem(title: "Privacy", action: nil, keyEquivalent: "")
+        privacyParent.submenu = privacyMenu
+        menu.addItem(privacyParent)
         if runtime["killed"] as? Bool ?? false {
-            menu.addItem(NSMenuItem(title: "Resume Bad Apple", action: #selector(resetKillSwitch), keyEquivalent: ""))
+            let resumeItem = NSMenuItem(title: "Resume Bad Apple", action: #selector(resetKillSwitch), keyEquivalent: "")
+            resumeItem.toolTip = "Reset the kill switch and resume generation and tools."
+            menu.addItem(resumeItem)
         } else {
-            menu.addItem(NSMenuItem(title: "Emergency Stop", action: #selector(engageKillSwitch), keyEquivalent: ""))
+            let stopItem = NSMenuItem(title: "Emergency Stop", action: #selector(engageKillSwitch), keyEquivalent: "")
+            stopItem.toolTip = "Cancel generation, stop ambient capture, and block tools."
+            menu.addItem(stopItem)
         }
-        menu.addItem(NSMenuItem(title: "System Health...", action: #selector(showSystemHealth), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Control Center", action: #selector(showControlCenter), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n"))
-        menu.addItem(NSMenuItem(title: "Chat History", action: #selector(showChatHistory), keyEquivalent: "h"))
+        let systemHealthItem = NSMenuItem(title: "System Health...", action: #selector(showSystemHealth), keyEquivalent: "")
+        systemHealthItem.toolTip = "Show the full runtime status JSON."
+        menu.addItem(systemHealthItem)
+        let controlCenterItem = NSMenuItem(title: "Control Center", action: #selector(showControlCenter), keyEquivalent: "")
+        controlCenterItem.toolTip = "Open the native glass control center window."
+        menu.addItem(controlCenterItem)
+        let newChatItem = NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n")
+        newChatItem.toolTip = "Start a new conversation."
+        menu.addItem(newChatItem)
+        let chatHistoryItem = NSMenuItem(title: "Chat History", action: #selector(showChatHistory), keyEquivalent: "h")
+        chatHistoryItem.toolTip = "Show the chat history window."
+        menu.addItem(chatHistoryItem)
         let toggle = NSMenuItem(title: "Voice Listening", action: #selector(toggleVoice), keyEquivalent: "v")
         toggle.state = voiceEnabled ? .on : .off
+        toggle.toolTip = "Toggle the local voice wake-word listener."
         menu.addItem(toggle)
 
         let roastToggle = NSMenuItem(title: "Roast Mode", action: #selector(toggleRoast), keyEquivalent: "")
         roastToggle.state = roastEnabled ? .on : .off
+        roastToggle.toolTip = "Switch to the drill persona for spicy roasts."
         menu.addItem(roastToggle)
 
         let personaMenu = NSMenu(title: "Persona")
@@ -4172,43 +4237,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         personaParent.submenu = personaMenu
         menu.addItem(personaParent)
 
-        menu.addItem(NSMenuItem(title: "Restart Voice Recognition", action: #selector(restartVoice), keyEquivalent: "r"))
-        menu.addItem(NSMenuItem(title: "Benchmark", action: #selector(runBenchmark), keyEquivalent: "b"))
+        let restartVoiceItem = NSMenuItem(title: "Restart Voice Recognition", action: #selector(restartVoice), keyEquivalent: "r")
+        restartVoiceItem.toolTip = "Recycle the local speech recognizer pipeline."
+        menu.addItem(restartVoiceItem)
+        let benchmarkItem = NSMenuItem(title: "Benchmark", action: #selector(runBenchmark), keyEquivalent: "b")
+        benchmarkItem.toolTip = "Run the standard benchmark suite."
+        menu.addItem(benchmarkItem)
 
         let toolsMenu = NSMenu(title: "Tools")
-        toolsMenu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d"))
-        toolsMenu.addItem(NSMenuItem(title: "Daily Briefing", action: #selector(showBriefing), keyEquivalent: ""))
-        toolsMenu.addItem(NSMenuItem(title: "Screen Actions...", action: #selector(showScreenActions), keyEquivalent: ""))
-        toolsMenu.addItem(NSMenuItem(title: "Image Playground...", action: #selector(showImagePlayground), keyEquivalent: ""))
-        toolsMenu.addItem(NSMenuItem(title: "View Working Memory", action: #selector(viewWorkingMemory), keyEquivalent: ""))
-        toolsMenu.addItem(NSMenuItem(title: "Clear Working Memory", action: #selector(clearWorkingMemory), keyEquivalent: ""))
+        let dashboardItem = NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d")
+        dashboardItem.toolTip = "Open the Bad Apple web dashboard in your browser."
+        toolsMenu.addItem(dashboardItem)
+        let briefingItem = NSMenuItem(title: "Daily Briefing", action: #selector(showBriefing), keyEquivalent: "")
+        briefingItem.toolTip = "Show the daily briefing window."
+        toolsMenu.addItem(briefingItem)
+        let screenActionsItem = NSMenuItem(title: "Screen Actions...", action: #selector(showScreenActions), keyEquivalent: "")
+        screenActionsItem.toolTip = "Run actions based on the current screen content."
+        toolsMenu.addItem(screenActionsItem)
+        let imagePlaygroundItem = NSMenuItem(title: "Image Playground...", action: #selector(showImagePlayground), keyEquivalent: "")
+        imagePlaygroundItem.toolTip = "Generate images from a text prompt."
+        toolsMenu.addItem(imagePlaygroundItem)
+        let viewWorkingMemoryItem = NSMenuItem(title: "View Working Memory", action: #selector(viewWorkingMemory), keyEquivalent: "")
+        viewWorkingMemoryItem.toolTip = "Inspect the working memory scratchpad."
+        toolsMenu.addItem(viewWorkingMemoryItem)
+        let clearWorkingMemoryItem = NSMenuItem(title: "Clear Working Memory", action: #selector(clearWorkingMemory), keyEquivalent: "")
+        clearWorkingMemoryItem.toolTip = "Erase the working memory scratchpad."
+        toolsMenu.addItem(clearWorkingMemoryItem)
         toolsMenu.addItem(NSMenuItem.separator())
-        toolsMenu.addItem(NSMenuItem(title: "List Shortcuts", action: #selector(listShortcuts), keyEquivalent: ""))
-        toolsMenu.addItem(NSMenuItem(title: "Run Shortcut...", action: #selector(runShortcutPrompt), keyEquivalent: ""))
-        let fastTierItem = NSMenuItem(title: "Fast Tier Only", action: #selector(toggleFastTier), keyEquivalent: "")
-        fastTierItem.state = fastTierOnly ? .on : .off
-        toolsMenu.addItem(fastTierItem)
-        let autopilotItem = NSMenuItem(title: "Autopilot", action: #selector(toggleAutopilot), keyEquivalent: "")
-        autopilotItem.state = autopilotEnabled ? .on : .off
-        toolsMenu.addItem(autopilotItem)
-        let focusItem = NSMenuItem(title: "Focus Mode", action: #selector(toggleFocus), keyEquivalent: "")
-        focusItem.state = focusEnabled ? .on : .off
-        toolsMenu.addItem(focusItem)
+        let listShortcutsItem = NSMenuItem(title: "List Shortcuts", action: #selector(listShortcuts), keyEquivalent: "")
+        listShortcutsItem.toolTip = "List available macOS Shortcuts."
+        toolsMenu.addItem(listShortcutsItem)
+        let runShortcutItem = NSMenuItem(title: "Run Shortcut...", action: #selector(runShortcutPrompt), keyEquivalent: "")
+        runShortcutItem.toolTip = "Prompt for a Shortcut name and run it."
+        toolsMenu.addItem(runShortcutItem)
         let toolsParent = NSMenuItem(title: "Tools", action: nil, keyEquivalent: "")
         toolsParent.submenu = toolsMenu
         menu.addItem(toolsParent)
 
         let meshMenu = NSMenu(title: "Mesh")
-        let ambientRunning = runtime["ambient_running"] as? Bool ?? false
-        let ambientItem = NSMenuItem(title: ambientRunning ? "Stop Ambient" : "Start Ambient", action: #selector(toggleAmbient), keyEquivalent: "")
-        ambientItem.state = ambientRunning ? .on : .off
-        meshMenu.addItem(ambientItem)
-        meshMenu.addItem(NSMenuItem(title: "Set Workspace...", action: #selector(setWorkspacePrompt), keyEquivalent: ""))
-        meshMenu.addItem(NSMenuItem(title: "Open Workspace", action: #selector(openCurrentWorkspace), keyEquivalent: ""))
         let p2pEnabled = runtime["p2p_enabled"] as? Bool ?? false
         let p2pItem = NSMenuItem(title: "P2P Sync", action: #selector(toggleP2P), keyEquivalent: "")
         p2pItem.state = p2pEnabled ? .on : .off
+        p2pItem.toolTip = "Enable or disable encrypted link-local peer discovery and sync."
         meshMenu.addItem(p2pItem)
+        let ambientRunning = runtime["ambient_running"] as? Bool ?? false
+        let ambientItem = NSMenuItem(title: ambientRunning ? "Stop Ambient" : "Start Ambient", action: #selector(toggleAmbient), keyEquivalent: "")
+        ambientItem.state = ambientRunning ? .on : .off
+        ambientItem.toolTip = "Capture active app and window context locally for context."
+        meshMenu.addItem(ambientItem)
+        let setWorkspaceItem = NSMenuItem(title: "Set Workspace...", action: #selector(setWorkspacePrompt), keyEquivalent: "")
+        setWorkspaceItem.toolTip = "Set the current workspace path for project-mode context."
+        meshMenu.addItem(setWorkspaceItem)
+        let openWorkspaceItem = NSMenuItem(title: "Open Workspace", action: #selector(openCurrentWorkspace), keyEquivalent: "")
+        openWorkspaceItem.toolTip = "Open the configured workspace in Finder."
+        meshMenu.addItem(openWorkspaceItem)
         let peers = runtime["p2p_peers"] as? [String] ?? []
         let peersItem = NSMenuItem(title: "Peers: \(peers.count)", action: nil, keyEquivalent: "")
         peersItem.isEnabled = false

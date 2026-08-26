@@ -2,16 +2,38 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-MODE="${1:---dry-run}"
+
+fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+MODE="--dry-run"
+UNSIGNED=0
+mode_set=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run|--install)
+      MODE="$1"
+      mode_set=1
+      shift
+      ;;
+    --unsigned-install)
+      UNSIGNED=1
+      shift
+      ;;
+    *)
+      fail "usage: $0 [--dry-run|--install] [--unsigned-install]"
+      ;;
+  esac
+done
+if [[ "${UNSIGNED}" -eq 1 && "${mode_set}" -eq 0 ]]; then
+  MODE="--install"
+fi
 CONSOLE_USER="$(stat -f %Su /dev/console)"
 CONSOLE_UID="$(id -u "${CONSOLE_USER}")"
 BACKUP_ROOT="/var/lib/bad_apple/install_backups"
 RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="${BACKUP_ROOT}/${RELEASE_ID}"
 
-fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
-
-[[ "${MODE}" == "--dry-run" || "${MODE}" == "--install" ]] || fail "usage: $0 [--dry-run|--install]"
+[[ "${MODE}" == "--dry-run" || "${MODE}" == "--install" ]] || fail "usage: $0 [--dry-run|--install] [--unsigned-install]"
 [[ "$(uname -s)" == "Darwin" ]] || fail "Bad Apple platform installation requires macOS"
 [[ -x "${REPO_ROOT}/.venv/bin/python" ]] || fail "persistent Python environment is missing"
 [[ -x "${REPO_ROOT}/target/release/badapple" ]] || fail "release CLI is missing"
@@ -24,8 +46,10 @@ for plist in com.badapple.gatekeeper.plist com.badapple.mlx.plist com.badapple.s
     echo "verified plist: ${plist}"
 done
 
-codesign --verify --strict "${REPO_ROOT}/target/release/badapple-identity"
-codesign --verify --deep --strict "/Applications/Bad Apple.app"
+if [[ "${UNSIGNED}" -eq 0 ]]; then
+    codesign --verify --strict "${REPO_ROOT}/target/release/badapple-identity"
+    codesign --verify --deep --strict "/Applications/Bad Apple.app"
+fi
 "${REPO_ROOT}/.venv/bin/python" -m pip check
 "${REPO_ROOT}/.venv/bin/python" -m unittest tests.test_badapple_runtime
 

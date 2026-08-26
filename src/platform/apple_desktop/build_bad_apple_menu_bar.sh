@@ -32,6 +32,9 @@ resolve_sdk() {
 }
 
 SDK_PATH=$(resolve_sdk)
+# Clean the app bundle so stale code signatures from prior signed runs do not
+# leak into unsigned builds.
+rm -rf "${APP_DIR}"
 mkdir -p "${BUILD_DIR}" "${MACOS_DIR}" "${FRAMEWORKS_DIR}" "${SCRATCH_DIR}/native"
 
 # Compile directly so this user-session host can be built even when the active
@@ -226,7 +229,22 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
 PLIST
 
 plutil -lint "${CONTENTS_DIR}/Info.plist"
-"${REPO_ROOT}/src/platform/apple_desktop/sign_bad_apple.sh"
+
+SIGN_SCRIPT="${REPO_ROOT}/src/platform/apple_desktop/sign_bad_apple.sh"
+if [[ "${BADAPPLE_NO_SIGN:-0}" == "1" ]]; then
+    echo "Skipping code signing (BADAPPLE_NO_SIGN=1)."
+    rm -rf "${CONTENTS_DIR}/_CodeSignature"
+elif [[ -x "${SIGN_SCRIPT}" ]]; then
+    if "${SIGN_SCRIPT}"; then
+        echo "Signed: ${APP_DIR}"
+    else
+        rm -rf "${CONTENTS_DIR}/_CodeSignature"
+        echo "Warning: code signing failed or no signing identity was available; continuing with unsigned .app bundle." >&2
+    fi
+else
+    rm -rf "${CONTENTS_DIR}/_CodeSignature"
+    echo "Warning: signing script not found at ${SIGN_SCRIPT}; continuing with unsigned .app bundle." >&2
+fi
 
 echo "Built: ${APP_DIR}"
 echo "Install it in /Applications and launch it once so macOS indexes Execute Bad Apple."

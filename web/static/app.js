@@ -114,16 +114,88 @@ function prevTour() {
 }
 function closeTour() { const t = $('#tour'); if (t) t.style.display = 'none'; }
 
+let wizardStep = 0;
+const wizardSteps = ['intro', 'workspace', 'features', 'done'];
+
 function maybeShowOnboarding() {
   if (localStorage.getItem('badapple-onboarded')) return;
   const modal = document.getElementById('onboarding');
-  if (modal) modal.style.display = 'flex';
+  if (!modal) return;
+  wizardStep = 0;
+  renderWizardStep();
+  modal.style.display = 'flex';
+}
+
+function renderWizardStep() {
+  $$('.wizard-step').forEach((el, i) => el.classList.toggle('hidden', i !== wizardStep));
+}
+
+function nextWizard() {
+  if (wizardStep < wizardSteps.length - 1) {
+    wizardStep++;
+    renderWizardStep();
+  }
+}
+
+function prevWizard() {
+  if (wizardStep > 0) {
+    wizardStep--;
+    renderWizardStep();
+  }
+}
+
+function skipWizard() {
+  localStorage.setItem('badapple-onboarded', '1');
+  const modal = document.getElementById('onboarding');
+  if (modal) modal.style.display = 'none';
 }
 
 function dismissOnboarding() {
   localStorage.setItem('badapple-onboarded', '1');
   const modal = document.getElementById('onboarding');
   if (modal) modal.style.display = 'none';
+}
+
+async function finishWizard() {
+  const ws = $('#setup-workspace').value.trim();
+  const fast = $('#setup-fast-tier').checked;
+  const autopilot = $('#setup-autopilot').checked;
+  const p2p = $('#setup-p2p').checked;
+
+  localStorage.setItem('badapple-setup', JSON.stringify({ workspace: ws, fastTier: fast, autopilot, p2p }));
+
+  if (ws) {
+    try {
+      await api('/api/workspace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: ws }),
+      });
+    } catch (e) {
+      console.error('workspace setup failed', e);
+      toast('Workspace setup failed: ' + e.message, 'error');
+    }
+  }
+
+  const commands = [];
+  commands.push(fast ? 'fast tier on' : 'fast tier off');
+  commands.push(autopilot ? 'autopilot on' : 'autopilot off');
+  commands.push(p2p ? 'p2p on' : 'p2p off');
+  for (const cmd of commands) {
+    try {
+      await api('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd }),
+      });
+    } catch (e) {
+      console.error(`${cmd} failed`, e);
+      toast(`${cmd} failed: ${e.message}`, 'error');
+    }
+  }
+
+  wizardStep = wizardSteps.length - 1;
+  renderWizardStep();
 }
 
 function setupNav() {
@@ -261,6 +333,7 @@ async function initStatusDot() {
 
 /* ---------- Dashboard ---------- */
 let dashboardInterval;
+let dashboardInitialLoad = true;
 async function loadDashboard() {
   if (dashboardInterval) clearInterval(dashboardInterval);
   await updateDashboard();
@@ -279,21 +352,72 @@ async function updateDashboard() {
   }
   if (banner) banner.classList.add('hidden');
 
-  const settled = await Promise.allSettled([
-    api('/api/snapshot'),
-    api('/api/tail?n=20'),
-    api('/api/ledger?n=50'),
-    api('/api/mcp_servers'),
-    api('/api/voice?n=12'),
-  ]);
-  const [snap, tail, ledger, mcp, voice] = settled.map(r => r.status === 'fulfilled' ? r.value : null);
+  if (dashboardInitialLoad) {
+    setDashboardSkeletons(true);
+    dashboardInitialLoad = false;
+  }
+  const endpoints = [
+    { key: 'snap', path: '/api/snapshot' },
+    { key: 'tail', path: '/api/tail?n=20' },
+    { key: 'ledger', path: '/api/ledger?n=50' },
+    { key: 'mcp', path: '/api/mcp_servers' },
+    { key: 'voice', path: '/api/voice?n=12' },
+  ];
+  const settled = await Promise.allSettled(endpoints.map(e => api(e.path)));
+  const data = {};
+  const errors = {};
   settled.forEach((r, i) => {
-    if (r.status === 'rejected') console.error(`dashboard endpoint ${i} failed:`, r.reason);
+    const key = endpoints[i].key;
+    if (r.status === 'fulfilled') data[key] = r.value;
+    else {
+      console.error(`dashboard endpoint ${key} failed:`, r.reason);
+      errors[key] = r.reason?.message || String(r.reason);
+    }
   });
-  renderDashboard(status, snap || {}, tail || [], ledger || [], mcp || [], voice || []);
+  setDashboardSkeletons(false);
+  renderDashboard(status, data.snap || {}, data.tail || [], data.ledger || [], data.mcp || [], data.voice || [], errors);
 }
 
-function renderDashboard(status, snap, tail, ledger, mcp, voice) {
+function setDashboardSkeletons(loading) {
+  const cards = $('#dashboard-cards');
+  if (!cards) return;
+  if (loading) {
+    cards.innerHTML = Array.from({ length: 8 }, () => `
+      <div class="card skeleton">
+        <div class="skeleton-title"></div>
+        <div class="skeleton-value"></div>
+        <div class="skeleton-sub"></div>
+      </div>
+    `).join('');
+    const panels = [
+      { id: 'p2p-peers', lines: 2 },
+      { id: 'mcp-status', lines: 2 },
+      { id: 'tool-calls', lines: 4 },
+      { id: 'voice-activity', lines: 4 },
+    ];
+    panels.forEach(p => {
+      const el = $('#' + p.id);
+      if (!el) return;
+      el.innerHTML = Array.from({ length: p.lines }, () => `<div class="skeleton-line"></div>`).join('');
+    });
+    const perf = $('#latest-perf');
+    if (perf) perf.innerHTML = '<span class="skeleton-line short"></span>';
+    const log = $('#log-tail');
+    if (log) log.innerHTML = '<span class="skeleton-line"></span><span class="skeleton-line"></span><span class="skeleton-line"></span>';
+  }
+}
+
+function emptyState(title, body, action) {
+  const btn = action ? `<button class="secondary" onclick="navigate('${action.view}')">${action.text}</button>` : '';
+  return `<div class="empty-state"><div class="empty-title">${title}</div><div class="empty-body">${body}</div>${btn}</div>`;
+}
+
+function errorState(title, detail) {
+  const short = escapeHtml(String(detail || ''));
+  return `<div class="error-state"><div class="error-title">${title}</div><div class="error-body">${short}</div><button class="secondary" onclick="loadDashboard()">Retry</button></div>`;
+}
+
+function renderDashboard(status, snap, tail, ledger, mcp, voice, errors = {}) {
   const rt = status.runtime || {};
   const flags = [];
   if (rt.killed) flags.push('killed');
@@ -332,34 +456,59 @@ function renderDashboard(status, snap, tail, ledger, mcp, voice) {
   }
 
   const peers = status.p2p_peers || [];
-  $('#p2p-peers').innerHTML = peers.length
-    ? peers.map(p => `<span class="persona-pill">${p}</span>`).join(' ')
-    : '<span class="text-tertiary">No peers connected</span>';
+  const peersEl = $('#p2p-peers');
+  if (peers.length) {
+    peersEl.innerHTML = peers.map(p => `<span class="persona-pill">${p}</span>`).join(' ');
+  } else if (!status.p2p_enabled) {
+    peersEl.innerHTML = emptyState('P2P is off', 'Enable P2P sync in Settings to discover peers on your local network.', { text: 'Open Settings', view: 'settings' });
+  } else {
+    peersEl.innerHTML = emptyState('No peers found', 'Bad Apple is listening on the local network. Peers will appear here when they join.');
+  }
 
   const perf = snap.latest_log_perf?.raw || '—';
   $('#latest-perf').textContent = perf;
 
-  $('#log-tail').textContent = (tail.lines || []).join('') || '—';
+  const logEl = $('#log-tail');
+  if (errors.tail) {
+    logEl.innerHTML = errorState('Could not load log tail', errors.tail);
+  } else {
+    logEl.textContent = (tail.lines || []).join('') || 'Log is empty — the daemon may still be starting.';
+  }
 
   const mcpList = mcp?.servers || [];
-  $('#mcp-status').innerHTML = mcpList.length
-    ? mcpList.map(s => `<span class="persona-pill" title="${s.command.join(' ')}">${s.name}</span>`).join(' ')
-    : '<span class="text-tertiary">No MCP servers</span>';
+  const mcpEl = $('#mcp-status');
+  if (errors.mcp) {
+    mcpEl.innerHTML = errorState('Could not load MCP servers', errors.mcp);
+  } else if (mcpList.length) {
+    mcpEl.innerHTML = mcpList.map(s => `<span class="persona-pill" title="${s.command.join(' ')}">${s.name}</span>`).join(' ');
+  } else {
+    mcpEl.innerHTML = emptyState('No MCP servers', 'Add local MCP servers in Settings to expand Bad Apple’s tools.', { text: 'Add server', view: 'settings' });
+  }
 
   const toolEvents = (ledger?.entries || []).filter(e => e.event_type === 'tool' || e.type === 'tool').slice(0, 12);
-  $('#tool-calls').innerHTML = toolEvents.length
-    ? toolEvents.map(e => `<div class="tool-call"><span class="name">⚡ ${e.tool || e.name || 'tool'}</span> <span class="muted">${e.timestamp || ''}</span></div>`).join('')
-    : '<span class="text-tertiary">No recent tools</span>';
+  const toolEl = $('#tool-calls');
+  if (errors.ledger) {
+    toolEl.innerHTML = errorState('Could not load tool calls', errors.ledger);
+  } else if (toolEvents.length) {
+    toolEl.innerHTML = toolEvents.map(e => `<div class="tool-call"><span class="name">⚡ ${e.tool || e.name || 'tool'}</span> <span class="muted">${e.timestamp || ''}</span></div>`).join('');
+  } else {
+    toolEl.innerHTML = emptyState('No recent tool calls', 'Ask Bad Apple to do something on your Mac, like “list my Downloads” or “run a benchmark”.');
+  }
 
   const voiceEvents = voice?.events || [];
-  $('#voice-activity').innerHTML = voiceEvents.length
-    ? voiceEvents.map(e => {
+  const voiceEl = $('#voice-activity');
+  if (errors.voice) {
+    voiceEl.innerHTML = errorState('Could not load voice activity', errors.voice);
+  } else if (voiceEvents.length) {
+    voiceEl.innerHTML = voiceEvents.map(e => {
         const icon = { transcript: '🎤', command: '▶', response: '💬', spoken: '🔊', error: '⚠' }[e.type] || '•';
         const cls = e.type === 'error' ? 'bad' : 'muted';
         const text = e.text.length > 120 ? e.text.slice(0, 120) + '…' : e.text;
         return `<div class="tool-call"><span class="name">${icon} ${e.type}</span> <span class="${cls}">${text}</span></div>`;
-      }).join('')
-    : '<span class="text-tertiary">No voice activity yet</span>';
+      }).join('');
+  } else {
+    voiceEl.innerHTML = emptyState('No voice activity yet', 'Voice events appear here when voice mode is enabled.');
+  }
 
   updateMetricsChart(snap, status);
 }

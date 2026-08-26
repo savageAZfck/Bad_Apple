@@ -173,28 +173,24 @@ cargo build --release
 
 ### Install and start the daemons
 
-```bash
-sudo cp src/platform/apple_bridge/com.badapple.gatekeeper.plist /Library/LaunchDaemons/
-sudo cp src/platform/apple_bridge/com.badapple.mlx.plist /Library/LaunchDaemons/
-sudo cp src/platform/apple_desktop/com.badapple.tts.plist /Library/LaunchDaemons/
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.badapple.gatekeeper.plist
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.badapple.mlx.plist
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.badapple.tts.plist
-```
-
-If the plists were already loaded, `bootout` them first:
+See [INSTALL.md](INSTALL.md) for the full consumer and unsigned build instructions. The short path is:
 
 ```bash
-sudo launchctl bootout system /Library/LaunchDaemons/com.badapple.gatekeeper.plist
-sudo launchctl bootout system /Library/LaunchDaemons/com.badapple.mlx.plist
-sudo launchctl bootout system /Library/LaunchDaemons/com.badapple.tts.plist
+cargo build --release
+src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+cp -R "target/release/Bad Apple.app" /Applications/
+osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
 ```
+
+If you do not have an Apple Developer ID, use `--unsigned-install` after copying the unsigned app.
 
 Wait ~45 s for the 9B model and embedding model to load. Check the log:
 
 ```bash
 tail -n 20 /var/log/bad_apple_mlx_server.log
 ```
+
+Need help? See [SUPPORT.md](SUPPORT.md).
 
 ### Run your first prompt
 

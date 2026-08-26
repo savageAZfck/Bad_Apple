@@ -19,6 +19,15 @@ This file captures the project-specific commands and conventions learned while w
 cargo build --release
 ```
 
+## Lint
+
+```bash
+cargo fmt --check
+cargo build --release
+.venv/bin/python -m ruff check .
+.venv/bin/python tests/test_smoke.py
+```
+
 ## Full platform install
 
 The installer replaces `/Applications/Bad Apple.app`, installs system LaunchDaemons, migrates `/var/lib/bad_apple` ownership, and loads the health supervisor:
@@ -30,6 +39,24 @@ osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_
 ```
 
 It creates a rollback snapshot under `/var/lib/bad_apple/install_backups/` and restores the previous launchd configuration if readiness does not pass.
+
+## Unsigned build and install
+
+If no Apple Developer ID is available, build the menu-bar app unsigned and install without `codesign --verify` checks:
+
+```bash
+cargo build --release
+BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
+```
+
+Package an unsigned release zip with a consumer README:
+
+```bash
+src/platform/apple_desktop/package_unsigned.sh
+```
+
+Produces `target/release/Bad_Apple-<version>-unsigned.zip`.
 
 ## Start / restart the daemon
 

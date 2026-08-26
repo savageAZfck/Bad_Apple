@@ -15,6 +15,7 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
     private let modelLabel = NSTextField(labelWithString: "Model: —")
     private let p2pLabel = NSTextField(labelWithString: "P2P: —")
     private let hibernationLabel = NSTextField(labelWithString: "Hibernating: —")
+    private let statusDot = NSView()
 
     private let fastTierButton = NSButton()
     private let autopilotButton = NSButton()
@@ -61,7 +62,25 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
         title.textColor = NSColor.labelColor
         contentStack.addArrangedSubview(title)
 
-        for label in [statusLabel, modeLabel, workspaceLabel, memoryLabel, modelLabel, p2pLabel, hibernationLabel] {
+        let statusRow = NSStackView()
+        statusRow.orientation = .horizontal
+        statusRow.spacing = 8
+        statusRow.alignment = .centerY
+        statusDot.wantsLayer = true
+        statusDot.layer?.cornerRadius = 6
+        statusDot.layer?.masksToBounds = true
+        statusDot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            statusDot.widthAnchor.constraint(equalToConstant: 12),
+            statusDot.heightAnchor.constraint(equalToConstant: 12)
+        ])
+        statusRow.addArrangedSubview(statusDot)
+        statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        statusLabel.textColor = NSColor.secondaryLabelColor
+        statusRow.addArrangedSubview(statusLabel)
+        contentStack.addArrangedSubview(statusRow)
+
+        for label in [modeLabel, workspaceLabel, memoryLabel, modelLabel, p2pLabel, hibernationLabel] {
             label.font = NSFont.systemFont(ofSize: 13, weight: .regular)
             label.textColor = NSColor.secondaryLabelColor
             contentStack.addArrangedSubview(label)
@@ -77,18 +96,22 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
         }
 
         fastTierButton.title = "Fast Tier Only"
+        fastTierButton.toolTip = "Route simple queries to the 0.5B fast model."
         fastTierButton.target = self
         fastTierButton.action = #selector(toggleFastTier)
 
         autopilotButton.title = "Autopilot"
+        autopilotButton.toolTip = "Allow destructive tools to run without approval prompts."
         autopilotButton.target = self
         autopilotButton.action = #selector(toggleAutopilot)
 
         p2pButton.title = "P2P Sync"
+        p2pButton.toolTip = "Enable or disable encrypted link-local peer discovery and sync."
         p2pButton.target = self
         p2pButton.action = #selector(toggleP2P)
 
         voiceButton.title = "Voice"
+        voiceButton.toolTip = "Toggle voice listening and TTS output."
         voiceButton.target = self
         voiceButton.action = #selector(toggleVoice)
 
@@ -104,18 +127,22 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
         }
 
         purgeButton.title = "Purge VRAM"
+        purgeButton.toolTip = "Release cached GPU memory and Metal allocations."
         purgeButton.target = self
         purgeButton.action = #selector(purgeVRAM)
 
         unloadButton.title = "Unload Models"
+        unloadButton.toolTip = "Unload vision, image, and optional models to free RAM."
         unloadButton.target = self
         unloadButton.action = #selector(unloadModels)
 
         killButton.title = "Stop"
+        killButton.toolTip = "Stop generation and block tools until resumed."
         killButton.target = self
         killButton.action = #selector(toggleKill)
 
         let dashboard = NSButton(title: "Open Dashboard", target: self, action: #selector(openDashboard))
+        dashboard.toolTip = "Open the Bad Apple web dashboard in your browser."
         dashboard.bezelStyle = .rounded
         contentStack.addArrangedSubview(dashboard)
 
@@ -168,6 +195,7 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
             } catch {
                 await MainActor.run {
                     statusLabel.stringValue = "Status: unreachable"
+                    statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
                 }
             }
         }
@@ -178,13 +206,28 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             statusLabel.stringValue = "Status: invalid"
+            statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
             return
         }
 
         let runtime = json["runtime"] as? [String: Any]
-        statusLabel.stringValue = "Status: \(runtime?["mode"] as? String ?? "—")"
-        modeLabel.stringValue = "Mode: \(runtime?["mode"] as? String ?? "—")"
-        killed = runtime?["killed"] as? Bool ?? false
+        let mode = runtime?["mode"] as? String ?? "—"
+        let killed = runtime?["killed"] as? Bool ?? false
+        let safeReason = runtime?["safe_mode_reason"] as? String
+        let healthColor: NSColor
+        if killed || safeReason != nil || mode == "SAFE_MODE" {
+            healthColor = .systemYellow
+        } else if mode == "READY" {
+            healthColor = .systemGreen
+        } else if mode == "STARTING" {
+            healthColor = .systemYellow
+        } else {
+            healthColor = .systemGray
+        }
+        statusDot.layer?.backgroundColor = healthColor.cgColor
+        statusLabel.stringValue = "Status: \(mode)"
+        modeLabel.stringValue = "Mode: \(mode)"
+        self.killed = killed
         killButton.title = killed ? "Resume" : "Stop"
 
         if let mem = json["resources"] as? [String: Any] {
