@@ -47,6 +47,7 @@ import badapple_working_memory
 import badapple_tier
 import badapple_tool_router
 import badapple_model_registry
+import badapple_supervisor
 import badapple_fact_extractor
 import badapple_workspace_watcher
 import badapple_mcp_marketplace
