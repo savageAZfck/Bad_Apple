@@ -154,6 +154,7 @@ def check_once(repair: bool = True) -> Dict[str, Any]:
                     report["safe_mode"] = True
         entry["last_check"] = now
         entry["healthy"] = healthy
+        detail["healthy"] = healthy
         report["services"][name] = {**detail, "consecutive_failures": entry["consecutive_failures"]}
 
     state["last_report"] = report
@@ -174,8 +175,10 @@ def heal() -> str:
     """Run one supervisor check with repair enabled and return the report."""
     report = check_once(repair=True)
     healthy = all(s.get("healthy", False) for s in report.get("services", {}).values())
-    if healthy:
+    if healthy and not report.get("safe_mode"):
         return "Self-heal check passed. All services healthy."
+    if report.get("safe_mode"):
+        return "Self-heal check performed. System is in SAFE MODE.\n" + json.dumps(report, indent=2, sort_keys=True)
     return "Self-heal check performed. Some services may still be recovering:\n" + json.dumps(report, indent=2, sort_keys=True)
 
 
