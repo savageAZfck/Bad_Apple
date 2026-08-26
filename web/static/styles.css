@@ -487,3 +487,52 @@ pre.log {
   margin-top: 1rem;
 }
 .help-actions a { text-decoration: none; }
+
+/* Startup overlay */
+.startup-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.startup-overlay.hidden { display: none; }
+.startup-card {
+  width: min(420px, 90vw);
+  text-align: center;
+  padding: 2rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+.startup-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+  color: #000;
+  font-weight: 900;
+  font-size: 1.5rem;
+  display: grid;
+  place-items: center;
+  margin: 0 auto 1.25rem;
+}
+.startup-card h2 { margin: 0 0 0.75rem; font-size: 1.5rem; }
+#startup-status { color: var(--text-secondary); margin: 0 0 1.25rem; min-height: 1.5em; }
+.startup-hint { color: var(--text-tertiary); font-size: 0.85rem; margin: 1rem 0 0; }
+.startup-bar {
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.startup-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #4ade80, #22c55e);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}

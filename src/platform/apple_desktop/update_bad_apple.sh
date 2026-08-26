@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Auto-update Bad Apple.app from a GitHub release, no Apple Developer ID required.
+# The updater fetches the latest release, downloads the unsigned .zip, replaces
+# the app in /Applications, strips the quarantine flag, and restarts the menu bar.
+#
+# Environment:
+#   BADAPPLE_GH_REPO  - owner/repo on GitHub (default: savag3/bad_apple)
+#   BADAPPLE_TAG      - specific tag to install, or "latest" (default: latest)
+#
+# The matching release asset must be named one of:
+#   Bad_Apple-<version>-unsigned.zip
+#   Bad_Apple-<tag>-unsigned.zip
+
+REPO="${BADAPPLE_GH_REPO:-savag3/bad_apple}"
+TAG="${BADAPPLE_TAG:-latest}"
+APP="/Applications/Bad Apple.app"
+BACKUP_DIR="${HOME}/.bad_apple/backups"
+
+fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+command -v curl >/dev/null || fail "curl is required"
+command -v unzip >/dev/null || fail "unzip is required"
+
+installed_version() {
+    if [[ ! -d "${APP}" ]]; then
+        echo "not installed"
+        return
+    fi
+    defaults read "${APP}/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "unknown"
+}
+
+resolve_latest() {
+    local url="https://api.github.com/repos/${REPO}/releases/latest"
+    local json
+    json=$(curl -fsSL "${url}") || fail "could not fetch release info from ${url}"
+    echo "${json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))' 2>/dev/null || true
+}
+
+download_asset() {
+    local tag="$1"
+    local version
+    version="${tag#v}"
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local tried=()
+
+    for name in "Bad_Apple-${version}-unsigned.zip" "Bad_Apple-${tag}-unsigned.zip" "Bad_Apple-${version}.zip" "Bad_Apple-${tag}.zip"; do
+        local url="https://github.com/${REPO}/releases/download/${tag}/${name}"
+        local out="${tmpdir}/${name}"
+        tried+=("${url}")
+        if curl -fsSL "${url}" -o "${out}"; then
+            echo "${out}"
+            return
+        fi
+    done
+
+    rm -rf "${tmpdir}"
+    fail "could not download a release asset. Tried:\n$(printf '  %s\n' "${tried[@]}")"
+}
+
+[[ "$(id -u)" -eq 0 ]] || fail "update must run as root so it can replace /Applications/Bad Apple.app"
+
+current=$(installed_version)
+echo "Installed version: ${current}"
+
+if [[ "${TAG}" == "latest" ]]; then
+    TAG=$(resolve_latest)
+    [[ -n "${TAG}" ]] || fail "could not determine latest release tag"
+fi
+
+new_version="${TAG#v}"
+echo "Latest release: ${TAG} (version ${new_version})"
+
+if [[ "${current}" == "${new_version}" ]]; then
+    echo "Bad Apple is already up to date (${current})."
+    exit 0
+fi
+
+echo "Downloading update..."
+zip=$(download_asset "${TAG}")
+
+echo "Stopping Bad Apple..."
+osascript -e 'tell application "Bad Apple" to quit' 2>/dev/null || true
+sleep 1
+
+install -d "${BACKUP_DIR}"
+if [[ -d "${APP}" ]]; then
+    backup="${BACKUP_DIR}/Bad Apple.app-$(date -u +%Y%m%dT%H%M%SZ)"
+    echo "Backing up current app to ${backup}..."
+    cp -a "${APP}" "${backup}"
+fi
+
+echo "Extracting update..."
+stage=$(mktemp -d)
+trap 'rm -rf "${stage}" "${zip}"' EXIT
+unzip -q "${zip}" -d "${stage}"
+
+updated_app=$(find "${stage}" -maxdepth 2 -type d -name 'Bad Apple.app' | head -n1)
+[[ -d "${updated_app}" ]] || fail "Bad Apple.app not found inside the downloaded zip"
+
+rm -rf "${APP}"
+cp -a "${updated_app}" "${APP}"
+
+echo "Removing quarantine flag..."
+LOCAL_STRIP="$(cd "$(dirname "$0")" && pwd)/strip_quarantine.sh"
+if [[ -x "${LOCAL_STRIP}" ]]; then
+    "${LOCAL_STRIP}" 2>/dev/null || xattr -dr com.apple.quarantine "${APP}" 2>/dev/null || true
+else
+    xattr -dr com.apple.quarantine "${APP}" 2>/dev/null || true
+fi
+
+echo "Restarting Bad Apple..."
+open -a "Bad Apple"
+
+# If the menu bar LaunchAgent is already installed, make sure it is loaded.
+PLIST="${HOME}/Library/LaunchAgents/com.badapple.menubar.plist"
+if [[ -f "${PLIST}" ]]; then
+    launchctl unload "${PLIST}" 2>/dev/null || true
+    launchctl load -w "${PLIST}" 2>/dev/null || true
+fi
+
+echo "Updated Bad Apple to ${new_version}."
+echo "Note: this updates the menu-bar app. To update the platform daemons, run the platform installer from the matching release."

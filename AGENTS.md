@@ -57,7 +57,17 @@ Package an unsigned release zip with a consumer README and the quarantine stripp
 src/platform/apple_desktop/package_unsigned.sh
 ```
 
-Produces `target/release/Bad_Apple-<version>-unsigned.zip`.
+Produces `target/release/Bad_Apple-<version>-unsigned.zip`. The .app bundle now includes `Contents/Resources/update_bad_apple.sh` and `strip_quarantine.sh`.
+
+## Update Bad Apple
+
+From the menu bar, use **Bad Apple → Check for Updates...**, or run the bundled updater:
+
+```bash
+sudo /Applications/Bad\ Apple.app/Contents/Resources/update_bad_apple.sh
+```
+
+The updater compares the installed `CFBundleShortVersionString` against the latest GitHub release, downloads `Bad_Apple-<version>-unsigned.zip`, backs up the old app, and replaces it. It then strips quarantine and restarts the menu bar.
 
 ## Start / restart the daemon
 

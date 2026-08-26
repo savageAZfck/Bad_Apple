@@ -97,6 +97,28 @@ target/release/badapple "What is 2+2?"
 
 Open the dashboard at `http://127.0.0.1:8787` in your browser.
 
+## Updating
+
+The menu bar app has a **Check for Updates** item that downloads the latest unsigned release from GitHub and replaces `/Applications/Bad Apple.app`.
+
+You can also update manually from a new release zip:
+
+```bash
+unzip Bad_Apple-<version>-unsigned.zip
+rm -rf /Applications/Bad\ Apple.app
+cp -R "Bad Apple.app" /Applications/
+sudo "Bad Apple.app/Contents/Resources/strip_quarantine.sh"
+sudo "Bad Apple.app/Contents/Resources/update_bad_apple.sh"
+```
+
+Or, from an existing install, run the bundled updater directly:
+
+```bash
+sudo /Applications/Bad\ Apple.app/Contents/Resources/update_bad_apple.sh
+```
+
+Note: the app updater only replaces the menu-bar app. To also update the platform daemons, re-run the platform installer from the matching release.
+
 ## Permissions you will be asked for
 
 Bad Apple needs a few macOS permissions:

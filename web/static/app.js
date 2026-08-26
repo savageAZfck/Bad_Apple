@@ -50,9 +50,59 @@ function init() {
     runSplash();
   } else {
     route();
-    maybeShowOnboarding();
   }
   initStatusDot();
+}
+
+let daemonReady = false;
+
+function showStartupOverlay() {
+  const el = $('#startup-overlay');
+  if (el) el.classList.remove('hidden');
+}
+
+function hideStartupOverlay() {
+  const el = $('#startup-overlay');
+  if (el) el.classList.add('hidden');
+  if (!daemonReady) {
+    daemonReady = true;
+    maybeShowOnboarding();
+  }
+}
+
+function updateStartupOverlay(status) {
+  const title = $('#startup-title');
+  const st = $('#startup-status');
+  const fill = $('#startup-fill');
+  if (!title || !st || !fill) return;
+
+  const mode = status.runtime?.mode || 'STARTING';
+  const mainModel = status.health?.checks?.main_model?.ok === true;
+  const elapsed = Math.round(performance.now() / 1000);
+
+  let msg = 'Waking up the local brain...';
+  let pct = 20;
+
+  if (mode === 'OFFLINE') {
+    msg = 'Cannot reach the Bad Apple daemon. Is it running?';
+    pct = 0;
+  } else if (mode === 'READY') {
+    msg = 'Ready.';
+    pct = 100;
+  } else if (mainModel) {
+    msg = 'Warming up...';
+    pct = 85;
+  } else if (elapsed > 15) {
+    msg = 'Loading the 9B model... this can take ~45 seconds.';
+    pct = 60;
+  } else if (elapsed > 5) {
+    msg = 'Loading the 9B model...';
+    pct = 40;
+  }
+
+  title.textContent = mode === 'READY' ? 'Bad Apple is ready' : 'Starting Bad Apple';
+  st.textContent = msg;
+  fill.style.width = pct + '%';
 }
 
 function setupKeyboard() {
@@ -348,9 +398,19 @@ async function updateDashboard() {
   } catch (e) {
     console.error('status fetch failed:', e);
     if (banner) banner.classList.remove('hidden');
+    showStartupOverlay();
+    updateStartupOverlay({ runtime: { mode: 'OFFLINE' } });
     return;
   }
   if (banner) banner.classList.add('hidden');
+
+  const ready = status.runtime?.mode === 'READY' && status.health?.checks?.main_model?.ok === true;
+  if (!ready) {
+    showStartupOverlay();
+    updateStartupOverlay(status);
+    return;
+  }
+  hideStartupOverlay();
 
   if (dashboardInitialLoad) {
     setDashboardSkeletons(true);
@@ -1161,31 +1221,44 @@ async function updateLogs() {
 function runSplash() {
   const splash = document.getElementById('splash');
   const bar = $('.splash-bar .fill', splash);
-  let progress = 0;
-  const steps = [
-    'Waking up the brain...',
-    'Loading embedding model...',
-    'Checking local tools...',
-    'Mounting file watcher...',
-    'Ready.',
-  ];
   const text = $('#splash-status', splash);
-  let i = 0;
-  const timer = setInterval(async () => {
-    progress += 20;
-    bar.style.width = progress + '%';
-    text.textContent = steps[i++] || '';
-    if (progress >= 100) {
-      clearInterval(timer);
-      try {
-        await fetch('/api/status');
+  let attempts = 0;
+
+  const poll = async () => {
+    attempts++;
+    try {
+      const status = await api('/api/status');
+      const ready = status.runtime?.mode === 'READY' && status.health?.checks?.main_model?.ok === true;
+      if (ready) {
+        text.textContent = 'Ready.';
+        bar.style.width = '100%';
         setTimeout(() => location.href = '/', 500);
-      } catch (e) {
-        text.textContent = 'Waiting for daemon... retrying';
-        setTimeout(runSplash, 1500);
+        return;
       }
+      const mainModel = status.health?.checks?.main_model?.ok === true;
+      const elapsed = attempts * 0.5;
+      let msg = 'Waking up the local brain...';
+      let pct = Math.min(95, Math.round(elapsed * 2));
+      if (elapsed > 30) {
+        msg = 'Loading the 9B model... this can take ~45 seconds on first launch.';
+        pct = 70;
+      } else if (elapsed > 10) {
+        msg = 'Loading the 9B model and embedding model...';
+        pct = 50;
+      } else if (mainModel) {
+        msg = 'Warming up...';
+        pct = 85;
+      }
+      text.textContent = msg;
+      bar.style.width = pct + '%';
+    } catch (e) {
+      text.textContent = 'Waiting for daemon...';
+      bar.style.width = Math.min(95, attempts * 2) + '%';
     }
-  }, 400);
+    setTimeout(poll, 500);
+  };
+
+  poll();
 }
 
 document.addEventListener('DOMContentLoaded', init);

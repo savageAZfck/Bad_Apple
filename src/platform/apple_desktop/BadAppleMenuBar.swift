@@ -2052,9 +2052,14 @@ private extension BadAppleVoiceHost.State {
 
 private final class BadAppleSplashWindow {
     private var window: NSWindow?
+    private var statusField: NSTextField?
+    private var progressBar: NSProgressIndicator?
+    private var startTime = Date()
+    private var pollTimer: Timer?
 
     func show() {
-        let size = NSSize(width: 420, height: 240)
+        startTime = Date()
+        let size = NSSize(width: 420, height: 260)
         let screen = NSScreen.main ?? NSScreen.screens.first
         let frame = NSRect(
             x: (screen?.visibleFrame.midX ?? 600) - size.width / 2,
@@ -2083,19 +2088,25 @@ private final class BadAppleSplashWindow {
         logo.font = NSFont.systemFont(ofSize: 56)
         logo.alignment = .center
         logo.textColor = NSColor.white
-        logo.frame = NSRect(x: (size.width - 80) / 2, y: 120, width: 80, height: 64)
+        logo.frame = NSRect(x: (size.width - 80) / 2, y: 130, width: 80, height: 64)
 
         let title = NSTextField(labelWithString: "Bad Apple")
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
         title.alignment = .center
         title.textColor = NSColor.white
-        title.frame = NSRect(x: 0, y: 85, width: size.width, height: 28)
+        title.frame = NSRect(x: 0, y: 95, width: size.width, height: 28)
 
         let status = NSTextField(labelWithString: "Starting local AI...")
         status.font = NSFont.systemFont(ofSize: 13)
         status.alignment = .center
         status.textColor = NSColor(red: 0.6, green: 0.6, blue: 0.6, alpha: 1.0)
-        status.frame = NSRect(x: 0, y: 55, width: size.width, height: 20)
+        status.frame = NSRect(x: 0, y: 60, width: size.width, height: 20)
+
+        let hint = NSTextField(labelWithString: "First launch can take ~45 seconds while the 9B model loads.")
+        hint.font = NSFont.systemFont(ofSize: 11)
+        hint.alignment = .center
+        hint.textColor = NSColor(red: 0.45, green: 0.45, blue: 0.45, alpha: 1.0)
+        hint.frame = NSRect(x: 20, y: 38, width: size.width - 40, height: 16)
 
         let progress = NSProgressIndicator()
         progress.style = .bar
@@ -2103,33 +2114,72 @@ private final class BadAppleSplashWindow {
         progress.doubleValue = 0
         progress.minValue = 0
         progress.maxValue = 100
-        progress.frame = NSRect(x: 80, y: 30, width: size.width - 160, height: 6)
+        progress.frame = NSRect(x: 80, y: 22, width: size.width - 160, height: 6)
 
         view.addSubview(logo)
         view.addSubview(title)
         view.addSubview(status)
+        view.addSubview(hint)
         view.addSubview(progress)
         w.contentView = view
 
         window = w
+        statusField = status
+        progressBar = progress
         w.makeKeyAndOrderFront(nil)
 
-        var pct: Double = 0
-        Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] timer in
-            pct += 2
-            progress.doubleValue = min(pct, 95)
-            if pct >= 100 {
-                timer.invalidate()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self?.close()
-                }
-            }
+        // Fallback close after 90s in case the daemon never reports ready.
+        Timer.scheduledTimer(withTimeInterval: 90.0, repeats: false) { [weak self] _ in self?.close() }
+    }
+
+    func update(status: [String: Any]) {
+        guard let statusField = statusField, let progressBar = progressBar else { return }
+        let runtime = status["runtime"] as? [String: Any]
+        let mode = runtime?["mode"] as? String
+        let health = status["health"] as? [String: Any]
+        let checks = health?["checks"] as? [String: Any]
+        let mainModel = (checks?["main_model"] as? [String: Any])?["ok"] as? Bool ?? false
+        let elapsed = -startTime.timeIntervalSinceNow
+
+        let msg: String
+        let pct: Double
+
+        if mode == "READY" && mainModel {
+            msg = "Ready."
+            pct = 100
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.close() }
+            pollTimer?.invalidate()
+            pollTimer = nil
+        } else if mainModel {
+            msg = "Warming up..."
+            pct = 85
+        } else if elapsed > 30 {
+            msg = "Loading the 9B model... \(Int(elapsed))s"
+            pct = 70
+        } else if elapsed > 10 {
+            msg = "Loading the 9B model..."
+            pct = 50
+        } else {
+            msg = "Waking up the local brain..."
+            pct = 25
         }
+
+        statusField.stringValue = msg
+        progressBar.doubleValue = pct
+    }
+
+    func setOffline() {
+        guard let statusField = statusField else { return }
+        statusField.stringValue = "Waiting for daemon..."
     }
 
     func close() {
+        pollTimer?.invalidate()
+        pollTimer = nil
         window?.close()
         window = nil
+        statusField = nil
+        progressBar = nil
     }
 }
 
@@ -3475,17 +3525,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                         self.lastRuntimeReachable = true
                         self.updateStatusIcon()
                         self.rebuildMenu()
+                        self.splash.update(status: json)
                     }
                 } else {
                     await MainActor.run {
                         self.lastRuntimeReachable = false
                         self.updateStatusIcon()
+                        self.splash.setOffline()
                     }
                 }
             } catch {
                 await MainActor.run {
                     self.lastRuntimeReachable = false
                     self.updateStatusIcon()
+                    self.splash.setOffline()
                 }
             }
         }
@@ -4414,6 +4467,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             menu.addItem(NSMenuItem(title: "Push Pursuit...", action: #selector(pushPursuit), keyEquivalent: "p"))
         }
         menu.addItem(NSMenuItem.separator())
+        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
+        updateItem.toolTip = "Download and install the latest unsigned release from GitHub."
+        menu.addItem(updateItem)
         let startAtLoginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: "")
         startAtLoginItem.state = isStartAtLoginEnabled() ? .on : .off
         menu.addItem(startAtLoginItem)
@@ -4757,6 +4813,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             }
             if let submenu = item.submenu {
                 assignMenuTargets(submenu)
+            }
+        }
+    }
+
+    @objc private func checkForUpdates() {
+        guard let script = Bundle.main.path(forResource: "update_bad_apple", ofType: "sh"),
+              !script.isEmpty else {
+            let err = NSAlert()
+            err.messageText = "Update script not found"
+            err.informativeText = "The updater is not bundled in this build."
+            err.alertStyle = .critical
+            err.runModal()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Check for Bad Apple updates?"
+        alert.informativeText = "This downloads the latest unsigned release from GitHub and replaces /Applications/Bad Apple.app. Requires administrator password."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Cancel")
+        let result = alert.runModal()
+        if result == .alertFirstButtonReturn {
+            let repo = "savag3/bad_apple"
+            let cmd = "BADAPPLE_GH_REPO=\(repo) \\\"\(script)\\\""
+            let appleScript = "do shell script \"\(cmd)\" with administrator privileges"
+            var errorInfo: NSDictionary?
+            NSAppleScript(source: appleScript)?.executeAndReturnError(&errorInfo)
+            if let errorInfo = errorInfo {
+                let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "unknown error"
+                let err = NSAlert()
+                err.messageText = "Update failed"
+                err.informativeText = msg
+                err.alertStyle = .critical
+                err.runModal()
             }
         }
     }

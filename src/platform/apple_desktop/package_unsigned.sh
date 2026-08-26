@@ -56,6 +56,10 @@ your Bad Apple repository checkout:
     osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 
 Replace /Users/savag3/bad_apple with the path to your checkout if you moved it.
+
+To update later, use Bad Apple > Check for Updates in the menu bar, or run:
+
+    sudo /Applications/Bad\ Apple.app/Contents/Resources/update_bad_apple.sh
 EOF
 
 rm -f "${ZIP_PATH}"

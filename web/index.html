@@ -42,6 +42,16 @@
         <span class="offline-icon">⚠</span> Daemon is offline. Bad Apple cannot answer questions or run tools.
       </div>
 
+      <div id="startup-overlay" class="startup-overlay hidden" role="status">
+        <div class="startup-card">
+          <div class="startup-logo">BA</div>
+          <h2 id="startup-title">Starting Bad Apple</h2>
+          <p id="startup-status">Waking up the local brain...</p>
+          <div class="startup-bar"><div class="startup-fill" id="startup-fill"></div></div>
+          <p class="startup-hint">First launch can take ~45 seconds while the 9B model and embedding model load.</p>
+        </div>
+      </div>
+
       <!-- Dashboard -->
       <section class="view" id="view-dashboard">
         <div class="cards" id="dashboard-cards">
