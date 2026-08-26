@@ -1086,6 +1086,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "run_benchmark",
+            "description": "Run the Bad Apple benchmark suite and report decode tokens/s and memory usage. Use to measure and auto-tune local performance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Optional single prompt to benchmark. If empty, runs the default suite."},
+                    "max_tokens": {"type": "integer", "description": "Maximum tokens to generate. Default 120."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_send_adapter",
             "description": "Send a local LoRA adapter to a discovered Bad Apple peer over the encrypted P2P link. Like AirDrop for models.",
             "parameters": {
@@ -1572,6 +1586,7 @@ TOOL_KEYWORDS = [
     "working memory", "scratchpad",
     "consolidate memory", "dream", "offline consolidation",
     "supervisor status", "health check", "self healing", "heal services",
+    "benchmark", "run benchmark", "measure performance", "tokens per second",
     "mcp", "model context protocol", "mcp server", "mcp tool", "mcp marketplace",
     "do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step",
     "set project", "this project is", "project context", "project goals",
@@ -1601,6 +1616,7 @@ KEYWORD_TOOL_MAP = [
     (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
     (["consolidate memory", "dream", "offline consolidation"], ["consolidate_memory"]),
     (["supervisor status", "health check", "self healing", "heal services"], ["supervisor_status", "heal"]),
+    (["benchmark", "run benchmark", "measure performance", "tokens per second"], ["run_benchmark"]),
     (["run shortcut", "list shortcuts", "shortcut"], ["run_shortcut"]),
     (["run applescript", "run script", "applescript"], ["run_applescript"]),
     (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
@@ -2221,6 +2237,21 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return badapple_supervisor.supervisor_status()
         if name == "heal":
             return badapple_supervisor.heal()
+        if name == "run_benchmark":
+            import shutil
+            badapple_bin = shutil.which("badapple") or "/Users/savag3/bad_apple/target/release/badapple"
+            prompt = args.get("prompt", "")
+            max_tokens = int(args.get("max_tokens") or 120)
+            if not Path(badapple_bin).is_file():
+                return "Bad Apple benchmark binary not found."
+            cmd = [badapple_bin, "--benchmark", "-n", str(max_tokens)]
+            if prompt:
+                cmd.append(prompt)
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                return (result.stdout or result.stderr or "Benchmark completed with no output.").strip()
+            except Exception as e:
+                return f"Benchmark error: {e}"
         if name == "p2p_send_adapter":
             daemon = badapple_p2p.get_p2p_daemon()
             if daemon is None:
