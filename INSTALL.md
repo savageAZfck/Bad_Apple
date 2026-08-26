@@ -62,13 +62,13 @@ The daemons need root to write to `/var/lib/bad_apple` and `/Library/LaunchDaemo
 
 ```bash
 cargo build --release
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
 ```
 
 If you are running without an Apple Developer ID, use the unsigned mode after copying the unsigned `Bad Apple.app` to `/Applications`:
 
 ```bash
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --unsigned-install" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --unsigned-install" with administrator privileges'
 ```
 
 The installer creates a rollback snapshot under `/var/lib/bad_apple/install_backups/`. If the health check fails, it restores the previous launchd configuration.

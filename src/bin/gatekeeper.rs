@@ -51,8 +51,18 @@ impl SemanticRouter {
                     }
                 };
 
-            let weights_path =
-                std::path::PathBuf::from("/Users/savag3/bad_apple/data/gatekeeper.safetensors");
+            let env_path = std::env::var("BADAPPLE_GATEKEEPER_WEIGHTS")
+                .map(std::path::PathBuf::from)
+                .ok();
+            let exe_path = std::env::current_exe().ok().and_then(|exe| {
+                exe.parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.parent())
+                    .map(|root| root.join("data").join("gatekeeper.safetensors"))
+            });
+            let default_path =
+                std::path::PathBuf::from("/var/lib/bad_apple/data/gatekeeper.safetensors");
+            let weights_path = env_path.or(exe_path).unwrap_or(default_path);
             if let Err(e) = brain.load_weights(&weights_path) {
                 eprintln!("[gatekeeper] no trained weights at {weights_path:?}: {e} (using untrained brain)");
             } else {

@@ -1,4 +1,4 @@
-#!/Users/savag3/bad_apple/.venv/bin/python
+#!/usr/bin/env python3
 """Bad Apple local neural TTS server.
 
 Runs Piper TTS on a Unix socket. The menu bar sends text, gets back a path to a

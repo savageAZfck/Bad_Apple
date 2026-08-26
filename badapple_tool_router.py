@@ -24,7 +24,7 @@ TOOL_EXAMPLES: dict[str, list[str]] = {
         "show me what's in /tmp",
         "what files are in this directory",
         "list files in my home folder",
-        "show the contents of /Users/savag3",
+        "show the contents of my home folder",
     ],
     "read_file": [
         "read the file /etc/hosts",

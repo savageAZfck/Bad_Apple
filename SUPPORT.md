@@ -85,7 +85,7 @@ If that fails, the dashboard server is not running; restart the platform daemons
 .venv/bin/python agent_client.py unload all
 
 # Air-gap / security certification
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && /Users/savag3/bad_apple/.venv/bin/python cert_suite.py" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && /path/to/bad_apple/.venv/bin/python cert_suite.py" with administrator privileges'
 ```
 
 ## Reporting issues

@@ -18,6 +18,7 @@ import http.server
 import json
 import os
 import re
+import shutil
 import socketserver
 import subprocess
 import threading
@@ -729,16 +730,21 @@ _CHAT_HTML = r"""<!DOCTYPE html>
 """
 
 
+def _repo_root() -> Path:
+    """Return the directory that contains this dashboard module."""
+    return Path(__file__).resolve().parent
+
+
 def _personas_file() -> Path:
     return (
         Path(os.environ["BADAPPLE_PERSONAS_FILE"]).expanduser()
         if os.environ.get("BADAPPLE_PERSONAS_FILE")
-        else Path("/Users/savag3/bad_apple/personas.json")
+        else _repo_root() / "personas.json"
     )
 
 
 def _prompt_file() -> Path:
-    return Path("/Users/savag3/bad_apple/prompt.txt")
+    return _repo_root() / "prompt.txt"
 
 
 def _active_persona() -> str:
@@ -792,9 +798,20 @@ def _save_persona_prompt(name: str, prompt: str) -> None:
             pf.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def _badapple_cli() -> str | None:
+    """Return the badapple CLI path: first on PATH, then next to this file."""
+    cli = shutil.which("badapple")
+    if cli:
+        return cli
+    candidate = _repo_root() / "target" / "release" / "badapple"
+    return str(candidate) if candidate.is_file() else None
+
+
 def _run_cli(prompt: str, max_tokens: int = 240) -> str:
     """Call the local badapple CLI as a simple bridge for the web chat."""
-    exe = "/Users/savag3/bad_apple/target/release/badapple"
+    exe = _badapple_cli()
+    if not exe:
+        return "Error: badapple CLI not found."
     try:
         result = subprocess.run(
             [exe, "-n", str(max_tokens), prompt],
@@ -812,7 +829,13 @@ def _run_cli(prompt: str, max_tokens: int = 240) -> str:
 def _stream_cli(handler: http.server.BaseHTTPRequestHandler, prompt: str, max_tokens: int = 240) -> None:
     """Stream the badapple CLI --json output as Server-Sent Events."""
 
-    exe = "/Users/savag3/bad_apple/target/release/badapple"
+    exe = _badapple_cli()
+    if not exe:
+        handler.send_response(503)
+        handler.send_header("Content-Type", "text/plain")
+        handler.end_headers()
+        handler.wfile.write(b"Error: badapple CLI not found.")
+        return
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")

@@ -1,4 +1,4 @@
-#!/Users/savag3/bad_apple/.venv/bin/python
+#!/usr/bin/env python3
 """Bad Apple speculative-decoding benchmark.
 
 Measures the raw tokens-per-second of the 8B target model with and without

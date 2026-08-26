@@ -34,8 +34,10 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 ### Core inference
 
 - **Local 9B reasoning** — `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` on the GPU.
-- **DFlash speculative decoding** — `z-lab/Qwen3.5-9B-DFlash` blocked draft for
-  faster generation.
+- **Speculative decoding** — DFlash is disabled for the 9B quant; the runtime
+  supports `mlx-lm` speculative decoding with a small cached draft model
+  (e.g. `Qwen2.5-0.5B-Instruct-4bit`) via `enable draft` or
+  `BADAPPLE_SPECULATIVE_DRAFT=auto`.
 - **Streaming output** — tokens stream to the terminal, TTS, or the menu bar
   as they are generated.
 - **Hot-reloadable prompt** — edit `prompt.txt` without restarting the daemon.
@@ -73,6 +75,9 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 
 ### Vision
 
+- **Ocular UI Stream** — live screen capture and optional VLM description on a
+  configurable interval. The dashboard shows the latest frame and the most recent
+  description at `/ocular`.
 - **Screen capture** — capture the main Mac screen to a PNG via `screencapture`
   (macOS screen-recording permission required).
 - **Image description** — local MLX-VLM with
@@ -161,9 +166,9 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 - Python 3.12 with the packages in `.venv` (`mlx`, `mlx-lm`, `mlx-vlm`, etc.)
 - Models download on first run:
   - `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`
-  - `z-lab/Qwen3.5-9B-DFlash`
   - `BAAI/bge-small-en-v1.5`
   - `mlx-community/Qwen2-VL-2B-Instruct-4bit` (first vision call)
+  - `mlx-community/Qwen2.5-0.5B-Instruct-4bit` (optional, for speculative decoding)
 
 ### Build
 
@@ -180,10 +185,18 @@ cargo build --release
 BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 cp -R "target/release/Bad Apple.app" /Applications/
 sudo src/platform/apple_desktop/strip_quarantine.sh
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
 This installs and runs the platform without Apple notarization or a Developer ID. The `--unsigned-install` flag removes the Gatekeeper quarantine flag automatically.
+
+### Tests
+
+```bash
+cargo fmt --check && cargo build --release
+.venv/bin/python -m ruff check .
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+```
 
 Wait ~45 s for the 9B model and embedding model to load. Check the log:
 
@@ -233,7 +246,7 @@ python agent_client.py invoke lora_adapters '{}'
 
 # Other agent commands
 python agent_client.py infer 'What is 2+2?'
-python agent_client.py workspace /Users/savag3/bad_apple
+python agent_client.py workspace /path/to/bad_apple
 python agent_client.py p2p_peers
 python agent_client.py p2p_sync
 ```

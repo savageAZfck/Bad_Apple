@@ -35,7 +35,7 @@ The installer replaces `/Applications/Bad Apple.app`, installs system LaunchDaem
 ```bash
 cargo build --release
 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
 ```
 
 It creates a rollback snapshot under `/var/lib/bad_apple/install_backups/` and restores the previous launchd configuration if readiness does not pass.
@@ -48,7 +48,7 @@ No Apple Developer ID is required. Build unsigned, strip the quarantine flag loc
 cargo build --release
 BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 sudo src/platform/apple_desktop/strip_quarantine.sh
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
 Package an unsigned release zip with a consumer README and the quarantine stripper:
@@ -200,7 +200,7 @@ target/release/badapple "disable private mode"
 
 ```bash
 # Run as root for full socket/process visibility
-osascript -e 'do shell script "cd /Users/savag3/bad_apple && /Users/savag3/bad_apple/.venv/bin/python cert_suite.py" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && /path/to/bad_apple/.venv/bin/python cert_suite.py" with administrator privileges'
 ```
 
 P2P sync and HuggingFace hub are disabled by default for certification:
@@ -244,8 +244,8 @@ The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`,
 
 Set in `src/platform/apple_bridge/com.badapple.mlx.plist`:
 
-- `BADAPPLE_DFLASH=0` — DFlash is off for this quant. The 9B Qwen 3.5 uses a hybrid linear/full attention state cache (`ArraysCache`) that does not provide a trimmable KV cache, so the `mlx-lm` draft path cannot load a small draft. DFlash's own 9B draft model is too heavy to beat the verification overhead on the benchmark suite, so plain `mlx-lm` is faster overall.
-- `BADAPPLE_SPECULATIVE_DRAFT=` (empty or "auto") — set to a small cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft.
+- `BADAPPLE_DFLASH=0` — DFlash is off for this quant. DFlash's 9B draft model is too heavy to beat the verification overhead, so plain `mlx-lm` is faster overall.
+- `BADAPPLE_SPECULATIVE_DRAFT=auto` — set to a cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft.
 - `BADAPPLE_NUM_DRAFT_TOKENS=2` — number of tokens the draft model generates per verification step. Runtime command: `set draft tokens to 4`.
 
 In `badapple_mlx_server.py`:
@@ -338,3 +338,21 @@ In `badapple_mlx_server.py`:
 - Dashboard: live canvas chart for memory % and decode tokens/s, MCP server status, recent tool calls from ledger.
 - Settings: model selector (list/switch), MCP tool invocation UI, theme toggle, runtime toggles, workspace, MCP marketplace.
 - Global: light/dark theme, keyboard shortcuts (`?` help, Cmd/Ctrl 1-5 views, Cmd/Ctrl N new chat, Cmd/Ctrl Enter send, Esc close modals), onboarding + guided tour.
+
+## Production readiness
+
+- No hardcoded `/Users/savag3` or dev paths remain in source. LaunchAgent plists use `__REPO_ROOT__` and `__HOME__` placeholders that installers substitute at install time.
+- `package_full_release.sh` excludes dev artifacts (`.cargo`, `.DS_Store`, `state.*`, `state-backup*`, `sapient_agi_soul*`, `test_*.wasm`, `test_cage`, `wild_workspace`, `strategy_db`, `data`, `voices`, `curriculum`, `com.badapple.substrate*` legacy plists, and `install_daemon.sh`).
+- Unit tests: `tests/test_badapple_runtime.py` (9), `tests/test_model_registry.py` (5), `tests/test_mcp_marketplace.py` (6), `tests/test_speculate.py` (3), `tests/test_workspace_watcher.py` (4), `tests/test_ocular.py` (5), `tests/test_smoke.py` (3) — 35 total.
+- CI-style suite:
+  ```bash
+  cargo fmt --check && cargo build --release
+  .venv/bin/python -m ruff check .
+  .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+  .venv/bin/python tests/test_smoke.py
+  ```
+- Full release package:
+  ```bash
+  src/platform/apple_desktop/package_full_release.sh
+  ```
+  Produces `target/release/Bad_Apple-<version>-full-unsigned.zip`.

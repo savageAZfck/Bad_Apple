@@ -90,6 +90,8 @@ chown root:staff "${LOG_FILE}"
 chmod 640 "${LOG_FILE}"
 
 cp "${PLIST_SOURCE}" "${PLIST_TARGET}"
+# Resolve placeholder tokens so the plist points at the right checkout.
+sed -i '' -e "s|__REPO_ROOT__|${REPO_ROOT}|g" -e "s|__HOME__|${HOME}|g" "${PLIST_TARGET}"
 python3 - "${PLIST_TARGET}" "${MODEL_PATH}" "${TOKENIZER_PATH}" <<'PY'
 import plistlib
 import sys

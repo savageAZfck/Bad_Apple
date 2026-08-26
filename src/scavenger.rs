@@ -70,7 +70,7 @@ impl ScavengerConfig {
     pub fn from_env() -> Result<Self> {
         // Support multiple colon-separated watch roots. This lets the daemon
         // index the Bad Apple repo plus adjacent local source folders. If no
-        // explicit list is set, auto-discover repositories under /Users/savag3.
+        // explicit list is set, auto-discover repositories under $HOME.
         let watch_dirs = if let Some(raw) = std::env::var_os("BADAPPLE_SCAVENGE_DIRS") {
             std::env::split_paths(&raw).collect::<Vec<_>>()
         } else {
@@ -149,7 +149,9 @@ impl ScavengerConfig {
 
     /// Discover the Bad Apple repo and any adjacent local source folders.
     fn discover_source_dirs() -> Vec<PathBuf> {
-        let home = PathBuf::from("/Users/savag3");
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/Users/YourName"));
         let primary = home.join("bad_apple");
         let mut dirs = vec![primary.clone()];
         if let Ok(entries) = fs::read_dir(&home) {

@@ -19,12 +19,13 @@ echo "Copying platform files..."
 rsync -a \
   --exclude='.git' --exclude='.venv' --exclude='.mypy_cache' \
   --exclude='.ruff_cache' --exclude='.DS_Store' --exclude='.github' \
-  --exclude='target' --exclude='__pycache__' --exclude='*.pyc' \
+  --exclude='.cargo' --exclude='target' --exclude='__pycache__' --exclude='*.pyc' \
   --exclude='data' --exclude='strategy_db' --exclude='voices' \
   --exclude='tests/ane_brain_perf' --exclude='qwen1.7b_*' --exclude='curriculum' \
-  --exclude='state.*' --exclude='scavenger_paths.json' --exclude='tokenizer.json' \
+  --exclude='state.*' --exclude='state-backup*' --exclude='scavenger_paths.json' --exclude='tokenizer.json' \
   --exclude='.badapple_dev_cert.*' --exclude='sapient_agi_soul*' --exclude='test_*.wasm' \
-  --exclude='test_cage' --exclude='wild_workspace' \
+  --exclude='test_cage' --exclude='wild_workspace' --exclude='*.defense' --exclude='*.network' --exclude='*.weights' \
+  --exclude='src/platform/apple_bridge/install_daemon.sh' --exclude='src/platform/apple_bridge/com.badapple.substrate*' \
   --exclude='src/platform/apple_desktop/.build' --exclude='src/platform/apple_desktop/.swiftpm' \
   "${REPO_ROOT}/" "${PKG_DIR}/bad_apple/"
 

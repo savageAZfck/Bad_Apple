@@ -53,9 +53,9 @@ To install the full Bad Apple platform (LaunchDaemons, supervisor, etc.),
 place Bad Apple.app in /Applications, then run the platform installer from
 your Bad Apple repository checkout:
 
-    osascript -e 'do shell script "cd /Users/savag3/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
+    osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 
-Replace /Users/savag3/bad_apple with the path to your checkout if you moved it.
+Replace /path/to/bad_apple with the path to your checkout if you moved it.
 
 To update later, use Bad Apple > Check for Updates in the menu bar, or run:
 

@@ -18,8 +18,9 @@ from mlx_lm.sample_utils import make_sampler
 
 def _default_fast_model() -> str | None:
     """Return the default downloaded tiny model path if it exists."""
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface" / "hub"))
     candidates = [
-        "/Users/savag3/.cache/huggingface/hub/models--mlx-community--Qwen2.5-0.5B-Instruct-4bit/snapshots/a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+        str(hf_home / "models--mlx-community--Qwen2.5-0.5B-Instruct-4bit/snapshots/a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3"),
     ]
     for p in candidates:
         if Path(p).is_dir() and (Path(p) / "config.json").is_file():

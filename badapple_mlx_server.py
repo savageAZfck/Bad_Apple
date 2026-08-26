@@ -1,4 +1,4 @@
-#!/Users/savag3/bad_apple/.venv/bin/python
+#!/usr/bin/env python3
 """Bad Apple native AI OS — MLX single-brain server.
 
 Features:
@@ -2304,7 +2304,14 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
             return badapple_supervisor.heal()
         if name == "run_benchmark":
             import shutil
-            badapple_bin = shutil.which("badapple") or "/Users/savag3/bad_apple/target/release/badapple"
+            badapple_bin = shutil.which("badapple")
+            if not badapple_bin:
+                # Fall back to the binary in the same package/install tree.
+                candidate = Path(__file__).resolve().parent / "target" / "release" / "badapple"
+                if candidate.is_file():
+                    badapple_bin = str(candidate)
+            if not badapple_bin:
+                return "Bad Apple benchmark binary not found."
             prompt = args.get("prompt", "")
             max_tokens = int(args.get("max_tokens") or 120)
             if not Path(badapple_bin).is_file():

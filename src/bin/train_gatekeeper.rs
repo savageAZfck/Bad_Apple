@@ -62,12 +62,13 @@ fn fast_templates() -> Vec<String> {
         "bad_apple",
         "firefly_inferno",
     ];
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/YourName".to_string());
     let full_paths = [
-        "/Users/savag3/bad_apple/test_cage",
-        "/Users/savag3/bad_apple/data",
-        "/Users/savag3/Documents",
-        "/Users/savag3/Downloads",
-        "/Users/savag3/bad_apple/test_hello.wasm",
+        format!("{home}/bad_apple/test_cage"),
+        format!("{home}/bad_apple/data"),
+        format!("{home}/Documents"),
+        format!("{home}/Downloads"),
+        format!("{home}/bad_apple/test_hello.wasm"),
     ];
     let prefixes = [
         "",
@@ -111,12 +112,14 @@ fn fast_templates() -> Vec<String> {
         out.push(format!("create directory {}", path));
         out.push(format!("list files in {}", path));
         out.push(format!(
-            "copy {} to /Users/savag3/bad_apple/test_cage/copy",
-            path
+            "copy {} to {home}/bad_apple/test_cage/copy",
+            path,
+            home = home
         ));
         out.push(format!(
-            "move {} to /Users/savag3/bad_apple/test_cage/moved",
-            path
+            "move {} to {home}/bad_apple/test_cage/moved",
+            path,
+            home = home
         ));
     }
     out

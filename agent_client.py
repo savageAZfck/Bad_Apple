@@ -4,7 +4,7 @@
 Usage:
     python3 agent_client.py discover
     python3 agent_client.py invoke run_shell '{"command":"ls"}'
-    python3 agent_client.py workspace /Users/savag3/bad_apple
+    python3 agent_client.py workspace /path/to/workspace
     python3 agent_client.py infer 'What is 2+2?'
 
 This is a reference / test client, not the production `badapple` CLI.

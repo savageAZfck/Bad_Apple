@@ -310,18 +310,33 @@ def stop_all_mcp_servers() -> None:
     _MARKETPLACE.stop_all()
 
 
+def _mcp_data_dir() -> Path:
+    """Return a user-writable MCP data directory."""
+    path = Path.home() / ".bad_apple" / "mcp_data"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _mcp_workspace_dir() -> Path:
+    """Return the default user workspace for the filesystem MCP server."""
+    path = Path.home() / "Documents"
+    return path
+
+
 def marketplace_catalog() -> str:
     """Return a curated list of local MCP servers the user can install."""
+    workspace = _mcp_workspace_dir()
+    db_path = _mcp_data_dir() / "memory.db"
     catalog = [
         {
             "name": "filesystem",
             "description": "Read, search, and edit files under a workspace path.",
-            "command": "npx -y @modelcontextprotocol/server-filesystem /Users/savag3/bad_apple/workspace",
+            "command": f"npx -y @modelcontextprotocol/server-filesystem {workspace}",
         },
         {
             "name": "sqlite",
             "description": "Query local SQLite databases with read-only access.",
-            "command": "npx -y @modelcontextprotocol/server-sqlite /Users/savag3/bad_apple/memory.db",
+            "command": f"npx -y @modelcontextprotocol/server-sqlite {db_path}",
         },
         {
             "name": "fetch",
@@ -337,9 +352,10 @@ def marketplace_catalog() -> str:
 
 def install_mcp_server_from_marketplace(name: str) -> str:
     """Install a server from the built-in catalog by name."""
+    db_path = _mcp_data_dir() / "memory.db"
     catalog = {
-        "filesystem": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/Users/savag3/bad_apple/workspace"],
-        "sqlite": ["npx", "-y", "@modelcontextprotocol/server-sqlite", "/Users/savag3/bad_apple/memory.db"],
+        "filesystem": ["npx", "-y", "@modelcontextprotocol/server-filesystem", str(_mcp_workspace_dir())],
+        "sqlite": ["npx", "-y", "@modelcontextprotocol/server-sqlite", str(db_path)],
         "fetch": ["uvx", "mcp-server-fetch"],
     }
     command = catalog.get(name)

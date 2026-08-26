@@ -10,10 +10,10 @@ PLIST_DST="${AGENT_DIR}/com.badapple.tts.plist"
 
 mkdir -p "${AGENT_DIR}"
 
-# Substitute the current repo root and home directory into the plist, so the
-# agent points at the right venv and voices directory on this machine.
-sed -e "s|/Users/savag3/bad_apple|${REPO_ROOT}|g" \
-    -e "s|/Users/savag3|${HOME}|g" \
+# Substitute placeholder tokens so the agent points at the right venv,
+# voices directory, and home directory on this machine.
+sed -e "s|__REPO_ROOT__|${REPO_ROOT}|g" \
+    -e "s|__HOME__|${HOME}|g" \
     "${PLIST_SRC}" > "${PLIST_DST}"
 
 chmod 644 "${PLIST_DST}"

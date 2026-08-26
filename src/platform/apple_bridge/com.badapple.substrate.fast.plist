@@ -13,9 +13,9 @@
 		<key>BADAPPLE_ANE_MAX_PREWARM_MS</key>
 		<string>30000</string>
 		<key>BADAPPLE_ANE_MODEL</key>
-		<string>/Users/savag3/bad_apple/qwen0.6b_f16_fixed/QwenANE_28L_fixed_manifest.json</string>
+		<string>__REPO_ROOT__/qwen0.6b_f16_fixed/QwenANE_28L_fixed_manifest.json</string>
 		<key>BADAPPLE_ANE_TOKENIZER</key>
-		<string>/Users/savag3/bad_apple/qwen0.6b_f16_fixed/QwenANE_28L_fixed_tokenizer.json</string>
+		<string>__REPO_ROOT__/qwen0.6b_f16_fixed/QwenANE_28L_fixed_tokenizer.json</string>
 		<key>BADAPPLE_CURRICULUM_DIR</key>
 		<string>/var/lib/bad_apple/fast/curriculum</string>
 		<key>BADAPPLE_METRICS_LOG</key>
@@ -31,7 +31,7 @@
 		<key>BADAPPLE_STATE_FILE</key>
 		<string>/var/lib/bad_apple/fast/state.json</string>
 		<key>BADAPPLE_PROMPT_FILE</key>
-		<string>/Users/savag3/bad_apple/prompt.txt</string>
+		<string>__REPO_ROOT__/prompt.txt</string>
 		<key>BADAPPLE_TOOLS_DIR</key>
 		<string>/var/lib/bad_apple/fast/tools</string>
 		<key>BADAPPLE_WILD_WORKSPACE_DIR</key>
@@ -48,21 +48,14 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/local/libexec/badapple/badappled</string>
-		<string>--daemon</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/var/log/bad_apple_fast_daemon.log</string>
+	<string>/var/log/bad_apple_daemon_fast.log</string>
 	<key>StandardOutPath</key>
-	<string>/var/log/bad_apple_fast_daemon.log</string>
-	<key>ThrottleInterval</key>
-	<integer>60</integer>
-	<key>Umask</key>
-	<integer>7</integer>
-	<key>UserName</key>
-	<string>root</string>
+	<string>/var/log/bad_apple_daemon_fast.log</string>
 	<key>WorkingDirectory</key>
-	<string>/var/lib/bad_apple/fast</string>
+	<string>/var/lib/bad_apple</string>
 </dict>
 </plist>

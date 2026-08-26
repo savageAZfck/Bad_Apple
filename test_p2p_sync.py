@@ -45,7 +45,10 @@ def main():
     time.sleep(1)
 
     # Tell the main daemon to enable P2P, add our test peer, and sync.
-    exe = "/Users/savag3/bad_apple/target/release/badapple"
+    repo_root = Path(__file__).resolve().parent
+    exe = str(repo_root / "target" / "release" / "badapple")
+    if not Path(exe).is_file():
+        raise RuntimeError(f"badapple CLI not found at {exe}")
     subprocess.run([exe, "p2p on"], capture_output=True, text=True, timeout=30, check=False)
     r1 = subprocess.run([exe, "p2p add peer 127.0.0.1:10001"], capture_output=True, text=True, timeout=30, check=False)
     if r1.returncode != 0:

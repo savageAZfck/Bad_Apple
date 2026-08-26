@@ -12,7 +12,7 @@ The runtime now uses a single Qwen 3.5 9B 4-bit brain for both text and voice. T
 |---|---|---|---|
 | Target LLM | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | All text and voice reasoning |
 | Fast tier / tiny brain | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Instant answers for greetings, identity, time, simple math, and deterministic queries |
-| DFlash draft | `z-lab/Qwen3.5-9B-DFlash` | ~2.4 GB | Installed but currently disabled because it does not reliably beat plain `mlx-lm` |
+| MLX-LM speculative draft (optional) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional small draft for the 9B brain; set `BADAPPLE_SPECULATIVE_DRAFT=auto` to enable |
 | RAG embeddings | `BAAI/bge-small-en-v1.5` | small | Local sentence-transformer on CPU |
 | TTS voice | `en_US-amy-medium` (default) | small | Piper neural TTS server (`badapple_tts_server.py`) |
 
@@ -64,7 +64,8 @@ Voice uses the 9B brain by default. When fast tier is on, short voice greetings 
 
 ### Inference tuning
 
-- `BADAPPLE_DFLASH=0` — DFlash is off. The repo log contains one outlier DFlash run at ~48 decode tok/s, but the same config is not reliable, so plain `mlx-lm` is used.
+- `BADAPPLE_DFLASH=0` — DFlash is off because it does not reliably beat plain `mlx-lm` on this quant.
+- `BADAPPLE_SPECULATIVE_DRAFT=auto` — when set, Bad Apple scans the HF cache for a small compatible draft model and uses it with `mlx-lm` speculative decoding.
 - `BADAPPLE_FAST_TIER=1` — the 0.5B fast model is enabled for appropriate queries.
 - `prefill_step_size=4096` and `max_kv_size=4096` keep prompt encoding in a single shot and bound KV-cache growth.
 - `prompt.txt` is hot-reloaded and kept compact; the 9B chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
@@ -227,7 +228,7 @@ New flags:
 ┌───────────────────────────────────────┐
 │  com.badapple.mlx                     │
 │  badapple_mlx_server.py               │
-│  - loads single 9B target + DFlash    │
+│  - loads single 9B target + optional small draft │
 │  - runs tools, memory, RAG, TTS       │
 └───────────────────────────────────────┘
             │
@@ -281,10 +282,9 @@ target/release/badapple -n 240 "Write me a poem about bare metal"
 | Variable | Default / Current | Purpose |
 |---|---|---|
 | `BADAPPLE_MAIN_MODEL` | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | Target model for all modes |
-| `BADAPPLE_DRAFT_MODEL` | `z-lab/Qwen3.5-9B-DFlash` | DFlash draft for the 9B target |
-| `BADAPPLE_DFLASH` | `1` | Enable DFlash speculative decoding |
-| `BADAPPLE_DFLASH_VERIFY_LEN_CAP` | `6` | Tokens to verify per target forward |
-| `BADAPPLE_DFLASH_BLOCK_TOKENS` | `6` | Draft block size per step |
+| `BADAPPLE_DRAFT_MODEL` | `z-lab/Qwen3.5-9B-DFlash` | Legacy DFlash draft for the 9B target (unused) |
+| `BADAPPLE_SPECULATIVE_DRAFT` | `auto` | Enable `mlx-lm` speculative decoding with an auto-detected small draft |
+| `BADAPPLE_NUM_DRAFT_TOKENS` | `2` | Tokens to draft per verification step |
 | `BADAPPLE_DFLASH_QUANTIZE_KV` | `1` | Quantize key/value cache |
 | `BADAPPLE_PROMPT_FILE` | `prompt.txt` | Hot-reloadable system prompt |
 | `BADAPPLE_TTS_VOICE` | `en_US-amy-medium` | Default TTS voice |
@@ -293,7 +293,7 @@ target/release/badapple -n 240 "Write me a poem about bare metal"
 
 ## Caveats
 
-- **DFlash is deterministic for the same prompt**: identical questions get identical answers. A per-query random seed is set, but the primary source of variance is different phrasing.
+- **Speculative decoding is optional and requires a small compatible draft model**: without a cached draft, plain `mlx-lm` is used.
 - **Throughput is workload-dependent**: DFlash acceptance swings from ~45% to ~80%, so tok/s swings with it. Sustained 22–33 tok/s is possible on high-acceptance turns but not guaranteed for every prompt on this hardware.
 - **First-token latency is dominated by prefill**: long prompts or large knowledge chunks push the first token toward the 5–7 s range.
 - **Max-token cutoffs are cleaned up**: if the model runs out of output tokens mid-sentence, the response is trimmed to the last complete sentence so it doesn't end on a dangling word.

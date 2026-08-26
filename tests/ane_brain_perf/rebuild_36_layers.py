@@ -4,7 +4,7 @@ import json
 import shutil
 from pathlib import Path
 
-base = Path("/Users/savag3/bad_apple/tests/ane_brain_perf/artifacts/qwen3b_ane_shards")
+base = Path(__file__).resolve().parent / "artifacts" / "qwen3b_ane_shards"
 compiled = base / "compiled"
 manifest_path = base / "conversion_manifest.json"
 

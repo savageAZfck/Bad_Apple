@@ -7,7 +7,7 @@
 		<key>BADAPPLE_TTS_SOCKET</key>
 		<string>/tmp/badapple_tts.sock</string>
 		<key>BADAPPLE_TTS_VOICES_DIR</key>
-		<string>/Users/savag3/bad_apple/voices</string>
+		<string>__REPO_ROOT__/voices</string>
 		<key>BADAPPLE_TTS_VOICE</key>
 		<string>en_US-amy-medium</string>
 		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
@@ -19,9 +19,9 @@
 		<key>BADAPPLE_TTS_VOLUME</key>
 		<string>1.0</string>
 		<key>HOME</key>
-		<string>/Users/savag3</string>
+		<string>__HOME__</string>
 		<key>PATH</key>
-		<string>/Users/savag3/bad_apple/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>__REPO_ROOT__/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>PYTHONUNBUFFERED</key>
 		<string>1</string>
 	</dict>
@@ -33,8 +33,8 @@
 	<string>Background</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/savag3/bad_apple/.venv/bin/python</string>
-		<string>/Users/savag3/bad_apple/badapple_tts_server.py</string>
+		<string>__REPO_ROOT__/.venv/bin/python</string>
+		<string>__REPO_ROOT__/badapple_tts_server.py</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -43,6 +43,6 @@
 	<key>StandardOutPath</key>
 	<string>/tmp/badapple_tts.log</string>
 	<key>WorkingDirectory</key>
-	<string>/Users/savag3/bad_apple</string>
+	<string>__REPO_ROOT__</string>
 </dict>
 </plist>

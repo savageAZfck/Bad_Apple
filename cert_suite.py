@@ -6,7 +6,7 @@ air-gapped. It checks for open network sockets, cloud leaks, secret redaction,
 policy presence, and ledger integrity.
 
 Run as root for full socket/process visibility:
-    sudo /Users/savag3/bad_apple/.venv/bin/python cert_suite.py
+    sudo /path/to/bad_apple/.venv/bin/python cert_suite.py
 """
 
 import json
