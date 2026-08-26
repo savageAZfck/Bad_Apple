@@ -3136,6 +3136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         self?.askPalette.show()
     }
     private let askPalette = BadAppleAskPalette()
+    private let controlCenter = BadAppleControlCenter()
     private let briefingWindow = BadAppleBriefingWindow()
     private let screenActionsWindow = BadAppleScreenActionsWindow()
     private let imagePlayground = BadAppleImagePlaygroundWindow()
@@ -3189,6 +3190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         BadAppleFFI.shared.load()
         startAquaHelper()
+        BadAppleMenuBarUIResponder.shared.start()
         registerSMAppService()
         removeLegacyLaunchAgent()
         // Prevent AppKit from treating this LSUIElement as idle and terminating it.
@@ -4141,6 +4143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             menu.addItem(NSMenuItem(title: "Emergency Stop", action: #selector(engageKillSwitch), keyEquivalent: ""))
         }
         menu.addItem(NSMenuItem(title: "System Health...", action: #selector(showSystemHealth), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Control Center", action: #selector(showControlCenter), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n"))
         menu.addItem(NSMenuItem(title: "Chat History", action: #selector(showChatHistory), keyEquivalent: "h"))
         let toggle = NSMenuItem(title: "Voice Listening", action: #selector(toggleVoice), keyEquivalent: "v")
@@ -4477,6 +4480,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 }
             }
         }
+    }
+
+    @objc private func showControlCenter() {
+        controlCenter.show()
     }
 
     @objc private func toggleVoice() {

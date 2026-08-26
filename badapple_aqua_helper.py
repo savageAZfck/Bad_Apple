@@ -14,6 +14,8 @@ import socketserver
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -118,16 +120,68 @@ def _helper_executable(name: str) -> Optional[str]:
     return None
 
 
+def _ui_via_menubar(action: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
+    """Ask the Bad Apple menu bar (which holds Accessibility) to run a UI action.
+
+    Uses a simple file IPC in /var/run/badapple because the menu bar is a GUI
+    process that can be granted Accessibility, while this helper may not.
+    """
+    request_dir = Path("/var/run/badapple")
+    try:
+        request_dir.mkdir(parents=True, exist_ok=True)
+        request_dir.chmod(0o777)
+    except Exception:
+        pass
+
+    req_id = str(uuid.uuid4())
+    request_file = request_dir / "ui_request.json"
+    response_file = request_dir / f"ui_response_{req_id}.json"
+
+    try:
+        request_file.write_text(
+            json.dumps({"id": req_id, "action": action, **kwargs}, default=str),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"could not write UI request: {e}"}
+
+    # Wait for the menu bar to process the request.
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        try:
+            if response_file.is_file() and response_file.stat().st_size > 0:
+                data = json.loads(response_file.read_text(encoding="utf-8"))
+                try:
+                    response_file.unlink()
+                except Exception:
+                    pass
+                return data
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+    return None
+
+
 def _ui_info() -> Dict[str, Any]:
-    """Return the frontmost app/window and a list of named accessible UI elements."""
+    """Return the frontmost app/window and a JSON UI tree."""
+    # Prefer the menu bar process, which has Accessibility and can prompt.
+    result = _ui_via_menubar("info")
+    if result:
+        if result.get("ok") and "data" in result:
+            return {**result["data"], "ok": True}
+        return {"ok": False, "error": result.get("error") or "menu bar UI failed"}
+
     helper = _helper_executable("BadAppleUI")
     if helper:
         result = subprocess.run([helper, "--action", "info"], capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            parts = result.stdout.strip().split("|", 2)
-            if len(parts) >= 3:
-                return {"ok": True, "app": parts[0], "window": parts[1], "elements": [e.strip() for e in parts[2].strip("{}").split(",") if e.strip()]}
-        return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI info failed"}
+        try:
+            data = json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI info failed"}
+        if data.get("error"):
+            return {"ok": False, "error": data["error"]}
+        return {"ok": True, **data}
     script = '''
     tell application "System Events"
         set p to first application process whose frontmost is true
@@ -161,16 +215,26 @@ def _ui_info() -> Dict[str, Any]:
     return {"ok": True, "app": parts[0], "window": parts[1], "elements": [e.strip() for e in parts[2].strip("{}").split(",") if e.strip()]}
 
 
-def _ui_click(target: str) -> Dict[str, Any]:
-    """Click the first accessible element whose name matches the target."""
-    if not target:
-        return {"ok": False, "error": "target name is required"}
+def _ui_click(target: str, role: str = "") -> Dict[str, Any]:
+    """Click the first accessible element whose name or role matches the target."""
+    if not target and not role:
+        return {"ok": False, "error": "target name or role is required"}
+    result = _ui_via_menubar("click", target=target, role=role)
+    if result:
+        return result
     helper = _helper_executable("BadAppleUI")
     if helper:
-        result = subprocess.run([helper, "--action", "click", "--target", target], capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            return {"ok": True, "result": result.stdout.strip()}
-        return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI click failed"}
+        cmd = [helper, "--action", "click"]
+        if target:
+            cmd.extend(["--target", target])
+        if role:
+            cmd.extend(["--role", role])
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        try:
+            data = json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI click failed"}
+        return data
     script = f'''
     tell application "System Events"
         set p to first application process whose frontmost is true
@@ -199,12 +263,17 @@ def _ui_type(target: str, text: str) -> Dict[str, Any]:
     """Type text into the named text field of the frontmost window."""
     if not target or text is None:
         return {"ok": False, "error": "target name and text are required"}
+    result = _ui_via_menubar("type", target=target, text=text)
+    if result:
+        return result
     helper = _helper_executable("BadAppleUI")
     if helper:
         result = subprocess.run([helper, "--action", "type", "--target", target, "--text", text], capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            return {"ok": True, "result": result.stdout.strip()}
-        return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI type failed"}
+        try:
+            data = json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI type failed"}
+        return data
     script = f'''
     tell application "System Events"
         set p to first application process whose frontmost is true
@@ -229,6 +298,24 @@ def _ui_type(target: str, text: str) -> Dict[str, Any]:
     return {"ok": True, "result": out}
 
 
+def _ui_focus(target: str) -> Dict[str, Any]:
+    """Set keyboard focus to the named element in the frontmost window."""
+    if not target:
+        return {"ok": False, "error": "target name is required"}
+    result = _ui_via_menubar("focus", target=target)
+    if result:
+        return result
+    helper = _helper_executable("BadAppleUI")
+    if helper:
+        result = subprocess.run([helper, "--action", "focus", "--target", target], capture_output=True, text=True, timeout=30)
+        try:
+            data = json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI focus failed"}
+        return data
+    return {"ok": False, "error": "BadAppleUI helper not available"}
+
+
 def _handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
     command = req.get("command")
     if command == "list_shortcuts":
@@ -240,9 +327,11 @@ def _handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
     if command == "ui_info":
         return _ui_info()
     if command == "ui_click":
-        return _ui_click(req.get("target", ""))
+        return _ui_click(req.get("target", ""), req.get("role", ""))
     if command == "ui_type":
         return _ui_type(req.get("target", ""), req.get("text", ""))
+    if command == "ui_focus":
+        return _ui_focus(req.get("target", ""))
     return {"ok": False, "error": f"unknown command '{command}'"}
 
 

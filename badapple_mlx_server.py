@@ -1420,18 +1420,22 @@ TOOLS.extend([
         "type": "function",
         "function": {
             "name": "ui_action",
-            "description": "Control the foreground macOS application via the accessibility UI. Actions: 'info' returns the frontmost app, window, and named UI elements; 'click' clicks a named element; 'type' sets text into a named text field.",
+            "description": "Control the foreground macOS application via the accessibility UI. Actions: 'info' returns the frontmost app, window, and a JSON UI tree; 'click' clicks a named element; 'focus' sets keyboard focus; 'type' sets text into a focused/named text field.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["info", "click", "type"],
+                        "enum": ["info", "click", "focus", "type"],
                         "description": "The UI action to perform.",
                     },
                     "target": {
                         "type": "string",
-                        "description": "For click/type, the accessible name of the target element.",
+                        "description": "For click/focus/type, the accessible name of the target element.",
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "Optional AX role to disambiguate the target (e.g., 'AXButton', 'AXTextField').",
                     },
                     "text": {
                         "type": "string",
@@ -2012,6 +2016,7 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             aqua = badapple_aqua_helper.call_aqua(
                 f"ui_{action}",
                 target=args.get("target", ""),
+                role=args.get("role", ""),
                 text=args.get("text", ""),
                 timeout=30,
             )

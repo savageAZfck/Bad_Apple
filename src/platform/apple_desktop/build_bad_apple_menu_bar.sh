@@ -90,6 +90,9 @@ plutil -lint "${EMBED_PLIST}"
     -I "${SCRATCH_DIR}/native" -L "${BUILD_DIR}" \
     -o "${SCRATCH_DIR}/native/BadAppleMenuBar" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBarUIResponder.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleControlCenter.swift" \
     -lBadAppleBridge -ldl \
     -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "${EMBED_PLIST}"
@@ -117,6 +120,7 @@ install -m 755 "${SCRATCH_DIR}/native/BadAppleScreenCapture" "${CONTENTS_DIR}/He
     -target "${TARGET}" -sdk "${SDK_PATH}" \
     -o "${SCRATCH_DIR}/native/BadAppleUI" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUI.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
     -framework Foundation
 install -m 755 "${SCRATCH_DIR}/native/BadAppleUI" "${CONTENTS_DIR}/Helpers/BadAppleUI"
 if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
