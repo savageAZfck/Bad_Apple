@@ -51,6 +51,7 @@ import badapple_mcp_marketplace
 import badapple_model_registry
 import badapple_p2p
 import badapple_scheduler
+import badapple_speculate
 import badapple_spotlight
 import badapple_stt
 import badapple_supervisor
@@ -110,6 +111,10 @@ MAIN_MODEL = os.environ.get("BADAPPLE_MAIN_MODEL", "caiovicentino1/Qwen3.5-9B-HL
 
 # DFlash speculative draft for the 9B brain (same architecture).
 DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "z-lab/Qwen3.5-9B-DFlash").strip()
+
+# Standard mlx-lm speculative decoding. Set BADAPPLE_SPECULATIVE_DRAFT to a
+# model ref/path or to "auto" to scan the HF cache for a small draft.
+SPECULATIVE_DRAFT = os.environ.get("BADAPPLE_SPECULATIVE_DRAFT", "").strip()
 NUM_DRAFT_TOKENS = int(os.environ.get("BADAPPLE_NUM_DRAFT_TOKENS") or "3")
 
 # Generation memory budget. Reduce for larger models (e.g. 32B Qwen at 1024-2048).
@@ -2812,13 +2817,22 @@ class MLXServer:
             self.model_registry.set_current(MAIN_MODEL)
 
             self.draft_model = None
-            if DRAFT_MODEL:
-                print(f"Loading speculative draft model {DRAFT_MODEL}...", flush=True)
-                try:
-                    self.draft_model, _ = load(DRAFT_MODEL)
-                    print("Speculative draft model loaded.", flush=True)
-                except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                    print(f"Warning: could not load draft model: {e}", flush=True)
+            self._load_speculative_draft()
+
+    def _load_speculative_draft(self, model_ref: str | None = None) -> None:
+        """Load or reload the mlx-lm speculative draft model."""
+        target = (model_ref or SPECULATIVE_DRAFT).strip()
+        if target.lower() == "auto":
+            target = None
+        if target or not self.draft_model:
+            draft = badapple_speculate.load_draft(target or None)
+            if draft:
+                self.draft_model = draft[0]
+
+    def _unload_speculative_draft(self) -> None:
+        if self.draft_model is not None:
+            badapple_speculate.unload_draft(self.draft_model)
+            self.draft_model = None
 
         # Each executor worker thread needs to know the device the model was
         # loaded on; capture it from the main (load) thread.
@@ -4532,6 +4546,29 @@ class MLXServer:
             if m:
                 self.prefill_step_size = int(m.group(1))
                 result = f"Prefill step size set to {self.prefill_step_size}."
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if low in ("enable draft", "draft on"):
+                await asyncio.get_event_loop().run_in_executor(self.executor, self._load_speculative_draft, "auto")
+                result = "Speculative draft auto-enabled." if self.draft_model else "No cached draft candidate found."
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            m = re.match(r"^(?:use|set)\s+draft\s+(?:model\s+)?(.+)", low)
+            if m:
+                model_ref = m.group(1).strip()
+                await asyncio.get_event_loop().run_in_executor(self.executor, self._load_speculative_draft, model_ref)
+                result = f"Speculative draft set to {model_ref}." if self.draft_model else f"Could not load draft {model_ref}."
+                await _write_frame(writer, {"type": "done", "text": result})
+                return
+            if low in ("disable draft", "stop draft", "draft off"):
+                self._unload_speculative_draft()
+                await _write_frame(writer, {"type": "done", "text": "Speculative draft disabled."})
+                return
+            m = re.match(r"^(?:set\s+)?draft\s+tokens\s+(?:to\s+)?(\d+)", low)
+            if m:
+                global NUM_DRAFT_TOKENS
+                NUM_DRAFT_TOKENS = int(m.group(1))
+                result = f"Number of draft tokens set to {NUM_DRAFT_TOKENS}."
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
 

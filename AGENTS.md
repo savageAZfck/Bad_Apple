@@ -245,8 +245,8 @@ The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`,
 Set in `src/platform/apple_bridge/com.badapple.mlx.plist`:
 
 - `BADAPPLE_DFLASH=0` — DFlash is off for this quant. The 9B Qwen 3.5 uses a hybrid linear/full attention state cache (`ArraysCache`) that does not provide a trimmable KV cache, so the `mlx-lm` draft path cannot load a small draft. DFlash's own 9B draft model is too heavy to beat the verification overhead on the benchmark suite, so plain `mlx-lm` is faster overall.
-- `BADAPPLE_DRAFT_MODEL=` (empty) — no speculative draft.
-- `BADAPPLE_NUM_DRAFT_TOKENS=2` (unused when draft is empty).
+- `BADAPPLE_SPECULATIVE_DRAFT=` (empty or "auto") — set to a small cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft.
+- `BADAPPLE_NUM_DRAFT_TOKENS=2` — number of tokens the draft model generates per verification step. Runtime command: `set draft tokens to 4`.
 
 In `badapple_mlx_server.py`:
 

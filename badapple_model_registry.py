@@ -45,6 +45,13 @@ RECOMMENDED_MODELS = [
         "memory_gb": 4,
         "notes": "Tiny fast tier or constrained machines.",
     },
+    {
+        "id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "name": "Qwen 2.5 0.5B 4-bit",
+        "size_gb": 0.5,
+        "memory_gb": 2,
+        "notes": "Best speculative-decoding draft for the 9B brain. Download and run `use draft model mlx-community/Qwen2.5-0.5B-Instruct-4bit`.",
+    },
 ]
 
 
