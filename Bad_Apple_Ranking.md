@@ -6,7 +6,7 @@
 
 ## What Bad Apple Is
 
-Bad Apple is a **local-first generative AI runtime** for macOS. It is built around a single 9B Qwen 3.5 4-bit model running on the Apple Neural Engine / GPU through MLX, a DFlash speculative draft model for faster generation, a local neural TTS server, and a Rust-backed SLICKS-secured Unix-socket command layer. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
+Bad Apple is a **local-first generative AI runtime** for macOS. It is built around a single 9B Qwen 3.5 4-bit model running on the Apple Neural Engine / GPU through MLX, an optional small speculative draft model for faster generation, a local neural TTS server, and a Rust-backed SLICKS-secured Unix-socket command layer. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
 
 Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 
@@ -22,7 +22,7 @@ Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 ### 1. On-Device Language Reasoning
 
 - **9B Qwen 3.5 target model** (`caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`) for general question answering, summarization, writing, coding help, and open-ended chat.
-- **DFlash speculative decoding** (`z-lab/Qwen3.5-9B-DFlash`) to accelerate token generation with block-level draft verification.
+- **Optional speculative decoding** — when a small compatible draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) is cached, `mlx-lm` can run speculative decoding for faster generation.
 - **Single model for text and voice** — no multi-second model swap when switching from text to speech mode.
 - **Streaming output** — tokens are emitted as they are generated and can be displayed, saved, or sent to TTS in real time.
 
@@ -106,13 +106,13 @@ Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_document
 
 ## Performance
 
-Measured on a 16 GB Apple Silicon M-series Mac with the 9B Qwen 3.5 4-bit target and DFlash draft:
+Measured on a 16 GB Apple Silicon M-series Mac with the 9B Qwen 3.5 4-bit target and an optional small draft model:
 
 | Metric | Typical Range |
 |---|---|
 | First-token latency | 3.5–6.5 s for 450–750 token prompts |
 | Decode throughput | 13–25 tok/s, spikes to ~36 tok/s |
-| Peak memory | 5.7–6.5 GB with target + DFlash loaded |
+| Peak memory | 5.7–6.5 GB with target and optional draft loaded |
 | Voice first token | 2.8–5.7 s for 430–460 token prompts |
 | RAG embeddings | bge-small on CPU |
 
@@ -142,7 +142,7 @@ badapple CLI / menu bar / voice host
               │
               ▼
    badapple_mlx_server.py  (Python + MLX)
-   ├─ 9B Qwen 3.5 + DFlash
+   ├─ 9B Qwen 3.5 + optional small draft
    ├─ RAG / embeddings
    ├─ personas, cache, firewall, audit
    └─ tools + approvals
@@ -159,7 +159,7 @@ badapple CLI / menu bar / voice host
 - **Persona-driven** — switchable, teachable personalities make the assistant entertaining and brandable.
 - **Built-in safety** — approvals, fail-closed paths, streaming firewall, and audit ledger by default.
 - **Mac-native** — uses MLX, Apple Silicon, launchd, Piper TTS, and a Swift/Objective-C menu bar.
-- **Fast speculative decoding** — DFlash block-diffusion draft gives better throughput than standard token-by-token drafting on Qwen 3.5.
+- **Fast speculative decoding** — when a small cached draft is available, speculative decoding can give better throughput than standard token-by-token generation on Qwen 3.5.
 - **Extensible local RAG** — index your own files and query them privately.
 - **Open-ended tool use** — local shell, AppleScript, and file tools gated by user approval.
 - **Benchmark-ready** — built-in metrics for throughput, latency, and memory.
