@@ -35,7 +35,7 @@ def index_project(project_path: str, knowledge: Any) -> str:
     try:
         indexed = knowledge.index_paths(files)
         return f"Indexed {len(files)} files from {p.name} ({indexed} chunks) with per-file source paths."
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Xcode index error: {e}"
 
 
@@ -49,7 +49,7 @@ def search_project(query: str, knowledge: Any, max_results: int = 10) -> str:
         for i, (text, score) in enumerate(results, 1):
             lines.append(f"\n{i}. score={score:.3f}\n{text[:500]}")
         return "\n".join(lines)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Xcode search error: {e}"
 
 
@@ -64,11 +64,11 @@ def project_info(project_path: str) -> str:
             capture_output=True,
             text=True,
             timeout=60,
-        )
+        check=False)
         if result.returncode != 0:
             return f"xcodebuild error: {result.stderr or result.stdout}"
         return json.dumps(json.loads(result.stdout), indent=2)
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError, json.JSONDecodeError, TypeError, AttributeError, LookupError) as e:
         return f"Xcode project info error: {e}"
 
 
@@ -93,11 +93,11 @@ def build_diagnostics(project_path: str, scheme: str, configuration: str = "Debu
             capture_output=True,
             text=True,
             timeout=900,
-        )
+        check=False)
         output = (result.stdout or "") + (result.stderr or "")
         relevant = [line for line in output.splitlines() if any(token in line for token in ("error:", "warning:", "BUILD "))]
         return "\n".join(relevant[-300:]) or output[-12000:]
     except subprocess.TimeoutExpired:
         return "Xcode build diagnostics timed out."
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError, LookupError, TypeError) as e:
         return f"Xcode build diagnostics error: {e}"

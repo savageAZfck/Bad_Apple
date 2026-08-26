@@ -63,7 +63,7 @@ def recv_frame(sock) -> dict:
     return json.loads(line)
 
 
-def call_agent(method: str, params: dict = None, prompt_text: str = None, max_tokens: int = 1):
+def call_agent(method: str, params: dict | None = None, prompt_text: str | None = None, max_tokens: int = 1):
     secret = load_secret()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(os.environ.get("BADAPPLE_SOCKET_PATH", DEFAULT_SOCKET_PATH))

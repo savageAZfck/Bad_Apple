@@ -169,7 +169,7 @@ def _handle_request(raw: bytes) -> dict:
             "sample_rate": rate,
             "duration_ms": duration_ms,
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return {"ok": False, "error": str(e)}
 
 
@@ -196,7 +196,7 @@ def _serve_client(conn: socket.socket):
     finally:
         try:
             conn.close()
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - cleanup
             pass
 
 
@@ -204,7 +204,7 @@ def _warm_voice():
     try:
         _load_voice(DEFAULT_VOICE)
         print(f"badapple_tts: voice {DEFAULT_VOICE} loaded", file=sys.stderr)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         print(f"badapple_tts: failed to preload voice: {e}", file=sys.stderr)
 
 

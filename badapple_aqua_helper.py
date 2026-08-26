@@ -29,7 +29,7 @@ def _remove_stale(path: str) -> None:
         p = Path(path)
         if p.exists():
             p.unlink()
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - cleanup
         pass
 
 
@@ -44,24 +44,24 @@ def _run_shortcut(name: str, input_text: str = "", timeout: int = 60) -> dict[st
             capture_output=True,
             text=True,
             timeout=timeout,
-        )
+        check=False)
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "shortcut failed"}
         return {"ok": True, "output": (result.stdout or "").strip()}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"shortcut '{name}' timed out"}
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return {"ok": False, "error": f"shortcut error: {e}"}
 
 
 def _list_shortcuts(timeout: int = 15) -> dict[str, Any]:
     try:
-        result = subprocess.run(["shortcuts", "list"], capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(["shortcuts", "list"], capture_output=True, text=True, timeout=timeout, check=False)
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "list failed"}
-        lines = [l.strip() for l in (result.stdout or "").splitlines() if l.strip()][:100]
+        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()][:100]
         return {"ok": True, "shortcuts": lines}
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return {"ok": False, "error": f"list error: {e}"}
 
 
@@ -84,7 +84,7 @@ def _capture_screen(path: str, region: str = "") -> dict[str, Any]:
         helper = next((p for p in app_paths if Path(p).is_file()), None)
 
         if helper and not region:
-            result = subprocess.run([helper, "--output", str(out)], capture_output=True, text=True, timeout=30)
+            result = subprocess.run([helper, "--output", str(out)], capture_output=True, text=True, timeout=30, check=False)
             if result.returncode == 0 and out.is_file() and out.stat().st_size > 0:
                 return {"ok": True, "path": str(out)}
             if result.returncode != 0:
@@ -97,13 +97,13 @@ def _capture_screen(path: str, region: str = "") -> dict[str, Any]:
         else:
             cmd.append("-S")  # main screen
         cmd.append(str(out))
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "screencapture failed"}
         if not out.is_file() or out.stat().st_size == 0:
             return {"ok": False, "error": "screencapture produced no image"}
         return {"ok": True, "path": str(out)}
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return {"ok": False, "error": f"screen capture error: {e}"}
 
 
@@ -128,7 +128,7 @@ def _ui_via_menubar(action: str, **kwargs: Any) -> dict[str, Any] | None:
     try:
         request_dir.mkdir(parents=True, exist_ok=True)
         request_dir.chmod(0o777)
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - cleanup
         pass
 
     req_id = str(uuid.uuid4())
@@ -140,7 +140,7 @@ def _ui_via_menubar(action: str, **kwargs: Any) -> dict[str, Any] | None:
             json.dumps({"id": req_id, "action": action, **kwargs}, default=str),
             encoding="utf-8",
         )
-    except Exception as e:
+    except (TypeError, ValueError, OSError) as e:
         return {"ok": False, "error": f"could not write UI request: {e}"}
 
     # Wait for the menu bar to process the request.
@@ -151,11 +151,11 @@ def _ui_via_menubar(action: str, **kwargs: Any) -> dict[str, Any] | None:
                 data = json.loads(response_file.read_text(encoding="utf-8"))
                 try:
                     response_file.unlink()
-                except Exception:
+                except Exception:  # noqa: BLE001,S110 - cleanup
                     pass
                 return data
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+            print(f"[aqua_helper] is_file failed: {e}", flush=True)
         time.sleep(0.1)
 
     return None
@@ -172,7 +172,7 @@ def _ui_info() -> dict[str, Any]:
 
     helper = _helper_executable("BadAppleUI")
     if helper:
-        result = subprocess.run([helper, "--action", "info"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([helper, "--action", "info"], capture_output=True, text=True, timeout=30, check=False)
         try:
             data = json.loads(result.stdout.strip())
         except json.JSONDecodeError:
@@ -204,7 +204,7 @@ def _ui_info() -> dict[str, Any]:
         return appName & "|" & winName & "|" & (elements as string)
     end tell
     '''
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "ui_info failed"}
     parts = result.stdout.strip().split("|", 2)
@@ -227,7 +227,7 @@ def _ui_click(target: str, role: str = "") -> dict[str, Any]:
             cmd.extend(["--target", target])
         if role:
             cmd.extend(["--role", role])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
         try:
             data = json.loads(result.stdout.strip())
         except json.JSONDecodeError:
@@ -248,7 +248,7 @@ def _ui_click(target: str, role: str = "") -> dict[str, Any]:
         return "not found"
     end tell
     '''
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "ui_click failed"}
     text = result.stdout.strip()
@@ -266,7 +266,7 @@ def _ui_type(target: str, text: str) -> dict[str, Any]:
         return result
     helper = _helper_executable("BadAppleUI")
     if helper:
-        result = subprocess.run([helper, "--action", "type", "--target", target, "--text", text], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([helper, "--action", "type", "--target", target, "--text", text], capture_output=True, text=True, timeout=30, check=False)
         try:
             data = json.loads(result.stdout.strip())
         except json.JSONDecodeError:
@@ -287,7 +287,7 @@ def _ui_type(target: str, text: str) -> dict[str, Any]:
         return "not found"
     end tell
     '''
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "ui_type failed"}
     out = result.stdout.strip()
@@ -305,7 +305,7 @@ def _ui_focus(target: str) -> dict[str, Any]:
         return result
     helper = _helper_executable("BadAppleUI")
     if helper:
-        result = subprocess.run([helper, "--action", "focus", "--target", target], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([helper, "--action", "focus", "--target", target], capture_output=True, text=True, timeout=30, check=False)
         try:
             data = json.loads(result.stdout.strip())
         except json.JSONDecodeError:
@@ -342,7 +342,7 @@ class _AquaHelperHandler(socketserver.StreamRequestHandler):
             try:
                 req = json.loads(line.decode("utf-8"))
                 resp = _handle_request(req)
-            except Exception as e:
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as e:
                 resp = {"ok": False, "error": f"invalid request: {e}"}
             self.wfile.write(json.dumps(resp).encode("utf-8") + b"\n")
             self.wfile.flush()
@@ -365,7 +365,7 @@ def call_aqua(command: str, timeout: float = 15.0, **kwargs) -> dict[str, Any] |
                 if not line:
                     return None
                 return json.loads(line.decode("utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001 - catch-all wrapper
         return None
 
 

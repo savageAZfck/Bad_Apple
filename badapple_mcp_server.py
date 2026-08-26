@@ -164,7 +164,7 @@ def _tools() -> list[dict[str, Any]]:
                     {"type": "object", "properties": {}, "required": []},
                 ),
             }
-    except Exception as exc:  # pragma: no cover - daemon may be down
+    except (LookupError, TypeError, ValueError) as exc: # pragma: no cover - daemon may be down
         print(f"[mcp] discover_tools failed: {exc}", file=sys.stderr, flush=True)
 
     return list(by_name.values())
@@ -178,7 +178,7 @@ def _call_agent_or_report(method: str, params: dict[str, Any] | None) -> dict[st
     """Call ``agent_client.call_agent`` and normalize errors."""
     try:
         return call_agent(method, params)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - catch-all wrapper
         return {"type": "error", "error": f"agent_client error: {exc}"}
 
 
@@ -362,7 +362,7 @@ class _MCPStreamRequestHandler(socketserver.StreamRequestHandler):
                 response = handle(request)
             except json.JSONDecodeError as exc:
                 response = _error(None, -32700, f"invalid JSON: {exc}")
-            except Exception as exc:
+            except (TypeError, ValueError, AttributeError) as exc:
                 response = _error(None, -32603, f"internal error: {exc}")
 
             if response is not None:
@@ -381,7 +381,7 @@ def _run_stdio_server() -> int:
             response = handle(request)
         except json.JSONDecodeError as exc:
             response = _error(None, -32700, f"invalid JSON: {exc}")
-        except Exception as exc:
+        except (TypeError, ValueError, AttributeError) as exc:
             response = _error(None, -32603, f"internal error: {exc}")
 
         if response is not None:
@@ -410,7 +410,7 @@ def _run_unix_server() -> int:
 
     try:
         _prepare_socket_path(socket_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - catch-all wrapper
         print(f"[mcp] socket setup failed: {exc}", file=sys.stderr, flush=True)
         return 1
 
@@ -433,7 +433,7 @@ def _run_unix_server() -> int:
 
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - cleanup
         # Signals may not be available on all platforms.
         pass
 

@@ -22,14 +22,14 @@ def _run(args: list[str], timeout: int = 30) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
-        )
+        check=False)
         out = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0:
             return f"Git error ({result.returncode}):\n{out.strip()}"
         return out
     except subprocess.TimeoutExpired:
         return "Git command timed out"
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"Git command error: {e}"
 
 

@@ -20,11 +20,11 @@ def _run_mdfind(query: str, max_results: int = 20) -> list[str]:
             capture_output=True,
             text=True,
             timeout=15,
-        )
+        check=False)
         if result.returncode != 0:
             return []
         return result.stdout.strip().splitlines()[:max_results]
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         return []
 
 
@@ -37,9 +37,9 @@ def _search_notes(query: str, max_results: int = 10) -> list[str]:
             capture_output=True,
             text=True,
             timeout=15,
-        )
+        check=False)
         return result.stdout.strip().splitlines()[:max_results]
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         return []
 
 
@@ -55,10 +55,10 @@ def _search_mail(query: str, max_results: int = 10) -> list[str]:
                 capture_output=True,
                 text=True,
                 timeout=10,
-            )
+            check=False)
             results.extend(result.stdout.strip().splitlines())
         return results[:max_results]
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError, LookupError, TypeError):
         return []
 
 
@@ -78,8 +78,8 @@ def _search_history(query: str, max_results: int = 10) -> list[str]:
                     out.append(line[:160])
             if len(out) >= max_results:
                 break
-    except Exception:
-        pass
+    except (OSError, ValueError) as e:
+        print(f"[spotlight] splitlines failed: {e}", flush=True)
     return out
 
 

@@ -25,7 +25,7 @@ def _load_registry() -> dict[str, Any]:
     if DEFAULT_REGISTRY.is_file():
         try:
             return json.loads(DEFAULT_REGISTRY.read_text(encoding="utf-8"))
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
             print(f"[mcp_marketplace] could not load registry: {e}", flush=True)
     return {"servers": []}
 
@@ -67,7 +67,7 @@ class MCPClient:
         while True:
             try:
                 line = self._proc.stdout.readline()
-            except Exception:
+            except Exception:  # noqa: BLE001 - catch-all wrapper
                 break
             if not line:
                 break
@@ -113,7 +113,7 @@ class MCPClient:
                 env=env,
                 text=False,
             )
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
             print(f"[mcp_client] could not start {self.name}: {e}", flush=True)
             return False
         self._reader = threading.Thread(target=self._reader_loop, name=f"mcp-{self.name}-reader", daemon=True)
@@ -124,7 +124,7 @@ class MCPClient:
             tools = self._call("tools/list", timeout=15)
             self._tools = tools.get("tools", []) if isinstance(tools, dict) else []
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             self.stop()
             print(f"[mcp_client] init failed for {self.name}: {e}", flush=True)
             return False
@@ -138,7 +138,7 @@ class MCPClient:
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=2)
-            except Exception:
+            except Exception:  # noqa: BLE001,S110 - cleanup
                 pass
             self._proc = None
 
@@ -209,7 +209,7 @@ class MCPMarketplace:
         try:
             result = client.call_tool(tool, arguments)
             return json.dumps(result, ensure_ascii=False, indent=2)
-        except Exception as e:
+        except (TypeError, ValueError) as e:
             return f"MCP tool error: {e}"
 
     def stop_all(self) -> None:

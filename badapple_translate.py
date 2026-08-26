@@ -42,7 +42,7 @@ def _load():
             _tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL, cache_dir=str(_cache_dir()))
             _model = AutoModelForSeq2SeqLM.from_pretrained(DEFAULT_MODEL, cache_dir=str(_cache_dir()))
             print(f"[translate] translation model loaded in {time.time()-t0:.1f}s", flush=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             return f"Translation model load error: {e}"
     return _model, _tokenizer
 
@@ -65,5 +65,5 @@ def translate(
         encoded = tokenizer(text, return_tensors="pt")
         generated = model.generate(**encoded, forced_bos_token_id=tokenizer.get_lang_id(target), max_length=max_length)
         return tokenizer.batch_decode(generated, skip_special_tokens=True)[0].strip()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Translation error: {e}"

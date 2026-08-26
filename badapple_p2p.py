@@ -14,7 +14,6 @@ import base64
 import datetime
 import hashlib
 import hmac
-import io
 import json
 import os
 import shutil
@@ -99,7 +98,7 @@ class P2PFrame:
                 payload_b64=obj["p"],
                 proof=obj["h"],
             )
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, LookupError):
             return None
 
 
@@ -149,7 +148,7 @@ class P2PDaemon:
             nonce = base64.b64decode(nonce_b64)
             ct = base64.b64decode(payload_b64)
             return self._aes.decrypt(nonce, ct, None)
-        except Exception:
+        except Exception:  # noqa: BLE001 - catch-all wrapper
             return None
 
     # ------------------------------------------------------------------
@@ -205,7 +204,7 @@ class P2PDaemon:
         while self._running:
             try:
                 await self._send_beacon()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 print(f"[p2p] beacon error: {e}", flush=True)
             await asyncio.sleep(P2P_BROADCAST_INTERVAL)
 
@@ -245,7 +244,7 @@ class P2PDaemon:
                 await self._handle_udp(data, addr)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 print(f"[p2p] udp read error: {e}", flush=True)
 
     async def _handle_udp(self, data: bytes, addr):
@@ -268,8 +267,8 @@ class P2PDaemon:
             if plaintext:
                 try:
                     remote_sync_port = int(json.loads(plaintext.decode()).get("sync_port", self.sync_port))
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as e:
+                    print(f"[p2p] int failed: {e}", flush=True)
             self._remember_peer(addr[0], frame.origin_id, remote_sync_port)
 
     def _remember_peer(self, host: str, origin_id: str, sync_port: int):
@@ -351,17 +350,17 @@ class P2PDaemon:
                     print(f"[p2p] received adapter '{adapter_name}' into {target}", flush=True)
                     writer.write(b'{"ok":true}\n')
                     await writer.drain()
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - catch-all wrapper
                     print(f"[p2p] adapter receive error: {e}", flush=True)
                     writer.write(json.dumps({"ok": False, "error": str(e)}).encode() + b"\n")
                     await writer.drain()
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError, LookupError) as e:
             print(f"[p2p] sync handler error: {e}", flush=True)
         finally:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110 - cleanup
                 pass
 
     # ------------------------------------------------------------------
@@ -415,7 +414,7 @@ class P2PDaemon:
                     sent += 1
                 writer.close()
                 await writer.wait_closed()
-            except Exception as e:
+            except (OSError, ValueError, TypeError) as e:
                 print(f"[p2p] sync to {peer.host} failed: {e}", flush=True)
         return f"Synced {len(facts)} facts to {sent} peer(s)."
 
@@ -423,7 +422,7 @@ class P2PDaemon:
         if not self.peers:
             return "No peers on the local network."
         lines = [
-            f"{p.origin_id} at {p.host}:{p.port} (last seen {datetime.datetime.fromtimestamp(p.last_seen).isoformat()})"
+            f"{p.origin_id} at {p.host}:{p.port} (last seen {datetime.datetime.fromtimestamp(p.last_seen, tz=datetime.timezone.utc).astimezone().isoformat()})"
             for p in self.peers.values()
         ]
         return "Discovered peers:\n" + "\n".join(lines)
@@ -445,12 +444,11 @@ class P2PDaemon:
             return f"Adapter '{adapter_name}' not found at {adapter_path}"
 
         try:
-            zip_buf = io.BytesIO()
             base = shutil.make_archive(str(adapter_path), 'zip', str(adapter_path))
             with open(base, "rb") as f:
                 zip_bytes = f.read()
             Path(base).unlink(missing_ok=True)
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return f"Error packaging adapter: {e}"
 
         plaintext = json.dumps({
@@ -483,12 +481,12 @@ class P2PDaemon:
                 if line and b'"ok":true' in line:
                     return f"Sent adapter '{adapter_name}' to {peer.origin_id}"
                 return f"Peer rejected adapter: {line.decode().strip()}"
-            except Exception as e:
+            except (OSError, ValueError, TypeError) as e:
                 return f"P2P adapter send failed: {e}"
 
         try:
             return asyncio.run(_send())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             return f"P2P adapter send error: {e}"
 
     def list_local_adapters(self, adapters_dir: Path) -> str:

@@ -144,6 +144,19 @@ nav { display: flex; flex-direction: column; gap: 0.35rem; }
 }
 .view.hidden { display: none; }
 
+/* Offline banner */
+.offline-banner {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-bottom: 1px solid var(--danger);
+  padding: 0.6rem 1rem;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.offline-banner.hidden { display: none; }
+
 /* Cards */
 .cards {
   display: grid;

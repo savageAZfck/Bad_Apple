@@ -32,7 +32,7 @@ def _console_uid() -> int:
             check=True,
         ).stdout.strip()
         return pwd.getpwnam(user).pw_uid
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         return os.getuid()
 
 
@@ -69,7 +69,7 @@ def _launchd_running(domain: str) -> bool:
         capture_output=True,
         text=True,
         timeout=5,
-    )
+    check=False)
     return result.returncode == 0 and "state = running" in result.stdout
 
 
@@ -114,7 +114,7 @@ def _restart(domain: str) -> bool:
         capture_output=True,
         text=True,
         timeout=20,
-    ).returncode == 0
+    check=False).returncode == 0
 
 
 def check_once(repair: bool = True) -> dict[str, Any]:

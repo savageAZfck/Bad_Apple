@@ -89,8 +89,8 @@ class TieringRouter:
                 try:
                     result = self._safe_eval(expr)
                     return ("fast", {"text": f"{expr} = {result}"})
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - logged
+                    print(f"[tier] _safe_eval failed: {e}", flush=True)
 
         # Fast tier: identity / creator.
         if re.search(r"\b(who are you|what are you|what's your name)\b", low):
@@ -102,7 +102,7 @@ class TieringRouter:
 
         # Fast tier: time.
         if re.search(r"\b(what time is it|current time|time is it)\b", low):
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+            now = datetime.datetime.now(tz=datetime.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
             return ("fast", {"text": f"It's {now}, bestie."})
 
         # Vision tier.

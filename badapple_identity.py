@@ -32,8 +32,8 @@ def _identity_blob_path() -> str:
                 check=True,
             ).stdout.strip()
             home = pwd.getpwnam(user).pw_dir
-        except Exception:
-            pass
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            print(f"[identity] strip failed: {e}", flush=True)
     return str(Path(home) / "Library/Application Support/BadApple/identity.sekey")
 
 
@@ -46,7 +46,7 @@ def _run(command: str, argument: str | None = None, timeout: int = 60) -> str:
         args.append(argument)
     env = os.environ.copy()
     env.setdefault("BADAPPLE_IDENTITY_BLOB", _identity_blob_path())
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env, check=False)
     if result.returncode != 0:
         raise IdentityError((result.stderr or result.stdout or "identity helper failed").strip())
     return result.stdout.strip()

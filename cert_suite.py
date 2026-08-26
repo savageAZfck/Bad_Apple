@@ -18,7 +18,7 @@ from pathlib import Path
 
 try:
     import psutil
-except Exception as e:  # pragma: no cover
+except ImportError as e: # pragma: no cover
     psutil = None
     print(f"[warn] psutil not available: {e}")
 
@@ -44,8 +44,8 @@ def find_badapple_processes() -> list[psutil.Process]:
             cmdline = " ".join(p.info.get("cmdline") or [])
             if "badapple" in cmdline.lower() or "bad_apple" in cmdline.lower():
                 procs.append(p)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - logged
+            print(f"[cert_suite] join failed: {e}", flush=True)
     return procs
 
 
@@ -67,7 +67,7 @@ def check_network_isolation() -> int:
                     if ip not in ("127.0.0.1", "::1", "0.0.0.0", "::"):
                         _fail(f"pid {pid} has external socket {ip}:{port} ({conn.status})")
                         failures += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             _info(f"could not inspect pid {pid}: {e}")
 
     if not failures:
@@ -98,8 +98,8 @@ def check_unix_sockets() -> int:
                         failures += 1
                     else:
                         _info(f"pid {pid} has local-only TCP listener {addr}")
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - logged
+            print(f"[cert_suite] Process failed: {e}", flush=True)
 
     socket_path = Path("/var/run/badapple/substrate_mlx.sock")
     if socket_path.exists():
@@ -109,7 +109,7 @@ def check_unix_sockets() -> int:
             s.connect(str(socket_path))
             s.close()
             _ok(f"MLX daemon reachable via Unix socket {socket_path}")
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             _info(f"Unix socket exists but not reachable: {e}")
     else:
         _info(f"Unix socket not present at {socket_path}")
@@ -144,7 +144,7 @@ def check_policy_present() -> int:
             return 0
         _fail("policy file is present but has no tool rules")
         return 1
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         _fail(f"policy file invalid: {e}")
         return 1
 
@@ -197,7 +197,7 @@ def check_no_secrets_in_logs(data_dir: Path) -> int:
         for f in files:
             try:
                 text = f.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
+            except (OSError, ValueError):
                 continue
             for pat in patterns:
                 for m in pat.finditer(text):
@@ -256,7 +256,7 @@ def check_cloud_references(data_dir: Path) -> int:
                 continue
             try:
                 text = f.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
+            except (OSError, ValueError):
                 continue
             for pat in cloud_patterns:
                 if pat.search(text):
@@ -285,7 +285,7 @@ def check_model_provenance() -> int:
         return 1
     try:
         result = ArtifactManifest.verify(json.loads(manifest_path.read_text(encoding="utf-8")))
-    except Exception as e:
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
         _fail(f"model manifest could not be verified: {e}")
         return 1
     if result.get("valid") and result.get("signature_valid") is True:
@@ -304,7 +304,7 @@ def check_hardware_identity() -> int:
             _ok(f"hardware-bound identity active ({status.split(':', 1)[1][:16]}...)")
             return 0
         _fail(f"hardware identity status: {status}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         _fail(f"Secure Enclave identity unavailable: {e}")
     return 1
 
@@ -320,7 +320,7 @@ def check_supervisor() -> int:
         text=True,
         timeout=20,
         env=env,
-    )
+    check=False)
     if result.returncode != 0:
         _fail(result.stderr.strip() or "supervisor health check failed")
         return 1
@@ -360,7 +360,7 @@ def main() -> int:
                 total_failures += test(data_dir)
             else:
                 total_failures += test()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             _fail(f"test {test.__name__} crashed: {e}")
             total_failures += 1
 

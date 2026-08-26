@@ -17,7 +17,7 @@ CLI = REPO / "target" / "release" / "badapple"
 
 
 def _agent(*args: str) -> dict:
-    result = subprocess.run(AGENT_CLIENT + list(args), capture_output=True, text=True, timeout=60)
+    result = subprocess.run(AGENT_CLIENT + list(args), capture_output=True, text=True, timeout=60, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"agent_client {' '.join(args)} failed: {result.stderr or result.stdout}")
     return json.loads(result.stdout)
@@ -26,7 +26,7 @@ def _agent(*args: str) -> dict:
 def _cli(prompt: str, max_tokens: int = 60) -> str:
     if not CLI.is_file():
         raise RuntimeError(f"CLI not built: {CLI}")
-    result = subprocess.run([str(CLI), "-n", str(max_tokens), prompt], capture_output=True, text=True, timeout=120)
+    result = subprocess.run([str(CLI), "-n", str(max_tokens), prompt], capture_output=True, text=True, timeout=120, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"CLI failed: {result.stderr or result.stdout}")
     return result.stdout.strip()
@@ -75,7 +75,7 @@ def main() -> int:
     for t in tests:
         try:
             t()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             print(f"FAIL: {t.__name__}: {e}")
             return 1
     print("All smoke tests passed.")

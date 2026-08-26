@@ -29,14 +29,14 @@ final class BadAppleUIAccess {
     static let shared = BadAppleUIAccess()
 
     func isTrusted() -> Bool {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as! String
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         return AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
     func requestTrustPrompt() {
         // The prompt only appears for a foreground app; force activation.
         NSApplication.shared.activate(ignoringOtherApps: true)
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as! String
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
@@ -142,9 +142,9 @@ final class BadAppleUIAccess {
     private func targetWindow(for app: AXUIElement) -> AXUIElement? {
         var value: CFTypeRef?
         var err = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &value)
-        if err == .success, let v = value { return v as! AXUIElement }
+        if err == .success, let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() { return (v as! AXUIElement) }
         err = AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &value)
-        if err == .success, let v = value { return v as! AXUIElement }
+        if err == .success, let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() { return (v as! AXUIElement) }
         return nil
     }
 

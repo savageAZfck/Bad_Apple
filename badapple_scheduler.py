@@ -54,7 +54,7 @@ def _parse_when(when: str) -> float | None:
         # Try ISO parse
         dt = datetime.fromisoformat(when)
         return dt.timestamp()
-    except Exception:
+    except Exception:  # noqa: BLE001 - catch-all wrapper
         return None
 
 
@@ -63,7 +63,6 @@ def list_tasks() -> str:
     if not f.is_file():
         return "No scheduled tasks."
     out = []
-    now = time.time()
     try:
         with f.open("r", encoding="utf-8") as fh:
             for i, line in enumerate(fh, 1):
@@ -75,11 +74,11 @@ def list_tasks() -> str:
                     status = t.get("status", "pending")
                     when = t.get("when_ts", 0)
                     out.append(
-                        f"{i}. [{status}] {datetime.fromtimestamp(when).isoformat()} — {t.get('command','')[:60]}"
+                        f"{i}. [{status}] {datetime.fromtimestamp(when, tz=timezone.utc).astimezone().isoformat()} — {t.get('command','')[:60]}"
                     )
                 except json.JSONDecodeError:
                     continue
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Error reading schedule: {e}"
     if not out:
         return "No scheduled tasks."
@@ -101,8 +100,8 @@ def add_task(when: str, command: str, repeat: str = "") -> str:
     try:
         with _schedule_file().open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(task) + "\n")
-        return f"Scheduled task for {datetime.fromtimestamp(when_ts).isoformat()}"
-    except Exception as e:
+        return f"Scheduled task for {datetime.fromtimestamp(when_ts, tz=timezone.utc).astimezone().isoformat()}"
+    except (TypeError, ValueError, OSError) as e:
         return f"Error scheduling task: {e}"
 
 
@@ -110,11 +109,11 @@ def _run_command(command: str) -> str:
     try:
         args = json.loads(command) if command.startswith("[") else command
         if isinstance(args, list):
-            result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(args, capture_output=True, text=True, timeout=60, check=False)
         else:
-            result = subprocess.run(args, shell=True, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(args, shell=True, capture_output=True, text=True, timeout=60, check=False)
         return (result.stdout or "") + (result.stderr or "")
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError, json.JSONDecodeError, TypeError, AttributeError) as e:
         return f"Task error: {e}"
 
 
@@ -158,7 +157,7 @@ def run_due_tasks() -> str:
             fh.seek(0)
             fh.truncate()
             fh.write("\n".join(updated) + "\n")
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return f"Scheduler error: {e}"
     if not results:
         return "No tasks due."
@@ -178,13 +177,13 @@ def run_shortcut(name: str, input_text: str | None = None) -> str:
                 capture_output=True,
                 text=True,
                 timeout=120,
-            )
+            check=False)
         else:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
         if result.returncode != 0:
             return f"Shortcut error ({result.returncode}): {result.stderr or result.stdout}"
         return result.stdout or "Shortcut ran."
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"Shortcut error: {e}"
 
 
@@ -193,8 +192,8 @@ def _scheduler_loop(interval: int = 60):
     while True:
         try:
             run_due_tasks()
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - logged
+            print(f"[scheduler] run_due_tasks failed: {e}", flush=True)
         time.sleep(interval)
 
 

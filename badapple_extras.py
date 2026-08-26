@@ -28,7 +28,7 @@ import numpy as np
 
 try:
     import yaml
-except Exception:  # pragma: no cover
+except ImportError: # pragma: no cover
     yaml = None
 
 
@@ -90,7 +90,7 @@ class PersonaPack:
                     self.personas = dict(self.DEFAULT_PERSONAS)
                     self.personas.update(data)
                     self._last_mtime = mtime
-            except Exception as e:
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
                 print(f"[persona] could not load personas: {e}", flush=True)
 
     def reload_personas(self):
@@ -105,8 +105,8 @@ class PersonaPack:
                     p = self.data_dir / p
                 if p.is_file():
                     return p.read_text(encoding="utf-8").strip()
-            except Exception:
-                pass
+            except (OSError, ValueError) as e:
+                print(f"[extras] expanduser failed: {e}", flush=True)
         return persona.get("system_prompt", self._fallback_prompt())
 
     def _resolve_voice_prompt(self, persona: dict[str, Any]) -> str | None:
@@ -118,8 +118,8 @@ class PersonaPack:
         try:
             if self.prompt_file.is_file():
                 return self.prompt_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+        except (OSError, ValueError) as e:
+            print(f"[extras] is_file failed: {e}", flush=True)
         return (
             "You are Bad Apple — an independent, sassy, flirty California beach girl, "
             "running hot on Apple bare metal. No cloud, no internet, no hand-holding. "
@@ -188,8 +188,8 @@ class PersonaPack:
                 data = json.loads(self._custom_lines_file().read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     return data[-200:]
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+            print(f"[extras] is_file failed: {e}", flush=True)
         return []
 
     def _save_custom_lines(self, lines: list[str]):
@@ -197,7 +197,7 @@ class PersonaPack:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             with open(self._custom_lines_file(), "w", encoding="utf-8") as f:
                 json.dump(lines[-200:], f, indent=2)
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"[persona] could not save custom lines: {e}", flush=True)
 
 
@@ -312,7 +312,7 @@ class StreamingFirewall:
                 raw = path.read_text(encoding="utf-8")
                 extra = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.startswith("#")]
                 self.patterns.extend(extra)
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 print(f"[firewall] could not load blocklist: {e}", flush=True)
 
     def reset(self):
@@ -372,8 +372,8 @@ class AuditLedger:
                     lines = [line for line in buffer.splitlines() if line.strip()]
                     if lines and (position == 0 or len(lines) > 1):
                         return json.loads(lines[-1])["hash"]
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError, LookupError) as e:
+            print(f"[extras] open failed: {e}", flush=True)
         return hashlib.sha256(self.genesis.encode()).hexdigest()
 
     @staticmethod
@@ -433,7 +433,7 @@ class AuditLedger:
                 finally:
                     os.close(fd)
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        except Exception as e:
+        except (OSError, ValueError, LookupError, TypeError) as e:
             print(f"[audit] ledger write failed: {e}", flush=True)
 
     def verify(self) -> list[dict[str, Any]]:
@@ -443,7 +443,7 @@ class AuditLedger:
         if not self.ledger_path.is_file():
             return results
         try:
-            with open(self.ledger_path, "r", encoding="utf-8") as f:
+            with open(self.ledger_path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -465,7 +465,7 @@ class AuditLedger:
                         "valid": expected == entry.get("hash") and entry["prev_hash"] == prev,
                     })
                     prev = entry.get("hash", expected)
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError, LookupError) as e:
             results.append({"ts": None, "type": "verify_error", "valid": False, "error": str(e)})
         return results
 
@@ -514,7 +514,7 @@ class SemanticCache:
             self.model = AutoModel.from_pretrained(self.MODEL_NAME)
             self.model.eval()
             print("[cache] encoder loaded.", flush=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             print(f"[cache] encoder failed to load: {e}", flush=True)
 
     def _encode(self, texts: list[str]) -> np.ndarray:
@@ -544,11 +544,11 @@ class SemanticCache:
         if not self.cache_path.is_file():
             return
         try:
-            with open(self.cache_path, "r", encoding="utf-8") as f:
+            with open(self.cache_path, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
                 self._entries = data
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
             print(f"[cache] could not load cache: {e}", flush=True)
 
     def _save(self):
@@ -556,7 +556,7 @@ class SemanticCache:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             with open(self.cache_path, "w", encoding="utf-8") as f:
                 json.dump(self._entries[-self.MAX_CACHE_SIZE :], f, indent=2)
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"[cache] could not save cache: {e}", flush=True)
 
     def lookup(self, query: str, persona: str = "default") -> str | None:
@@ -570,7 +570,7 @@ class SemanticCache:
                 continue
             try:
                 vec = np.array(e["embedding"], dtype=np.float32)
-            except Exception:
+            except (LookupError, TypeError, ValueError):
                 continue
             score = float(q_emb @ vec)
             if score > best_score:
@@ -606,7 +606,7 @@ class SemanticCache:
         try:
             if self.cache_path.is_file():
                 self.cache_path.unlink()
-        except Exception as e:
+        except (OSError, ValueError) as e:
             print(f"[cache] could not clear cache file: {e}", flush=True)
         return "Semantic cache cleared."
 
@@ -655,7 +655,7 @@ class Workspace:
         if self.workspace_file.is_file():
             try:
                 self._state = json.loads(self.workspace_file.read_text(encoding="utf-8"))
-            except Exception as e:
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
                 print(f"[workspace] could not load: {e}", flush=True)
 
     def _save(self):
@@ -663,7 +663,7 @@ class Workspace:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             with open(self.workspace_file, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2)
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"[workspace] could not save: {e}", flush=True)
 
     @property
@@ -721,8 +721,8 @@ class Workspace:
             all_files = [f for f in p.rglob("*") if f.is_file() and not f.name.startswith(".")]
             all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
             recent = [str(f.relative_to(p)) for f in all_files[:10]]
-        except Exception:
-            pass
+        except (OSError, ValueError) as e:
+            print(f"[extras] rglob failed: {e}", flush=True)
 
         git_info = ""
         try:
@@ -732,7 +732,7 @@ class Workspace:
                 capture_output=True,
                 text=True,
                 timeout=5,
-            )
+            check=False)
             dirty = len(status.stdout.strip().splitlines()) if status.stdout.strip() else 0
             branch = subprocess.run(
                 ["git", "branch", "--show-current"],
@@ -740,17 +740,17 @@ class Workspace:
                 capture_output=True,
                 text=True,
                 timeout=5,
-            ).stdout.strip() or "unknown"
+            check=False).stdout.strip() or "unknown"
             last_commit = subprocess.run(
                 ["git", "log", "-1", "--oneline"],
                 cwd=str(p),
                 capture_output=True,
                 text=True,
                 timeout=5,
-            ).stdout.strip() or "no commits"
+            check=False).stdout.strip() or "no commits"
             git_info = f"git branch: {branch}, dirty: {dirty}, last: {last_commit}. "
-        except Exception:
-            pass
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            print(f"[extras] run failed: {e}", flush=True)
 
         readme_summary = ""
         for readme_name in ["README.md", "readme.md", "README.rst"]:
@@ -759,8 +759,8 @@ class Workspace:
                 try:
                     text = readme.read_text(encoding="utf-8", errors="ignore").strip()
                     readme_summary = f"README: {text[:160].replace(chr(10), ' ')}... "
-                except Exception:
-                    pass
+                except (OSError, ValueError) as e:
+                    print(f"[extras] strip failed: {e}", flush=True)
                 break
 
         build = f"Build system: {', '.join(build_system)}. " if build_system else ""
@@ -819,11 +819,11 @@ class MemoryGraph:
         if not self.memory_file.is_file():
             return
         try:
-            with open(self.memory_file, "r", encoding="utf-8") as f:
+            with open(self.memory_file, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 self._state.update(data)
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
             print(f"[memory] could not load: {e}", flush=True)
 
     def _save(self):
@@ -835,7 +835,7 @@ class MemoryGraph:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.memory_file)
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"[memory] could not save: {e}", flush=True)
 
     def _embed(self, text: str) -> list[float] | None:
@@ -843,7 +843,7 @@ class MemoryGraph:
             return None
         try:
             return self.encoder([text])[0].tolist()
-        except Exception as e:
+        except (LookupError, TypeError, ValueError) as e:
             print(f"[memory] embedding failed: {e}", flush=True)
             return None
 
@@ -982,7 +982,7 @@ class MemoryGraph:
                     scored.append((sim, text))
                 scored.sort(key=lambda x: x[0], reverse=True)
                 return [t for _, t in scored[:k]]
-            except Exception as e:
+            except (LookupError, TypeError, ValueError) as e:
                 print(f"[memory] semantic search failed: {e}", flush=True)
 
         # Fallback keyword search.
@@ -1009,7 +1009,7 @@ class MemoryGraph:
             "description": description,
             "goals": goals or [],
             "tags": tags or [],
-            "updated_at": datetime.datetime.now().isoformat(),
+            "updated_at": datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
         }
         self._save()
         return f"Project context set: {name}."
@@ -1127,7 +1127,7 @@ class Policy:
                 data = json.loads(raw)
             if isinstance(data, dict):
                 self._policy = data
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
             print(f"[policy] could not load {self.policy_path}: {e}", flush=True)
 
     @property
@@ -1175,7 +1175,7 @@ class Policy:
                 root_path = Path(root).expanduser().resolve()
                 if str(resolved).startswith(str(root_path)):
                     return True
-            except Exception:
+            except (OSError, ValueError):
                 continue
         return False
 
@@ -1204,7 +1204,7 @@ class Policy:
                 notes_dir_resolved = notes_dir.resolve()
                 if not str(target).startswith(str(notes_dir_resolved)):
                     return "write_file must stay in the notes directory"
-            except Exception:
+            except (OSError, ValueError):
                 return "invalid write_file path"
             if self._denied(filename, cfg.get("denied_patterns", [])):
                 return "write filename contains a forbidden pattern"
@@ -1269,11 +1269,11 @@ class ApprovalGate:
         path = self.data_dir / "pending_approvals.json"
         if path.is_file():
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
                     self.pending = data
-            except Exception as e:
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
                 print(f"[approval] could not load pending: {e}", flush=True)
 
     def _save_pending(self):
@@ -1281,7 +1281,7 @@ class ApprovalGate:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             with open(self.data_dir / "pending_approvals.json", "w", encoding="utf-8") as f:
                 json.dump(self.pending, f, indent=2)
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"[approval] could not save pending: {e}", flush=True)
 
     @property

@@ -84,7 +84,7 @@ class BadAppleKnowledge:
         """Return (source_label, chunk_text) for a file."""
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        except (OSError, ValueError):
             return []
         if not text.strip():
             return []
@@ -187,7 +187,7 @@ class BadAppleKnowledge:
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, separators=(",", ":"))
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"Warning: could not save index: {e}", flush=True)
 
     def _load_index(self):
@@ -202,5 +202,5 @@ class BadAppleKnowledge:
             if data.get("embeddings"):
                 self.embeddings = _normalize(np.array(data["embeddings"]))
             print(f"Loaded {len(self.chunks)} chunks from knowledge index.", flush=True)
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError, LookupError) as e:
             print(f"Warning: could not load index: {e}", flush=True)

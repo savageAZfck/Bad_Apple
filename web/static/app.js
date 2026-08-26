@@ -13,10 +13,20 @@ let currentView = 'dashboard';
 
 function initTheme() {
   const saved = localStorage.getItem('badapple-theme');
-  if (saved === 'light') document.body.classList.add('light');
+  const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+  const light = saved ? saved === 'light' : prefersLight;
+  document.body.classList.toggle('light', light);
   const checkbox = $('#theme-toggle');
-  if (checkbox) checkbox.checked = document.body.classList.contains('light');
+  if (checkbox) checkbox.checked = light;
   updateThemeIcon();
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', e => {
+    if (!localStorage.getItem('badapple-theme')) {
+      document.body.classList.toggle('light', e.matches);
+      const cb = $('#theme-toggle');
+      if (cb) cb.checked = e.matches;
+      updateThemeIcon();
+    }
+  });
 }
 function toggleTheme(force) {
   const light = typeof force === 'boolean' ? force : !document.body.classList.contains('light');
@@ -258,6 +268,7 @@ async function loadDashboard() {
 }
 
 async function updateDashboard() {
+  const banner = $('#offline-banner');
   try {
     const [status, snap, tail, ledger, mcp, voice] = await Promise.all([
       api('/api/status'),
@@ -267,9 +278,11 @@ async function updateDashboard() {
       api('/api/mcp_servers'),
       api('/api/voice?n=12'),
     ]);
+    if (banner) banner.classList.add('hidden');
     renderDashboard(status, snap, tail, ledger, mcp, voice);
   } catch (e) {
     console.error(e);
+    if (banner) banner.classList.remove('hidden');
   }
 }
 

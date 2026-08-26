@@ -18,13 +18,13 @@ def _run_applescript(script: str, timeout: int = 30) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
-        )
+        check=False)
         if result.returncode != 0:
             return f"AppleScript error: {result.stderr.strip() or result.stdout.strip()}"
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
         return "AppleScript timed out."
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"AppleScript failed: {e}"
 
 

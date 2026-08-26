@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agent_client import call_agent
+from agent_client import call_agent  # noqa: E402
 
 
 def read_message():
@@ -40,7 +40,7 @@ def ask_badapple(text: str) -> str:
             return f"Bad Apple connection error: {response.get('message', response)}"
         result = response.get("result", {})
         return result.get("text") or response.get("text") or "No response."
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Bad Apple connection error: {e}"
 
 

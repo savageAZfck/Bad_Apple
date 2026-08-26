@@ -28,7 +28,7 @@ def read_memory(limit: int = 5000) -> str:
     p = _ensure()
     try:
         text = p.read_text(encoding="utf-8")
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return f"Error reading working memory: {e}"
     return text[:limit] if len(text) > limit else text
 
@@ -48,7 +48,7 @@ def write_memory(content: str, mode: str = "replace") -> str:
             return "Working memory prepended."
         p.write_text(content, encoding="utf-8")
         return "Working memory replaced."
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return f"Error writing working memory: {e}"
 
 
@@ -57,5 +57,5 @@ def clear_memory() -> str:
     try:
         p.write_text("", encoding="utf-8")
         return "Working memory cleared."
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return f"Error clearing working memory: {e}"

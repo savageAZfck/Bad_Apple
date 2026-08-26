@@ -11,7 +11,7 @@ from typing import Any
 
 try:
     from badapple_knowledge import BadAppleKnowledge
-except Exception:
+except ImportError:
     BadAppleKnowledge = Any
 
 
@@ -25,10 +25,10 @@ def _extract_pdf(path: Path) -> str:
                     text = page.extract_text() or ""
                     if text.strip():
                         parts.append(f"--- Page {i} ---\n{text}")
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - logged
+                    print(f"[documents] extract_text failed: {e}", flush=True)
         return "\n\n".join(parts)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"PDF extraction error: {e}"
 
 
@@ -45,17 +45,17 @@ def _extract_epub(path: Path) -> str:
                     text = re.sub(r"\s+", " ", text).strip()
                     if text:
                         parts.append(text)
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - logged
+                    print(f"[documents] decode failed: {e}", flush=True)
         return "\n\n".join(parts)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"EPUB extraction error: {e}"
 
 
 def _extract_plain(path: Path, limit: int = 100000) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="ignore")[:limit]
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return f"Text read error: {e}"
 
 
@@ -105,5 +105,5 @@ def index_document(path: str, knowledge: BadAppleKnowledge) -> str:
         tmp.write_text(text, encoding="utf-8")
         indexed = knowledge.index_paths([tmp])
         return f"Indexed {p.name} ({count} pages/chunks, {indexed} chunks)."
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return f"Index error: {e}"

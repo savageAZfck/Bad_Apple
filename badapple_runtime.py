@@ -199,7 +199,7 @@ class HealthRegistry:
                     "detail": detail,
                     "latency_ms": round((time.monotonic() - started) * 1000, 2),
                 }
-            except Exception as e:
+            except (LookupError, TypeError, ValueError) as e:
                 results[name] = {
                     "level": level,
                     "ok": False,
@@ -225,10 +225,10 @@ class ResourceGovernor:
     @staticmethod
     def _battery() -> tuple[int | None, bool]:
         try:
-            out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3).stdout
+            out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3, check=False).stdout
             match = re.search(r"(\d+)%", out)
             return (int(match.group(1)) if match else None, "AC Power" in out)
-        except Exception:
+        except (subprocess.SubprocessError, OSError, ValueError):
             return None, False
 
     def snapshot(self) -> dict[str, Any]:

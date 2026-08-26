@@ -106,7 +106,7 @@ class ArtifactManifest:
                     ec.ECDSA(hashes.SHA256()),
                 )
                 signature_valid = True
-            except Exception:
+            except (LookupError, TypeError, ValueError):
                 signature_valid = False
         artifacts_valid = bool(results) and all(item["valid"] for item in results)
         return {

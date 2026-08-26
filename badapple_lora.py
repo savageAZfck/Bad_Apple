@@ -95,11 +95,11 @@ def train(
         need = True
         if fpath.is_file():
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    first = next((l for l in f if l.strip()), None)
+                with open(fpath, encoding="utf-8") as f:
+                    first = next((line for line in f if line.strip()), None)
                 need = first is None
-            except Exception:
-                pass
+            except (OSError, ValueError) as e:
+                print(f"[lora] open failed: {e}", flush=True)
         if need:
             with open(fpath, "w", encoding="utf-8") as f:
                 f.write(dummy)
@@ -127,6 +127,7 @@ def train(
             capture_output=True,
             text=True,
             timeout=iters * 30,  # rough per-iteration ceiling
+            check=False,
         )
         if result.returncode != 0:
             return f"LoRA training failed:\n{result.stderr or result.stdout}"
@@ -136,7 +137,7 @@ def train(
         )
     except subprocess.TimeoutExpired:
         return f"LoRA training timed out after {iters * 30}s"
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"LoRA training error: {e}"
 
 
@@ -161,13 +162,13 @@ def generate_with_adapter(
         "--temp", "0.7",
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
         if result.returncode != 0:
             return f"LoRA generation failed:\n{result.stderr or result.stdout}"
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
         return "LoRA generation timed out"
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"LoRA generation error: {e}"
 
 

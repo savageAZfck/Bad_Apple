@@ -38,7 +38,7 @@ class ModelRegistry:
             try:
                 with self.registry_path.open("r", encoding="utf-8") as f:
                     self._state = json.load(f)
-            except Exception as e:
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as e:
                 print(f"[model_registry] could not load registry: {e}", flush=True)
 
     def _save(self) -> None:
@@ -50,7 +50,7 @@ class ModelRegistry:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.registry_path)
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"[model_registry] could not save registry: {e}", flush=True)
 
     def _maybe_rescan(self) -> None:
@@ -77,7 +77,7 @@ class ModelRegistry:
         try:
             with config_path.open("r", encoding="utf-8") as f:
                 config = json.load(f)
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             config = {}
 
         size_bytes = sum(f.stat().st_size for f in snap_dir.rglob("*") if f.is_file())

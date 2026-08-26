@@ -92,7 +92,7 @@ try:
     )
     from dflash_mlx.runtime.bundle import load_runtime_bundle
     _dflash_available = True
-except Exception:
+except ImportError:
     _dflash_available = False
 
 # Protocol constants from bad_apple_ipc.rs
@@ -155,8 +155,8 @@ def load_prompt() -> str:
     if path.is_file():
         try:
             return path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+        except (OSError, ValueError) as e:
+            print(f"[mlx_server] strip failed: {e}", flush=True)
 
     return (
         "You are Bad Apple — an independent, sassy, sultry, flirty California beach girl, sun-kissed and barefoot, running hot on Apple bare metal. "
@@ -1658,14 +1658,14 @@ def load_slicks_secret() -> bytes:
     elif os.environ.get("BADAPPLE_SLICKS_KEYCHAIN", "0") == "1":
         try:
             return badapple_keychain.get_or_create_secret()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             print(f"[slicks] keychain load failed: {e}; falling back to key file", flush=True)
             key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
-            with open(key_path, "r") as f:
+            with open(key_path) as f:
                 raw = f.read()
     else:
         key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
-        with open(key_path, "r") as f:
+        with open(key_path) as f:
             raw = f.read()
     trimmed = raw.strip()
     if all(c in "0123456789abcdefABCDEF" for c in trimmed) and len(trimmed) >= 32:
@@ -1734,12 +1734,12 @@ def conversation_path() -> Path:
 
 def load_user_memory() -> list[str]:
     try:
-        with open(memory_path(), "r") as f:
+        with open(memory_path()) as f:
             data = json.load(f)
             if isinstance(data, list):
                 return data[-50:]
-    except Exception:
-        pass
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+        print(f"[mlx_server] open failed: {e}", flush=True)
     return []
 
 
@@ -1747,18 +1747,18 @@ def save_user_memory(facts: list[str]):
     try:
         with open(memory_path(), "w") as f:
             json.dump(facts[-50:], f, indent=2)
-    except Exception:
-        pass
+    except (TypeError, ValueError, OSError) as e:
+        print(f"[mlx_server] open failed: {e}", flush=True)
 
 
 def load_conversation() -> list[dict[str, str]]:
     try:
-        with open(conversation_path(), "r") as f:
+        with open(conversation_path()) as f:
             data = json.load(f)
             if isinstance(data, list):
                 return [m for m in data if isinstance(m, dict) and "role" in m and "content" in m]
-    except Exception:
-        pass
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+        print(f"[mlx_server] open failed: {e}", flush=True)
     return []
 
 
@@ -1770,7 +1770,7 @@ def save_conversation(messages: list[dict[str, str]]):
             json.dump(messages[-40:], f, indent=2)
         # Make it readable by the user and group so the menu bar can open it.
         os.chmod(path, 0o644)
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - cleanup
         pass
 
 
@@ -1795,7 +1795,7 @@ def _run_shell(command: str) -> str:
         return "Error: command contains dangerous characters or operators"
     try:
         tokens = shlex.split(command)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Error: invalid command syntax: {e}"
     if not tokens:
         return "Error: empty command"
@@ -1813,13 +1813,13 @@ def _run_shell(command: str) -> str:
             capture_output=True,
             text=True,
             timeout=15,
-        )
+        check=False)
         out = (result.stdout or "").strip()
         if result.returncode != 0:
             err = (result.stderr or "").strip()
             return f"Error ({result.returncode}): {err or 'command failed'}"
         return out[:5000] or "(no output)"
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"Error: {e}"
 
 
@@ -1999,9 +1999,9 @@ def _console_user() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
-        )
+        check=False)
         return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         return None
 
 
@@ -2019,7 +2019,7 @@ def _run_as_user(cmd: list[str], user: str | None = None, input_text: str | None
             capture_output=True,
             text=True,
             timeout=timeout,
-        )
+        check=False)
     except subprocess.TimeoutExpired:
         return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
@@ -2040,7 +2040,7 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
         )
     try:
         if name == "get_current_time":
-            return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+            return datetime.datetime.now(tz=datetime.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
         if name == "list_directory":
             p = _resolve_tool_path(args, "path", workspace)
             if not p.is_dir():
@@ -2053,7 +2053,7 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
                 return f"Error: {p} is not a file"
             try:
                 text = p.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
+            except (OSError, ValueError):
                 return f"Error: could not read {p} as text"
             limit = int(args.get("limit") or 10000)
             if len(text) > limit:
@@ -2097,8 +2097,8 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
                 capture_output=True,
                 text=True,
                 timeout=15,
-            )
-            lines = [l for l in (result.stdout or "").splitlines() if l][:max_results]
+            check=False)
+            lines = [line for line in (result.stdout or "").splitlines() if line][:max_results]
             return "\n".join(lines) or "No matches found"
         if name == "run_shell":
             return _run_shell(args.get("command", ""))
@@ -2149,7 +2149,7 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
             result = _run_as_user(["shortcuts", "list"], timeout=15)
             if result.returncode != 0:
                 return f"Error listing shortcuts: {result.stderr or result.stdout}"
-            lines = [l for l in (result.stdout or "").splitlines() if l][:100]
+            lines = [line for line in (result.stdout or "").splitlines() if line][:100]
             return "\n".join(lines) or "No shortcuts found"
         if name == "read_working_memory":
             return badapple_working_memory.read_memory(int(args.get("limit") or 5000))
@@ -2253,9 +2253,9 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
             if prompt:
                 cmd.append(prompt)
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
                 return (result.stdout or result.stderr or "Benchmark completed with no output.").strip()
-            except Exception as e:
+            except (subprocess.SubprocessError, OSError, ValueError) as e:
                 return f"Benchmark error: {e}"
         if name == "p2p_send_adapter":
             daemon = badapple_p2p.get_p2p_daemon()
@@ -2399,8 +2399,8 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
                 capture_output=True,
                 text=True,
                 timeout=15,
-            )
-            lines = [l for l in (result.stdout or "").splitlines() if l][:20]
+            check=False)
+            lines = [line for line in (result.stdout or "").splitlines() if line][:20]
             return "\n".join(lines) or "No files found"
         if name == "index_documents" and knowledge is not None:
             p = _resolve_tool_path(args, "path", workspace)
@@ -2437,7 +2437,7 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
             return badapple_mcp_marketplace.invoke_mcp_tool(
                 args.get("server", ""), args.get("tool", ""), args.get("arguments") or {}
             )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Tool error: {e}"
     return "Unknown tool"
 
@@ -2741,7 +2741,7 @@ class MLXServer:
                 # Voice now uses the same 9B unified brain; no separate voice bundle.
                 self.dflash_voice_bundle = None
                 self.dflash_voice_runtime_context = None
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 print(f"Warning: could not load DFlash bundle: {e}", flush=True)
                 print(f"Loading Bad Apple MLX brain ({MAIN_MODEL})...", flush=True)
                 self.model, self.tokenizer = load(MAIN_MODEL)
@@ -2760,7 +2760,7 @@ class MLXServer:
                 try:
                     self.draft_model, _ = load(DRAFT_MODEL)
                     print("Speculative draft model loaded.", flush=True)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - catch-all wrapper
                     print(f"Warning: could not load draft model: {e}", flush=True)
 
         # Each executor worker thread needs to know the device the model was
@@ -2792,7 +2792,7 @@ class MLXServer:
                     "path": badapple_fast_model.fast_model_path(),
                     "loaded": self.fast_model is not None,
                 }
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 print(f"[fast_model] failed to load: {e}", flush=True)
                 self.fast_model_info = {"path": badapple_fast_model.fast_model_path(), "loaded": False, "error": str(e)}
         else:
@@ -2807,7 +2807,7 @@ class MLXServer:
             mx.clear_cache()
             after = mx.get_cache_memory() / (1024 ** 2)
             return {"ok": True, "cache_memory_mb": {"before": round(before, 2), "after": round(after, 2)}}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             return {"ok": False, "error": str(e)}
 
     def unload_model(self, model_type: str = "vision") -> dict[str, Any]:
@@ -2826,7 +2826,7 @@ class MLXServer:
                         proc.terminate()
                         killed += 1
                 results["image"] = {"killed": killed}
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 results["image"] = {"error": str(e)}
         if model_type == "all":
             flush = self.flush_vram()
@@ -2879,7 +2879,7 @@ class MLXServer:
             return
         try:
             conversation_path().unlink(missing_ok=True)
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - cleanup
             pass
 
     def _audit_record(self, event_type: str, data: Any):
@@ -2968,7 +2968,7 @@ class MLXServer:
             else:
                 self.messages.insert(0, {"role": "system", "content": new_prompt})
             print("[daemon] system prompt hot-reloaded", flush=True)
-        except Exception as e:
+        except (OSError, ValueError, LookupError, TypeError) as e:
             print(f"[daemon] prompt reload failed: {e}", flush=True)
 
     def record_fact(self, text: str, source: str = "user"):
@@ -2977,7 +2977,7 @@ class MLXServer:
         if source == "user":
             for fact in badapple_fact_extractor.extract_facts(text):
                 self.memory.remember(fact, source="user")
-        elif source == "assistant" and "your name is" in low:
+        elif source == "assistant" and "your name is" in text.lower():
             # Trust the assistant when it confirms a user fact
             self.memory.remember(text, source="assistant")
 
@@ -3007,7 +3007,7 @@ class MLXServer:
             enable_thinking=False,
         )
         plan_raw = self._stream(plan_prompt, max_tokens=200, voice_mode=voice_mode)
-        plan_lines = [l.strip() for l in plan_raw.splitlines() if l.strip().startswith(("TOOL:", "SAY:"))]
+        plan_lines = [line.strip() for line in plan_raw.splitlines() if line.strip().startswith(("TOOL:", "SAY:"))]
         if not plan_lines:
             return None
 
@@ -3386,7 +3386,7 @@ class MLXServer:
             else:
                 self.breakers["tools"].success()
             return result
-        except Exception as e:
+        except (TypeError, ValueError, LookupError) as e:
             self.breakers["tools"].failure()
             return f"Tool error: {e}"
 
@@ -3521,7 +3521,7 @@ class MLXServer:
             self.draft_model = None
             self.dflash_bundle = None
             self.dflash_runtime_context = None
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - cleanup
             pass
         gc.collect()
         mx.clear_cache()
@@ -3531,7 +3531,7 @@ class MLXServer:
         try:
             self.model, self.tokenizer = load(model_ref)
             print("[model_registry] model loaded.", flush=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             return f"Error loading {model_ref}: {e}"
 
         self.model_registry.set_current(model_ref)
@@ -3913,8 +3913,8 @@ class MLXServer:
             ambient = None
             try:
                 ambient = json.loads(badapple_ambient.get_context()) if badapple_ambient._CONTEXT_FILE.is_file() else None
-            except Exception:
-                pass
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+                print(f"[mlx_server] is_file failed: {e}", flush=True)
             ambient_running = badapple_ambient.is_running()
             await _respond(req_id, {
                 "runtime": self.runtime.status(),
@@ -4024,7 +4024,7 @@ class MLXServer:
                         "persona": self.personas.active,
                     })
                     return text
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - catch-all wrapper
                     traceback.print_exc()
                     return f"Error generating response: {e}"
 
@@ -4065,7 +4065,7 @@ class MLXServer:
                     await self.p2p.start()
                 else:
                     await self.p2p.stop()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 await _respond(req_id, None, f"P2P toggle failed: {e}")
                 return
             await _respond(req_id, {"p2p_enabled": self.p2p.is_running()})
@@ -4082,10 +4082,10 @@ class MLXServer:
             entries = []
             if self.audit.ledger_path.is_file():
                 try:
-                    with open(self.audit.ledger_path, "r", encoding="utf-8") as f:
+                    with open(self.audit.ledger_path, encoding="utf-8") as f:
                         lines = f.readlines()
-                    entries = [json.loads(l) for l in lines[-n:] if l.strip()]
-                except Exception as e:
+                    entries = [json.loads(line) for line in lines[-n:] if line.strip()]
+                except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
                     await _respond(req_id, None, f"could not read ledger: {e}")
                     return
             await _respond(req_id, {"entries": entries})
@@ -4238,8 +4238,8 @@ class MLXServer:
                 ambient = None
                 try:
                     ambient = json.loads(badapple_ambient.get_context()) if badapple_ambient._CONTEXT_FILE.is_file() else None
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+                    print(f"[mlx_server] is_file failed: {e}", flush=True)
                 status = {
                     "runtime": self.runtime.status(),
                     "ambient_running": badapple_ambient.is_running(),
@@ -4336,7 +4336,7 @@ class MLXServer:
                     return
                 try:
                     await self.p2p.start()
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - catch-all wrapper
                     await _write_frame(writer, {"type": "error", "message": f"P2P start failed: {e}"})
                     return
                 await _write_frame(writer, {"type": "done", "text": "P2P discovery and sync started, bestie."})
@@ -4557,7 +4557,7 @@ class MLXServer:
                         if result:
                             return self.polish_response(result)
                         return self.polish_response(self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode, benchmark=benchmark_mode))
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - catch-all wrapper
                         traceback.print_exc()
                         return f"Error: {e}"
                 text = await loop.run_in_executor(self.executor, _plan)
@@ -4598,7 +4598,7 @@ class MLXServer:
                         return self.polish_response(raw)
                     raw = self.generate_with_tools(prompt, max_new_tokens, voice_mode=voice_mode, stream_queue=stream_queue, benchmark=benchmark_mode)
                     return self.polish_response(raw)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - catch-all wrapper
                     traceback.print_exc()
                     return f"Error generating response: {e}"
 
@@ -4630,17 +4630,17 @@ class MLXServer:
             metrics = self.last_metrics
             await _write_frame(writer, {"type": "done", "text": text, "metrics": metrics})
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             traceback.print_exc()
             try:
                 await _write_frame(writer, {"type": "error", "message": f"MLX server error: {e}"})
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - logged
+                print(f"[mlx_server] _write_frame failed: {e}", flush=True)
         finally:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110 - cleanup
                 pass
 
 
@@ -4704,7 +4704,7 @@ async def main():
         dashboard = DashboardServer(server)
         dashboard.start()
         print(f"[main] Dashboard available at http://{dashboard.host}:{dashboard.port}/", flush=True)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         print(f"[main] Dashboard failed to start: {e}", flush=True)
 
     # Start the local-only P2P sync daemon on the same event loop.
@@ -4712,14 +4712,14 @@ async def main():
     if server.p2p is not None and os.environ.get("BADAPPLE_P2P", "1") != "0":
         try:
             await server.p2p.start()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             print(f"[main] P2P daemon failed to start: {e}", flush=True)
 
     # Start the local task scheduler background thread.
     try:
         badapple_scheduler.start_background_scheduler(interval=60)
         print("[main] Background task scheduler started", flush=True)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         print(f"[main] Scheduler failed to start: {e}", flush=True)
 
     # Start the local MCP server (Unix socket only; uses the same SLICKS agent channel).
@@ -4734,7 +4734,7 @@ async def main():
             start_new_session=True,
         )
         print(f"[main] MCP server started on {mcp_env['BADAPPLE_MCP_SOCKET']}", flush=True)
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError, LookupError, TypeError) as e:
         print(f"[main] MCP server failed to start: {e}", flush=True)
 
     try:
@@ -4746,7 +4746,7 @@ async def main():
             try:
                 mcp_process.terminate()
                 mcp_process.wait(timeout=5)
-            except Exception:
+            except Exception:  # noqa: BLE001,S110 - cleanup
                 pass
 
 

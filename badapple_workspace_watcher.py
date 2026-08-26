@@ -67,7 +67,7 @@ class WorkspaceWatcher:
                 if f.stat().st_size > MAX_FILE_SIZE:
                     continue
                 files.add(f)
-        except Exception as e:
+        except (OSError, ValueError) as e:
             print(f"[workspace_watcher] scan error: {e}", flush=True)
         return files
 
@@ -88,7 +88,7 @@ class WorkspaceWatcher:
             for f in files:
                 try:
                     mtime = f.stat().st_mtime
-                except Exception:
+                except (OSError, ValueError):
                     continue
                 key = str(f)
                 new_mtimes[key] = mtime
@@ -100,7 +100,7 @@ class WorkspaceWatcher:
                 try:
                     count = self.knowledge.index_paths(list(to_index))
                     print(f"[workspace_watcher] indexed {count} chunk(s) from {len(to_index)} file(s)", flush=True)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - catch-all wrapper
                     import traceback
                     print(f"[workspace_watcher] index error: {e}\n{traceback.format_exc()}", flush=True)
 

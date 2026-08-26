@@ -20,7 +20,7 @@ try:
     from mlx_vlm import generate as _vlm_generate
     from mlx_vlm import load as _vlm_load
     _VLM_LOADED = True
-except Exception:
+except ImportError:
     _vlm_load = None
     _vlm_generate = None
 
@@ -79,7 +79,7 @@ class VisionHost:
             )
             text = getattr(result, "text", None) or str(result)
             return text.strip()
-        except Exception as e:
+        except (AttributeError, TypeError) as e:
             traceback.print_exc()
             return f"Vision error: {e}"
 
@@ -91,9 +91,9 @@ def _console_user() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
-        )
+        check=False)
         return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         return None
 
 
@@ -110,7 +110,7 @@ def _run_as_user(cmd: list[str], user: str | None = None, input_text: str | None
             capture_output=True,
             text=True,
             timeout=timeout,
-        )
+        check=False)
     except subprocess.TimeoutExpired:
         return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
@@ -133,8 +133,8 @@ def capture_screen(path: Path | None = None, region: str = "") -> Path:
             captured = Path(resp["path"])
             if captured.is_file() and captured.stat().st_size > 0:
                 return captured
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 - logged
+        print(f"[vision] call_aqua failed: {e}", flush=True)
 
     # Fallback: run screencapture in this process (works when already in an Aqua session).
     cmd = ["screencapture", "-x"]
@@ -196,6 +196,6 @@ def unload_vision_model() -> bool:
         mx.clear_cache()
         print("[vision] VLM unloaded from RAM.", flush=True)
         return True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         print(f"[vision] unload failed: {e}", flush=True)
         return False

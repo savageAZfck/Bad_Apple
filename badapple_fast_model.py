@@ -48,7 +48,7 @@ def load_fast_model(path: str | None = None) -> tuple[Any, Any] | None:
         model, tokenizer = load(p)
         print("[fast_model] tiny model loaded.", flush=True)
         return model, tokenizer
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         print(f"[fast_model] failed to load tiny model: {e}", flush=True)
         return None
 
@@ -68,11 +68,11 @@ def generate_fast(
     ]
     try:
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 - catch-all wrapper
         text = f"{system_prompt}\n\nUser: {prompt}\nAssistant:"
     try:
         tokens = tokenizer.encode(text, add_special_tokens=False)
-    except Exception:
+    except Exception:  # noqa: BLE001 - catch-all wrapper
         tokens = tokenizer.encode(text)
 
     sampler = make_sampler(temperature)
@@ -93,5 +93,5 @@ def unload_fast_model(model: Any) -> None:
         del model
         gc.collect()
         mx.clear_cache()
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - cleanup
         pass

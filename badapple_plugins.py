@@ -85,7 +85,7 @@ class PluginRegistry:
                     if not name or name in self.tools:
                         raise PluginError(f"duplicate or invalid tool name: {name}")
                     self.tools[name] = {"plugin": manifest["name"], "schema": tool}
-            except Exception as e:
+            except (LookupError, TypeError, ValueError) as e:
                 errors[plugin_dir.name] = str(e)
         return errors
 
@@ -125,7 +125,7 @@ class PluginRegistry:
             cwd=plugin_dir,
             env=env,
             timeout=min(max(timeout, 1), 120),
-        )
+        check=False)
         if result.returncode != 0:
             raise PluginError((result.stderr or result.stdout or "plugin failed")[:2000])
         return result.stdout.strip()

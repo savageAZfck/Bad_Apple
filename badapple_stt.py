@@ -12,7 +12,7 @@ from pathlib import Path
 def _available() -> bool:
     try:
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - catch-all wrapper
         return False
 
 
@@ -59,5 +59,5 @@ def transcribe(
             max_tokens=max_tokens,
         )
         return getattr(segments, "text", str(segments)).strip()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return f"Transcription error: {e}"

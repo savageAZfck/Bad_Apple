@@ -265,7 +265,7 @@ class ToolRouter:
                     for p in phrases:
                         if p not in self._examples[name]:
                             self._examples[name].append(p)
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, LookupError) as e:
             print(f"[tool_router] could not load learned examples: {e}", flush=True)
 
     def _save_learned(self) -> None:
@@ -273,7 +273,7 @@ class ToolRouter:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             with self._learned_path.open("w", encoding="utf-8") as f:
                 json.dump(self._examples, f, indent=2)
-        except Exception as e:
+        except (TypeError, ValueError, OSError) as e:
             print(f"[tool_router] could not save learned examples: {e}", flush=True)
 
     def _rebuild_embeddings(self) -> None:
@@ -289,7 +289,7 @@ class ToolRouter:
                 try:
                     emb = np.asarray(self.encoder(texts))
                     self._embeddings[name] = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-10)
-                except Exception as e:
+                except (LookupError, TypeError, ValueError) as e:
                     print(f"[tool_router] failed to embed {name}: {e}", flush=True)
 
     def record_success(self, prompt: str, tool_name: str) -> None:
@@ -327,7 +327,7 @@ class ToolRouter:
                     best_name = name
             if best_name and best_score >= self.SEMANTIC_THRESHOLD:
                 return best_name, best_score
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
             print(f"[tool_router] semantic match failed: {e}", flush=True)
         return None
 

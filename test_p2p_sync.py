@@ -46,16 +46,16 @@ def main():
 
     # Tell the main daemon to enable P2P, add our test peer, and sync.
     exe = "/Users/savag3/bad_apple/target/release/badapple"
-    subprocess.run([exe, "p2p on"], capture_output=True, text=True, timeout=30)
-    r1 = subprocess.run([exe, "p2p add peer 127.0.0.1:10001"], capture_output=True, text=True, timeout=30)
+    subprocess.run([exe, "p2p on"], capture_output=True, text=True, timeout=30, check=False)
+    r1 = subprocess.run([exe, "p2p add peer 127.0.0.1:10001"], capture_output=True, text=True, timeout=30, check=False)
     if r1.returncode != 0:
         print(f"add peer failed: {r1.stderr or r1.stdout}")
         return 1
 
     # Add a fact to the main memory first so there is something to sync.
-    subprocess.run([exe, "add a reminder: p2p sync test"], capture_output=True, text=True, timeout=30)
+    subprocess.run([exe, "add a reminder: p2p sync test"], capture_output=True, text=True, timeout=30, check=False)
 
-    r2 = subprocess.run([exe, "p2p sync"], capture_output=True, text=True, timeout=60)
+    r2 = subprocess.run([exe, "p2p sync"], capture_output=True, text=True, timeout=60, check=False)
     if r2.returncode != 0:
         print(f"p2p sync failed: {r2.stderr or r2.stdout}")
         return 1

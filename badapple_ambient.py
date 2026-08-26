@@ -46,9 +46,9 @@ def _active_app_and_window() -> dict[str, str]:
             capture_output=True,
             text=True,
             timeout=5,
-        )
+        check=False)
         app = (result.stdout or "unknown").strip()
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         app = "unknown"
     try:
         result = subprocess.run(
@@ -56,9 +56,9 @@ def _active_app_and_window() -> dict[str, str]:
             capture_output=True,
             text=True,
             timeout=5,
-        )
+        check=False)
         window = (result.stdout or "unknown").strip()
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         window = "unknown"
     return {"app": app, "window": window}
 
@@ -71,7 +71,7 @@ def _capture_screen() -> Path | None:
             subprocess.run(["screencapture", "-x", str(tmp)], check=True, timeout=10)
             tmp.replace(_SCREEN_FILE)
             return _SCREEN_FILE
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         print(f"[ambient] screen capture failed: {e}", flush=True)
     return None
 
@@ -85,7 +85,7 @@ def _snapshot():
             "screen_path": str(screen) if screen else None,
         })
         _CONTEXT_FILE.write_text(json.dumps(context, indent=2), encoding="utf-8")
-    except Exception as e:
+    except (TypeError, ValueError, OSError) as e:
         print(f"[ambient] snapshot error: {e}", flush=True)
 
 
@@ -124,7 +124,7 @@ def status() -> str:
         return f"Ambient capture running={running}; no snapshots yet."
     try:
         data = json.loads(_CONTEXT_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
         return f"Error reading context: {e}"
     return f"Ambient capture running={running}; latest: {data.get('timestamp')} — app='{data.get('app')}', window='{data.get('window')}', screen='{data.get('screen_path')}'"
 
@@ -134,7 +134,7 @@ def get_context() -> str:
         return "No ambient context captured yet."
     try:
         return _CONTEXT_FILE.read_text(encoding="utf-8")
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return f"Error reading context: {e}"
 
 

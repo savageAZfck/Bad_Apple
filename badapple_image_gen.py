@@ -70,12 +70,12 @@ def generate(
             capture_output=True,
             text=True,
             timeout=900,
-        )
+        check=False)
         if result.returncode != 0:
             return f"Image generation failed:\n{result.stderr or result.stdout}"
         # The CLI prints a lot; just report the file path.
         return f"Generated image: {output}"
     except subprocess.TimeoutExpired:
         return "Image generation timed out"
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"Image generation error: {e}"

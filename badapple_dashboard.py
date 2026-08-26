@@ -55,9 +55,9 @@ def _run(*args, timeout: int = 5) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
-        )
+        check=False)
         return (result.stdout or "").strip()
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         return ""
 
 
@@ -112,7 +112,7 @@ def _latest_log_perf() -> dict[str, Any] | None:
     try:
         with log.open("r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-    except Exception:
+    except Exception:  # noqa: BLE001 - catch-all wrapper
         return None
     for line in reversed(lines):
         m = re.search(r"\[perf\]\s+(.*)", line)
@@ -160,9 +160,9 @@ def snapshot() -> str:
 def _tail_lines(path: str, n: int = 20) -> list[str]:
     """Return the last n lines of a text file."""
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(path, encoding="utf-8", errors="ignore") as f:
             return list(deque(f, maxlen=n))
-    except Exception:
+    except (OSError, ValueError):
         return []
 
 
@@ -170,7 +170,7 @@ def _tail_ledger(path: str, n: int = 20) -> list[Any]:
     """Return the last n JSONL entries, falling back to raw strings."""
     entries: list[Any] = []
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(path, encoding="utf-8", errors="ignore") as f:
             for line in deque(f, maxlen=n):
                 line = line.strip()
                 if not line:
@@ -179,8 +179,8 @@ def _tail_ledger(path: str, n: int = 20) -> list[Any]:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
                     entries.append(line)
-    except Exception:
-        pass
+    except (OSError, ValueError) as e:
+        print(f"[dashboard] open failed: {e}", flush=True)
     return entries
 
 
@@ -194,7 +194,7 @@ def _voice_activity(n: int = 20) -> list[dict[str, Any]]:
     spoken_re = re.compile(r"spoken: (.*)")
     error_re = re.compile(r"consume error: (.*)")
     try:
-        with open("/tmp/badapple_voice_debug.log", "r", encoding="utf-8", errors="ignore") as f:
+        with open("/tmp/badapple_voice_debug.log", encoding="utf-8", errors="ignore") as f:
             for line in deque(f, maxlen=5000):
                 if "consume:" in line:
                     m = consume_re.search(line)
@@ -238,8 +238,8 @@ def _voice_activity(n: int = 20) -> list[dict[str, Any]]:
                             "time": line[:20] if len(line) >= 20 else "",
                             "text": m.group(1).strip(),
                         })
-    except Exception:
-        pass
+    except (OSError, ValueError) as e:
+        print(f"[dashboard] open failed: {e}", flush=True)
     return list(reversed(events[-n:]))
 
 
@@ -259,7 +259,7 @@ def _load_mcp_servers() -> dict[str, Any]:
     try:
         registry = badapple_mcp_marketplace._load_registry()
         return {"servers": registry.get("servers", [])}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return {"servers": [], "error": str(e)}
 
 
@@ -285,7 +285,7 @@ def _daemon_status() -> dict[str, Any]:
         }
     try:
         ambient = json.loads(badapple_ambient.get_context()) if badapple_ambient._CONTEXT_FILE.is_file() else None
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError):
         ambient = None
     return {
         "runtime": _server_instance.runtime.status(),
@@ -740,8 +740,8 @@ def _active_persona() -> str:
     try:
         if _server_instance is not None:
             return _server_instance.personas.active
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 - logged
+        print(f"[dashboard] error failed: {e}", flush=True)
     return "default"
 
 
@@ -754,8 +754,8 @@ def _list_personas() -> tuple[list[str], str, str]:
             data = json.loads(pf.read_text(encoding="utf-8"))
             for k in data:
                 personas[k] = data[k].get("name", k)
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError, LookupError) as e:
+            print(f"[dashboard] loads failed: {e}", flush=True)
     prompt, _ = _load_persona_prompt(active)
     return list(personas.keys()), active, prompt
 
@@ -796,11 +796,11 @@ def _run_cli(prompt: str, max_tokens: int = 240) -> str:
             capture_output=True,
             text=True,
             timeout=120,
-        )
+        check=False)
         if result.returncode == 0:
             return result.stdout.strip()
         return f"Error: {result.stderr.strip() or 'CLI failed'}"
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"Error: {e}"
 
 
@@ -819,7 +819,7 @@ def _stream_cli(handler: http.server.BaseHTTPRequestHandler, prompt: str, max_to
             line = json.dumps(obj, default=str)
             handler.wfile.write(f"data: {line}\n\n".encode())
             handler.wfile.flush()
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - cleanup
             pass
 
     try:
@@ -850,12 +850,12 @@ def _stream_cli(handler: http.server.BaseHTTPRequestHandler, prompt: str, max_to
         err = proc.stderr.read().strip() if proc.stderr else ""
         if err and proc.returncode != 0:
             _emit({"type": "error", "error": err or "CLI failed"})
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         _emit({"type": "error", "error": str(e)})
     try:
         handler.wfile.flush()
         handler.connection.close()
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - cleanup
         pass
 
 
@@ -969,14 +969,14 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 name = urllib.parse.parse_qs(parsed.query).get("name", [active])[0]
                 prompt, _ = _load_persona_prompt(name)
                 self._send_json({"personas": names, "active": active, "prompt": prompt})
-            except Exception as e:
+            except (LookupError, TypeError, ValueError) as e:
                 self._send_json({"error": str(e)}, 500)
             return
         if path == "/api/mcp_servers":
             try:
                 data = _load_mcp_servers()
                 self._send_json(data)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return
         if path.startswith("/api/image/"):
@@ -1015,7 +1015,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     return
                 text = _run_cli(prompt, max_tokens)
                 self._send_json({"text": text})
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": f"bad request: {e}"}, 400)
             return
 
@@ -1030,7 +1030,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 _save_persona_prompt(name, prompt)
                 _run_cli(f"switch to {name}")
                 self._send_json({"ok": True})
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": f"bad request: {e}"}, 400)
             return
 
@@ -1043,7 +1043,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     result = "Workspace set to " + path
                 self._send_json({"ok": True, "result": result})
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return
 
@@ -1056,7 +1056,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     return
                 result = _run_cli(command, max_tokens=512)
                 self._send_json({"ok": True, "result": result})
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return
 
@@ -1076,7 +1076,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json({"error": "unknown action"}, 400)
                     return
                 self._send_json({"ok": True, "result": result} if isinstance(result, str) else result)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return
 

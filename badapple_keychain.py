@@ -23,9 +23,9 @@ def _run(args: list[str], timeout: int = 10) -> tuple[int, str, str]:
             capture_output=True,
             text=True,
             timeout=timeout,
-        )
+        check=False)
         return result.returncode, result.stdout, result.stderr
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         return -1, "", str(e)
 
 
