@@ -240,6 +240,14 @@ In `badapple_mlx_server.py`:
 - macOS Shortcuts can be listed/run through `list_shortcuts` and `run_shortcut` tools and the menu bar `Tools > Run Shortcut...`/`List Shortcuts`.
 - `cert_suite.py` treats `127.0.0.1`/`::1` TCP listeners as local-only, so the dashboard does not fail the air-gap test.
 
+## Lint
+
+```bash
+.venv/bin/python -m ruff check --select E4,E7,E9,F,B,UP,PLW1510,F821,DTZ005,DTZ006,F841,RUF013 . --exclude .venv --exclude target --exclude build --exclude __pycache__ --exclude web --exclude tests/ane_brain_perf
+.venv/bin/python -m ruff check --select BLE001,S110 . --exclude .venv --exclude target --exclude build --exclude __pycache__ --exclude web --exclude tests/ane_brain_perf
+.venv/bin/python -m compileall -q .
+```
+
 ## Phase 5 Local Intelligence Mesh
 
 - Autopilot: `agent_client.py autopilot <on|off>` or the menu bar `Tools > Autopilot` toggle. When on, destructive tools run without approval prompts.
