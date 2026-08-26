@@ -256,3 +256,41 @@ def invoke_mcp_tool(server: str, tool: str, arguments: Dict[str, Any]) -> str:
 
 def stop_all_mcp_servers() -> None:
     _MARKETPLACE.stop_all()
+
+
+def marketplace_catalog() -> str:
+    """Return a curated list of local MCP servers the user can install."""
+    catalog = [
+        {
+            "name": "filesystem",
+            "description": "Read, search, and edit files under a workspace path.",
+            "command": "npx -y @modelcontextprotocol/server-filesystem /Users/savag3/bad_apple/workspace",
+        },
+        {
+            "name": "sqlite",
+            "description": "Query local SQLite databases with read-only access.",
+            "command": "npx -y @modelcontextprotocol/server-sqlite /Users/savag3/bad_apple/memory.db",
+        },
+        {
+            "name": "fetch",
+            "description": "Fetch and sanitize web pages. Disabled in air-gap mode by default.",
+            "command": "uvx mcp-server-fetch",
+        },
+    ]
+    return "Available MCP servers:\n" + "\n".join(
+        f"- {c['name']}: {c['description']}\n  install: add mcp server {c['name']} command \"{c['command']}\""
+        for c in catalog
+    )
+
+
+def install_mcp_server_from_marketplace(name: str) -> str:
+    """Install a server from the built-in catalog by name."""
+    catalog = {
+        "filesystem": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/Users/savag3/bad_apple/workspace"],
+        "sqlite": ["npx", "-y", "@modelcontextprotocol/server-sqlite", "/Users/savag3/bad_apple/memory.db"],
+        "fetch": ["uvx", "mcp-server-fetch"],
+    }
+    command = catalog.get(name)
+    if not command:
+        return f"Unknown marketplace server '{name}'. Available: {', '.join(catalog)}."
+    return _MARKETPLACE.add_server(name, command)

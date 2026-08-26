@@ -1048,6 +1048,28 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "mcp_marketplace",
+            "description": "List the curated local MCP marketplace. Use mcp_install to add a server from the marketplace.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_install",
+            "description": "Install an MCP server from the curated marketplace by name (filesystem, sqlite, fetch).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "p2p_send_adapter",
             "description": "Send a local LoRA adapter to a discovered Bad Apple peer over the encrypted P2P link. Like AirDrop for models.",
             "parameters": {
@@ -1533,7 +1555,7 @@ TOOL_KEYWORDS = [
     "calendar", "events", "meetings", "reminders", "unread mail", "email", "mail",
     "working memory", "scratchpad",
     "consolidate memory", "dream", "offline consolidation",
-    "mcp", "model context protocol", "mcp server", "mcp tool",
+    "mcp", "model context protocol", "mcp server", "mcp tool", "mcp marketplace",
     "do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step",
     "set project", "this project is", "project context", "project goals",
 ]
@@ -1564,7 +1586,7 @@ KEYWORD_TOOL_MAP = [
     (["run shortcut", "list shortcuts", "shortcut"], ["run_shortcut"]),
     (["run applescript", "run script", "applescript"], ["run_applescript"]),
     (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
-    (["mcp", "model context protocol", "mcp server", "mcp tool"], ["list_mcp_servers", "add_mcp_server", "list_mcp_tools", "invoke_mcp_tool"]),
+    (["mcp", "model context protocol", "mcp server", "mcp tool", "mcp marketplace"], ["list_mcp_servers", "add_mcp_server", "list_mcp_tools", "invoke_mcp_tool", "mcp_marketplace"]),
     (["do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step"], ["run_agent_task"]),
     (["set project", "this project is", "project context", "project goals"], ["set_project_context", "get_project_context"]),
 ]
@@ -2343,6 +2365,10 @@ def run_tool(name: str, args: dict, knowledge: Optional[BadAppleKnowledge] = Non
             return badapple_mcp_marketplace.add_mcp_server(
                 args.get("name", ""), args.get("command", ""), args.get("env")
             )
+        if name == "mcp_marketplace":
+            return badapple_mcp_marketplace.marketplace_catalog()
+        if name == "mcp_install":
+            return badapple_mcp_marketplace.install_mcp_server_from_marketplace(args.get("name", ""))
         if name == "remove_mcp_server":
             return badapple_mcp_marketplace.remove_mcp_server(args.get("name", ""))
         if name == "list_mcp_servers":
