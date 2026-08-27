@@ -962,6 +962,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         if path == "/":
             self._serve_html_file("index.html")
             return
+        if path == "/models" or path == "/models.html":
+            self._serve_html_file("models.html")
+            return
 
         if path == "/splash":
             self._serve_html_file("splash.html")
@@ -1039,6 +1042,17 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 self._send_file(img_path, "image/png")
             else:
                 self._send_text("Image not found", 404)
+            return
+
+        if path == "/api/models":
+            try:
+                model_id = urllib.parse.parse_qs(parsed.query).get("model_id", [None])[0]
+                if _server_instance is not None and hasattr(_server_instance, "model_manager"):
+                    self._send_json(_server_instance.model_manager.status(model_id))
+                else:
+                    self._send_json({"error": "daemon not running"}, 503)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 500)
             return
 
         # SPA fallback
@@ -1152,6 +1166,42 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json({"error": "unknown action"}, 400)
                     return
                 self._send_json({"ok": True, "result": result} if isinstance(result, str) else result)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        if path == "/api/models":
+            try:
+                payload = _read_body()
+                action = payload.get("action", "")
+                if _server_instance is None or not hasattr(_server_instance, "model_manager"):
+                    self._send_json({"error": "daemon not running"}, 503)
+                    return
+                if action == "status":
+                    model_id = payload.get("model_id")
+                    self._send_json(_server_instance.model_manager.status(model_id))
+                elif action == "download":
+                    model_id = payload.get("model_id", "").strip()
+                    if not model_id:
+                        self._send_json({"error": "model_id required"}, 400)
+                        return
+                    if not _server_instance.model_manager.allow_downloads:
+                        self._send_json({"error": "downloads disabled"}, 403)
+                        return
+                    self._send_json(_server_instance.model_manager.start_download(model_id))
+                elif action == "allow_downloads":
+                    enabled = bool(payload.get("enabled", False))
+                    _server_instance.model_manager.set_allow_downloads(enabled)
+                    self._send_json({"ok": True, "allow_downloads": enabled})
+                elif action == "refresh":
+                    model_id = payload.get("model_id")
+                    if model_id:
+                        self._send_json(_server_instance.model_manager.refresh_cache_status(str(model_id)))
+                    else:
+                        _server_instance.model_manager.background_refresh_all()
+                        self._send_json({"ok": True})
+                else:
+                    self._send_json({"error": "unknown action"}, 400)
             except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return

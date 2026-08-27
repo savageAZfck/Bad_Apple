@@ -182,7 +182,7 @@ class WorkspaceWatcher:
             try:
                 count = self.knowledge.index_paths(batch)
                 print(f"[workspace_watcher] indexed {count} chunk(s) from {len(batch)} file(s)", flush=True)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - indexer errors are best-effort
                 print(f"[workspace_watcher] index error: {e}\n{traceback.format_exc()}", flush=True)
 
     def _collect_files(self, root: Path) -> set[Path]:
@@ -232,7 +232,7 @@ class WorkspaceWatcher:
                 try:
                     count = self.knowledge.index_paths(list(to_index))
                     print(f"[workspace_watcher] indexed {count} chunk(s) from {len(to_index)} file(s)", flush=True)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - indexer errors are best-effort
                     print(f"[workspace_watcher] index error: {e}\n{traceback.format_exc()}", flush=True)
 
             with self._lock:

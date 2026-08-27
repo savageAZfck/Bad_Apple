@@ -112,5 +112,5 @@ def unload_draft(model: Any) -> None:
         del model
         gc.collect()
         mx.clear_cache()
-    except Exception:  # noqa: BLE001 - cleanup
-        pass
+    except Exception as e:  # noqa: BLE001 - cleanup
+        print(f"[speculate] unload_draft cleanup ignored: {e}", flush=True)

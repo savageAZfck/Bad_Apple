@@ -55,6 +55,10 @@
         <string>__CONSOLE_HOME__/Library/Application Support/BadApple/identity.sekey</string>
         <key>BADAPPLE_FAST_TIER</key>
         <string>1</string>
+        <key>BADAPPLE_LAZY_MAIN_MODEL</key>
+        <string>1</string>
+        <key>BADAPPLE_FAST_MODEL</key>
+        <string></string>
         <key>HOME</key>
         <string>__CONSOLE_HOME__</string>
         <key>PYTHONUNBUFFERED</key>

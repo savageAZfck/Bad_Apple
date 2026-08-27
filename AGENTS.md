@@ -377,3 +377,54 @@ In `badapple_mlx_server.py`:
   ```
   See `SIGNING.md` for the full code-signing and notarization path.
 - CI: `.github/workflows/ci.yml` runs `cargo fmt`, `cargo build`, `ruff`, Python unit tests, and the full release package on every push/PR.
+
+## Distribution packaging
+
+- Drag-to-Applications DMG:
+  ```bash
+  src/platform/apple_desktop/package_dmg.sh
+  ```
+  Produces `target/release/Bad_Apple-<version>.dmg` with `Bad Apple.app`,
+  the platform tree, an `Applications` alias, and an `Install.command` that
+  copies the app to `/Applications` and installs the system LaunchDaemons.
+
+- Homebrew Cask tap:
+  ```bash
+  src/platform/apple_desktop/package_homebrew_cask.sh
+  ```
+  Generates a local tap in `target/release/homebrew-bad-apple` from the
+  canonical `homebrew-bad-apple/Casks/bad-apple.rb`. The canonical tap is
+  configured for a GitHub release; the local tap points at the freshly built
+  unsigned zip for testing:
+  ```bash
+  brew tap local/bad-apple /Users/savag3/bad_apple/target/release/homebrew-bad-apple
+  brew install --cask bad-apple
+  ```
+
+## Lazy main-model loading
+
+- Set `BADAPPLE_LAZY_MAIN_MODEL=1` in `com.badapple.mlx.plist` to skip loading
+  the 9B brain at daemon startup. The first non-fast-tier request calls
+  `_ensure_main_model()` and loads the brain on demand.
+- `BADAPPLE_FAST_TIER=1` keeps simple queries (math, time, identity, greetings,
+  `ping`, jokes, thanks) on the fast tier so the UI is responsive while the
+  9B model is still absent.
+- When lazy mode is on and `BADAPPLE_FAST_MODEL` is unset, `badapple_fast_model`
+  falls back to the cached `mlx-community/Qwen2.5-0.5B-Instruct-4bit` model.
+- The `runtime_status` dashboard payload now includes `main_model_loaded` and
+  the health `main_model` readiness reflects the lazy state.
+
+## Background model manager
+
+- `badapple_model_manager.py` tracks four models: `main_9b`, `fast_0.5b`,
+  `vision_2b`, and `flux_4b`. Each has download status (`missing`, `queued`,
+  `downloading`, `cached`, `loaded`, `error`) and progress.
+- Downloads are disabled by default. Enable them in the dashboard at
+  `http://127.0.0.1:8787/models` or set `BADAPPLE_ALLOW_DOWNLOADS=1`.
+- The manager temporarily overrides `HF_HUB_OFFLINE=1` only inside the download
+  thread, so the rest of the daemon stays air-gap certifiable by default.
+- Agent protocol methods: `model_status`, `download_model`, `set_allow_downloads`.
+- HTTP dashboard endpoints: `GET /api/models`, `POST /api/models` with actions
+  `status`, `download`, `allow_downloads`, `refresh`.
+- The onboarding wizard now includes a model-download step that links to
+  `/models` so first-time users can pre-download before asking deep questions.

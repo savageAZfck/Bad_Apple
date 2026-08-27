@@ -78,7 +78,8 @@ function updateStartupOverlay(status) {
   if (!title || !st || !fill) return;
 
   const mode = status.runtime?.mode || 'STARTING';
-  const mainModel = status.health?.checks?.main_model?.ok === true;
+  const mainModel = status.main_model_loaded === true || status.health?.checks?.main_model?.ok === true;
+  const mainModelStatus = status.models?.main_9b?.status;
   const elapsed = Math.round(performance.now() / 1000);
 
   let msg = 'Waking up the local brain...';
@@ -87,12 +88,18 @@ function updateStartupOverlay(status) {
   if (mode === 'OFFLINE') {
     msg = 'Cannot reach the Bad Apple daemon. Is it running?';
     pct = 0;
-  } else if (mode === 'READY') {
-    msg = 'Ready.';
-    pct = 100;
   } else if (mainModel) {
-    msg = 'Warming up...';
-    pct = 85;
+    msg = 'Deep brain loaded and ready.';
+    pct = 100;
+  } else if (mode === 'READY' && mainModelStatus === 'downloading') {
+    msg = 'Downloading the 9B model in the background...';
+    pct = Math.round((status.models.main_9b.progress || 0) * 100);
+  } else if (mode === 'READY' && mainModelStatus === 'queued') {
+    msg = 'Preparing the 9B model download...';
+    pct = 20;
+  } else if (mode === 'READY') {
+    msg = 'Lazy brain is ready. Fast tier active; 9B will load on first deep question.';
+    pct = 100;
   } else if (elapsed > 15) {
     msg = 'Loading the 9B model... this can take ~45 seconds.';
     pct = 60;
@@ -101,7 +108,7 @@ function updateStartupOverlay(status) {
     pct = 40;
   }
 
-  title.textContent = mode === 'READY' ? 'Bad Apple is ready' : 'Starting Bad Apple';
+  title.textContent = (mode === 'READY' || mainModel) ? 'Bad Apple is ready' : 'Starting Bad Apple';
   st.textContent = msg;
   fill.style.width = pct + '%';
 }
@@ -167,7 +174,7 @@ function prevTour() {
 function closeTour() { const t = $('#tour'); if (t) t.style.display = 'none'; }
 
 let wizardStep = 0;
-const wizardSteps = ['intro', 'workspace', 'features', 'done'];
+const wizardSteps = ['intro', 'workspace', 'features', 'models', 'done'];
 
 function maybeShowOnboarding() {
   if (localStorage.getItem('badapple-onboarded')) return;
@@ -407,7 +414,7 @@ async function updateDashboard() {
   }
   if (banner) banner.classList.add('hidden');
 
-  const ready = status.runtime?.mode === 'READY' && status.health?.checks?.main_model?.ok === true;
+  const ready = status.runtime?.mode === 'READY';
   if (!ready) {
     showStartupOverlay();
     updateStartupOverlay(status);
@@ -1276,7 +1283,7 @@ function runSplash() {
     attempts++;
     try {
       const status = await api('/api/status');
-      const ready = status.runtime?.mode === 'READY' && status.health?.checks?.main_model?.ok === true;
+      const ready = status.runtime?.mode === 'READY';
       if (ready) {
         text.textContent = 'Ready.';
         bar.style.width = '100%';

@@ -125,19 +125,19 @@ class TieringRouter:
         # answer (a joke, good morning/evening) goes to the 9B so the 0.5B fast
         # model doesn't serve vague, repetitive banter.
         # Skip the greeting fast-path if the prompt contains a tool or MCP command.
-        if re.search(r"\b(hello|hi|hey)\b", low) and not any(k in low for k in ("mcp", "tool", "invoke", "list mcp", "add mcp", "remove mcp")):
-            return ("fast", {"text": _rotated(GREETING_RESPONSES)})
+        if re.search(r"\b(hello|hi|hey|ping|pong)\b", low) and not any(k in low for k in ("mcp", "tool", "invoke", "list mcp", "add mcp", "remove mcp")):
+            return ("fast", {"text": _rotated(GREETING_RESPONSES), "fast_model": self.fast_model_enabled})
 
         # Fast tier: "how are you" must be answered as a question, not identity.
         if re.search(r"\b(how are you|how're you|how's it going|how you doing|what's up)\b", low) and not any(k in low for k in ("mcp", "tool", "invoke", "list mcp", "add mcp", "remove mcp")):
-            return ("fast", {"text": _rotated(HOW_ARE_YOU_RESPONSES)})
+            return ("fast", {"text": _rotated(HOW_ARE_YOU_RESPONSES), "fast_model": self.fast_model_enabled})
 
         if re.search(r"\b(thanks|thank you)\b", low):
-            return ("fast", {"text": _rotated(THANKS_RESPONSES)})
+            return ("fast", {"text": _rotated(THANKS_RESPONSES), "fast_model": self.fast_model_enabled})
 
         # Fast tier: requested jokes. The 9B sometimes refuses, so keep a local bank.
         if re.search(r"\b(tell me a joke|make me laugh|say something funny|joke)\b", low):
-            return ("fast", {"text": _rotated(JOKE_RESPONSES)})
+            return ("fast", {"text": _rotated(JOKE_RESPONSES), "fast_model": self.fast_model_enabled})
 
         return ("reasoning", None)
 

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bad Apple Models</title>
+  <style>
+    :root { --bg: #0b0c0f; --card: #161821; --text: #d7e0ea; --muted: #8b95a6; --accent: #ff4d6d; --ok: #4ade80; --warn: #facc15; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; display: flex; justify-content: center; padding: 2rem; }
+    .wrap { width: 100%; max-width: 720px; }
+    h1 { font-size: 1.6rem; margin: 0 0 0.5rem; }
+    p { color: var(--muted); margin: 0 0 1.5rem; }
+    .allow { display: flex; gap: 0.75rem; align-items: center; background: var(--card); padding: 1rem; border-radius: 0.75rem; margin-bottom: 1rem; }
+    .allow input { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); }
+    .allow label { flex: 1; }
+    .grid { display: grid; gap: 1rem; }
+    .card { background: var(--card); border-radius: 0.75rem; padding: 1rem; display: flex; align-items: center; gap: 1rem; }
+    .icon { width: 2.5rem; height: 2.5rem; border-radius: 0.5rem; display: grid; place-items: center; font-size: 1.25rem; background: #232631; }
+    .info { flex: 1; }
+    .name { font-weight: 600; }
+    .meta { color: var(--muted); font-size: 0.85rem; }
+    .status { font-size: 0.8rem; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em; }
+    .status.missing { color: var(--warn); }
+    .status.cached { color: var(--ok); }
+    .status.loaded { color: var(--ok); }
+    .status.downloading { color: var(--accent); }
+    .status.error { color: #ef4444; }
+    .bar { width: 100%; height: 0.4rem; background: #232631; border-radius: 0.2rem; overflow: hidden; margin-top: 0.5rem; }
+    .bar > div { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
+    button { background: var(--accent); color: #fff; border: 0; border-radius: 0.5rem; padding: 0.55rem 1rem; cursor: pointer; font-weight: 600; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #232631; color: var(--text); }
+    .actions { display: flex; gap: 0.5rem; }
+    .back { display: inline-block; margin-bottom: 1rem; color: var(--muted); text-decoration: none; }
+    .error { color: #ef4444; font-size: 0.85rem; margin-top: 0.25rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <a class="back" href="/">&#8592; Back to dashboard</a>
+    <h1>Model Checklist</h1>
+    <p>Download the local models you want to use. They stay in the HuggingFace cache and never leave your Mac once downloaded.</p>
+
+    <div class="allow">
+      <input type="checkbox" id="allow-dl">
+      <label for="allow-dl">Allow Bad Apple to download models from the internet</label>
+    </div>
+
+    <div class="grid" id="model-list">
+      <div class="card"><div class="info">Loading models…</div></div>
+    </div>
+  </div>
+
+  <script>
+    const icons = { fast_0.5b: '⚡', main_9b: '🧠', vision_2b: '👁', flux_4b: '🎨' };
+    const allowBox = document.getElementById('allow-dl');
+    const list = document.getElementById('model-list');
+
+    async function api(method, body) {
+      const r = await fetch('/api/models', { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+      if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      return r.json();
+    }
+
+    async function loadStatus() {
+      const data = await api('POST', { action: 'status' });
+      render(data);
+    }
+
+    function render(data) {
+      list.innerHTML = '';
+      for (const m of Object.values(data).filter(x => x.id)) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const progress = Math.round((m.progress || 0) * 100);
+        card.innerHTML = `
+          <div class="icon">${icons[m.id] || '📦'}</div>
+          <div class="info">
+            <div class="name">${m.name}</div>
+            <div class="meta">${m.repo_id} · ${m.size_gb} GB · ${m.kind}</div>
+            <div class="status ${m.status}">${m.status}${m.error ? ' — error' : ''}</div>
+            ${m.status === 'downloading' ? `<div class="bar"><div style="width:${progress}%"></div></div>` : ''}
+            ${m.error ? `<div class="error">${m.error}</div>` : ''}
+          </div>
+          <div class="actions">
+            <button class="secondary" onclick="refreshModel('${m.id}')">Refresh</button>
+            <button onclick="downloadModel('${m.id}')" ${m.status !== 'missing' ? 'disabled' : ''}>Download</button>
+          </div>`;
+        list.appendChild(card);
+      }
+    }
+
+    async function refreshModel(id) {
+      await api('POST', { action: 'refresh', model_id: id });
+      setTimeout(loadStatus, 500);
+    }
+
+    async function downloadModel(id) {
+      if (!allowBox.checked) {
+        alert('Enable "Allow downloads" first.');
+        return;
+      }
+      try {
+        await api('POST', { action: 'allow_downloads', enabled: true });
+        await api('POST', { action: 'download', model_id: id });
+      } catch (e) { alert(e.message); }
+      setTimeout(loadStatus, 500);
+    }
+
+    allowBox.onchange = async () => {
+      await api('POST', { action: 'allow_downloads', enabled: allowBox.checked });
+      loadStatus();
+    };
+
+    loadStatus();
+    setInterval(loadStatus, 2000);
+  </script>
+</body>
+</html>

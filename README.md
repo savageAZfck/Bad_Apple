@@ -1,12 +1,12 @@
 # Bad Apple
 
-> **A local, air-gapped AI that runs on your Mac — no cloud after the first download.**
+> **A bare-metal AI operating system that runs on your Mac — no cloud after the first download.**
 
-Bad Apple is a bare-metal AI OS for macOS. It runs a local **Qwen 3.5 9B**
-model on Apple Silicon with [MLX](https://github.com/ml-explore/mlx), uses a
-DFlash speculative draft for fast token generation, and exposes a growing set
-of local tools, memory, vision, peer-to-peer sync, and on-device LoRA
-fine-tuning — all without sending prompts, responses, or actions to the cloud.
+Bad Apple is not a chatbot. It is a **bare-metal AI OS for macOS**: a private,
+on-device cognitive layer that runs a **Qwen 3.5 9B** brain and a **0.5B fast
+tier** on Apple Silicon with [MLX](https://github.com/ml-explore/mlx), owns its
+own memory, tools, policy, and audit trail, and never sends prompts, responses,
+or data to the cloud after the first model download.
 
 After the model weights are cached once, **nothing leaves your machine**.
 
@@ -23,6 +23,8 @@ Bad Apple is both a product and a proof-of-concept for a **Bare-Metal AI OS**:
 - Destructive actions require explicit approval unless the user opts into
   autopilot.
 - It can sync encrypted memory with other Bad Apple peers on the same LAN.
+- It ships as a consumer **DMG installer** and a **Homebrew Cask**,
+  and it can lazy-load the 9B brain so the first query is fast.
 
 Read the public specs in [MANIFESTO.md](MANIFESTO.md) and [STANDARDS.md](STANDARDS.md),
 and the roadmap in [ROADMAP.md](ROADMAP.md).
@@ -156,6 +158,32 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 
 ---
 
+## Consumer packaging
+
+Bad Apple can be installed like a normal macOS app:
+
+- **DMG installer** — `src/platform/apple_desktop/package_dmg.sh` builds
+  `target/release/Bad_Apple-<version>.dmg` with a drag-to-Applications UX
+  and an `Install.command` that installs the platform LaunchDaemons.
+- **Homebrew Cask** — `src/platform/apple_desktop/package_homebrew_cask.sh`
+  builds the tap. The canonical formula is in `homebrew-bad-apple/Casks/bad-apple.rb`.
+- **Unsigned zip** — `src/platform/apple_desktop/package_full_release.sh`
+  creates `target/release/Bad_Apple-<version>-full-unsigned.zip`.
+- **Signed / notarized zip** — `src/platform/apple_desktop/package_signed_release.sh`
+  with `CODESIGN_ID`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`.
+
+### Lazy loading and the model manager
+
+- Set `BADAPPLE_LAZY_MAIN_MODEL=1` to skip the 9B load at startup. Simple
+  queries still hit the fast 0.5B tier; the 9B brain loads on the first deep
+  question.
+- `badapple_model_manager.py` tracks `main_9b`, `fast_0.5b`, `vision_2b`, and
+  `flux_4b` with background download status and progress.
+- The dashboard at `http://127.0.0.1:8787/models` lets users opt in to
+  downloads and start them before first use. Downloads are disabled by default.
+
+---
+
 ## Quick start
 
 ### Requirements
@@ -164,11 +192,11 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 - macOS 26 or later
 - Rust toolchain with Cargo
 - Python 3.12 with the packages in `.venv` (`mlx`, `mlx-lm`, `mlx-vlm`, etc.)
-- Models download on first run:
+- Models download on first run (or pre-download from the dashboard):
   - `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`
   - `BAAI/bge-small-en-v1.5`
   - `mlx-community/Qwen2-VL-2B-Instruct-4bit` (first vision call)
-  - `mlx-community/Qwen2.5-0.5B-Instruct-4bit` (optional, for speculative decoding)
+  - `mlx-community/Qwen2.5-0.5B-Instruct-4bit` (optional, for fast tier / speculative decoding)
 
 ### Build
 
@@ -302,11 +330,11 @@ badapple CLI / menu bar / Siri
 - **gatekeeper** — authenticated front door; SLICKS challenge-response, prompt
   binding, fast action proxy. It listens on `substrate.sock` and forwards to
   the MLX server on `substrate_mlx.sock`.
-- **MLX server** — loads the 9B target + DFlash draft once; handles
+- **MLX server** — loads the 9B target + optional draft once; handles
   conversation, memory, RAG, tools, approvals, cache, firewall, audit, P2P,
   screen capture, image description, LoRA, image generation, STT, OCR,
-  translation, Git, dashboard, scheduling, Spotlight, ambient context, and
-  Xcode RAG.
+  translation, Git, dashboard, scheduling, Spotlight, ambient context, Xcode
+  RAG, and the model manager.
 - **TTS server** — Piper on a Unix socket, returns WAV paths.
 - **Menu bar app** — Swift status-bar host with voice, persona switching,
   benchmarks, and output.
@@ -374,6 +402,7 @@ All tools are local and policy-governed:
 
 ```text
 badapple_mlx_server.py          # 9B MLX inference + tools daemon
+badapple_model_manager.py       # background model download / status manager
 badapple_extras.py              # personas, firewall, audit, cache, approvals, memory graph
 badapple_vision.py              # screen capture and VLM image description
 badapple_lora.py                # on-device LoRA training and generation
@@ -402,7 +431,11 @@ src/bin/badapple.rs             # Rust CLI client
 src/bin/gatekeeper.rs           # SLICKS proxy + fast action gate
 src/bad_apple_ipc.rs            # SLICKS protocol
 src/platform/apple_bridge/      # launchd plists and Siri bridge
-src/platform/apple_desktop/     # menu bar app source
+src/platform/apple_desktop/     # menu bar app source and packaging scripts
+src/platform/apple_desktop/package_dmg.sh            # drag-to-Applications DMG
+src/platform/apple_desktop/package_homebrew_cask.sh  # Homebrew tap generator
+src/platform/apple_desktop/package_full_release.sh   # unsigned zip
+src/platform/apple_desktop/package_signed_release.sh # notarized zip
 src/platform/safari_extension/  # Safari companion extension scaffold
 ```
 
@@ -419,6 +452,24 @@ Measured on a 16 GB Apple Silicon M-series Mac:
   VLM, image generation, translation, and LoRA generation add transient
   working memory.
 - **RAG embeddings**: `bge-small-en-v1.5` on CPU.
+
+---
+
+## Consumer readiness
+
+Bad Apple is currently rated **7.5/10** for consumer readiness.
+
+What works now:
+- drag-to-Applications DMG with `Install.command`
+- Homebrew Cask formula and tap generator
+- lazy 9B loading and a 0.5B fast tier
+- background model manager with dashboard checklist
+- 52 passing unit tests, `ruff` clean, `cargo build --release`
+
+Remaining blockers to 8+:
+- signed and notarized release as the default artifact
+- full FLUX pre-download in the model manager
+- a clean-machine VM install / smoke test
 
 ---
 

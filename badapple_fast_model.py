@@ -29,13 +29,18 @@ def _default_fast_model() -> str | None:
 
 
 def fast_model_path() -> str | None:
-    """Resolve the tiny fast model path from env only.
+    """Resolve the tiny fast model path.
 
-    The 0.5B default is no longer auto-loaded because it produces vague,
-    repetitive chitchat.  Set BADAPPLE_FAST_MODEL to a larger model (1.5B+)
-    if you want a neural fast tier.
+    BADAPPLE_FAST_MODEL takes precedence.  When BADAPPLE_LAZY_MAIN_MODEL is
+    enabled and no explicit fast model is configured, the 0.5B Qwen cache is
+    used as a lightweight bootstrap model so the fast tier can run before the
+    9B brain has loaded.
     """
-    return os.environ.get("BADAPPLE_FAST_MODEL")
+    if os.environ.get("BADAPPLE_FAST_MODEL"):
+        return os.environ.get("BADAPPLE_FAST_MODEL")
+    if os.environ.get("BADAPPLE_LAZY_MAIN_MODEL", "0") == "1":
+        return _default_fast_model()
+    return None
 
 
 def load_fast_model(path: str | None = None) -> tuple[Any, Any] | None:

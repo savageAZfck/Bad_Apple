@@ -21,6 +21,7 @@
         <a class="nav-item" data-view="chat" href="/chat"><span class="icon">💬</span> Chat</a>
         <a class="nav-item" data-view="ocular" href="/ocular"><span class="icon">◉</span> Ocular</a>
         <a class="nav-item" data-view="persona" href="/persona"><span class="icon">✦</span> Persona</a>
+        <a class="nav-item" href="/models"><span class="icon">⬇</span> Models</a>
         <a class="nav-item" data-view="settings" href="/settings"><span class="icon">⚙</span> Settings</a>
         <a class="nav-item" data-view="logs" href="/logs"><span class="icon">⌘</span> Logs</a>
       </nav>
@@ -49,7 +50,7 @@
           <h2 id="startup-title">Starting Bad Apple</h2>
           <p id="startup-status">Waking up the local brain...</p>
           <div class="startup-bar"><div class="startup-fill" id="startup-fill"></div></div>
-          <p class="startup-hint">First launch can take ~45 seconds while the 9B model and embedding model load.</p>
+          <p class="startup-hint">Lazy startup is active. Simple queries work right away; the 9B model loads on first deep question. You can pre-download it from the Models page.</p>
         </div>
       </div>
 
@@ -347,10 +348,20 @@
         </div>
         <div class="form-actions" style="justify-content: space-between;">
           <button class="secondary" onclick="prevWizard()">Back</button>
-          <button onclick="finishWizard()">Finish setup</button>
+          <button onclick="nextWizard()">Continue</button>
         </div>
       </div>
       <div class="wizard-step hidden" data-step="3">
+        <h2>Load your models</h2>
+        <p>Bad Apple can use a tiny 0.5B model for quick chitchat, a 9B model for deep reasoning, a 2B vision model, and a 4B FLUX model for local images.</p>
+        <p>Open the Models page to pre-download them. Otherwise the 9B brain will download the first time you ask a deep question.</p>
+        <div class="form-actions" style="justify-content: space-between;">
+          <button class="secondary" onclick="prevWizard()">Back</button>
+          <button class="secondary" onclick="window.open('/models', '_blank')">Open Models</button>
+          <button onclick="nextWizard()">Next</button>
+        </div>
+      </div>
+      <div class="wizard-step hidden" data-step="4">
         <h2>You’re all set</h2>
         <p>Your preferences have been saved. Press <strong>?</strong> anytime to see keyboard shortcuts or visit the help link.</p>
         <div class="form-actions" style="justify-content: space-between;">

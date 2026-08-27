@@ -201,6 +201,34 @@ open -a "Bad Apple"
 
 ---
 
+## Consumer Readiness Ranking
+
+**Current score: 7.5/10**
+
+| Category | Score | Rationale |
+|---|---|---|
+| Packaging & distribution | 2.5 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, and a Homebrew Cask formula are in place. A signed/notarized path exists but is not the default artifact. |
+| Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. |
+| First-run experience | 1.75 / 2 | Lazy startup with `BADAPPLE_LAZY_MAIN_MODEL=1` and fast tier means simple queries work instantly. The new `badapple_model_manager.py` + `web/models.html` checklist lets users pre-download 9B, 0.5B, and vision models before first use; FLUX is tracked but still downloads on first image generation. |
+| QA & reliability | 1.75 / 2 | `cargo fmt`, `cargo build --release`, `ruff`, `compileall`, and 52 unit tests pass. Dashboard has new `/api/models` endpoints and the models page is wired. Smoke tests still require a running daemon; no VM install test. |
+| Security & trust posture | 1.0 / 2 | Strong internal controls (SLICKS, approvals, audit ledger) and an unsigned consumer package means first-time users see a Gatekeeper warning. `package_signed_release.sh` + `SIGNING.md` document the notarized path. |
+
+### What moved the needle from 6 → 7.5
+
+1. **DMG installer** — `src/platform/apple_desktop/package_dmg.sh` produces a consumer `.dmg` with `Bad Apple.app`, `Applications` alias, and `Install.command` that copies the app and installs the platform LaunchDaemons.
+2. **Homebrew Cask** — `homebrew-bad-apple/Casks/bad-apple.rb` and `src/platform/apple_desktop/package_homebrew_cask.sh` provide a `brew install --cask bad-apple` path.
+3. **Lazy 9B loading + fast 0.5B tier** — `BADAPPLE_LAZY_MAIN_MODEL=1` and `badapple_mlx_server._ensure_main_model()` defer the heavy model until first use. Fast-tier queries no longer require a loaded 9B brain.
+4. **Background model manager and dashboard checklist** — `badapple_model_manager.py` tracks `main_9b`, `fast_0.5b`, `vision_2b`, and `flux_4b` with download/load status. `web/models.html` gives users an allow-downloads toggle, download buttons, and progress for each model, and the onboarding wizard now points to it.
+
+### Remaining blockers to 8+
+
+- Signed/notarized `.dmg` and `.zip` as the default release artifact.
+- Full FLUX pre-download in the model manager (the current `mflux` path still triggers its own cache download on first image generation).
+- A clean-machine VM install + smoke test to verify the DMG and Cask end-to-end.
+- Native onboarding/purchase-grade first launch in the Swift menu bar app.
+
+---
+
 ## License
 
 LicenseRef-Proprietary. See `LICENSE.txt`.

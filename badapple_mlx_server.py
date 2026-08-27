@@ -48,6 +48,7 @@ import badapple_keychain
 import badapple_lora
 import badapple_macos_apps
 import badapple_mcp_marketplace
+import badapple_model_manager
 import badapple_model_registry
 import badapple_p2p
 import badapple_scheduler
@@ -2736,6 +2737,7 @@ class MLXServer:
             encoder=self.knowledge._encode_texts,
         )
         self.model_registry = badapple_model_registry.ModelRegistry(self.data_dir)
+        self.model_manager = badapple_model_manager.ModelManager(self.data_dir)
         self.max_kv_size = MAX_KV_SIZE
         self.prefill_step_size = PREFILL_STEP_SIZE
         self._roast_index = 0
@@ -2788,7 +2790,15 @@ class MLXServer:
 
         self.dflash_bundle = None
         self.dflash_runtime_context = None
-        if USE_DFLASH:
+        self.draft_model = None
+        self._main_model_loading = False
+
+        lazy_main = os.environ.get("BADAPPLE_LAZY_MAIN_MODEL", "0") == "1"
+        if lazy_main:
+            print("[lazy] 9B main brain will load on first request.", flush=True)
+            self.model = None
+            self.tokenizer = None
+        elif USE_DFLASH:
             print(f"Loading Bad Apple DFlash bundle ({MAIN_MODEL} + {DRAFT_MODEL})...", flush=True)
             try:
                 self.dflash_runtime_context = build_offline_runtime_context(
@@ -2804,7 +2814,6 @@ class MLXServer:
                 )
                 self.model = self.dflash_bundle.target_model
                 self.tokenizer = self.dflash_bundle.tokenizer
-                self.draft_model = None
                 print("Bad Apple DFlash bundle loaded.", flush=True)
 
                 # Voice now uses the same 9B unified brain; no separate voice bundle.
@@ -2812,34 +2821,9 @@ class MLXServer:
                 self.dflash_voice_runtime_context = None
             except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 print(f"Warning: could not load DFlash bundle: {e}", flush=True)
-                print(f"Loading Bad Apple MLX brain ({MAIN_MODEL})...", flush=True)
-                self.model, self.tokenizer = load(MAIN_MODEL)
-                print("Bad Apple MLX brain loaded.", flush=True)
-                self.model_registry.set_current(MAIN_MODEL)
-                self.draft_model = None
+                self._ensure_main_model()
         else:
-            print(f"Loading Bad Apple MLX brain ({MAIN_MODEL})...", flush=True)
-            self.model, self.tokenizer = load(MAIN_MODEL)
-            print("Bad Apple MLX brain loaded.", flush=True)
-            self.model_registry.set_current(MAIN_MODEL)
-
-            self.draft_model = None
-            self._load_speculative_draft()
-
-    def _load_speculative_draft(self, model_ref: str | None = None) -> None:
-        """Load or reload the mlx-lm speculative draft model."""
-        target = (model_ref or SPECULATIVE_DRAFT).strip()
-        if target.lower() == "auto":
-            target = None
-        if target or not self.draft_model:
-            draft = badapple_speculate.load_draft(target or None)
-            if draft:
-                self.draft_model = draft[0]
-
-    def _unload_speculative_draft(self) -> None:
-        if self.draft_model is not None:
-            badapple_speculate.unload_draft(self.draft_model)
-            self.draft_model = None
+            self._ensure_main_model()
 
         # Each executor worker thread needs to know the device the model was
         # loaded on; capture it from the main (load) thread.
@@ -2877,6 +2861,52 @@ class MLXServer:
             self.fast_model_info = {"path": None, "loaded": False}
 
         self.runtime.set_ready()
+
+        # Refresh model manager cache status in background so the dashboard
+        # can show which models are present, missing, or downloading.
+        if getattr(self, "model_manager", None) is not None:
+            self.model_manager.background_refresh_all()
+
+    def _load_speculative_draft(self, model_ref: str | None = None) -> None:
+        """Load or reload the mlx-lm speculative draft model."""
+        target = (model_ref or SPECULATIVE_DRAFT).strip()
+        if target.lower() == "auto":
+            target = ""
+        if not target:
+            return
+        draft = badapple_speculate.load_draft(target or None)
+        if draft:
+            self.draft_model = draft[0]
+
+    def _unload_speculative_draft(self) -> None:
+        if self.draft_model is not None:
+            badapple_speculate.unload_draft(self.draft_model)
+            self.draft_model = None
+
+    def _ensure_main_model(self) -> None:
+        """Load the 9B main brain on first use if lazy loading is enabled."""
+        if self.model is not None and self.tokenizer is not None:
+            return
+        if self._main_model_loading:
+            return
+        self._main_model_loading = True
+        try:
+            print(f"Loading Bad Apple MLX brain ({MAIN_MODEL})...", flush=True)
+            if getattr(self, "model_manager", None) is not None:
+                state = self.model_manager.ensure_cached("main_9b", download=True)
+                # If the manager is downloading, wait up to 10 minutes.
+                if state.get("status") in ("queued", "downloading"):
+                    if not self.model_manager.wait_for_download("main_9b", timeout=600):
+                        print("[lazy] main model download did not complete in 600s", flush=True)
+            self.model, self.tokenizer = load(MAIN_MODEL)
+            print("Bad Apple MLX brain loaded.", flush=True)
+            if getattr(self, "model_manager", None) is not None:
+                self.model_manager.mark_loaded("main_9b")
+            self.model_registry.set_current(MAIN_MODEL)
+            self._load_speculative_draft()
+            self.mlx_device = mx.default_device()
+        finally:
+            self._main_model_loading = False
 
     def flush_vram(self) -> dict[str, Any]:
         """Clear the Metal allocation cache instantly."""
@@ -2924,7 +2954,7 @@ class MLXServer:
             return method in {
                 "runtime_status", "discover_tools", "audit_tail", "p2p_peers", "p2p_sync",
                 "get_workspace", "get_pending_approvals", "identity_status",
-                "flush_vram", "unload_model",
+                "flush_vram", "unload_model", "model_status",
             }
         return prompt.strip().lower() in {"runtime status", "health status", "bad apple status"}
 
@@ -2942,7 +2972,9 @@ class MLXServer:
 
     def active_models(self) -> list[str]:
         """Return a list of currently resident heavy models."""
-        models = ["main_9b"]
+        models: list[str] = []
+        if self.model is not None and self.tokenizer is not None:
+            models.append("main_9b")
         if self.draft_model is not None:
             models.append("dflash")
         if getattr(self, "fast_model", None) is not None:
@@ -3623,6 +3655,7 @@ class MLXServer:
         stream_queue: queue.Queue | None = None,
         voice_mode: bool = False,
     ) -> str:
+        self._ensure_main_model()
         t0 = time.time()
         tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
@@ -3988,6 +4021,27 @@ class MLXServer:
             await _respond(req_id, {"hibernate_after": self.hibernate_after})
             return
 
+        if method == "model_status":
+            await _respond(req_id, self.model_manager.status(params.get("model_id")))
+            return
+
+        if method == "download_model":
+            model_id = str(params.get("model_id", ""))
+            if not model_id:
+                await _respond(req_id, None, "model_id is required")
+                return
+            if not self.model_manager.allow_downloads:
+                await _respond(req_id, None, "downloads disabled; call set_allow_downloads first")
+                return
+            await _respond(req_id, self.model_manager.start_download(model_id))
+            return
+
+        if method == "set_allow_downloads":
+            enabled = bool(params.get("enabled", False))
+            self.model_manager.set_allow_downloads(enabled)
+            await _respond(req_id, {"allow_downloads": enabled})
+            return
+
         if method == "runtime_status":
             ambient = None
             try:
@@ -4017,6 +4071,8 @@ class MLXServer:
                 "p2p_peers": self.p2p.get_peers() if self.p2p is not None and self.p2p.is_running() else [],
                 "mcp_socket": os.environ.get("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock"),
                 "fast_model": self.fast_model_info,
+                "main_model_loaded": self.model is not None and self.tokenizer is not None,
+                "models": self.model_manager.status() if getattr(self, "model_manager", None) is not None else {},
                 "hibernating": self.hibernating,
                 "idle_seconds": round(time.time() - self.last_activity, 1),
             })
