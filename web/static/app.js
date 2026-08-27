@@ -406,8 +406,11 @@ async function updateDashboard() {
   try {
     status = await api('/api/status');
   } catch (e) {
-    console.error('status fetch failed:', e);
+    const msg = e?.message || String(e);
+    console.error('status fetch failed:', msg, e);
     if (banner) banner.classList.remove('hidden');
+    const statusText = $('.status-text');
+    if (statusText) statusText.textContent = 'Offline — ' + msg;
     showStartupOverlay();
     updateStartupOverlay({ runtime: { mode: 'OFFLINE' } });
     return;
@@ -939,6 +942,10 @@ async function sendChat(textOverride, isSystem) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: p, stream: true }),
     });
+    if (!r.ok) {
+      const err = await r.text();
+      throw new Error(err || `HTTP ${r.status}`);
+    }
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';

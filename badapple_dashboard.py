@@ -794,6 +794,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.end_headers()
         self.wfile.write(body)
 
@@ -840,7 +841,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             if "</head>" in html:
                 html = html.replace(
                     "</head>",
-                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js"></script>\n</head>',
+                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js?v=4"></script>\n</head>',
                 )
             self._send_html(html)
         else:

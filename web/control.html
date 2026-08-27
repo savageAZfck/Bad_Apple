@@ -87,9 +87,14 @@
 
     async function control(command) {
       if (!command) return;
-      const res = await fetch('/api/control', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({command}) });
-      const data = await res.json();
-      document.getElementById('cli-result').textContent = JSON.stringify(data, null, 2);
+      try {
+        const res = await fetch('/api/control', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({command}) });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        document.getElementById('cli-result').textContent = JSON.stringify(data, null, 2);
+      } catch (e) {
+        document.getElementById('cli-result').textContent = 'Error: ' + e.message;
+      }
       status();
     }
 
