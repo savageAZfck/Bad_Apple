@@ -319,6 +319,43 @@ def _daemon_status() -> dict[str, Any]:
     }
 
 
+def _recent_ambient_facts(n: int = 10) -> list[dict[str, Any]]:
+    if _server_instance is None:
+        return []
+    try:
+        facts = _server_instance.memory._state.get("facts", [])
+        ambient = [f for f in facts if f.get("source") == "ambient"]
+        return [
+            {
+                "fact": f.get("text", ""),
+                "created": f.get("created", ""),
+            }
+            for f in ambient[-n:]
+        ]
+    except Exception as e:  # noqa: BLE001
+        print(f"[dashboard] ambient facts error: {e}", flush=True)
+        return []
+
+
+def _recent_ambient_episodes(n: int = 10) -> list[dict[str, Any]]:
+    if _server_instance is None:
+        return []
+    try:
+        eps = _server_instance.memory._state.get("episodes", [])
+        ambient = [e for e in eps if e.get("context", {}).get("source") == "ambient"]
+        return [
+            {
+                "user": e.get("user", ""),
+                "context": e.get("context", {}),
+                "created": e.get("created", ""),
+            }
+            for e in ambient[-n:]
+        ]
+    except Exception as e:  # noqa: BLE001
+        print(f"[dashboard] ambient episodes error: {e}", flush=True)
+        return []
+
+
 _PERSONA_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -973,6 +1010,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         if path in ("/chat", "/persona", "/settings", "/logs", "/dashboard"):
             self._serve_html_file("index.html")
             return
+        if path == "/ambient" or path == "/ambient.html":
+            self._serve_html_file("ambient.html")
+            return
 
         if path == "/api/snapshot":
             self._send_json(json.loads(snapshot()))
@@ -1061,6 +1101,20 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json({"tasks": _server_instance.list_agent_tasks()})
                 else:
                     self._send_json({"error": "daemon not running"}, 503)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        if path == "/api/ambient":
+            try:
+                import badapple_ambient
+
+                self._send_json({
+                    "running": badapple_ambient.is_running(),
+                    "context": json.loads(badapple_ambient.get_context()) if badapple_ambient._CONTEXT_FILE.is_file() else {},
+                    "recent_facts": _recent_ambient_facts(10),
+                    "recent_episodes": _recent_ambient_episodes(10),
+                })
             except Exception as e:  # noqa: BLE001
                 self._send_json({"error": str(e)}, 500)
             return

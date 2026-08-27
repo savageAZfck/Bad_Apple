@@ -36,6 +36,7 @@ from mlx_lm.sample_utils import make_sampler
 
 import badapple_agent_tasks
 import badapple_ambient
+import badapple_ambient_memory
 import badapple_aqua_helper
 import badapple_dashboard
 import badapple_ocular
@@ -2758,6 +2759,7 @@ class MLXServer:
         registered = {item.get("function", {}).get("name") for item in TOOLS}
         TOOLS.extend(schema for schema in self.plugins.tool_schemas() if schema["function"]["name"] not in registered)
         self.memory = MemoryGraph(self.data_dir, encoder=self.knowledge._encode_texts)
+        self.ambient_memory = badapple_ambient_memory.AmbientMemory(self.memory, self.data_dir)
         # legacy short-term memory is folded into the memory graph
         self.personas = PersonaPack(self.data_dir, self.prompt_file)
         self.firewall = StreamingFirewall(self.data_dir)

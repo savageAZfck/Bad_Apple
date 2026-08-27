@@ -292,6 +292,7 @@ In `badapple_mlx_server.py`:
 
 - Autopilot: `agent_client.py autopilot <on|off>` or the menu bar `Tools > Autopilot` toggle. When on, destructive tools run without approval prompts.
 - Ambient context: `agent_client.py ambient <on|off>` or menu bar `Mesh > Start/Stop Ambient`. Captures active app/window and (when GUI allows) screenshots locally. Dashboard and `runtime_status` show the latest context.
+- Ambient memory: `badapple_ambient_memory.py` subscribes to ambient snapshots and writes facts/entities and episodic records into the `MemoryGraph`. Window titles are parsed for editor projects, browser sites, and file names. Set `BADAPPLE_AMBIENT_VLM=1` to also run the VLM on screenshots and store the description.
 - Workspace / project mode: `agent_client.py workspace <path>` or menu bar `Mesh > Set Workspace...`/`Open Workspace`. Adds workspace context to prompts and the dashboard.
 - P2P encrypted sync: `agent_client.py p2p <on|off|peers|sync>` or menu bar `Mesh > P2P Sync`. Link-local UDP/TCP, AES-256-GCM, off by default for air-gap certification.
 - Local MCP server: `badapple_mcp_server.py` runs on Unix socket `/var/run/badapple/mcp.sock` and stdio, exposing tools/resources to MCP clients. Started automatically by the MLX daemon.

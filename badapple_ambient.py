@@ -11,8 +11,10 @@ import os
 import shutil
 import subprocess
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 def _ambient_dir() -> Path:
@@ -37,6 +39,11 @@ _SCREEN_FILE = _AMBIENT_DIR / "screen.png"
 _thread: threading.Thread | None = None
 _stop_event = threading.Event()
 _interval = 30.0
+_callbacks: list[Callable[[dict[str, Any]], None]] = []
+
+
+def register_snapshot_callback(callback: Callable[[dict[str, Any]], None]) -> None:
+    _callbacks.append(callback)
 
 
 def _active_app_and_window() -> dict[str, str]:
@@ -85,6 +92,11 @@ def _snapshot():
             "screen_path": str(screen) if screen else None,
         })
         _CONTEXT_FILE.write_text(json.dumps(context, indent=2), encoding="utf-8")
+        for cb in list(_callbacks):
+            try:
+                cb(context)
+            except Exception as e:  # noqa: BLE001
+                print(f"[ambient] callback error: {e}", flush=True)
     except (TypeError, ValueError, OSError) as e:
         print(f"[ambient] snapshot error: {e}", flush=True)
 

@@ -117,8 +117,10 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
   same prompt, same output.
 - **Scheduler + Shortcuts** — `schedule_task`, `list_scheduled_tasks`, and
   `run_shortcut` run local commands and macOS Shortcuts.
-- **Ambient context** — `ambient_start`/`ambient_context` captures active app,
-  window title, and screenshots in the background.
+- **Ambient context + memory** — `ambient_start`/`ambient_context` captures active app,
+  window title, and screenshots in the background. `badapple_ambient_memory` turns
+  every snapshot into facts and episodic memory, so the OS remembers what you were
+  doing. Optional VLM screen description with `BADAPPLE_AMBIENT_VLM=1`.
 - **Universal Spotlight** — `spotlight_search` queries macOS Notes, Mail,
   files, and the Bad Apple history/ledger locally.
 - **Xcode coding assistant** — `xcode_index_project` and `xcode_search` index a
@@ -407,6 +409,7 @@ All tools are local and policy-governed:
 badapple_mlx_server.py          # 9B MLX inference + tools daemon
 badapple_model_manager.py       # background model download / status manager
 badapple_agent_tasks.py         # persistent autonomous agent task manager
+badapple_ambient_memory.py      # ambient snapshot → memory graph
 badapple_extras.py              # personas, firewall, audit, cache, approvals, memory graph
 badapple_vision.py              # screen capture and VLM image description
 badapple_lora.py                # on-device LoRA training and generation
