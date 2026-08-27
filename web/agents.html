@@ -41,15 +41,18 @@
   </main>
 
   <script>
+    function csrfToken() {
+      return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
+    }
     function csrfHeaders() {
-      const token = document.querySelector('meta[name="csrf-token"]')?.content;
+      const token = csrfToken();
       return token ? { 'X-CSRF-Token': token } : {};
     }
     async function api(action, body = {}) {
       const res = await fetch('/api/agents', {
         method: 'POST',
         headers: {'Content-Type': 'application/json', ...csrfHeaders()},
-        body: JSON.stringify({action, ...body}),
+        body: JSON.stringify({action, ...body, csrf_token: csrfToken()}),
       });
       return res.json();
     }

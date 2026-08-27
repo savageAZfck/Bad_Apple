@@ -56,12 +56,15 @@
   </main>
 
   <script>
+    function csrfToken() {
+      return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
+    }
     function csrfHeaders() {
-      const token = document.querySelector('meta[name="csrf-token"]')?.content;
+      const token = csrfToken();
       return token ? { 'X-CSRF-Token': token } : {};
     }
     async function api(path, body) {
-      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json', ...csrfHeaders()}, body: JSON.stringify(body) });
+      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json', ...csrfHeaders()}, body: JSON.stringify({...body, csrf_token: csrfToken()}) });
       if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
       return r.json();
     }

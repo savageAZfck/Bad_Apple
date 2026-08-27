@@ -12,8 +12,12 @@ const ROUTES = {
 
 let currentView = 'dashboard';
 
+function csrfToken() {
+  if (window.csrfToken) return window.csrfToken();
+  return document.querySelector('meta[name="csrf-token"]')?.content || '';
+}
 function csrfHeader() {
-  const token = document.querySelector('meta[name="csrf-token"]')?.content;
+  const token = csrfToken();
   return token ? { 'X-CSRF-Token': token } : {};
 }
 
@@ -47,8 +51,10 @@ function updateThemeIcon() {
   if (btn) btn.textContent = document.body.classList.contains('light') ? '☀️' : '🌙';
 }
 
-function init() {
-  if (window.refreshCsrfToken) refreshCsrfToken();
+async function init() {
+  if (window.refreshCsrfToken) {
+    try { await refreshCsrfToken(); } catch (e) { console.warn('CSRF refresh failed:', e); }
+  }
   initTheme();
   setupNav();
   setupKeyboard();
@@ -313,11 +319,30 @@ function toast(message, type = 'ok') {
 async function api(path, opts = {}) {
   const options = opts || {};
   const headers = new Headers(options.headers || {});
-  if (options.method && options.method.toUpperCase() !== 'GET') {
+  const isMutating = options.method && options.method.toUpperCase() !== 'GET';
+  if (isMutating) {
     Object.entries(csrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
+    if (options.body) {
+      try {
+        const payload = JSON.parse(options.body);
+        payload.csrf_token = csrfToken();
+        options.body = JSON.stringify(payload);
+      } catch (e) { /* non-JSON body, ignore */ }
+    }
   }
   options.headers = headers;
-  const r = await fetch(path, options);
+  let r = await fetch(path, options);
+  if (r.status === 403 && isMutating && window.refreshCsrfToken) {
+    await refreshCsrfToken();
+    if (options.body) {
+      try {
+        const payload = JSON.parse(options.body);
+        payload.csrf_token = csrfToken();
+        options.body = JSON.stringify(payload);
+      } catch (e) {}
+    }
+    r = await fetch(path, options);
+  }
   if (!r.ok) {
     const txt = await r.text();
     throw new Error(txt || `HTTP ${r.status}`);
@@ -917,6 +942,24 @@ async function retryMessage(id) {
   await sendChat(promptMsg.text, false);
 }
 
+async function doChatRequest(prompt) {
+  const makeReq = async () => {
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    Object.entries(csrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
+    return fetch(window.location.origin + '/api/chat', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ prompt, stream: true, csrf_token: csrfToken() }),
+    });
+  };
+  let r = await makeReq();
+  if (r.status === 403 && window.refreshCsrfToken) {
+    await refreshCsrfToken();
+    r = await makeReq();
+  }
+  return r;
+}
+
 async function sendChat(textOverride, isSystem) {
   const input = $('#chat-input');
   const sendBtn = $('#chat-send');
@@ -949,13 +992,7 @@ async function sendChat(textOverride, isSystem) {
 
   let finalText = '';
   try {
-    const headers = new Headers({ 'Content-Type': 'application/json' });
-    Object.entries(csrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
-    const r = await fetch(window.location.origin + '/api/chat', {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify({ prompt: p, stream: true }),
-    });
+    const r = await doChatRequest(p);
     if (!r.ok) {
       const err = await r.text();
       throw new Error(err || `HTTP ${r.status}`);

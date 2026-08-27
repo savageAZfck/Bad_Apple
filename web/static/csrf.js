@@ -1,9 +1,12 @@
 (function () {
-  function getToken() {
-    return document.querySelector('meta[name="csrf-token"]')?.content || '';
+  function csrfToken() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.content : '';
   }
 
-  window.getCsrfToken = getToken;
+  window.csrfToken = csrfToken;
+  window.getCsrfToken = csrfToken;
+
   window.refreshCsrfToken = async function () {
     try {
       const r = await fetch('/api/csrf', { method: 'GET', cache: 'no-store' });
@@ -27,7 +30,7 @@
     const sameOrigin = new URL(url, window.location.href).origin === window.location.origin;
     if (sameOrigin && method !== 'GET' && method !== 'HEAD') {
       const headers = new Headers(options.headers || {});
-      const token = getToken();
+      const token = csrfToken();
       if (token && !headers.get('X-CSRF-Token')) {
         headers.set('X-CSRF-Token', token);
       }
@@ -35,4 +38,8 @@
     }
     return originalFetch(url, options);
   };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    if (window.refreshCsrfToken) refreshCsrfToken();
+  });
 })();

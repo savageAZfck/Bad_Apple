@@ -70,8 +70,10 @@ def _get_csrf_token() -> str:
     return token
 
 
-def _check_csrf_token(headers: dict[str, str]) -> bool:
+def _check_csrf_token(headers: dict[str, str], body: dict[str, Any] | None = None) -> bool:
     token = headers.get("X-CSRF-Token") or headers.get("X-Csrf-Token")
+    if not token and body is not None:
+        token = body.get("csrf_token")
     return token == _get_csrf_token()
 
 
@@ -1005,14 +1007,19 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if not _check_csrf_token({k: v for k, v in self.headers.items()}):
+        length = int(self.headers.get("Content-Length", 0))
+        body_bytes = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            self._post_body = json.loads(body_bytes.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._post_body = {}
+
+        if not _check_csrf_token({k: v for k, v in self.headers.items()}, self._post_body):
             self._send_json({"error": "invalid or missing CSRF token"}, 403)
             return
 
         def _read_body() -> dict:
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
-            return json.loads(body)
+            return self._post_body
 
         if path == "/api/chat":
             try:

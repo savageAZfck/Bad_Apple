@@ -85,15 +85,18 @@
       });
     }
 
+    function csrfToken() {
+      return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
+    }
     function csrfHeaders() {
-      const token = document.querySelector('meta[name="csrf-token"]')?.content;
+      const token = csrfToken();
       return token ? { 'X-CSRF-Token': token } : {};
     }
     async function control(command) {
       if (!command) return;
       try {
         const headers = { 'Content-Type': 'application/json', ...csrfHeaders() };
-        const res = await fetch('/api/control', { method: 'POST', headers, body: JSON.stringify({command}) });
+        const res = await fetch('/api/control', { method: 'POST', headers, body: JSON.stringify({command, csrf_token: csrfToken()}) });
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         document.getElementById('cli-result').textContent = JSON.stringify(data, null, 2);
