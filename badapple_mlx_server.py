@@ -18,6 +18,7 @@ import json
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -3288,8 +3289,19 @@ class MLXServer:
         """Restart the local MCP server process so it picks up env changes."""
         if self.mcp_process is not None:
             try:
-                self.mcp_process.terminate()
-                self.mcp_process.wait(timeout=5)
+                try:
+                    pgid = os.getpgid(self.mcp_process.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    self.mcp_process.terminate()
+                try:
+                    self.mcp_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(self.mcp_process.pid), signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        self.mcp_process.kill()
+                    self.mcp_process.wait(timeout=2)
             except Exception as e:  # noqa: BLE001 - cleanup
                 print(f"[main] MCP server terminate failed: {e}", flush=True)
         try:
@@ -4828,8 +4840,18 @@ async def main():
     finally:
         if mcp_process is not None:
             try:
-                mcp_process.terminate()
-                mcp_process.wait(timeout=5)
+                try:
+                    os.killpg(os.getpgid(mcp_process.pid), signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    mcp_process.terminate()
+                try:
+                    mcp_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(mcp_process.pid), signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        mcp_process.kill()
+                    mcp_process.wait(timeout=2)
             except Exception:  # noqa: BLE001,S110 - cleanup
                 pass
 

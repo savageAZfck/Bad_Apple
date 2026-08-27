@@ -3294,6 +3294,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Bail out if another Bad Apple menu bar is already running.
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.badapple.menubar"
+        let alreadyRunning = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier == bundleID && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        }
+        if !alreadyRunning.isEmpty {
+            badAppleVoiceLog("Another Bad Apple menu bar is already running (pids: \(alreadyRunning.map { $0.processIdentifier })); terminating.")
+            NSApp.terminate(nil)
+            return
+        }
+
         if shouldShowBootSplash {
             splash.show()
         }
