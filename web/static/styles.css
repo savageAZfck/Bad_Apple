@@ -442,10 +442,23 @@ pre.log {
 .modal-card ul { color: var(--text-secondary); padding-left: 1.25rem; line-height: 1.7; }
 .modal-card li strong { color: var(--text); }
 
+.menu-btn { display: none; background: none; border: none; color: var(--text); font-size: 1.25rem; cursor: pointer; padding: 0.5rem; }
+.mobile-header { display: none; }
+
 @media (max-width: 800px) {
-  .sidebar { display: none; }
+  body { padding-top: 56px; }
+  #app, .main, .content { height: calc(100vh - 56px); }
+  .mobile-header {
+    display: flex; align-items: center; justify-content: space-between;
+    position: fixed; top: 0; left: 0; right: 0; height: 56px;
+    padding: 0 1rem; background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border-subtle); z-index: 100;
+  }
+  .menu-btn { display: inline-flex; }
+  .sidebar { display: none; position: fixed; top: 56px; left: 0; bottom: 0; z-index: 90; }
+  .sidebar.open { display: flex; }
   .topbar { padding: 0 1rem; }
-  .view { padding: 1rem; }
+  .view, .content { padding: 1rem; }
 }
 
 /* Skeletons / shimmer */

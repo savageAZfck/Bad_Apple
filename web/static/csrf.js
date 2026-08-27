@@ -52,7 +52,29 @@
     return originalFetch(url, options);
   };
 
+  function setupMobileNav() {
+    if (document.querySelector('.mobile-header')) return;
+    const sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+    const header = document.createElement('header');
+    header.className = 'mobile-header';
+    header.innerHTML = '<button class="menu-btn" aria-label="Open navigation">☰</button>';
+    document.body.insertBefore(header, document.body.firstChild);
+    const btn = header.querySelector('.menu-btn');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      sidebar.classList.toggle('open');
+    });
+    sidebar.querySelectorAll('a').forEach(a => a.addEventListener('click', () => sidebar.classList.remove('open')));
+    document.addEventListener('click', (e) => {
+      if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !header.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     if (window.refreshCsrfToken) refreshCsrfToken();
+    setupMobileNav();
   });
 })();
