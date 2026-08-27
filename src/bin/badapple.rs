@@ -2,9 +2,9 @@ use anyhow::{bail, Context, Result};
 use bad_apple::bad_apple_ipc::query_with_metrics;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -142,26 +142,31 @@ fn main() -> Result<()> {
     }
     stdout.flush()?;
 
+    if let Some(ref tts) = tts {
+        tts.flush();
+    }
+
     // Give TTS a moment to finish before the program exits.
     if tts.is_some() {
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
     Ok(())
 }
 
+enum TtsMsg {
+    Text(String),
+    Flush,
+}
+
 struct TtsQueue {
-    tx: Option<Sender<String>>,
+    tx: Option<Sender<TtsMsg>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl TtsQueue {
     fn new() -> Self {
-        let (tx, rx) = channel::<String>();
-        let worker = thread::spawn(move || {
-            while let Ok(text) = rx.recv() {
-                speak_chunk(&text);
-            }
-        });
+        let (tx, rx) = channel::<TtsMsg>();
+        let worker = thread::spawn(move || tts_worker(rx));
         Self {
             tx: Some(tx),
             worker: Some(worker),
@@ -169,16 +174,81 @@ impl TtsQueue {
     }
     fn push(&self, text: &str) {
         if let Some(ref tx) = self.tx {
-            let _ = tx.send(text.to_string());
+            let _ = tx.send(TtsMsg::Text(text.to_string()));
+        }
+    }
+    fn flush(&self) {
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(TtsMsg::Flush);
         }
     }
 }
 
 impl Drop for TtsQueue {
     fn drop(&mut self) {
-        self.tx.take();
+        self.flush();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+    }
+}
+
+/// TTS worker buffers tokens into natural chunks and flushes on idle timeout
+/// so the voice starts quickly without synthesizing every subword separately.
+fn tts_worker(rx: Receiver<TtsMsg>) {
+    const IDLE_TIMEOUT: Duration = Duration::from_millis(80);
+    const MAX_CHUNK: usize = 160;
+    const MIN_CHUNK: usize = 2;
+
+    let mut buffer = String::new();
+    let mut deadline: Option<Instant> = None;
+
+    fn is_break_point(buf: &str) -> bool {
+        if buf.len() >= MAX_CHUNK {
+            return true;
+        }
+        if buf.len() < MIN_CHUNK {
+            return false;
+        }
+        if buf.ends_with(|c: char| matches!(c, '.' | '!' | '?' | ':' | ';' | '\n')) {
+            return true;
+        }
+        if buf.ends_with("—") || buf.ends_with("...") || buf.ends_with("…") {
+            return true;
+        }
+        false
+    }
+
+    loop {
+        let timeout = match deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()),
+            None => Duration::from_millis(500),
+        };
+
+        match rx.recv_timeout(timeout) {
+            Ok(TtsMsg::Text(text)) => {
+                buffer.push_str(&text);
+                if is_break_point(&buffer) {
+                    speak_chunk(&buffer);
+                    buffer.clear();
+                    deadline = None;
+                } else {
+                    deadline = Some(Instant::now() + IDLE_TIMEOUT);
+                }
+            }
+            Ok(TtsMsg::Flush) | Err(RecvTimeoutError::Disconnected) => {
+                if !buffer.is_empty() {
+                    speak_chunk(&buffer);
+                }
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if !buffer.is_empty() {
+                    speak_chunk(&buffer);
+                    buffer.clear();
+                    deadline = None;
+                }
+            }
         }
     }
 }
