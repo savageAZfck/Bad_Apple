@@ -62,10 +62,22 @@ def check_network_isolation() -> int:
         try:
             p = psutil.Process(pid)
             for conn in p.net_connections(kind="inet"):
-                if conn.status == psutil.CONN_LISTEN or conn.status == psutil.CONN_ESTABLISHED:
+                if conn.status == psutil.CONN_LISTEN:
                     ip, port = conn.laddr
-                    if ip not in ("127.0.0.1", "::1", "0.0.0.0", "::"):
-                        _fail(f"pid {pid} has external socket {ip}:{port} ({conn.status})")
+                    if ip in ("0.0.0.0", "::"):
+                        _fail(f"pid {pid} is listening on all interfaces {ip}:{port}")
+                        failures += 1
+                    elif ip not in ("127.0.0.1", "::1"):
+                        _fail(f"pid {pid} has external listener {ip}:{port}")
+                        failures += 1
+                elif conn.status == psutil.CONN_ESTABLISHED:
+                    ip, port = conn.laddr
+                    remote = conn.raddr
+                    if ip not in ("127.0.0.1", "::1"):
+                        _fail(f"pid {pid} has external local socket {ip}:{port} -> {remote}")
+                        failures += 1
+                    elif remote and remote.ip not in ("127.0.0.1", "::1"):
+                        _fail(f"pid {pid} connected to external host {remote.ip}:{remote.port}")
                         failures += 1
         except Exception as e:  # noqa: BLE001 - catch-all wrapper
             _info(f"could not inspect pid {pid}: {e}")
@@ -91,8 +103,12 @@ def check_unix_sockets() -> int:
             for conn in p.net_connections(kind="inet"):
                 if conn.status == psutil.CONN_LISTEN:
                     addr = conn.laddr
-                    # 127.0.0.1 / ::1 only is still local; anything else is external.
-                    if str(addr.ip) not in ("127.0.0.1", "::1", "::", "0.0.0.0"):
+                    # 127.0.0.1 / ::1 only is local. 0.0.0.0 means all interfaces.
+                    if str(addr.ip) in ("0.0.0.0", "::"):
+                        _fail(f"pid {pid} is listening on all interfaces {addr}")
+                        tcp_found = True
+                        failures += 1
+                    elif str(addr.ip) not in ("127.0.0.1", "::1"):
                         _fail(f"pid {pid} is listening on external TCP {addr}")
                         tcp_found = True
                         failures += 1
@@ -312,8 +328,11 @@ def check_hardware_identity() -> int:
 def check_supervisor() -> int:
     print("\n[TEST] bounded health supervisor")
     import subprocess
+    import tempfile
+
     env = dict(os.environ)
-    env["BADAPPLE_DATA_DIR"] = "/tmp/badapple_cert_supervisor"
+    cert_dir = Path(tempfile.mkdtemp(prefix="badapple_cert_supervisor_"))
+    env["BADAPPLE_DATA_DIR"] = str(cert_dir)
     result = subprocess.run(
         [sys.executable, str(Path(__file__).with_name("badapple_supervisor.py")), "--once", "--no-repair"],
         capture_output=True,
@@ -321,6 +340,10 @@ def check_supervisor() -> int:
         timeout=20,
         env=env,
     check=False)
+    try:
+        cert_dir.rmdir()
+    except OSError:
+        pass
     if result.returncode != 0:
         _fail(result.stderr.strip() or "supervisor health check failed")
         return 1

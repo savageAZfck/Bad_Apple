@@ -6,15 +6,12 @@ from pathlib import Path
 
 import badapple_ambient_memory as am
 from badapple_extras import MemoryGraph
-from badapple_knowledge import BadAppleKnowledge
 
 
 class TestAmbientMemory(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["BADAPPLE_DATA_DIR"] = self.tmp.name
-        self.knowledge = BadAppleKnowledge()
-        self.memory = MemoryGraph(Path(self.tmp.name), encoder=self.knowledge._encode_texts)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -41,6 +38,17 @@ class TestAmbientMemory(unittest.TestCase):
         ambient._on_snapshot(ctx)
         results = self.memory.search("What is my current project")
         self.assertTrue(any("Bad Apple" in r for r in results))
+
+    def _get_memory(self) -> MemoryGraph:
+        from tests._test_utils import fake_encoder
+
+        return MemoryGraph(Path(self.tmp.name), encoder=fake_encoder)
+
+    @property
+    def memory(self) -> MemoryGraph:
+        if not hasattr(self, "_memory"):
+            self._memory = self._get_memory()
+        return self._memory
 
 
 if __name__ == "__main__":

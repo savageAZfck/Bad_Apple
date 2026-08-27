@@ -18,6 +18,7 @@ import http.server
 import json
 import os
 import re
+import secrets
 import shutil
 import socketserver
 import subprocess
@@ -38,6 +39,24 @@ import badapple_ocular
 # The MLXServer instance is set here by badapple_mlx_server.py at startup so
 # the HTTP handler can return daemon-internal status.
 _server_instance: Any | None = None
+_dashboard_csrf_token: str = ""
+
+
+def _generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _get_csrf_token() -> str:
+    global _dashboard_csrf_token
+    if not _dashboard_csrf_token:
+        _dashboard_csrf_token = _generate_csrf_token()
+    return _dashboard_csrf_token
+
+
+def _check_csrf_token(headers: dict[str, str]) -> bool:
+    token = headers.get("X-CSRF-Token") or headers.get("X-Csrf-Token")
+    return token == _get_csrf_token()
+
 
 # New web UX assets live in the web/ directory next to this module.
 WEB_ROOT = Path(__file__).with_name("web").resolve()
@@ -984,7 +1003,15 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
     def _serve_html_file(self, name: str) -> None:
         file_path = WEB_ROOT / name
         if file_path.is_file():
-            self._send_html(file_path.read_text(encoding="utf-8"))
+            html = file_path.read_text(encoding="utf-8")
+            token = _get_csrf_token()
+            html = html.replace("{{CSRF_TOKEN}}", token)
+            if "</head>" in html:
+                html = html.replace(
+                    "</head>",
+                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js"></script>\n</head>',
+                )
+            self._send_html(html)
         else:
             self._send_text("Not found", 404)
 
@@ -1135,6 +1162,10 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        if not _check_csrf_token({k: v for k, v in self.headers.items()}):
+            self._send_json({"error": "invalid or missing CSRF token"}, 403)
+            return
 
         def _read_body() -> dict:
             length = int(self.headers.get("Content-Length", 0))

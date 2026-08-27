@@ -5183,8 +5183,8 @@ async def main():
         print(f"[main] Dashboard failed to start: {e}", flush=True)
 
     # Start the local-only P2P sync daemon on the same event loop.
-    # P2P is on by default; set BADAPPLE_P2P=0 to keep the daemon air-gapped.
-    if server.p2p is not None and os.environ.get("BADAPPLE_P2P", "1") != "0":
+    # P2P is off by default for air-gap certification; set BADAPPLE_P2P=1 to enable LAN sync.
+    if server.p2p is not None and os.environ.get("BADAPPLE_P2P", "0") == "1":
         try:
             await server.p2p.start()
         except Exception as e:  # noqa: BLE001 - catch-all wrapper

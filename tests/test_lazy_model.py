@@ -44,8 +44,11 @@ class TestLazyModel(unittest.TestCase):
             return
         self.assertTrue(Path(path).is_dir())
 
+    @mock.patch("badapple_mlx_server.BadAppleKnowledge")
     @mock.patch("badapple_mlx_server.load")
-    def test_ensure_main_model_loads_on_demand(self, mock_load) -> None:
+    def test_ensure_main_model_loads_on_demand(self, mock_load, mock_knowledge) -> None:
+        from tests._test_utils import fake_encoder
+
         os.environ["BADAPPLE_LAZY_MAIN_MODEL"] = "1"
         os.environ["BADAPPLE_P2P"] = "0"
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -59,6 +62,7 @@ class TestLazyModel(unittest.TestCase):
 
             badapple_mlx_server.MAIN_MODEL = "dummy-model"
             mock_load.return_value = (object(), object())
+            mock_knowledge.return_value._encode_texts = fake_encoder
 
             server = badapple_mlx_server.MLXServer(
                 secret=b"x" * 32,

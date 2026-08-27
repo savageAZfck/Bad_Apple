@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import badapple_agent_tasks
+import badapple_dashboard as dashboard
 import badapple_mcp_marketplace as mcp
 import badapple_model_manager
 import badapple_vram_governor as vg
@@ -83,6 +84,15 @@ class TestModelRefValidation(unittest.TestCase):
         self.assertFalse(validate("../evil"))
         self.assertFalse(validate("/etc/passwd"))
         self.assertFalse(validate(""))
+
+
+class TestDashboardCsrf(unittest.TestCase):
+    def test_token_generated_and_validated(self) -> None:
+        token = dashboard._get_csrf_token()
+        self.assertTrue(len(token) > 20)
+        self.assertTrue(dashboard._check_csrf_token({"X-CSRF-Token": token}))
+        self.assertFalse(dashboard._check_csrf_token({"X-CSRF-Token": "wrong"}))
+        self.assertFalse(dashboard._check_csrf_token({}))
 
 
 if __name__ == "__main__":
