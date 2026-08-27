@@ -9,7 +9,7 @@ The `BadAppleIntent` module in `src/platform/apple_bridge/BadAppleIntent.swift` 
 | **Execute Bad Apple** | "Ask Bad Apple" or "Execute Bad Apple" | Sends spoken text to the local daemon and speaks the reply. |
 | **Bad Apple Status** | "What's my Bad Apple status" | Returns runtime, active model, and memory summary. |
 | **Bad Apple Kill Switch** | "Stop Bad Apple" | Engages the kill switch to halt generation and tool use. |
-| **Bad Apple Kill Switch** | "Resume Bad Apple" | Resumes from kill switch / safe mode when supported by the intent. |
+| **Execute Bad Apple** | "Resume Bad Apple" | Resumes from kill switch / safe mode. |
 
 ## Sample Shortcuts you can build in the Shortcuts app
 
@@ -20,7 +20,6 @@ The `BadAppleIntent` module in `src/platform/apple_bridge/BadAppleIntent.swift` 
 
 2. **Focus Kill Switch** — a button or Siri
    - Action: *Bad Apple Kill Switch*
-   - Set *Engage* to `On`
    - Use phrase: "Hey Siri, stop Bad Apple"
 
 3. **Read My Day** — voice or widget
