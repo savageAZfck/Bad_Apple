@@ -68,6 +68,9 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 - **Local Agent Protocol (LAP)** — JSON-RPC over the authenticated SLICKS
   Unix socket, exposed by `agent_client.py` via `__BADAPPLE_AGENT__`
   sentinel-prefixed JSON payloads.
+- **Autonomous agent tasks** — queue multi-step goals with `agent_client.py agent create`,
+  or from the dashboard at `/agents`. The OS plans, executes local tools, observes results,
+  recovers from errors, and persists tasks across restarts.
 - **Tool set** — local file system, shell (approved), AppleScript (approved),
   RAG, time, macOS Shortcuts, Accessibility actions, screen capture, image
   description, P2P peer discovery, LoRA training/inference, local image
@@ -403,6 +406,7 @@ All tools are local and policy-governed:
 ```text
 badapple_mlx_server.py          # 9B MLX inference + tools daemon
 badapple_model_manager.py       # background model download / status manager
+badapple_agent_tasks.py         # persistent autonomous agent task manager
 badapple_extras.py              # personas, firewall, audit, cache, approvals, memory graph
 badapple_vision.py              # screen capture and VLM image description
 badapple_lora.py                # on-device LoRA training and generation

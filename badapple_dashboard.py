@@ -1055,6 +1055,20 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
+        if path == "/api/agents":
+            try:
+                if _server_instance is not None and hasattr(_server_instance, "list_agent_tasks"):
+                    self._send_json({"tasks": _server_instance.list_agent_tasks()})
+                else:
+                    self._send_json({"error": "daemon not running"}, 503)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        if path == "/agents":
+            self._serve_html_file("agents.html")
+            return
+
         # SPA fallback
         self._serve_html_file("index.html")
 
@@ -1200,6 +1214,44 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     else:
                         _server_instance.model_manager.background_refresh_all()
                         self._send_json({"ok": True})
+                else:
+                    self._send_json({"error": "unknown action"}, 400)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
+
+        if path == "/api/agents":
+            try:
+                payload = _read_body()
+                action = payload.get("action", "")
+                if _server_instance is None or not hasattr(_server_instance, "agent_task_manager"):
+                    self._send_json({"error": "daemon not running"}, 503)
+                    return
+                if action == "list":
+                    self._send_json({"tasks": _server_instance.list_agent_tasks()})
+                elif action == "create":
+                    goal = payload.get("goal", "").strip()
+                    max_steps = max(1, min(50, int(payload.get("max_steps", 10))))
+                    if not goal:
+                        self._send_json({"error": "goal is required"}, 400)
+                        return
+                    task = _server_instance.submit_agent_task(goal, max_steps)
+                    self._send_json({"ok": True, "task": task.to_dict()})
+                elif action == "status":
+                    task = _server_instance.get_agent_task(payload.get("task_id", ""))
+                    self._send_json({"task": task})
+                elif action == "cancel":
+                    ok = _server_instance.cancel_agent_task(payload.get("task_id", ""))
+                    self._send_json({"ok": ok})
+                elif action == "pause":
+                    ok = _server_instance.pause_agent_task(payload.get("task_id", ""))
+                    self._send_json({"ok": ok})
+                elif action == "resume":
+                    ok = _server_instance.resume_agent_task(payload.get("task_id", ""))
+                    self._send_json({"ok": ok})
+                elif action == "delete":
+                    ok = _server_instance.agent_task_manager.delete(payload.get("task_id", ""))
+                    self._send_json({"ok": ok})
                 else:
                     self._send_json({"error": "unknown action"}, 400)
             except Exception as e:  # noqa: BLE001 - catch-all wrapper

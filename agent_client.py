@@ -115,7 +115,7 @@ def call_agent(method: str, params: dict | None = None, prompt_text: str | None 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | status | kill | resume | private <on|off> | identity | p2p_sync | p2p_peers | p2p <on|off|peers|sync> | flush | unload <vision|image|all> | dashboard [--open] | work <read|write|clear> [content] | tier <on|off> | autopilot <on|off> | ambient <on|off>>")
+        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | status | kill | resume | private <on|off> | identity | p2p_sync | p2p_peers | p2p <on|off|peers|sync> | flush | unload <vision|image|all> | dashboard [--open] | work <read|write|clear> [content] | tier <on|off> | autopilot <on|off> | ambient <on|off> | agent <list | create '<goal>' [max_steps] | status <task_id> | cancel <task_id> | pause <task_id> | resume <task_id>>>")
         return 1
 
     cmd = sys.argv[1]
@@ -200,6 +200,43 @@ def main():
             print("Usage: agent_client.py ambient <on|off>")
             return 1
         print(json.dumps(call_agent("set_ambient", {"enabled": sys.argv[2] == "on"}), indent=2))
+    elif cmd == "agent":
+        if len(sys.argv) < 3:
+            print("Usage: agent_client.py agent <list | create '<goal>' [max_steps] | status <task_id> | cancel <task_id> | pause <task_id> | resume <task_id>>")
+            return 1
+        sub = sys.argv[2]
+        if sub == "list":
+            print(json.dumps(call_agent("list_agent_tasks"), indent=2))
+        elif sub == "create":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py agent create '<goal>' [max_steps]")
+                return 1
+            goal = sys.argv[3]
+            max_steps = int(sys.argv[4]) if len(sys.argv) > 4 else 10
+            print(json.dumps(call_agent("run_agent_task", {"goal": goal, "max_steps": max_steps}), indent=2))
+        elif sub == "status":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py agent status <task_id>")
+                return 1
+            print(json.dumps(call_agent("get_agent_task", {"task_id": sys.argv[3]}), indent=2))
+        elif sub == "cancel":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py agent cancel <task_id>")
+                return 1
+            print(json.dumps(call_agent("cancel_agent_task", {"task_id": sys.argv[3]}), indent=2))
+        elif sub == "pause":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py agent pause <task_id>")
+                return 1
+            print(json.dumps(call_agent("pause_agent_task", {"task_id": sys.argv[3]}), indent=2))
+        elif sub == "resume":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py agent resume <task_id>")
+                return 1
+            print(json.dumps(call_agent("resume_agent_task", {"task_id": sys.argv[3]}), indent=2))
+        else:
+            print(f"Unknown agent command: {sub}")
+            return 1
     elif cmd == "dashboard":
         url = "http://127.0.0.1:8787/"
         print(url)

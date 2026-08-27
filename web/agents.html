@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bad Apple — Agent Tasks</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="sidebar">
+    <h1>🍎 Bad Apple</h1>
+    <a href="/">Dashboard</a>
+    <a href="/chat">Chat</a>
+    <a href="/ocular">Ocular</a>
+    <a href="/models">Models</a>
+    <a class="active" href="/agents">Agents</a>
+    <a href="/audit">Audit</a>
+    <a href="/ledger">Ledger</a>
+  </nav>
+
+  <main class="content">
+    <h2>Autonomous Agent Tasks</h2>
+    <p class="subtitle">Queue multi-step goals. Bad Apple plans, acts, observes, and persists the outcome.</p>
+
+    <section class="card">
+      <h3>New task</h3>
+      <div class="form-row">
+        <input type="text" id="goal-input" placeholder="Find every TODO in ~/Code, save to /tmp/todos.txt, and read it back" class="grow">
+        <input type="number" id="max-steps" value="10" min="1" max="50" style="width:80px;">
+        <button id="submit-task" onclick="createTask()">Run</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Active tasks <span id="task-count" class="badge">0</span></h3>
+      <div id="tasks" class="task-list"></div>
+    </section>
+  </main>
+
+  <script>
+    async function api(action, body = {}) {
+      const res = await fetch('/api/agents', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action, ...body}),
+      });
+      return res.json();
+    }
+
+    async function loadTasks() {
+      const data = await api('list');
+      const container = document.getElementById('tasks');
+      container.innerHTML = '';
+      const tasks = (data.tasks || []).sort((a, b) => b.created_at - a.created_at);
+      document.getElementById('task-count').textContent = tasks.length;
+
+      if (!tasks.length) {
+        container.innerHTML = '<p class="muted">No tasks yet. Create one above.</p>';
+        return;
+      }
+
+      for (const t of tasks) {
+        const statusClass = t.status === 'completed' ? 'ok' : t.status === 'failed' ? 'err' : t.status === 'running' ? 'running' : '';
+        const steps = t.steps || [];
+        const lastStep = steps.length ? steps[steps.length - 1].tool || steps[steps.length - 1].thought : '';
+        const div = document.createElement('div');
+        div.className = 'task-row';
+        div.innerHTML = `
+          <div class="task-meta">
+            <span class="status-pill ${statusClass}">${t.status}</span>
+            <span class="task-id">${t.task_id}</span>
+            <span class="task-goal">${escapeHtml(t.goal)}</span>
+            <span class="task-date">${new Date(t.created_at * 1000).toLocaleString()}</span>
+          </div>
+          <div class="task-progress">step ${steps.length}/${t.max_steps}${lastStep ? ' · ' + escapeHtml(truncate(lastStep, 60)) : ''}</div>
+          <div class="task-actions">
+            ${t.status === 'paused' ? `<button onclick="resumeTask('${t.task_id}')">Resume</button>` : ''}
+            ${t.status === 'running' || t.status === 'queued' ? `<button onclick="pauseTask('${t.task_id}')">Pause</button>` : ''}
+            ${t.status !== 'completed' && t.status !== 'failed' ? `<button class="secondary" onclick="cancelTask('${t.task_id}')">Cancel</button>` : ''}
+            <button class="secondary" onclick="deleteTask('${t.task_id}')">Delete</button>
+          </div>
+          <details class="task-log">
+            <summary>Steps (${steps.length})</summary>
+            <pre>${steps.map(s => JSON.stringify(s, null, 2)).join('\n---\n')}</pre>
+          </details>
+        `;
+        container.appendChild(div);
+      }
+    }
+
+    async function createTask() {
+      const goal = document.getElementById('goal-input').value.trim();
+      const max_steps = parseInt(document.getElementById('max-steps').value, 10) || 10;
+      if (!goal) return;
+      await api('create', {goal, max_steps});
+      document.getElementById('goal-input').value = '';
+      loadTasks();
+    }
+
+    async function cancelTask(id) { await api('cancel', {task_id: id}); loadTasks(); }
+    async function pauseTask(id) { await api('pause', {task_id: id}); loadTasks(); }
+    async function resumeTask(id) { await api('resume', {task_id: id}); loadTasks(); }
+    async function deleteTask(id) { await api('delete', {task_id: id}); loadTasks(); }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    }
+    function truncate(s, n) { return s.length > n ? s.slice(0, n) + '…' : s; }
+
+    loadTasks();
+    setInterval(loadTasks, 3000);
+  </script>
+</body>
+</html>

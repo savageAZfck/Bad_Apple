@@ -34,6 +34,7 @@ from mlx_lm import load
 from mlx_lm.generate import stream_generate
 from mlx_lm.sample_utils import make_sampler
 
+import badapple_agent_tasks
 import badapple_ambient
 import badapple_aqua_helper
 import badapple_dashboard
@@ -2738,6 +2739,7 @@ class MLXServer:
         )
         self.model_registry = badapple_model_registry.ModelRegistry(self.data_dir)
         self.model_manager = badapple_model_manager.ModelManager(self.data_dir)
+        self.agent_task_manager = badapple_agent_tasks.AgentTaskManager(self.data_dir)
         self.max_kv_size = MAX_KV_SIZE
         self.prefill_step_size = PREFILL_STEP_SIZE
         self._roast_index = 0
@@ -2955,6 +2957,7 @@ class MLXServer:
                 "runtime_status", "discover_tools", "audit_tail", "p2p_peers", "p2p_sync",
                 "get_workspace", "get_pending_approvals", "identity_status",
                 "flush_vram", "unload_model", "model_status",
+                "list_agent_tasks", "get_agent_task",
             }
         return prompt.strip().lower() in {"runtime status", "health status", "bad apple status"}
 
@@ -3530,9 +3533,39 @@ class MLXServer:
             "args": call.get("arguments") or call.get("args") or {},
         }
 
-    def run_agent_task(self, goal: str, max_steps: int = 10, voice_mode: bool = False) -> str:
-        """Autonomous plan/act/observe loop for multi-step tasks."""
-        max_steps = max(1, min(max_steps, 15))
+    def run_agent_task(
+        self,
+        goal: str,
+        max_steps: int = 10,
+        voice_mode: bool = False,
+        task_id: str | None = None,
+    ) -> str:
+        """Autonomous plan/act/observe loop for multi-step tasks.
+
+        If task_id is provided, the AgentTaskManager record is updated in place.
+        Otherwise a new task is created and tracked.
+        """
+        max_steps = max(1, min(max_steps, 50))
+        task = (
+            self.agent_task_manager.get(task_id)
+            if task_id
+            else self.agent_task_manager.create(goal, max_steps)
+        )
+        if task is None:
+            return f"Agent task {task_id} not found."
+        task_id = task.task_id
+        self.agent_task_manager.update_status(task_id, "running")
+
+        def _record_step(thought: str, tool: str, args: dict[str, Any], result: str, error: str = "") -> None:
+            step = badapple_agent_tasks.AgentStep(
+                thought=thought,
+                tool=tool,
+                args=args,
+                result=result[:500],
+                error=error,
+            )
+            self.agent_task_manager.add_step(task_id, step)
+
         # Pick a focused tool set for the goal so the prompt stays small.
         agent_tools = tools_for_prompt(goal)
         agent_tools = [t for t in agent_tools if t["function"]["name"] != "run_agent_task"]
@@ -3544,7 +3577,7 @@ class MLXServer:
             for t in agent_tools
         )
 
-        history: list[dict[str, Any]] = []
+        history_for_model: list[dict[str, Any]] = []
         system_prompt = (
             "You are an autonomous agent inside Bad Apple. "
             "You have a goal and a focused set of tools. "
@@ -3562,9 +3595,13 @@ class MLXServer:
             "- Keep going until the goal is fully achieved or you are stuck."
         )
 
+        last_tool_name = ""
+        repeated_failures = 0
         for step in range(max_steps):
-            # Keep only the last 3 steps in context so the prompt does not balloon.
-            recent_history = history[-3:]
+            if self.agent_task_manager.get(task_id).status == "cancelled":  # type: ignore[union-attr]
+                return f"Agent task {task_id} cancelled."
+
+            recent_history = history_for_model[-3:]
             step_messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Goal: {goal}\n\nHistory so far:\n{json.dumps(recent_history, indent=2, default=str)}\n\nWhat is the next step?"},
@@ -3575,32 +3612,35 @@ class MLXServer:
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
-            raw = self._stream(prompt_text, 160, voice_mode=voice_mode)
+            raw = self._stream(prompt_text, 220, voice_mode=voice_mode)
 
-            # The model may emit tool-style XML or JSON. Try both.
             decision = self._extract_agent_json(raw)
             if decision is None:
                 decision = self._extract_agent_xml(raw)
 
             if decision is None:
-                history.append({"step": step, "raw": raw[:500], "error": "could not parse agent JSON"})
+                _record_step("", "", {}, raw[:500], "could not parse agent JSON")
                 continue
 
-            thought = decision.get("thought", "")
+            thought = str(decision.get("thought", ""))
             if "finish" in decision:
-                return str(decision["finish"])
+                finish = str(decision["finish"])
+                self.agent_task_manager.update_status(task_id, "completed", summary=finish)
+                return finish
 
             tool_name = decision.get("tool", "")
             tool_args = decision.get("args", {})
             if tool_name == "finish":
-                # Sometimes the model tries 'finish' as a tool; accept it.
-                return str(decision.get("finish", decision.get("args", json.dumps(decision))))
+                finish = str(decision.get("finish", decision.get("args", json.dumps(decision))))
+                self.agent_task_manager.update_status(task_id, "completed", summary=finish)
+                return finish
             if not tool_name:
-                history.append({"step": step, "thought": thought, "error": "no tool chosen"})
+                _record_step(thought, "", {}, raw[:500], "no tool chosen")
                 continue
 
             result = self._run_approved_tool(tool_name, tool_args, f"agent task: {goal}")
-            history.append({
+            _record_step(thought, tool_name, tool_args, str(result))
+            history_for_model.append({
                 "step": step,
                 "thought": thought,
                 "tool": tool_name,
@@ -3609,10 +3649,87 @@ class MLXServer:
             })
 
             if str(result).startswith(("Approval required", "Policy:", "Runtime", "Tool error")):
-                # Stop the agent loop on a blocking error and return it to the user.
-                return f"Agent task paused: {result}"
+                self.agent_task_manager.update_status(task_id, "paused", error=str(result))
+                return f"Agent task {task_id} paused: {result}"
 
-        return f"Agent task for \"{goal}\" reached the step limit ({max_steps}).\n\nProgress:\n{json.dumps(history, indent=2, default=str)}"
+            if tool_name == last_tool_name and str(result).startswith("Tool error"):
+                repeated_failures += 1
+            else:
+                repeated_failures = 0
+            last_tool_name = tool_name
+            if repeated_failures >= 2:
+                self.agent_task_manager.update_status(
+                    task_id, "failed", error="Repeated failures on the same tool."
+                )
+                return f"Agent task {task_id} failed after repeated errors."
+
+        progress = [s.to_dict() for s in self.agent_task_manager.get(task_id).steps]  # type: ignore[union-attr]
+        self.agent_task_manager.update_status(
+            task_id, "failed", error=f"Reached step limit ({max_steps})."
+        )
+        return (
+            f"Agent task {task_id} for \"{goal}\" reached the step limit "
+            f"({max_steps}).\n\nProgress:\n{json.dumps(progress, indent=2, default=str)}"
+        )
+
+    def _agent_done(self, future: Any, task_id: str) -> None:
+        try:
+            future.result()
+        except Exception as e:  # noqa: BLE001
+            self.agent_task_manager.update_status(
+                task_id, "failed", error=f"Uncaught exception: {e}"
+            )
+
+    def submit_agent_task(self, goal: str, max_steps: int = 10) -> badapple_agent_tasks.AgentTask:
+        """Queue a background agent task and return immediately."""
+        task = self.agent_task_manager.create(goal, max_steps)
+        if not getattr(self, "loop", None) or not getattr(self, "executor", None):
+            return task
+        future = self.loop.run_in_executor(
+            self.executor,
+            self.run_agent_task,
+            goal,
+            max_steps,
+            False,
+            task.task_id,
+        )
+        future.add_done_callback(lambda fut: self._agent_done(fut, task.task_id))
+        return task
+
+    def list_agent_tasks(self) -> list[dict[str, Any]]:
+        return self.agent_task_manager.status()
+
+    def get_agent_task(self, task_id: str) -> dict[str, Any] | None:
+        task = self.agent_task_manager.get(task_id)
+        if task is None:
+            return None
+        return task.to_dict()
+
+    def cancel_agent_task(self, task_id: str) -> bool:
+        return self.agent_task_manager.cancel(task_id)
+
+    def pause_agent_task(self, task_id: str) -> bool:
+        return self.agent_task_manager.pause(task_id)
+
+    def resume_agent_task(self, task_id: str) -> bool:
+        ok = self.agent_task_manager.resume(task_id)
+        if not ok:
+            return False
+        task = self.agent_task_manager.get(task_id)
+        if task is None:
+            return False
+        if not getattr(self, "loop", None) or not getattr(self, "executor", None):
+            return True
+        future = self.loop.run_in_executor(
+            self.executor,
+            self.run_agent_task,
+            task.goal,
+            task.max_steps,
+            False,
+            task.task_id,
+        )
+        future.add_done_callback(lambda fut: self._agent_done(fut, task.task_id))
+        return True
 
     def load_main_model(self, model_ref: str) -> str:
         """Load a new main LLM on the fly and replace the current one.
@@ -4042,6 +4159,40 @@ class MLXServer:
             await _respond(req_id, {"allow_downloads": enabled})
             return
 
+        if method == "run_agent_task":
+            goal = str(params.get("goal", ""))
+            max_steps = int(params.get("max_steps") or 10)
+            if not goal:
+                await _respond(req_id, None, "goal is required")
+                return
+            task = self.submit_agent_task(goal, max_steps)
+            await _respond(req_id, {"task_id": task.task_id, "status": task.status, "goal": task.goal})
+            return
+
+        if method == "list_agent_tasks":
+            await _respond(req_id, {"tasks": self.list_agent_tasks()})
+            return
+
+        if method == "get_agent_task":
+            task = self.get_agent_task(str(params.get("task_id", "")))
+            await _respond(req_id, {"task": task})
+            return
+
+        if method == "cancel_agent_task":
+            ok = self.cancel_agent_task(str(params.get("task_id", "")))
+            await _respond(req_id, {"cancelled": ok})
+            return
+
+        if method == "pause_agent_task":
+            ok = self.pause_agent_task(str(params.get("task_id", "")))
+            await _respond(req_id, {"paused": ok})
+            return
+
+        if method == "resume_agent_task":
+            ok = self.resume_agent_task(str(params.get("task_id", "")))
+            await _respond(req_id, {"resumed": ok})
+            return
+
         if method == "runtime_status":
             ambient = None
             try:
@@ -4073,6 +4224,7 @@ class MLXServer:
                 "fast_model": self.fast_model_info,
                 "main_model_loaded": self.model is not None and self.tokenizer is not None,
                 "models": self.model_manager.status() if getattr(self, "model_manager", None) is not None else {},
+                "agent_tasks": self.list_agent_tasks(),
                 "hibernating": self.hibernating,
                 "idle_seconds": round(time.time() - self.last_activity, 1),
             })
