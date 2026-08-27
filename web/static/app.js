@@ -272,8 +272,13 @@ async function finishWizard() {
 function setupNav() {
   $$('.nav-item').forEach(el => {
     el.addEventListener('click', e => {
-      e.preventDefault();
       const view = el.dataset.view;
+      if (!view || !ROUTES[view]) {
+        // Standalone page links (models, agents, ambient, control, mcp, audit, ledger)
+        // should navigate normally.
+        return;
+      }
+      e.preventDefault();
       navigate(view);
     });
   });
