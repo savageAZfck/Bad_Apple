@@ -686,12 +686,12 @@ def _save_persona_prompt(name: str, prompt: str) -> None:
 
 
 def _badapple_cli() -> str | None:
-    """Return the badapple CLI path: first on PATH, then next to this file."""
-    cli = shutil.which("badapple")
-    if cli:
-        return cli
+    """Return the badapple CLI path: prefer the current build, then PATH."""
     candidate = _repo_root() / "target" / "release" / "badapple"
-    return str(candidate) if candidate.is_file() else None
+    if candidate.is_file():
+        return str(candidate)
+    cli = shutil.which("badapple")
+    return cli
 
 
 def _run_cli(prompt: str, max_tokens: int = 240) -> str:
