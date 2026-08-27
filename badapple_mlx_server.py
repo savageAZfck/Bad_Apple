@@ -2271,6 +2271,8 @@ class MLXServer:
         self.dflash_runtime_context = None
         self.draft_model = None
         self._main_model_loading = False
+        self.model: Any | None = None
+        self.tokenizer: Any | None = None
 
         lazy_main = os.environ.get("BADAPPLE_LAZY_MAIN_MODEL", "0") == "1"
         if lazy_main:
