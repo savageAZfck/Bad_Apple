@@ -54,7 +54,7 @@
     async function load() {
       const data = await fetch('/api/ambient').then(r => r.json());
       document.getElementById('ambient-status').textContent = data.running ? 'running' : 'off';
-      document.getElementById('ambient-status').className = 'badge ' + (data.running ? 'ok' : 'err');
+      document.getElementById('ambient-status').className = 'badge ' + (data.running ? 'ok' : 'bad');
       document.getElementById('ambient-context').textContent = JSON.stringify(data.context || {}, null, 2);
 
       const facts = document.getElementById('ambient-facts');
