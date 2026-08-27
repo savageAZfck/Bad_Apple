@@ -316,11 +316,15 @@ class ModelManager:
             self._update_state(model_id, status="cached", progress=1.0, error="")
 
     def refresh_cache_status(self, model_id: str) -> dict[str, Any]:
-        """Check the local HF cache for a model without downloading."""
+        """Check the local HF cache for a model without downloading.
+
+        Do not overwrite a model that is currently loaded in RAM; a load in
+        progress takes precedence over a cache scan.
+        """
         profile = self._profiles.get(model_id)
         if not profile:
             return {"error": f"unknown model {model_id}"}
-        if self._state[model_id].status in ("downloading", "queued"):
+        if self._state[model_id].status in ("downloading", "queued", "loaded"):
             return self._status_for(model_id)
         if self._check_cached(profile.repo_id):
             path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
