@@ -183,7 +183,7 @@ final class PiperTTSClient {
 
     private let socketPath = "/tmp/badapple_tts.sock"
     private let requestTimeout: TimeInterval = 2.0
-    private let responseTimeout: TimeInterval = 15.0
+    private let responseTimeout: TimeInterval = 60.0
     private var requestID = 0
 
     // Simple queue for streaming TTS chunks in order.
@@ -210,6 +210,20 @@ final class PiperTTSClient {
     static let availableVoices = [
         "en_US-amy-medium",
     ]
+
+    /// Pre-warm Piper by synthesizing a short silent phrase. This loads the voice model
+    /// into memory so the first spoken response does not hit the cold-start timeout.
+    func warmup() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                _ = try self.synthesize("hello", voice: PiperTTSClient.defaultVoice)
+                badAppleVoiceLog("PiperTTS warmup complete")
+            } catch {
+                badAppleVoiceLog("PiperTTS warmup failed: \(error.localizedDescription)")
+            }
+        }
+    }
 
     /// Enqueue a chunk for synthesis. Chunks play in order so streaming stays smooth.
     func speak(_ text: String, voice: String, completion: ((Bool) -> Void)? = nil) {
@@ -3410,6 +3424,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         memoryGovernor.start()
         refreshTelemetry()
 
+        if UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false {
+            PiperTTSClient.shared.warmup()
+        }
+
         controlCenter.onVoiceToggle = { [weak self] enabled in
             guard let self = self else { return }
             UserDefaults.standard.set(enabled, forKey: "BadAppleVoiceEnabled")
@@ -4288,6 +4306,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             stopItem.toolTip = "Cancel generation, stop ambient capture, and block tools."
             menu.addItem(stopItem)
         }
+        if !lastRuntimeReachable {
+            let restartDaemonItem = NSMenuItem(title: "Restart Daemon", action: #selector(restartDaemon), keyEquivalent: "")
+            restartDaemonItem.toolTip = "Unload and reload the Bad Apple launchd daemon."
+            menu.addItem(restartDaemonItem)
+        }
         let systemHealthItem = NSMenuItem(title: "System Health...", action: #selector(showSystemHealth), keyEquivalent: "")
         systemHealthItem.toolTip = "Show the full runtime status JSON."
         menu.addItem(systemHealthItem)
@@ -4638,6 +4661,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
     }
 
+    @objc private func restartDaemon() {
+        let script = """
+        do shell script "launchctl unload /Library/LaunchDaemons/com.badapple.mlx.plist 2>/dev/null; launchctl unload /Library/LaunchDaemons/com.badapple.gatekeeper.plist 2>/dev/null; launchctl unload /Library/LaunchDaemons/com.badapple.supervisor.plist 2>/dev/null; sleep 2; launchctl load -w /Library/LaunchDaemons/com.badapple.gatekeeper.plist; launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist; launchctl load -w /Library/LaunchDaemons/com.badapple.supervisor.plist" with administrator privileges
+        """
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        do {
+            try task.run()
+            badAppleVoiceLog("Daemon restart initiated")
+        } catch {
+            badAppleVoiceLog("Daemon restart failed: \(error.localizedDescription)")
+        }
+    }
+
     @objc private func showSystemHealth() {
         Task {
             do {
@@ -4684,8 +4722,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     @objc private func togglePiperTTS() {
         let current = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
-        UserDefaults.standard.set(!current, forKey: "BadAppleUsePiperTTS")
-        badAppleVoiceLog("Piper TTS enabled: \(!current)")
+        let next = !current
+        UserDefaults.standard.set(next, forKey: "BadAppleUsePiperTTS")
+        badAppleVoiceLog("Piper TTS enabled: \(next)")
+        if next {
+            PiperTTSClient.shared.warmup()
+        }
         rebuildMenu()
     }
 

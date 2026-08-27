@@ -1,20 +1,33 @@
 (function () {
-  function csrfToken() {
+  function cookieToken() {
+    const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  function metaToken() {
     const meta = document.querySelector('meta[name="csrf-token"]');
     return meta ? meta.content : '';
   }
 
+  function csrfToken() {
+    return cookieToken() || metaToken();
+  }
+
   window.csrfToken = csrfToken;
   window.getCsrfToken = csrfToken;
+
+  function setMetaToken(token) {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    if (meta && token) meta.content = token;
+  }
 
   window.refreshCsrfToken = async function () {
     try {
       const r = await fetch('/api/csrf', { method: 'GET', cache: 'no-store' });
       if (!r.ok) return false;
       const data = await r.json();
-      const meta = document.querySelector('meta[name="csrf-token"]');
-      if (meta && data.csrf_token) {
-        meta.content = data.csrf_token;
+      if (data.csrf_token) {
+        setMetaToken(data.csrf_token);
         return true;
       }
     } catch (e) {

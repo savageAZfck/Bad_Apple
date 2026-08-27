@@ -13,7 +13,7 @@ const ROUTES = {
 let currentView = 'dashboard';
 
 function appCsrfToken() {
-  if (window.csrfToken) return window.appCsrfToken();
+  if (window.csrfToken) return window.csrfToken();
   return document.querySelector('meta[name="csrf-token"]')?.content || '';
 }
 function appCsrfHeader() {

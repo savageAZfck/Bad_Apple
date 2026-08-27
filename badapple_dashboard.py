@@ -70,6 +70,10 @@ def _get_csrf_token() -> str:
     return token
 
 
+def _csrf_cookie() -> str:
+    return f"csrf_token={_get_csrf_token()}; Path=/; SameSite=Strict"
+
+
 def _check_csrf_token(headers: dict[str, str], body: dict[str, Any] | None = None) -> bool:
     token = headers.get("X-CSRF-Token") or headers.get("X-Csrf-Token")
     if not token and body is not None:
@@ -795,8 +799,12 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._set_csrf_cookie()
         self.end_headers()
         self.wfile.write(body)
+
+    def _set_csrf_cookie(self) -> None:
+        self.send_header("Set-Cookie", _csrf_cookie())
 
     def _send_html(self, html: str, status: int = 200) -> None:
         body = html.encode("utf-8")
@@ -804,6 +812,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self._set_csrf_cookie()
         self.end_headers()
         self.wfile.write(body)
 
@@ -812,6 +821,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._set_csrf_cookie()
         self.end_headers()
         self.wfile.write(body)
 
@@ -820,7 +830,10 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self._set_csrf_cookie()
         self.end_headers()
         self.wfile.write(body)
 
