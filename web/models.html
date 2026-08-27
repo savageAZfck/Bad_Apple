@@ -3,12 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bad Apple Models</title>
+  <title>Bad Apple — Models</title>
+  <link rel="stylesheet" href="/static/styles.css?v=7">
   <style>
     :root { --bg: #0b0c0f; --card: #161821; --text: #d7e0ea; --muted: #8b95a6; --accent: #ff4d6d; --ok: #4ade80; --warn: #facc15; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; display: flex; justify-content: center; padding: 2rem; }
-    .wrap { width: 100%; max-width: 720px; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .wrap { width: 100%; max-width: 720px; margin: 0 auto; padding: 2rem 1rem; }
     h1 { font-size: 1.6rem; margin: 0 0 0.5rem; }
     p { color: var(--muted); margin: 0 0 1.5rem; }
     .allow { display: flex; gap: 0.75rem; align-items: center; background: var(--card); padding: 1rem; border-radius: 0.75rem; margin-bottom: 1rem; }
@@ -37,6 +38,29 @@
   </style>
 </head>
 <body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">BA</div>
+      <div>
+        <div class="title">Bad Apple</div>
+        <div class="subtitle">Local OS</div>
+      </div>
+    </div>
+    <nav>
+      <a class="nav-item" href="/">Dashboard</a>
+      <a class="nav-item" href="/chat">Chat</a>
+      <a class="nav-item" href="/ocular">Ocular</a>
+      <a class="nav-item active" href="/models">Models</a>
+      <a class="nav-item" href="/agents">Agents</a>
+      <a class="nav-item" href="/ambient">Ambient</a>
+      <a class="nav-item" href="/control">Control</a>
+      <a class="nav-item" href="/mcp">MCP</a>
+      <a class="nav-item" href="/settings">Settings</a>
+      <a class="nav-item" href="/logs">Logs</a>
+    </nav>
+  </aside>
+
+  <main class="content">
   <div class="wrap">
     <a class="back" href="/">&#8592; Back to dashboard</a>
     <h1>Model Checklist</h1>
@@ -158,5 +182,6 @@
     loadStatus();
     setInterval(loadStatus, 2000);
   </script>
+  </main>
 </body>
 </html>
