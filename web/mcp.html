@@ -56,8 +56,12 @@
   </main>
 
   <script>
+    function csrfHeaders() {
+      const token = document.querySelector('meta[name="csrf-token"]')?.content;
+      return token ? { 'X-CSRF-Token': token } : {};
+    }
     async function api(path, body) {
-      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json', ...csrfHeaders()}, body: JSON.stringify(body) });
       if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
       return r.json();
     }

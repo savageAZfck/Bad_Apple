@@ -85,10 +85,15 @@
       });
     }
 
+    function csrfHeaders() {
+      const token = document.querySelector('meta[name="csrf-token"]')?.content;
+      return token ? { 'X-CSRF-Token': token } : {};
+    }
     async function control(command) {
       if (!command) return;
       try {
-        const res = await fetch('/api/control', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({command}) });
+        const headers = { 'Content-Type': 'application/json', ...csrfHeaders() };
+        const res = await fetch('/api/control', { method: 'POST', headers, body: JSON.stringify({command}) });
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         document.getElementById('cli-result').textContent = JSON.stringify(data, null, 2);

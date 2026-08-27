@@ -66,8 +66,12 @@
     const allowBox = document.getElementById('allow-dl');
     const list = document.getElementById('model-list');
 
+    function csrfHeaders() {
+      const token = document.querySelector('meta[name="csrf-token"]')?.content;
+      return token ? { 'X-CSRF-Token': token } : {};
+    }
     async function api(method, body) {
-      const r = await fetch('/api/models', { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+      const r = await fetch('/api/models', { method, headers: { 'Content-Type': 'application/json', ...csrfHeaders() }, body: JSON.stringify(body || {}) });
       if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
       return r.json();
     }

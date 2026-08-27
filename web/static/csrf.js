@@ -1,15 +1,36 @@
 (function () {
-  const token = document.querySelector('meta[name="csrf-token"]')?.content;
-  if (!token) return;
+  function getToken() {
+    return document.querySelector('meta[name="csrf-token"]')?.content || '';
+  }
+
+  window.getCsrfToken = getToken;
+  window.refreshCsrfToken = async function () {
+    try {
+      const r = await fetch('/api/csrf', { method: 'GET', cache: 'no-store' });
+      if (!r.ok) return false;
+      const data = await r.json();
+      const meta = document.querySelector('meta[name="csrf-token"]');
+      if (meta && data.csrf_token) {
+        meta.content = data.csrf_token;
+        return true;
+      }
+    } catch (e) {
+      console.warn('refreshCsrfToken failed:', e);
+    }
+    return false;
+  };
 
   const originalFetch = window.fetch;
   window.fetch = function (url, init) {
     const options = init || {};
-    const method = (options.method || "GET").toUpperCase();
+    const method = (options.method || 'GET').toUpperCase();
     const sameOrigin = new URL(url, window.location.href).origin === window.location.origin;
-    if (sameOrigin && method !== "GET") {
+    if (sameOrigin && method !== 'GET' && method !== 'HEAD') {
       const headers = new Headers(options.headers || {});
-      headers.set("X-CSRF-Token", token);
+      const token = getToken();
+      if (token && !headers.get('X-CSRF-Token')) {
+        headers.set('X-CSRF-Token', token);
+      }
       options.headers = headers;
     }
     return originalFetch(url, options);

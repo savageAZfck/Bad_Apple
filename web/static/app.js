@@ -12,6 +12,11 @@ const ROUTES = {
 
 let currentView = 'dashboard';
 
+function csrfHeader() {
+  const token = document.querySelector('meta[name="csrf-token"]')?.content;
+  return token ? { 'X-CSRF-Token': token } : {};
+}
+
 function initTheme() {
   const saved = localStorage.getItem('badapple-theme');
   const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
@@ -43,6 +48,7 @@ function updateThemeIcon() {
 }
 
 function init() {
+  if (window.refreshCsrfToken) refreshCsrfToken();
   initTheme();
   setupNav();
   setupKeyboard();
@@ -305,7 +311,13 @@ function toast(message, type = 'ok') {
 }
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, opts);
+  const options = opts || {};
+  const headers = new Headers(options.headers || {});
+  if (options.method && options.method.toUpperCase() !== 'GET') {
+    Object.entries(csrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
+  }
+  options.headers = headers;
+  const r = await fetch(path, options);
   if (!r.ok) {
     const txt = await r.text();
     throw new Error(txt || `HTTP ${r.status}`);
@@ -937,9 +949,11 @@ async function sendChat(textOverride, isSystem) {
 
   let finalText = '';
   try {
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    Object.entries(csrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
     const r = await fetch(window.location.origin + '/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify({ prompt: p, stream: true }),
     });
     if (!r.ok) {

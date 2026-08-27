@@ -49,7 +49,12 @@ from badapple_dashboard_data import (
 # The MLXServer instance is set here by badapple_mlx_server.py at startup so
 # the HTTP handler can return daemon-internal status.
 _server_instance: Any | None = None
-_dashboard_csrf_token: str = ""
+
+
+def _csrf_token_path() -> Path:
+    data_dir = Path(os.environ.get("BADAPPLE_DATA_DIR") or "/var/lib/bad_apple").expanduser()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir / "dashboard_csrf.token"
 
 
 def _generate_csrf_token() -> str:
@@ -57,10 +62,12 @@ def _generate_csrf_token() -> str:
 
 
 def _get_csrf_token() -> str:
-    global _dashboard_csrf_token
-    if not _dashboard_csrf_token:
-        _dashboard_csrf_token = _generate_csrf_token()
-    return _dashboard_csrf_token
+    token_path = _csrf_token_path()
+    if token_path.is_file():
+        return token_path.read_text(encoding="utf-8").strip()
+    token = _generate_csrf_token()
+    token_path.write_text(token, encoding="utf-8")
+    return token
 
 
 def _check_csrf_token(headers: dict[str, str]) -> bool:
@@ -841,7 +848,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             if "</head>" in html:
                 html = html.replace(
                     "</head>",
-                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js?v=4"></script>\n</head>',
+                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js?v=5"></script>\n</head>',
                 )
             self._send_html(html)
         else:
@@ -857,6 +864,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/":
             self._serve_html_file("index.html")
+            return
+        if path == "/api/csrf":
+            self._send_json({"csrf_token": _get_csrf_token()})
             return
         if path == "/models" or path == "/models.html":
             self._serve_html_file("models.html")
