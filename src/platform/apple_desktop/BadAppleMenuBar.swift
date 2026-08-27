@@ -225,12 +225,55 @@ final class PiperTTSClient {
         }
     }
 
+    /// Split text into sentence-ish chunks so the first WAV is small and
+    /// starts playing while the rest of the queue is still being synthesized.
+    private func chunkText(_ text: String, maxLength: Int = 160) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var chunks: [String] = []
+        var remaining = trimmed
+        while !remaining.isEmpty {
+            if remaining.count <= maxLength {
+                chunks.append(remaining)
+                break
+            }
+
+            // Prefer splitting after sentence punctuation.
+            let sentencePattern = "[.!?;:—…\\n]+[\\s]+"
+            var bestBreak = remaining.range(of: sentencePattern, options: .regularExpression, range: remaining.startIndex..<remaining.index(remaining.startIndex, offsetBy: min(maxLength, remaining.count)))
+
+            // Fall back to the nearest whitespace.
+            if bestBreak == nil || bestBreak!.upperBound <= remaining.index(remaining.startIndex, offsetBy: maxLength / 2) {
+                let searchEnd = remaining.index(remaining.startIndex, offsetBy: min(maxLength, remaining.count))
+                if let spaceRange = remaining[..<searchEnd].range(of: " ", options: .backwards) {
+                    bestBreak = spaceRange
+                }
+            }
+
+            let splitIndex = bestBreak?.upperBound ?? remaining.index(remaining.startIndex, offsetBy: maxLength)
+            let chunk = String(remaining[..<splitIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !chunk.isEmpty {
+                chunks.append(chunk)
+            }
+            remaining = String(remaining[splitIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return chunks.isEmpty ? [trimmed] : chunks
+    }
+
     /// Enqueue a chunk for synthesis. Chunks play in order so streaming stays smooth.
+    /// Long text is broken into sentence chunks so the voice starts earlier.
     func speak(_ text: String, voice: String, completion: ((Bool) -> Void)? = nil) {
         requestID += 1
         let myID = requestID
+        let chunks = chunkText(text)
+
         queueLock.lock()
-        queue.append(QueueItem(text: text, voice: voice, id: myID, completion: completion))
+        for (index, chunk) in chunks.enumerated() {
+            let isLast = index == chunks.count - 1
+            queue.append(QueueItem(text: chunk, voice: voice, id: myID, completion: isLast ? completion : nil))
+        }
         let shouldStart = !isProcessing
         if shouldStart { isProcessing = true }
         queueLock.unlock()
