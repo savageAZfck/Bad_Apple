@@ -84,7 +84,7 @@
       ];
       rows.forEach(r => {
         const div = document.createElement('div');
-        div.className = 'toggle-row';
+        div.className = 'control-row';
         div.innerHTML = `
           <span class="toggle-label">${r.label}</span>
           <label class="toggle"><input type="checkbox" ${r.on ? 'checked' : ''} onchange="control('${r.on ? r.cmdOff : r.cmdOn}')"> <span class="slider"></span></label>
