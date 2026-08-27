@@ -35,7 +35,7 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 
 ### Core inference
 
-- **Local 9B reasoning** — `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` on the GPU.
+- **Local 9B/32B/70B reasoning** — `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`, `mlx-community/Qwen3.5-32B-MLX-4bit`, and `mlx-community/DeepSeek-V3-Chat-4bit` on Apple Silicon. The VRAM governor refuses to load a model that will not fit.
 - **Speculative decoding** — DFlash is disabled for the 9B quant; the runtime
   supports `mlx-lm` speculative decoding with a small cached draft model
   (e.g. `Qwen2.5-0.5B-Instruct-4bit`) via `enable draft` or
@@ -408,6 +408,7 @@ All tools are local and policy-governed:
 ```text
 badapple_mlx_server.py          # 9B MLX inference + tools daemon
 badapple_model_manager.py       # background model download / status manager
+badapple_vram_governor.py       # memory-admission and model-scale control
 badapple_agent_tasks.py         # persistent autonomous agent task manager
 badapple_ambient_memory.py      # ambient snapshot → memory graph
 badapple_extras.py              # personas, firewall, audit, cache, approvals, memory graph

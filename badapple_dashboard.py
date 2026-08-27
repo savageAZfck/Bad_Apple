@@ -1268,6 +1268,33 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     else:
                         _server_instance.model_manager.background_refresh_all()
                         self._send_json({"ok": True})
+                elif action == "recommend":
+                    query = payload.get("query", "")
+                    if query:
+                        self._send_json(_server_instance.model_manager.recommend_for_query(str(query)))
+                    else:
+                        self._send_json(_server_instance.model_manager.recommend_for_memory())
+                elif action == "switch":
+                    model_ref = payload.get("model_ref", "").strip()
+                    if not model_ref:
+                        self._send_json({"error": "model_ref required"}, 400)
+                        return
+                    if not _server_instance.loop or not _server_instance.executor:
+                        self._send_json({"error": "server not ready"}, 503)
+                        return
+                    _server_instance.loop.run_in_executor(
+                        _server_instance.executor, _server_instance.switch_main_model, model_ref
+                    )
+                    self._send_json({"ok": True, "message": f"Switching to {model_ref}"})
+                elif action == "admit":
+                    model_ref = payload.get("model_ref", "").strip()
+                    if not model_ref:
+                        self._send_json({"error": "model_ref required"}, 400)
+                        return
+                    self._send_json(_server_instance.admit_model(model_ref))
+                elif action == "preload":
+                    model_ids = payload.get("model_ids")
+                    self._send_json({"ok": True, "preloaded": _server_instance.submit_preload_models(model_ids)})
                 else:
                     self._send_json({"error": "unknown action"}, 400)
             except Exception as e:  # noqa: BLE001 - catch-all wrapper

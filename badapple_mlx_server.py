@@ -64,6 +64,7 @@ import badapple_translate
 import badapple_undo
 import badapple_vision
 import badapple_working_memory
+import badapple_vram_governor
 import badapple_workspace_watcher
 import badapple_xcode
 from badapple_extras import (
@@ -2960,6 +2961,7 @@ class MLXServer:
                 "get_workspace", "get_pending_approvals", "identity_status",
                 "flush_vram", "unload_model", "model_status",
                 "list_agent_tasks", "get_agent_task",
+                "recommend_model", "admit_model",
             }
         return prompt.strip().lower() in {"runtime status", "health status", "bad apple status"}
 
@@ -3733,12 +3735,48 @@ class MLXServer:
         future.add_done_callback(lambda fut: self._agent_done(fut, task.task_id))
         return True
 
+    def _memory_for_model(self, model_ref: str) -> float:
+        """Return estimated memory in GB for a model ref/id."""
+        for profile in self.model_manager.list_profiles():
+            if profile.repo_id == model_ref or model_ref == profile.id or model_ref in (profile.local_path or ""):
+                return profile.size_gb * 1.4
+        try:
+            for m in self.model_registry._state.get("models", []):
+                if m["id"] == model_ref or m["path"] == model_ref:
+                    return m.get("size_gb", 6.0) * 1.4
+        except Exception:  # noqa: BLE001
+            pass
+        return 6.0
+
+    def admit_model(self, model_ref: str, auto_unload: bool = True) -> dict[str, Any]:
+        """Check whether the Mac can fit the requested model; optionally free RAM."""
+        memory_gb = self._memory_for_model(model_ref)
+        ok, available_gb = badapple_vram_governor.can_fit_model(memory_gb)
+        if ok:
+            return {"ok": True, "needed_gb": round(memory_gb, 2), "available_gb": round(available_gb, 2)}
+        if auto_unload:
+            self.unload_model("all")
+            ok, available_gb = badapple_vram_governor.can_fit_model(memory_gb)
+        if not ok:
+            return {
+                "ok": False,
+                "needed_gb": round(memory_gb, 2),
+                "available_gb": round(available_gb, 2),
+                "pressure": badapple_vram_governor.memory_pressure(),
+                "message": f"Not enough memory for {model_ref} ({round(memory_gb, 2)} GB needed).",
+            }
+        return {"ok": True, "needed_gb": round(memory_gb, 2), "available_gb": round(available_gb, 2), "unloaded_optional": True}
+
     def load_main_model(self, model_ref: str) -> str:
         """Load a new main LLM on the fly and replace the current one.
 
         This unloads the existing model first so the Mac isn't holding two
         full model weights in memory at once.  Returns a status string.
         """
+        admission = self.admit_model(model_ref, auto_unload=True)
+        if not admission["ok"]:
+            return f"Model refused: {admission['message']}"
+
         import gc
 
         print("[model_registry] unloading current model...", flush=True)
@@ -3765,7 +3803,44 @@ class MLXServer:
 
         self.model_registry.set_current(model_ref)
         self.mlx_device = mx.default_device()
+        # Mark the loaded model in the manager if it maps to a known profile.
+        for profile in self.model_manager.list_profiles():
+            if profile.repo_id == model_ref or profile.local_path == model_ref or (profile.id and model_ref.endswith(profile.repo_id.rsplit("/", 1)[-1])):
+                self.model_manager.mark_loaded(profile.id)
         return f"Loaded {model_ref}. Current model updated."
+
+    def recommend_model(self, query: str = "") -> dict[str, Any]:
+        """Recommend a model for the current memory budget or a specific query."""
+        if query:
+            return self.model_manager.recommend_for_query(query)
+        return self.model_manager.recommend_for_memory()
+
+    def switch_main_model(self, model_ref: str) -> str:
+        """Download if missing and load a new main LLM."""
+        # Try to resolve to a repo_id from a model id.
+        for profile in self.model_manager.list_profiles():
+            if profile.id == model_ref or profile.repo_id == model_ref:
+                if not self.model_manager.allow_downloads:
+                    state = self.model_manager.ensure_cached(profile.id, download=False)
+                    if state.get("status") not in ("cached", "loaded"):
+                        return f"Model {model_ref} is not cached. Enable downloads or pre-download it."
+                else:
+                    self.model_manager.ensure_cached(profile.id, download=True)
+                    self.model_manager.wait_for_download(profile.id, timeout=600)
+                return self.load_main_model(profile.repo_id)
+        return self.load_main_model(model_ref)
+
+    def submit_preload_models(self, model_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        """Queue background downloads for a list of models (or default priority list)."""
+        if model_ids is None:
+            model_ids = self.model_manager.preload_priority()
+        results = []
+        for mid in model_ids:
+            if not self.model_manager._profiles.get(mid):
+                continue
+            state = self.model_manager.ensure_cached(mid, download=True)
+            results.append({"id": mid, "status": state.get("status")})
+        return results
 
     def _stream(
         self,
@@ -4159,6 +4234,40 @@ class MLXServer:
             enabled = bool(params.get("enabled", False))
             self.model_manager.set_allow_downloads(enabled)
             await _respond(req_id, {"allow_downloads": enabled})
+            return
+
+        if method == "recommend_model":
+            await _respond(req_id, self.recommend_model(str(params.get("query", ""))))
+            return
+
+        if method == "admit_model":
+            model_ref = str(params.get("model_ref", ""))
+            if not model_ref:
+                await _respond(req_id, None, "model_ref is required")
+                return
+            await _respond(req_id, self.admit_model(model_ref, bool(params.get("auto_unload", True))))
+            return
+
+        if method == "switch_main_model":
+            model_ref = str(params.get("model_ref", ""))
+            if not model_ref:
+                await _respond(req_id, None, "model_ref is required")
+                return
+            # Run the heavy load in the MLX executor.
+            if not getattr(self, "loop", None) or not getattr(self, "executor", None):
+                await _respond(req_id, None, "server not initialized")
+                return
+            future = self.loop.run_in_executor(self.executor, self.switch_main_model, model_ref)
+            result = await future
+            await _respond(req_id, {"result": result})
+            return
+
+        if method == "preload_models":
+            model_ids = params.get("model_ids")
+            if isinstance(model_ids, str):
+                model_ids = [m.strip() for m in model_ids.split(",") if m.strip()]
+            result = self.submit_preload_models(model_ids)
+            await _respond(req_id, {"preloaded": result})
             return
 
         if method == "run_agent_task":

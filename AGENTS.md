@@ -305,6 +305,7 @@ In `badapple_mlx_server.py`:
 - Model registry in `badapple_model_registry.py` with CLI commands `list models`, `scan models`, `model info <id>`, `use model <id>`, and `recommend models` for runtime LLM switching.
 - The MLX server reads `BADAPPLE_MAX_KV_SIZE` and `BADAPPLE_PREFILL_STEP_SIZE` (default 4096). Lower `BADAPPLE_MAX_KV_SIZE` to 1024-2048 before loading 32B+ models to stay within unified memory.
 - `badapple_model_registry.RECOMMENDED_MODELS` includes 9B, 32B, 70B, and 1.5B options with memory guidance.
+- `badapple_vram_governor.py` tracks physical and MLX memory pressure and refuses to load a model that will not fit. `admit_model` and `switch_main_model` run in the MLX executor; the dashboard `/models` page can switch, pre-load, and query recommendations.
 - Natural-language tool router in `badapple_tool_router.py` routes common requests directly to tools without waiting for the 9B.
 - Web chat UI at `http://127.0.0.1:8787/chat`; REST endpoint `POST /api/chat`.
 - P2P supports manual `p2p add peer <host>:<port>` and the sync beacon now carries the TCP sync port.

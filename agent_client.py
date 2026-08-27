@@ -115,7 +115,7 @@ def call_agent(method: str, params: dict | None = None, prompt_text: str | None 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | status | kill | resume | private <on|off> | identity | p2p_sync | p2p_peers | p2p <on|off|peers|sync> | flush | unload <vision|image|all> | dashboard [--open] | work <read|write|clear> [content] | tier <on|off> | autopilot <on|off> | ambient <on|off> | agent <list | create '<goal>' [max_steps] | status <task_id> | cancel <task_id> | pause <task_id> | resume <task_id>>>")
+        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | status | kill | resume | private <on|off> | identity | p2p_sync | p2p_peers | p2p <on|off|peers|sync> | flush | unload <vision|image|all> | dashboard [--open] | work <read|write|clear> [content] | tier <on|off> | autopilot <on|off> | ambient <on|off> | agent <list | create '<goal>' [max_steps] | status <task_id> | cancel <task_id> | pause <task_id> | resume <task_id>> | model <list | recommend [query] | switch <id> | preload [id,id,...] | admit <id>>>")
         return 1
 
     cmd = sys.argv[1]
@@ -236,6 +236,32 @@ def main():
             print(json.dumps(call_agent("resume_agent_task", {"task_id": sys.argv[3]}), indent=2))
         else:
             print(f"Unknown agent command: {sub}")
+            return 1
+    elif cmd == "model":
+        if len(sys.argv) < 3:
+            print("Usage: agent_client.py model <list | recommend [query] | switch <id> | preload [id,id,...] | admit <id>>")
+            return 1
+        sub = sys.argv[2]
+        if sub == "list":
+            print(json.dumps(call_agent("model_status"), indent=2))
+        elif sub == "recommend":
+            query = " ".join(sys.argv[3:])
+            print(json.dumps(call_agent("recommend_model", {"query": query}), indent=2))
+        elif sub == "switch":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py model switch <id or repo>")
+                return 1
+            print(json.dumps(call_agent("switch_main_model", {"model_ref": sys.argv[3]}), indent=2))
+        elif sub == "preload":
+            ids = [m.strip() for m in sys.argv[3].split(",")] if len(sys.argv) > 3 else []
+            print(json.dumps(call_agent("preload_models", {"model_ids": ids}), indent=2))
+        elif sub == "admit":
+            if len(sys.argv) < 4:
+                print("Usage: agent_client.py model admit <id or repo>")
+                return 1
+            print(json.dumps(call_agent("admit_model", {"model_ref": sys.argv[3]}), indent=2))
+        else:
+            print(f"Unknown model command: {sub}")
             return 1
     elif cmd == "dashboard":
         url = "http://127.0.0.1:8787/"

@@ -62,6 +62,22 @@ _KNOWN_MODELS: list[ModelProfile] = [
         loaded_in="mlx_server",
     ),
     ModelProfile(
+        id="main_32b",
+        name="Deep 32B",
+        repo_id="mlx-community/Qwen3.5-32B-MLX-4bit",
+        size_gb=19.0,
+        kind="text",
+        loaded_in="mlx_server",
+    ),
+    ModelProfile(
+        id="main_70b",
+        name="Deep 70B MoE",
+        repo_id="mlx-community/DeepSeek-V3-Chat-4bit",
+        size_gb=41.0,
+        kind="text",
+        loaded_in="mlx_server",
+    ),
+    ModelProfile(
         id="vision_2b",
         name="Ocular Vision",
         repo_id="mlx-community/Qwen2-VL-2B-Instruct-4bit",
@@ -317,6 +333,39 @@ class ModelManager:
         """Queue cache checks for every known model without blocking the caller."""
         for model_id in self._profiles:
             self._download_executor.submit(self.refresh_cache_status, model_id)
+
+    def memory_required(self, model_id: str) -> float:
+        profile = self._profiles.get(model_id)
+        return profile.size_gb * 1.4 if profile else 0.0
+
+    def recommend_for_memory(self) -> dict[str, Any]:
+        """Recommend the best model that currently fits in RAM."""
+        import badapple_vram_governor as vg
+
+        available_gb = vg._available_gb()
+        pick = vg.recommend_for_memory(available_gb)
+        return {
+            "available_gb": round(available_gb, 2),
+            "recommended_id": pick,
+            "recommended": self._status_for(pick),
+        }
+
+    def recommend_for_query(self, query: str) -> dict[str, Any]:
+        """Recommend a model for a specific query and memory budget."""
+        import badapple_vram_governor as vg
+
+        available_gb = vg._available_gb()
+        pick = vg.recommend_model_for_query(query, available_gb)
+        return {
+            "available_gb": round(available_gb, 2),
+            "recommended_id": pick,
+            "recommended": self._status_for(pick),
+        }
+
+    def preload_priority(self) -> list[str]:
+        import badapple_vram_governor as vg
+
+        return vg.model_preload_priority()
 
     def shutdown(self) -> None:
         self._download_executor.shutdown(wait=False, cancel_futures=True)

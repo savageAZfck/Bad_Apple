@@ -47,13 +47,22 @@
       <label for="allow-dl">Allow Bad Apple to download models from the internet</label>
     </div>
 
+    <div class="card" style="align-items:flex-start; flex-direction:column;">
+      <h3 style="margin:0 0 0.5rem;">Recommend a model</h3>
+      <div class="form-row" style="width:100%;">
+        <input type="text" id="recommend-query" placeholder="Deep reasoning about physics" class="grow">
+        <button onclick="recommend()">Recommend</button>
+      </div>
+      <div id="recommend-result" class="meta" style="margin-top:0.5rem;"></div>
+    </div>
+
     <div class="grid" id="model-list">
       <div class="card"><div class="info">Loading models…</div></div>
     </div>
   </div>
 
   <script>
-    const icons = { fast_0.5b: '⚡', main_9b: '🧠', vision_2b: '👁', flux_4b: '🎨' };
+    const icons = { fast_0.5b: '⚡', main_9b: '🧠', main_32b: '🔭', main_70b: '🌌', vision_2b: '👁', flux_4b: '🎨' };
     const allowBox = document.getElementById('allow-dl');
     const list = document.getElementById('model-list');
 
@@ -66,6 +75,28 @@
     async function loadStatus() {
       const data = await api('POST', { action: 'status' });
       render(data);
+      const rec = await api('POST', { action: 'recommend' });
+      document.getElementById('recommend-result').innerHTML = `Available ${rec.available_gb} GB · recommended: <strong>${rec.recommended?.name || rec.recommended_id}</strong>`;
+    }
+
+    async function recommend() {
+      const q = document.getElementById('recommend-query').value;
+      const rec = await api('POST', { action: 'recommend', query: q });
+      document.getElementById('recommend-result').innerHTML = `Available ${rec.available_gb} GB · recommended: <strong>${rec.recommended?.name || rec.recommended_id}</strong>`;
+    }
+
+    async function switchModel(id) {
+      try {
+        const res = await api('POST', { action: 'switch', model_ref: id });
+        alert(res.message || res.result || JSON.stringify(res));
+      } catch (e) { alert(e.message); }
+    }
+
+    async function admitModel(id) {
+      try {
+        const res = await api('POST', { action: 'admit', model_ref: id });
+        alert(`Admit ${id}: ${res.ok ? 'yes' : 'no'} (${res.available_gb} GB available, ${res.needed_gb} GB needed)`);
+      } catch (e) { alert(e.message); }
     }
 
     function render(data) {
@@ -86,6 +117,8 @@
           <div class="actions">
             <button class="secondary" onclick="refreshModel('${m.id}')">Refresh</button>
             <button onclick="downloadModel('${m.id}')" ${m.status !== 'missing' ? 'disabled' : ''}>Download</button>
+            ${m.kind === 'text' ? `<button class="secondary" onclick="switchModel('${m.id}')">Switch</button>` : ''}
+            <button class="secondary" onclick="admitModel('${m.id}')">Admit</button>
           </div>`;
         list.appendChild(card);
       }
