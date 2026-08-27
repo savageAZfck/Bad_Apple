@@ -3244,7 +3244,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         startAquaHelper()
         BadAppleMenuBarUIResponder.shared.start()
         registerSMAppService()
-        removeLegacyLaunchAgent()
+        // Do not remove the legacy LaunchAgent while running; the app is still
+        // distributed through a LaunchAgent on this install path, and bootout
+        // would kill the menu bar before it can display.
+        // removeLegacyLaunchAgent()
         // Prevent AppKit from treating this LSUIElement as idle and terminating it.
         ProcessInfo.processInfo.disableAutomaticTermination("Bad Apple menu bar host")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

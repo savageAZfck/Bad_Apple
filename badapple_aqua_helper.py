@@ -8,6 +8,8 @@ from the system LaunchDaemon.
 Listens on a Unix domain socket and speaks line-delimited JSON. No TCP, no cloud.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import socketserver
@@ -236,15 +238,16 @@ def _ui_click(target: str, role: str = "") -> dict[str, Any]:
         except json.JSONDecodeError:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI click failed"}
         return data
+    escaped_target = target.replace('"', '\\"')
     script = f'''
     tell application "System Events"
         set p to first application process whose frontmost is true
         set w to front window of p
         repeat with e in (entire contents of w)
             try
-                if name of e is "{target.replace('"', '\\"')}" then
+                if name of e is "{escaped_target}" then
                     click e
-                    return "clicked {target.replace('"', '\\"')}"
+                    return "clicked {escaped_target}"
                 end if
             end try
         end repeat
@@ -275,15 +278,17 @@ def _ui_type(target: str, text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI type failed"}
         return data
+    escaped_target = target.replace('"', '\\"')
+    escaped_text = text.replace('"', '\\"').replace("\n", "\\n")
     script = f'''
     tell application "System Events"
         set p to first application process whose frontmost is true
         set w to front window of p
         repeat with e in (entire contents of w)
             try
-                if name of e is "{target.replace('"', '\\"')}" then
-                    set value of e to "{text.replace('"', '\\"').replace(chr(10), '\\n')}"
-                    return "typed into {target.replace('"', '\\"')}"
+                if name of e is "{escaped_target}" then
+                    set value of e to "{escaped_text}"
+                    return "typed into {escaped_target}"
                 end if
             end try
         end repeat
