@@ -111,8 +111,10 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 
 - **Git copilot** — `git_status`, `git_diff`, `git_log`, and `git_commit` tools
   use only the local repo.
-- **Power dashboard** — `system_dashboard` returns CPU, memory, swap, disk,
-  battery, thermal pressure, and Bad Apple process stats.
+- **Power dashboard / control center** — `system_dashboard` returns CPU, memory,
+  swap, disk, battery, thermal pressure, and Bad Apple process stats. The local
+  web UI at `http://127.0.0.1:8787/control` exposes kill/resume, autopilot,
+  fast tier, ambient, P2P, and CLI overrides.
 - **Deterministic sessions** — `set_session_seed` pins the MLX random stream;
   same prompt, same output.
 - **Scheduler + Shortcuts** — `schedule_task`, `list_scheduled_tasks`, and
@@ -140,6 +142,9 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 - **Encrypted P2P sync** — `badapple_p2p.py` discovers peers on the local
   network via UDP beacons and syncs the memory graph over TCP with
   AES-256-GCM + HMAC-SHA256, keyed from the SLICKS secret.
+- **MCP marketplace** — `badapple_mcp_marketplace.py` registers local MCP
+  servers, lists their tools, and invokes them over stdio. Manage from
+  `http://127.0.0.1:8787/mcp`.
 - **Air-gap certification** — `cert_suite.py` validates network isolation,
   local sockets, policy, secret redaction, local model weights, and absence
   of hard-coded cloud endpoints.

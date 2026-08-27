@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bad Apple — Control Center</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="sidebar">
+    <h1>🍎 Bad Apple</h1>
+    <a href="/">Dashboard</a>
+    <a href="/chat">Chat</a>
+    <a href="/ocular">Ocular</a>
+    <a href="/models">Models</a>
+    <a href="/agents">Agents</a>
+    <a href="/ambient">Ambient</a>
+    <a class="active" href="/control">Control</a>
+    <a href="/mcp">MCP</a>
+    <a href="/audit">Audit</a>
+    <a href="/ledger">Ledger</a>
+  </nav>
+
+  <main class="content">
+    <h2>Control Center</h2>
+    <p class="subtitle">Toggles and overrides for the local OS.</p>
+
+    <section class="card" id="status-card">
+      <h3>Status</h3>
+      <pre id="status" class="json-box">Loading...</pre>
+    </section>
+
+    <section class="card">
+      <h3>Toggles</h3>
+      <div class="grid" id="toggles"></div>
+    </section>
+
+    <section class="card">
+      <h3>Actions</h3>
+      <div class="form-row" style="flex-wrap: wrap; gap: 0.5rem;">
+        <button class="secondary" onclick="control('kill switch')">Kill switch</button>
+        <button class="secondary" onclick="control('resume bad apple')">Resume</button>
+        <button class="secondary" onclick="control('flush vram')">Flush VRAM</button>
+        <button class="secondary" onclick="control('unload all models')">Unload all</button>
+        <button class="secondary" onclick="control('set workspace to ' + prompt('Workspace path?'))">Set workspace</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>CLI override</h3>
+      <div class="form-row">
+        <input type="text" id="cli-command" placeholder="enter safe mode" class="grow">
+        <button onclick="runCli()">Run</button>
+      </div>
+      <pre id="cli-result"></pre>
+    </section>
+  </main>
+
+  <script>
+    async function status() {
+      const r = await fetch('/api/status');
+      const data = await r.json();
+      document.getElementById('status').textContent = JSON.stringify(data, null, 2);
+      renderToggles(data);
+    }
+
+    function renderToggles(data) {
+      const container = document.getElementById('toggles');
+      container.innerHTML = '';
+      const rows = [
+        { label: 'Autopilot', key: 'autopilot', on: data.autopilot, cmdOn: 'enable autopilot', cmdOff: 'disable autopilot' },
+        { label: 'Fast tier', key: 'fast_tier', on: data.fast_tier, cmdOn: 'enable fast tier', cmdOff: 'disable fast tier' },
+        { label: 'Ambient', key: 'ambient_running', on: data.ambient_running, cmdOn: 'start ambient', cmdOff: 'stop ambient' },
+        { label: 'P2P', key: 'p2p_enabled', on: data.p2p_enabled, cmdOn: 'enable p2p', cmdOff: 'disable p2p' },
+        { label: 'Private mode', key: 'private', on: data.runtime?.private_mode, cmdOn: 'enable private mode', cmdOff: 'disable private mode' },
+      ];
+      rows.forEach(r => {
+        const div = document.createElement('div');
+        div.className = 'toggle-row';
+        div.innerHTML = `
+          <span class="toggle-label">${r.label}</span>
+          <label class="toggle"><input type="checkbox" ${r.on ? 'checked' : ''} onchange="control('${r.on ? r.cmdOff : r.cmdOn}')"> <span class="slider"></span></label>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    async function control(command) {
+      if (!command) return;
+      const res = await fetch('/api/control', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({command}) });
+      const data = await res.json();
+      document.getElementById('cli-result').textContent = JSON.stringify(data, null, 2);
+      status();
+    }
+
+    async function runCli() {
+      const cmd = document.getElementById('cli-command').value;
+      await control(cmd);
+    }
+
+    status();
+    setInterval(status, 3000);
+  </script>
+</body>
+</html>

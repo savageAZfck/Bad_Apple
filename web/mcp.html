@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bad Apple — MCP Marketplace</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="sidebar">
+    <h1>🍎 Bad Apple</h1>
+    <a href="/">Dashboard</a>
+    <a href="/chat">Chat</a>
+    <a href="/ocular">Ocular</a>
+    <a href="/models">Models</a>
+    <a href="/agents">Agents</a>
+    <a href="/ambient">Ambient</a>
+    <a href="/control">Control</a>
+    <a class="active" href="/mcp">MCP</a>
+    <a href="/audit">Audit</a>
+    <a href="/ledger">Ledger</a>
+  </nav>
+
+  <main class="content">
+    <h2>Tool Marketplace (MCP)</h2>
+    <p class="subtitle">Register local MCP servers and call their tools through Bad Apple.</p>
+
+    <section class="card">
+      <h3>Catalog</h3>
+      <div id="catalog"><span class="text-tertiary">Loading...</span></div>
+    </section>
+
+    <section class="card">
+      <h3>Installed servers</h3>
+      <div id="installed"><span class="text-tertiary">Loading...</span></div>
+    </section>
+
+    <section class="card">
+      <h3>Custom server</h3>
+      <div class="form-row">
+        <input type="text" id="custom-name" placeholder="my_server" style="width:140px;">
+        <input type="text" id="custom-cmd" placeholder="npx -y @modelcontextprotocol/server-filesystem ~/Documents" class="grow">
+        <button onclick="addServer()">Add</button>
+      </div>
+    </section>
+
+    <section class="card" id="tool-panel" style="display:none;">
+      <h3>Invoke tool</h3>
+      <div class="form-row">
+        <select id="tool-select"></select>
+        <input type="text" id="tool-args" placeholder='{"path": "/tmp"}' class="grow">
+        <button onclick="invokeTool()">Invoke</button>
+      </div>
+      <pre id="tool-result"></pre>
+    </section>
+  </main>
+
+  <script>
+    async function api(path, body) {
+      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      return r.json();
+    }
+
+    async function loadCatalog() {
+      const data = await fetch('/api/mcp_registry').then(r => r.json());
+      const div = document.getElementById('catalog');
+      div.innerHTML = '';
+      const servers = data.servers || [];
+      if (!servers.length) { div.innerHTML = '<p class="muted">No catalog entries.</p>'; return; }
+      servers.forEach(s => {
+        const d = document.createElement('div');
+        d.className = 'model-row';
+        d.innerHTML = `
+          <div class="model-info"><div class="name">${escapeHtml(s.name)}</div><div class="meta">${escapeHtml(s.description)} · ${escapeHtml(s.install_type)}</div></div>
+          <div class="actions"><button onclick="installServer('${s.name}')">Install</button></div>
+        `;
+        div.appendChild(d);
+      });
+    }
+
+    async function loadInstalled() {
+      const data = await api('/api/mcp_servers', {action: 'list'});
+      const div = document.getElementById('installed');
+      div.innerHTML = '';
+      const servers = data.servers || [];
+      if (!servers.length) { div.innerHTML = '<p class="muted">No MCP servers registered.</p>'; return; }
+
+      const panel = document.getElementById('tool-panel');
+      const select = document.getElementById('tool-select');
+      select.innerHTML = '';
+
+      for (const s of servers) {
+        const tools = await api('/api/mcp_servers', {action: 'tools', name: s.name});
+        const toolList = (tools.tools || []).map(t => t.name).join(', ');
+        const d = document.createElement('div');
+        d.className = 'model-row';
+        d.innerHTML = `
+          <div class="model-info"><div class="name">${escapeHtml(s.name)}</div><div class="meta">${escapeHtml(s.command.join(' '))}</div><div class="meta">Tools: ${toolList || 'none'}</div></div>
+          <div class="actions"><button class="secondary" onclick="removeServer('${s.name}')">Remove</button></div>
+        `;
+        div.appendChild(d);
+
+        (tools.tools || []).forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = JSON.stringify({server: s.name, tool: t.name});
+          opt.textContent = `${s.name} / ${t.name}`;
+          select.appendChild(opt);
+        });
+      }
+      panel.style.display = select.options.length ? 'block' : 'none';
+    }
+
+    async function installServer(name) {
+      try {
+        const res = await api('/api/mcp_servers', {action: 'install', name});
+        alert(res.result || JSON.stringify(res));
+        loadInstalled();
+      } catch (e) { alert(e.message); }
+    }
+
+    async function addServer() {
+      const name = document.getElementById('custom-name').value.trim();
+      const cmd = document.getElementById('custom-cmd').value.trim();
+      if (!name || !cmd) return;
+      try {
+        const res = await api('/api/mcp_servers', {action: 'add', name, command: cmd});
+        alert(res.result || JSON.stringify(res));
+        loadInstalled();
+      } catch (e) { alert(e.message); }
+    }
+
+    async function removeServer(name) {
+      if (!confirm(`Remove ${name}?`)) return;
+      try {
+        await api('/api/mcp_servers', {action: 'remove', name});
+        loadInstalled();
+      } catch (e) { alert(e.message); }
+    }
+
+    async function invokeTool() {
+      const meta = JSON.parse(document.getElementById('tool-select').value);
+      const args = JSON.parse(document.getElementById('tool-args').value || '{}');
+      try {
+        const res = await api('/api/mcp_servers', {action: 'invoke', ...meta, args});
+        document.getElementById('tool-result').textContent = JSON.stringify(res, null, 2);
+      } catch (e) { document.getElementById('tool-result').textContent = e.message; }
+    }
+
+    function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+    loadCatalog();
+    loadInstalled();
+    setInterval(loadInstalled, 5000);
+  </script>
+</body>
+</html>

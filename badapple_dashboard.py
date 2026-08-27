@@ -1013,6 +1013,12 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         if path == "/ambient" or path == "/ambient.html":
             self._serve_html_file("ambient.html")
             return
+        if path == "/mcp" or path == "/mcp.html":
+            self._serve_html_file("mcp.html")
+            return
+        if path == "/control" or path == "/control.html":
+            self._serve_html_file("control.html")
+            return
 
         if path == "/api/snapshot":
             self._send_json(json.loads(snapshot()))
@@ -1208,6 +1214,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     result = badapple_mcp_marketplace.install_catalog_server(payload.get("name", ""), catalog_path)
                 elif action == "list":
                     result = _load_mcp_servers()
+                elif action == "tools":
+                    result = {"tools": badapple_mcp_marketplace._MARKETPLACE.list_tools(payload.get("name", ""))}
+                elif action == "invoke":
+                    server = payload.get("server", "")
+                    tool = payload.get("tool", "")
+                    arguments = payload.get("args", {})
+                    result = badapple_mcp_marketplace._MARKETPLACE.invoke(server, tool, arguments)
+                    self._send_json({"ok": True, "result": result})
+                    return
+                elif action == "stop_all":
+                    badapple_mcp_marketplace._MARKETPLACE.stop_all()
+                    result = "Stopped all MCP servers."
                 else:
                     self._send_json({"error": "unknown action"}, 400)
                     return

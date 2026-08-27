@@ -326,11 +326,13 @@ In `badapple_mlx_server.py`:
 ## New web UI (SPA) and native splash
 
 - The dashboard is now a single-page app served from `web/index.html` with a unified sidebar, dark design system, and responsive layout.
-- Routes: `/` (Dashboard), `/chat`, `/persona`, `/settings`, `/logs`, `/splash`.
+- Routes: `/` (Dashboard), `/chat`, `/persona`, `/models`, `/agents`, `/ambient`, `/control`, `/mcp`, `/settings`, `/logs`, `/splash`.
 - Static assets live in `web/static/` (styles.css, app.js) and are served by `DashboardHandler`.
 - Chat view: streaming markdown, code blocks, tool-call cards, generated-image preview, scroll-to-bottom, auto-resize textarea.
 - Settings view: workspace setter, MCP server list/add/remove, active models, runtime toggles (autopilot, fast tier, P2P).
 - Dashboard view: status cards, P2P peers, latest perf, log tail.
+- Control center (`/control`): kill/resume, autopilot, fast tier, ambient, P2P, VRAM flush, CLI override.
+- MCP marketplace (`/mcp`): install from catalog, register custom servers, list tools, invoke tools.
 - Onboarding modal shown once for new browsers.
 - Native boot splash: `BadAppleSplashWindow` in `BadAppleMenuBar.swift` shows a progress bar on macOS app launch and auto-closes.
 
