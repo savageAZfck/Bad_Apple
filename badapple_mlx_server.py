@@ -3544,6 +3544,7 @@ class MLXServer:
         voice_mode: bool = False,
         task_id: str | None = None,
     ) -> str:
+        max_steps = max(1, min(int(max_steps), 50))
         """Autonomous plan/act/observe loop for multi-step tasks.
 
         If task_id is provided, the AgentTaskManager record is updated in place.
@@ -3744,8 +3745,8 @@ class MLXServer:
             for m in self.model_registry._state.get("models", []):
                 if m["id"] == model_ref or m["path"] == model_ref:
                     return m.get("size_gb", 6.0) * 1.4
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[model_memory] lookup error: {e}", flush=True)
         return 6.0
 
     def admit_model(self, model_ref: str, auto_unload: bool = True) -> dict[str, Any]:
@@ -3773,6 +3774,8 @@ class MLXServer:
         This unloads the existing model first so the Mac isn't holding two
         full model weights in memory at once.  Returns a status string.
         """
+        if not self._validate_model_ref(model_ref):
+            return f"Invalid model reference: {model_ref}"
         admission = self.admit_model(model_ref, auto_unload=True)
         if not admission["ok"]:
             return f"Model refused: {admission['message']}"
@@ -3815,8 +3818,18 @@ class MLXServer:
             return self.model_manager.recommend_for_query(query)
         return self.model_manager.recommend_for_memory()
 
+    def _validate_model_ref(self, model_ref: str) -> bool:
+        """Reject path traversal or non-model-looking refs."""
+        if not model_ref or ".." in model_ref or model_ref.startswith((".", "/", "~", "\\")):
+            return False
+        if "/" in model_ref:
+            return bool(re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", model_ref))
+        return model_ref in {p.id for p in self.model_manager.list_profiles()}
+
     def switch_main_model(self, model_ref: str) -> str:
         """Download if missing and load a new main LLM."""
+        if not self._validate_model_ref(model_ref):
+            return f"Invalid model reference: {model_ref}"
         # Try to resolve to a repo_id from a model id.
         for profile in self.model_manager.list_profiles():
             if profile.id == model_ref or profile.repo_id == model_ref:

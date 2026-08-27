@@ -27,8 +27,8 @@ def _available_gb() -> float:
         cache_gb = mx.get_cache_memory() / (1024 ** 3)
         # Only account for cache above a modest pool; the active set is real usage.
         available_gb -= active_gb + max(0.0, cache_gb - 1.0)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[vram_governor] memory tracking error: {e}", flush=True)
     return max(0.0, available_gb)
 
 

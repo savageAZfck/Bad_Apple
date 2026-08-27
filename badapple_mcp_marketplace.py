@@ -12,11 +12,19 @@ cloud dependency.  Servers must be installed locally (npx, uvx, python, etc.).
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any
+
+
+SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _is_safe_name(name: str) -> bool:
+    return bool(SAFE_NAME_RE.match(name)) and len(name) <= 64
 
 DEFAULT_REGISTRY = Path("/var/lib/bad_apple/mcp_servers.json")
 DEFAULT_TIMEOUT = 30
@@ -72,6 +80,8 @@ def _install_pip_server(entry: dict[str, Any]) -> list[str]:
 
 
 def install_catalog_server(name: str, catalog_path: Path | None = None) -> str:
+    if not _is_safe_name(name):
+        return "MCP server name must be alphanumeric, hyphens or underscores."
     catalog = _load_catalog(catalog_path)
     for entry in catalog.get("servers", []):
         if entry.get("name") == name:
@@ -217,6 +227,8 @@ class MCPMarketplace:
         return data.get("servers", [])
 
     def add_server(self, name: str, command: list[str], env: dict[str, str] | None = None) -> str:
+        if not _is_safe_name(name):
+            return "MCP server name must be alphanumeric, hyphens or underscores."
         data = _load_registry()
         servers = data.get("servers", [])
         for s in servers:
@@ -228,6 +240,8 @@ class MCPMarketplace:
         return f"Added MCP server '{name}'."
 
     def remove_server(self, name: str) -> str:
+        if not _is_safe_name(name):
+            return "MCP server name must be alphanumeric, hyphens or underscores."
         data = _load_registry()
         servers = [s for s in data.get("servers", []) if s["name"] != name]
         data["servers"] = servers
@@ -239,6 +253,8 @@ class MCPMarketplace:
         return f"Removed MCP server '{name}'."
 
     def get_client(self, name: str) -> MCPClient | None:
+        if not _is_safe_name(name):
+            return None
         with self._lock:
             client = self._clients.get(name)
             if client is not None:
@@ -253,12 +269,16 @@ class MCPMarketplace:
         return None
 
     def list_tools(self, name: str) -> list[dict[str, Any]]:
+        if not _is_safe_name(name):
+            return []
         client = self.get_client(name)
         if client is None:
             return []
         return client.tools()
 
     def invoke(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
+        if not _is_safe_name(server):
+            return f"Error: invalid MCP server name '{server}'."
         client = self.get_client(server)
         if client is None:
             return f"Error: MCP server '{server}' not found or failed to start."
@@ -280,11 +300,15 @@ _MARKETPLACE = MCPMarketplace()
 
 def add_mcp_server(name: str, command: str, env: dict[str, str] | None = None) -> str:
     """command is a shell-style string; split with shell semantics."""
+    if not _is_safe_name(name):
+        return "MCP server name must be alphanumeric, hyphens or underscores."
     import shlex
     return _MARKETPLACE.add_server(name, shlex.split(command), env)
 
 
 def remove_mcp_server(name: str) -> str:
+    if not _is_safe_name(name):
+        return "MCP server name must be alphanumeric, hyphens or underscores."
     return _MARKETPLACE.remove_server(name)
 
 
@@ -296,6 +320,8 @@ def list_mcp_servers() -> str:
 
 
 def list_mcp_tools(server: str) -> str:
+    if not _is_safe_name(server):
+        return f"MCP server name '{server}' is invalid."
     tools = _MARKETPLACE.list_tools(server)
     if not tools:
         return f"No tools from MCP server '{server}'."
@@ -303,6 +329,10 @@ def list_mcp_tools(server: str) -> str:
 
 
 def invoke_mcp_tool(server: str, tool: str, arguments: dict[str, Any]) -> str:
+    if not _is_safe_name(server):
+        return f"MCP server name '{server}' is invalid."
+    if not _is_safe_name(tool):
+        return f"MCP tool name '{tool}' is invalid."
     return _MARKETPLACE.invoke(server, tool, arguments)
 
 

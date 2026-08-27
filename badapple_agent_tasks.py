@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -17,6 +18,9 @@ from dataclasses import asdict, dataclass, field
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+
+SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @dataclass
@@ -91,8 +95,16 @@ class AgentTaskManager:
         self._callbacks: list[Callable[[AgentTask], None]] = []
         self._load_all()
 
-    def _path_for(self, task_id: str) -> Path:
-        return self.tasks_dir / f"{task_id}.json"
+    def _is_safe_id(self, task_id: str) -> bool:
+        return bool(SAFE_ID_RE.match(task_id)) and len(task_id) <= 64
+
+    def _path_for(self, task_id: str) -> Path | None:
+        if not self._is_safe_id(task_id):
+            return None
+        path = (self.tasks_dir / f"{task_id}.json").resolve()
+        if not path.is_relative_to(self.tasks_dir.resolve()):
+            return None
+        return path
 
     def _load_all(self) -> None:
         if not self.tasks_dir.is_dir():
@@ -102,6 +114,12 @@ class AgentTaskManager:
                 with open(p) as f:
                     data = json.load(f)
                 task = AgentTask.from_dict(data)
+                if not self._is_safe_id(task.task_id):
+                    print(f"[agent_tasks] skipping invalid task id in {p}: {task.task_id}", flush=True)
+                    continue
+                if p.resolve() != self._path_for(task.task_id):
+                    print(f"[agent_tasks] ignoring mismatched task file {p}", flush=True)
+                    continue
                 self._tasks[task.task_id] = task
             except (json.JSONDecodeError, KeyError, TypeError, OSError) as e:
                 print(f"[agent_tasks] could not load {p}: {e}", flush=True)
@@ -110,7 +128,11 @@ class AgentTaskManager:
         try:
             with self._lock:
                 task.updated_at = time.time()
-            with open(self._path_for(task.task_id), "w") as f:
+            path = self._path_for(task.task_id)
+            if path is None:
+                print(f"[agent_tasks] invalid task_id for save: {task.task_id}", flush=True)
+                return
+            with open(path, "w") as f:
                 json.dump(task.to_dict(), f, indent=2, default=str)
         except OSError as e:
             print(f"[agent_tasks] could not save {task.task_id}: {e}", flush=True)
@@ -201,6 +223,8 @@ class AgentTaskManager:
 
     def delete(self, task_id: str) -> bool:
         path = self._path_for(task_id)
+        if path is None:
+            return False
         try:
             path.unlink(missing_ok=True)
         except OSError:
