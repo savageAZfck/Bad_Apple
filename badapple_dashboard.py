@@ -170,6 +170,7 @@ def _daemon_status() -> dict[str, Any]:
         "ocular_running": badapple_ocular.is_running(),
         "ocular": badapple_ocular.status() if badapple_ocular.is_running() or badapple_ocular.OCULAR_CONTEXT.is_file() else None,
         "workspace": str(_server_instance.workspace.path) if _server_instance.workspace.path else None,
+        "airgap": _server_instance.airgap,
         "p2p_enabled": _server_instance.p2p is not None and _server_instance.p2p.is_running(),
         "p2p_peers": _server_instance.p2p.get_peers() if _server_instance.p2p is not None and _server_instance.p2p.is_running() else [],
         "mcp_socket": os.environ.get("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock"),
@@ -1079,6 +1080,25 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
 
+        if path == "/api/airgap":
+            try:
+                if _server_instance is None:
+                    self._send_json({"error": "daemon not running"}, 503)
+                    return
+                if self.command == "GET":
+                    self._send_json({"airgap": _server_instance.airgap})
+                    return
+                if self.command == "POST":
+                    payload = _read_body()
+                    enabled = bool(payload.get("enabled", False))
+                    _server_instance._set_airgap(enabled)
+                    self._send_json({"ok": True, "airgap": _server_instance.airgap})
+                    return
+                self._send_json({"error": "method not allowed"}, 405)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
+
         if path == "/api/control":
             try:
                 payload = _read_body()
@@ -1167,7 +1187,10 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     if not _server_instance.model_manager.allow_downloads:
                         self._send_json({"error": "downloads disabled"}, 403)
                         return
-                    self._send_json(_server_instance.model_manager.start_download(model_id))
+                    # Memory check before pre-download (does not block the download).
+                    admit = _server_instance.admit_model(model_id, auto_unload=False)
+                    result = _server_instance.model_manager.start_download(model_id)
+                    self._send_json({**result, "memory_check": admit})
                 elif action == "allow_downloads":
                     enabled = bool(payload.get("enabled", False))
                     _server_instance.model_manager.set_allow_downloads(enabled)

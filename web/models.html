@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bad Apple — Models</title>
-  <link rel="stylesheet" href="/static/styles.css?v=7">
+  <link rel="stylesheet" href="/static/styles.css?v=8">
   <style>
     :root { --bg: #0b0c0f; --card: #161821; --text: #d7e0ea; --muted: #8b95a6; --accent: #ff4d6d; --ok: #4ade80; --warn: #facc15; }
     * { box-sizing: border-box; }
@@ -169,7 +169,13 @@
       }
       try {
         await api('POST', { action: 'allow_downloads', enabled: true });
-        await api('POST', { action: 'download', model_id: id });
+        const res = await api('POST', { action: 'download', model_id: id });
+        const ok = res.status !== 'error';
+        const mem = res.memory_check || {};
+        const memMsg = mem.ok
+          ? ` (${mem.needed_gb} GB needed, ${mem.available_gb} GB available)`
+          : ` (WARNING: ${mem.message || 'memory check unavailable'})`;
+        alert(`${ok ? 'Download queued' : 'Download failed'}: ${res.status}${memMsg}`);
       } catch (e) { alert(e.message); }
       setTimeout(loadStatus, 500);
     }

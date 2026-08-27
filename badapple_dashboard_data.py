@@ -76,7 +76,7 @@ def _badapple_proc() -> dict[str, Any] | None:
 
 
 def _latest_log_perf() -> dict[str, Any] | None:
-    """Parse the latest [perf] line from the Bad Apple log."""
+    """Parse the latest [perf] line from the current Bad Apple process log."""
     log = Path("/var/log/bad_apple_mlx_server.log")
     if not log.is_file():
         return None
@@ -85,6 +85,11 @@ def _latest_log_perf() -> dict[str, Any] | None:
             lines = f.readlines()
     except Exception:  # noqa: BLE001 - catch-all wrapper
         return None
+    # Only consider the current process by finding the most recent start marker.
+    for i in range(len(lines) - 1, -1, -1):
+        if _START_MARKER in lines[i]:
+            lines = lines[i:]
+            break
     for line in reversed(lines):
         m = re.search(r"\[perf\]\s+(.*)", line)
         if m:
@@ -92,13 +97,28 @@ def _latest_log_perf() -> dict[str, Any] | None:
     return None
 
 
-def _tail_lines(path: str, n: int = 20) -> list[str]:
-    """Return the last n lines of a text file."""
+_START_MARKER = "Bad Apple MLX server started"
+
+
+def _tail_lines(path: str, n: int = 20, current_process_only: bool = True) -> list[str]:
+    """Return the last n lines of a text file.
+
+    If current_process_only is True, skip all lines before the most recent
+    daemon startup marker so the tail only shows the running process.
+    """
     try:
         with open(path, encoding="utf-8", errors="ignore") as f:
-            return list(deque(f, maxlen=n))
+            lines = f.readlines()
     except (OSError, ValueError):
         return []
+    if current_process_only:
+        for i in range(len(lines) - 1, -1, -1):
+            if _START_MARKER in lines[i]:
+                lines = lines[i:]
+                break
+    if n <= 0:
+        return lines
+    return lines[-n:] if len(lines) >= n else lines
 
 
 def _tail_ledger(path: str, n: int = 20) -> list[Any]:
@@ -192,6 +212,9 @@ def _query_int(path: str, key: str, default: int) -> int:
 def _load_mcp_servers() -> dict[str, Any]:
     try:
         registry = badapple_mcp_marketplace._load_registry()
-        return {"servers": registry.get("servers", [])}
+        servers = registry.get("servers", [])
+        for s in servers:
+            s["airgap_blocked"] = badapple_mcp_marketplace.is_airgap() and s.get("name") in badapple_mcp_marketplace._NETWORK_MCP_SERVERS
+        return {"servers": servers, "airgap": badapple_mcp_marketplace.is_airgap()}
     except Exception as e:  # noqa: BLE001 - catch-all wrapper
         return {"servers": [], "error": str(e)}

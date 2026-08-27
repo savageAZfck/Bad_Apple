@@ -389,16 +389,81 @@ public struct BadAppleIntent: AppIntent {
 }
 
 @available(macOS 26.0, *)
+public struct BadAppleStatusIntent: AppIntent {
+    public static let title: LocalizedStringResource = "Bad Apple Status"
+    public static let description = IntentDescription(
+        "Get the current Bad Apple runtime status, memory, and active model."
+    )
+    public static let openAppWhenRun = false
+
+    public init() {}
+
+    public func perform() async throws -> some IntentResult & ProvidesDialog {
+        let response = try await BadAppleDaemonClient.shared.generate(prompt: "status", maxNewTokens: 120)
+        return .result(dialog: IntentDialog(stringLiteral: response))
+    }
+}
+
+@available(macOS 26.0, *)
+public struct BadAppleKillSwitchIntent: AppIntent {
+    public static let title: LocalizedStringResource = "Bad Apple Kill Switch"
+    public static let description = IntentDescription(
+        "Engage the Bad Apple kill switch."
+    )
+    public static let openAppWhenRun = false
+
+    @Parameter(title: "Engage")
+    public var engage: Bool = true
+
+    public init() {}
+
+    public static var parameterSummary: some ParameterSummary {
+        Summary("Engage kill switch: \($engage)")
+    }
+
+    public func perform() async throws -> some IntentResult & ProvidesDialog {
+        let response = try await BadAppleDaemonClient.shared.generate(prompt: "kill switch", maxNewTokens: 64)
+        return .result(dialog: IntentDialog(stringLiteral: response))
+    }
+}
+
+@available(macOS 26.0, *)
 public struct BadAppleShortcuts: AppShortcutsProvider {
     public static var appShortcuts: [AppShortcut] {
-        AppShortcut(
-            intent: BadAppleIntent(),
-            phrases: [
-                "Execute \(.applicationName)",
-                "Ask \(.applicationName)"
-            ],
-            shortTitle: "Execute Bad Apple",
-            systemImageName: "apple.logo"
-        )
+        [
+            AppShortcut(
+                intent: BadAppleIntent(),
+                phrases: [
+                    "Execute \(.applicationName)",
+                    "Ask \(.applicationName)",
+                    "Resume \(.applicationName)",
+                    "Tell \(.applicationName) to",
+                    "Run \(.applicationName)",
+                    "Ask \(.applicationName) about",
+                ],
+                shortTitle: "Execute Bad Apple",
+                systemImageName: "apple.logo"
+            ),
+            AppShortcut(
+                intent: BadAppleStatusIntent(),
+                phrases: [
+                    "What's my \(.applicationName) status",
+                    "Show \(.applicationName) status",
+                    "\(.applicationName) status"
+                ],
+                shortTitle: "Bad Apple Status",
+                systemImageName: "chart.bar"
+            ),
+            AppShortcut(
+                intent: BadAppleKillSwitchIntent(),
+                phrases: [
+                    "Stop \(.applicationName)",
+                    "\(.applicationName) kill switch",
+                    "Kill switch \(.applicationName)"
+                ],
+                shortTitle: "Bad Apple Kill Switch",
+                systemImageName: "exclamationmark.octagon"
+            ),
+        ]
     }
 }

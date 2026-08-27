@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bad Apple</title>
-  <link rel="stylesheet" href="/static/styles.css?v=7">
+  <link rel="stylesheet" href="/static/styles.css?v=8">
 </head>
 <body>
   <div id="app">
@@ -39,7 +39,9 @@
       <header class="topbar">
         <h2 id="view-title">Dashboard</h2>
         <div class="right">
+          <button class="danger" onclick="engageKillSwitch()" id="kill-switch-btn" title="Stop all generation and tools" style="margin-right:0.5rem">Kill switch</button>
           <span class="persona-pill" id="top-persona">default</span>
+          <span class="persona-pill" id="airgap-pill" style="display:none; background:var(--danger)">AIR-GAP</span>
           <button class="secondary" onclick="toggleTheme()" id="theme-btn" title="Toggle theme">🌙</button>
         </div>
       </header>
@@ -172,6 +174,11 @@
               <input type="checkbox" id="p2p-enabled" onchange="toggleControl('p2p', this.checked ? 'p2p on' : 'p2p off', this)">
               <span class="slider"></span>
               <span class="label">P2P sync</span>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="airgap" onchange="toggleAirgap(this.checked)">
+              <span class="slider"></span>
+              <span class="label">Air-gap mode</span>
             </label>
           </div>
         </div>
@@ -376,6 +383,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

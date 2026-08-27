@@ -224,10 +224,29 @@ class ModelManager:
         try:
             from huggingface_hub import snapshot_download
 
+            # Essential model artifacts only; incomplete snapshots with missing
+            # READMEs or .gitattributes should not block local use.
+            allow_patterns = [
+                "*.safetensors",
+                "*.bin",
+                "*.json",
+                "*.py",
+                "*.txt",
+                "*.model",
+                "tokenizer.*",
+                "merges.*",
+                "vocab.*",
+                "config.*",
+                "model.*",
+                "preprocessor_config.*",
+                "chat_template.*",
+            ]
+
             def _download() -> str:
                 return snapshot_download(
                     repo_id,
                     local_files_only=not allow_download,
+                    allow_patterns=allow_patterns,
                 )
 
             if allow_download:
@@ -305,15 +324,25 @@ class ModelManager:
         except TimeoutError:
             return False
 
-    def mark_loaded(self, model_id: str) -> None:
+    def mark_loaded(self, model_id: str, local_path: str | None = None) -> None:
         """Mark a model as loaded in RAM."""
-        if model_id in self._state:
-            self._update_state(model_id, status="loaded", progress=1.0, error="")
+        if model_id not in self._state:
+            return
+        if local_path is None:
+            profile = self._profiles.get(model_id)
+            if profile:
+                local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
+        self._update_state(model_id, status="loaded", progress=1.0, local_path=local_path or "", error="")
 
-    def mark_unloaded(self, model_id: str) -> None:
+    def mark_unloaded(self, model_id: str, local_path: str | None = None) -> None:
         """Mark a model as cached but not resident."""
-        if model_id in self._state:
-            self._update_state(model_id, status="cached", progress=1.0, error="")
+        if model_id not in self._state:
+            return
+        if local_path is None:
+            profile = self._profiles.get(model_id)
+            if profile:
+                local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
+        self._update_state(model_id, status="cached", progress=1.0, local_path=local_path or "", error="")
 
     def refresh_cache_status(self, model_id: str) -> dict[str, Any]:
         """Check the local HF cache for a model without downloading.

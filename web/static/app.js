@@ -46,6 +46,17 @@ function toggleTheme(force) {
   if (checkbox) checkbox.checked = light;
   updateThemeIcon();
 }
+
+async function engageKillSwitch() {
+  if (!confirm('Engage kill switch? This stops all generation and tools immediately.')) return;
+  try {
+    const data = await api('/api/control', { method: 'POST', body: JSON.stringify({ command: 'kill switch' }) });
+    toast(data.result || 'Kill switch engaged.');
+    await updateDashboard();
+  } catch (e) {
+    toast('Kill switch failed: ' + e.message, 'error');
+  }
+}
 function updateThemeIcon() {
   const btn = $('#theme-btn');
   if (btn) btn.textContent = document.body.classList.contains('light') ? '☀️' : '🌙';
@@ -568,6 +579,11 @@ function renderDashboard(status, snap, tail, ledger, mcp, voice, errors = {}) {
 
   if (status.active_persona) {
     $('#top-persona').textContent = status.active_persona;
+  }
+
+  const airgapPill = $('#airgap-pill');
+  if (airgapPill) {
+    airgapPill.style.display = status.airgap ? 'inline-block' : 'none';
   }
 
   const peers = status.p2p_peers || [];
@@ -1131,10 +1147,21 @@ async function loadSettings() {
   $('#auto-pilot').checked = !!status.autopilot;
   $('#fast-tier').checked = !!status.fast_tier;
   $('#p2p-enabled').checked = !!status.p2p_enabled;
+  $('#airgap').checked = !!status.airgap;
   renderModels(status.active_models || []);
   await loadMcpServers();
   await loadMcpRegistry();
   await loadModelList(status.active_models?.[0]);
+}
+
+async function toggleAirgap(enabled) {
+  try {
+    const data = await api('/api/airgap', { method: 'POST', body: JSON.stringify({ enabled }) });
+    toast(data.airgap ? 'Air-gap mode on. Network MCP servers and downloads blocked.' : 'Air-gap mode off.');
+    await loadSettings();
+  } catch (e) {
+    toast('Air-gap toggle failed: ' + e.message, 'error');
+  }
 }
 
 function renderModels(models) {

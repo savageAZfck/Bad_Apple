@@ -81,8 +81,10 @@ class ModelManagerTests(unittest.TestCase):
 
     def test_mark_loaded_and_unloaded(self) -> None:
         self.mgr = ModelManager()
-        self.mgr.mark_loaded("main_9b")
-        self.assertEqual(self.mgr.status("main_9b")["status"], "loaded")
+        self.mgr.mark_loaded("main_9b", "/mock/path")
+        status = self.mgr.status("main_9b")
+        self.assertEqual(status["status"], "loaded")
+        self.assertEqual(status["local_path"], "/mock/path")
         self.mgr.mark_unloaded("main_9b")
         self.assertEqual(self.mgr.status("main_9b")["status"], "cached")
 

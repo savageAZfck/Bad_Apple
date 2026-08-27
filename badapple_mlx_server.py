@@ -50,6 +50,7 @@ import badapple_tool_router
 import badapple_vision
 import badapple_vram_governor
 import badapple_workspace_watcher
+import badapple_mcp_marketplace
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
@@ -2253,6 +2254,14 @@ class MLXServer:
         badapple_p2p.set_p2p_daemon(self.p2p)
         self.approval = ApprovalGate(self.data_dir, policy=self.policy)
 
+        # MCP server process handle and air-gap state.
+        self.mcp_process: subprocess.Popen | None = None
+        self.airgap = os.environ.get("BADAPPLE_AIRGAP", "0") == "1"
+        if self.airgap:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            self.model_manager.set_allow_downloads(False)
+            badapple_mcp_marketplace.set_airgap(True)
+
         # Keep the last few turns in context. When it grows, older turns are
         # still persisted to disk and a rolling summary keeps context alive.
         self.max_history_turns = 3
@@ -3244,6 +3253,37 @@ class MLXServer:
             }
         return {"ok": True, "needed_gb": round(memory_gb, 2), "available_gb": round(available_gb, 2), "unloaded_optional": True}
 
+    def _set_airgap(self, enabled: bool) -> None:
+        """Enable or disable air-gap mode: offline weights, blocked network MCP."""
+        self.airgap = enabled
+        os.environ["BADAPPLE_AIRGAP"] = "1" if enabled else "0"
+        badapple_mcp_marketplace.set_airgap(enabled)
+        if enabled:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            self.model_manager.set_allow_downloads(False)
+        self._restart_mcp_server()
+
+    def _restart_mcp_server(self) -> None:
+        """Restart the local MCP server process so it picks up env changes."""
+        if self.mcp_process is not None:
+            try:
+                self.mcp_process.terminate()
+                self.mcp_process.wait(timeout=5)
+            except Exception as e:  # noqa: BLE001 - cleanup
+                print(f"[main] MCP server terminate failed: {e}", flush=True)
+        try:
+            mcp_env = os.environ.copy()
+            mcp_env.setdefault("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock")
+            self.mcp_process = subprocess.Popen(
+                [sys.executable, "-u", str(Path(__file__).with_name("badapple_mcp_server.py"))],
+                cwd=str(Path(__file__).resolve().parent),
+                env=mcp_env,
+                start_new_session=True,
+            )
+            print(f"[main] MCP server restarted on {mcp_env['BADAPPLE_MCP_SOCKET']}", flush=True)
+        except (subprocess.SubprocessError, OSError, ValueError, LookupError, TypeError) as e:
+            print(f"[main] MCP server failed to restart: {e}", flush=True)
+
     def load_main_model(self, model_ref: str) -> str:
         """Load a new main LLM on the fly and replace the current one.
 
@@ -3725,6 +3765,15 @@ class MLXServer:
             await _respond(req_id, {"allow_downloads": enabled})
             return
 
+        if method == "set_airgap":
+            enabled = bool(params.get("enabled", False))
+            self._set_airgap(enabled)
+            await _respond(req_id, {"airgap": self.airgap})
+            return
+        if method == "airgap_status":
+            await _respond(req_id, {"airgap": self.airgap})
+            return
+
         if method == "recommend_model":
             await _respond(req_id, self.recommend_model(str(params.get("query", ""))))
             return
@@ -3818,6 +3867,7 @@ class MLXServer:
                 "ocular_running": badapple_ocular.is_running(),
                 "ocular": ocular,
                 "workspace": str(self.workspace.path) if self.workspace.path else None,
+                "airgap": self.airgap,
                 "p2p_enabled": self.p2p is not None and self.p2p.is_running(),
                 "p2p_peers": self.p2p.get_peers() if self.p2p is not None and self.p2p.is_running() else [],
                 "mcp_socket": os.environ.get("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock"),
@@ -4114,10 +4164,21 @@ class MLXServer:
             if not self._is_passive_method(None, prompt):
                 self.touch_activity()
 
-            if control in ("stop everything", "emergency stop", "kill switch"):
+            if control in ("stop everything", "emergency stop", "kill switch", "stop bad apple"):
                 state = self.runtime.engage_kill_switch("user requested")
                 badapple_ambient.stop()
                 await _write_frame(writer, {"type": "done", "text": f"Kill switch engaged. Runtime mode: {state['mode']}."})
+                return
+            if control in ("status", "bad apple status"):
+                st = self.runtime.status()
+                models = self.active_models()
+                txt = (
+                    f"Status: mode {st.get('mode', 'unknown')}, "
+                    f"kill switch {'engaged' if st.get('killed') else 'off'}, "
+                    f"safe mode {st.get('safe_mode_reason') or 'off'}, "
+                    f"active models: {', '.join(models) or 'none'}."
+                )
+                await _write_frame(writer, {"type": "done", "text": txt})
                 return
             if control in ("resume bad apple", "reset kill switch", "resume everything"):
                 state = self.runtime.reset_kill_switch()
@@ -4617,12 +4678,34 @@ class DashboardServer:
         self._web.start(self.mlx_server)
 
 
+def _rotate_log_if_needed() -> None:
+    """Keep the daemon log from growing without bound."""
+    log = Path("/var/log/bad_apple_mlx_server.log")
+    if not log.is_file():
+        return
+    max_bytes = 50 * 1024 * 1024
+    try:
+        if log.stat().st_size <= max_bytes:
+            return
+        prev = log.with_suffix(".log.1")
+        if prev.is_file():
+            older = log.with_suffix(".log.2")
+            if older.is_file():
+                older.unlink()
+            prev.rename(older)
+        log.rename(prev)
+    except OSError as e:
+        print(f"[main] log rotation failed: {e}", flush=True)
+
+
 async def main():
     secret = load_slicks_secret()
     # Support legacy env override; otherwise load from the prompt file and keep
     # the model in memory while the persona can be hot-reloaded.
     legacy = os.environ.get("BADAPPLE_SYSTEM_PROMPT")
     system_prompt = legacy if legacy else load_prompt()
+
+    _rotate_log_if_needed()
 
     socket_path = os.environ.get("BADAPPLE_SOCKET_PATH", DEFAULT_SOCKET_PATH)
     fast_socket_path = socket_path.replace(".sock", "_fast.sock")
@@ -4648,6 +4731,9 @@ async def main():
         os.chmod(fast_socket_path, 0o666)
     except FileExistsError:
         pass
+    print("=" * 40, flush=True)
+    print(f"Bad Apple MLX server started (pid {os.getpid()})", flush=True)
+    print("=" * 40, flush=True)
     print(f"Bad Apple MLX server listening on {socket_path}", flush=True)
 
     # Start the local-only observability dashboard (127.0.0.1 only).
@@ -4687,6 +4773,8 @@ async def main():
         print(f"[main] MCP server started on {mcp_env['BADAPPLE_MCP_SOCKET']}", flush=True)
     except (subprocess.SubprocessError, OSError, ValueError, LookupError, TypeError) as e:
         print(f"[main] MCP server failed to start: {e}", flush=True)
+
+    server.mcp_process = mcp_process
 
     try:
         asyncio.create_task(server.hibernation_watcher())

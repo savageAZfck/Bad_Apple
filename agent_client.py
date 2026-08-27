@@ -115,7 +115,7 @@ def call_agent(method: str, params: dict | None = None, prompt_text: str | None 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | status | kill | resume | private <on|off> | identity | p2p_sync | p2p_peers | p2p <on|off|peers|sync> | flush | unload <vision|image|all> | dashboard [--open] | work <read|write|clear> [content] | tier <on|off> | autopilot <on|off> | ambient <on|off> | agent <list | create '<goal>' [max_steps] | status <task_id> | cancel <task_id> | pause <task_id> | resume <task_id>> | model <list | recommend [query] | switch <id> | preload [id,id,...] | admit <id>>>")
+        print("Usage: agent_client.py <discover | invoke <tool> <json-args> | workspace <path> | infer <prompt> | status | kill | resume | private <on|off> | airgap [on|off] | identity | p2p_sync | p2p_peers | p2p <on|off|peers|sync> | flush | unload <vision|image|all> | dashboard [--open] | work <read|write|clear> [content] | tier <on|off> | autopilot <on|off> | ambient <on|off> | agent <list | create '<goal>' [max_steps] | status <task_id> | cancel <task_id> | pause <task_id> | resume <task_id>> | model <list | recommend [query] | switch <id> | preload [id,id,...] | admit <id>>>")
         return 1
 
     cmd = sys.argv[1]
@@ -147,6 +147,14 @@ def main():
             print("Usage: agent_client.py private <on|off>")
             return 1
         print(json.dumps(call_agent("private_mode", {"enabled": sys.argv[2] == "on"}), indent=2))
+    elif cmd == "airgap":
+        if len(sys.argv) == 1:
+            print(json.dumps(call_agent("airgap_status"), indent=2))
+        elif sys.argv[2] in ("on", "off"):
+            print(json.dumps(call_agent("set_airgap", {"enabled": sys.argv[2] == "on"}), indent=2))
+        else:
+            print("Usage: agent_client.py airgap [on|off]")
+            return 1
     elif cmd == "identity":
         print(json.dumps(call_agent("identity_status"), indent=2))
     elif cmd == "p2p_sync":

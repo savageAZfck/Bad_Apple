@@ -156,6 +156,16 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
             f"Reply with 'approve {proposal_id}' to proceed. "
             f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
         )
+    if name == "invoke_mcp_tool" and approval is not None and not approval.autopilot:
+        server = str(args.get("server", ""))
+        tool = str(args.get("tool", ""))
+        if badapple_mcp_marketplace.is_mcp_write_tool(server, tool):
+            proposal_id = approval.propose("invoke_mcp_tool", args)
+            return (
+                f"Approval required before I can run MCP write tool '{tool}' on '{server}'. "
+                f"Reply with 'approve {proposal_id}' to proceed. "
+                f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
+            )
     try:
         if name == "get_current_time":
             return datetime.datetime.now(tz=datetime.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")

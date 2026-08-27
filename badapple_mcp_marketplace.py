@@ -35,6 +35,32 @@ _extra_path = ":".join([
     "/sbin",
 ])
 
+# Tool names that mutate the filesystem across MCP servers.
+_MCP_WRITE_TOOL_PATTERNS = ("write", "edit", "create", "move", "delete", "remove", "update", "append")
+
+# Servers that reach the network. These are blocked when air-gap mode is on.
+_NETWORK_MCP_SERVERS = {"fetch", "brave", "puppeteer"}
+
+# Runtime air-gap flag.
+_AIRGAP = os.environ.get("BADAPPLE_AIRGAP", "0") == "1"
+
+
+def set_airgap(enabled: bool) -> None:
+    """Enable or disable air-gap mode for MCP tool use."""
+    global _AIRGAP
+    _AIRGAP = bool(enabled)
+
+
+def is_airgap() -> bool:
+    """Return True if the MCP marketplace is currently in air-gap mode."""
+    return _AIRGAP
+
+
+def is_mcp_write_tool(server: str, tool_name: str) -> bool:
+    """Return True if the named MCP tool is considered a destructive/mutative action."""
+    low = tool_name.lower()
+    return any(p in low for p in _MCP_WRITE_TOOL_PATTERNS)
+
 
 def _resolve_command(command: list[str]) -> list[str]:
     """Expand ~ and resolve the executable in common bin paths if needed."""
@@ -334,6 +360,8 @@ class MCPMarketplace:
     def invoke(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         if not _is_safe_name(server):
             return f"Error: invalid MCP server name '{server}'."
+        if _AIRGAP and server in _NETWORK_MCP_SERVERS:
+            return f"Air-gap mode is on. MCP server '{server}' has been blocked."
         client = self.get_client(server)
         if client is None:
             return f"Error: MCP server '{server}' not found or failed to start."
