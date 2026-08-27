@@ -1861,7 +1861,7 @@ def fast_execute(prompt: str, knowledge: BadAppleKnowledge | None = None, approv
     low = prompt.lower().strip()
 
     def _rt(name, args):
-        return run_tool(name, args, knowledge, approval=approval, policy=policy, workspace=workspace)
+        return run_tool(name, args, knowledge, approval=approval, policy=policy, workspace=workspace, user_prompt=prompt)
 
     # Working memory read/clear are deterministic; writes use quoted or trailing text.
     if re.search(r"\b(working memory|scratchpad)\b", low):
@@ -2982,7 +2982,7 @@ class MLXServer:
             elif self.plugins.has_tool(name):
                 result = self.plugins.invoke(name, args, timeout=self.policy.timeout(name))
             else:
-                result = run_tool(name, args, self.knowledge, policy=self.policy, workspace=self.workspace)
+                result = run_tool(name, args, self.knowledge, approval=self.approval, policy=self.policy, workspace=self.workspace, user_prompt=user_prompt)
             if result.lower().startswith("error"):
                 self.breakers["tools"].failure()
             else:
@@ -3761,6 +3761,9 @@ class MLXServer:
 
         if method == "set_allow_downloads":
             enabled = bool(params.get("enabled", False))
+            if self.airgap and enabled:
+                await _respond(req_id, None, "downloads cannot be enabled while air-gap mode is on")
+                return
             self.model_manager.set_allow_downloads(enabled)
             await _respond(req_id, {"allow_downloads": enabled})
             return
@@ -4679,33 +4682,54 @@ class DashboardServer:
 
 
 def _rotate_log_if_needed() -> None:
-    """Keep the daemon log from growing without bound."""
+    """Keep the daemon log from growing without bound and reopen stdout."""
     log = Path("/var/log/bad_apple_mlx_server.log")
-    if not log.is_file():
-        return
     max_bytes = 50 * 1024 * 1024
     try:
-        if log.stat().st_size <= max_bytes:
-            return
-        prev = log.with_suffix(".log.1")
-        if prev.is_file():
-            older = log.with_suffix(".log.2")
-            if older.is_file():
-                older.unlink()
-            prev.rename(older)
-        log.rename(prev)
+        if log.is_file() and log.stat().st_size > max_bytes:
+            prev = log.with_suffix(".log.1")
+            if prev.is_file():
+                older = log.with_suffix(".log.2")
+                if older.is_file():
+                    older.unlink()
+                prev.rename(older)
+            log.rename(prev)
     except OSError as e:
-        print(f"[main] log rotation failed: {e}", flush=True)
+        # stderr may not be set up yet, so use fd 2 directly.
+        try:
+            os.write(2, f"[main] log rotation failed: {e}\n".encode())
+        except OSError:
+            pass
+
+    # Reopen stdout/stderr to the log path so further output goes to the
+    # (possibly rotated) file. Only do this when stdout is not a terminal so
+    # interactive runs and tests are not redirected.
+    if os.isatty(1):
+        return
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+        os.close(fd)
+        sys.stdout = open(1, "a", encoding="utf-8", closefd=False)
+        sys.stderr = sys.stdout
+    except OSError as e:
+        try:
+            os.write(2, f"[main] log reopen failed: {e}\n".encode())
+        except OSError:
+            pass
 
 
 async def main():
+    # Rotate and reopen the log before anything is printed.
+    _rotate_log_if_needed()
+
     secret = load_slicks_secret()
     # Support legacy env override; otherwise load from the prompt file and keep
     # the model in memory while the persona can be hot-reloaded.
     legacy = os.environ.get("BADAPPLE_SYSTEM_PROMPT")
     system_prompt = legacy if legacy else load_prompt()
-
-    _rotate_log_if_needed()
 
     socket_path = os.environ.get("BADAPPLE_SOCKET_PATH", DEFAULT_SOCKET_PATH)
     fast_socket_path = socket_path.replace(".sock", "_fast.sock")

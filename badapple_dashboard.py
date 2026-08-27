@@ -1193,6 +1193,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json({**result, "memory_check": admit})
                 elif action == "allow_downloads":
                     enabled = bool(payload.get("enabled", False))
+                    if _server_instance.airgap and enabled:
+                        self._send_json({"error": "downloads cannot be enabled while air-gap mode is on"}, 403)
+                        return
                     _server_instance.model_manager.set_allow_downloads(enabled)
                     self._send_json({"ok": True, "allow_downloads": enabled})
                 elif action == "refresh":

@@ -212,7 +212,7 @@ def _query_int(path: str, key: str, default: int) -> int:
 def _load_mcp_servers() -> dict[str, Any]:
     try:
         registry = badapple_mcp_marketplace._load_registry()
-        servers = registry.get("servers", [])
+        servers = [dict(s) for s in registry.get("servers", [])]
         for s in servers:
             s["airgap_blocked"] = badapple_mcp_marketplace.is_airgap() and s.get("name") in badapple_mcp_marketplace._NETWORK_MCP_SERVERS
         return {"servers": servers, "airgap": badapple_mcp_marketplace.is_airgap()}

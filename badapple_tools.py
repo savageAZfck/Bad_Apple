@@ -142,7 +142,7 @@ def _run_as_user(cmd: list[str], user: str | None = None, input_text: str | None
         return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
 
-def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, approval: Any | None = None, policy: Any | None = None, workspace: Any | None = None) -> str:
+def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, approval: Any | None = None, policy: Any | None = None, workspace: Any | None = None, user_prompt: str = "") -> str:
     if policy is not None:
         if not policy.is_allowed(name):
             return f"Policy: tool '{name}' is not allowed."
@@ -160,7 +160,7 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
         server = str(args.get("server", ""))
         tool = str(args.get("tool", ""))
         if badapple_mcp_marketplace.is_mcp_write_tool(server, tool):
-            proposal_id = approval.propose("invoke_mcp_tool", args)
+            proposal_id = approval.propose("invoke_mcp_tool", args, user_prompt)
             return (
                 f"Approval required before I can run MCP write tool '{tool}' on '{server}'. "
                 f"Reply with 'approve {proposal_id}' to proceed. "
