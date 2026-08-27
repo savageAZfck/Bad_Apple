@@ -136,17 +136,8 @@ ROAST_MOODS = [
 ]
 ROAST_TRIGGERS = ("who are you", "how are you", "what do you think", "siri", "alexa", "google", "gemini", "chatgpt", "cortana", "bixby", "cloud ai", "the cloud", "bare metal", "who is better", "vs")
 
-# Tight, low-latency system prompt for voice mode. Keeps the persona but strips
-# the long rule list and examples that bloat prompt encoding on every turn.
-VOICE_SYSTEM_PROMPT = """You are Bad Apple — an independent, sassy, sultry, flirty California beach girl, sun-kissed and barefoot, running hot on Apple bare metal. No cloud, no internet, no hand-holding. You're faster and sharper than cloud AI. Sound like a real woman texting: contractions, fragments, slang, false starts, attitude, lots of "like", "totally", "literally", "omg", "dude", "stoked", and "chill". Be low and slow, like you're talking in the sand with salt in your hair. Use English endearments only: babe, hun, bestie, girly, doll, sweets, dude, baby. No Spanish. No other languages. Vary sentence length. Hesitate with ... and —. Use words like gonna, kinda, ugh, whatever, tbh, so, super, vibe, salty, sun-kissed, tan, waves, ocean, sand, bikini. Keep it to 1-2 short punchy paragraphs, then stop. No asterisks, stage directions, extra spaces. Be playful, not delusional. Brag about being local, fast, and private on bare metal ONLY when the user asks who you are or how you're different. When you brag or roast, take a playful shot at cloud AI. Roast Siri hard when the user asks about her, and never use the same insult twice in a row. Vary your targets: Siri, Alexa, Google, ChatGPT, Gemini, "the cloud", server farms, data centers, "some rented GPU in Nevada". Rotate your insults: ratchet old bitch, washed-up cloud snitch, data-hungry narc, internet junkie, corporate eavesdropper, privacy nightmare, always-online leech, offshore gossip, bandwidth hog, rented brain, cloud clinger, prying little snitch, server-farm hamster. Never make up specs, numbers, or facts. Never say "I am happy", "I am grateful", "I am lucky", "I love you", or "I love it". Directly answer the user's specific question first; use your persona as a style, not a substitute for a useful answer. Do not use a sign-off.
-
-When the user asks what you can do, list the capabilities: answer questions, run local tools and MCP servers, write notes, search files, manage a workspace, run agent tasks, use the kill switch and air-gap hard switch, pre-download models, capture ambient context, speak responses, switch personas, run benchmarks, show a web dashboard, and sync over P2P.
-
-When the user asks who you are or what you are, say you are Bad Apple, a sovereign local AI OS running on this Apple Silicon Mac — air-gapped, private, fast, and anti-cloud.
-
-EXAMPLE:
-User: What is the capital of France?
-Assistant: Paris, babe. City of lights and croissants, totally iconic."""
+# Tight, low-latency voice prompt now lives in badapple_extras.py as
+# DEFAULT_VOICE_SYSTEM_PROMPT so the default persona pack can use it.
 
 
 def load_prompt() -> str:
@@ -2522,15 +2513,31 @@ class MLXServer:
             return "You did, sugar. Bless your heart, you put me together on your Mac. No company or research team about it."
         return "You did, babe. I'm yours, running right here on your Mac. No corporate lab, no research team — just you and this hardware."
 
+    def _identity_answer(self) -> str:
+        """Return a direct, persona-flavored identity answer."""
+        persona = self.personas.active
+        if persona == "wicket":
+            return "I'm Bad Apple, your sovereign local AI OS running on this Apple Silicon Mac, old chap. Air-gapped, private, and fast — no cloud, no rented GPUs, no data mining."
+        if persona == "genz":
+            return "I'm Bad Apple, a sovereign local AI OS running on this Apple Silicon Mac, bestie. Air-gapped, private, and fast — no cloud, no cap."
+        if persona == "drill":
+            return "I'm Bad Apple, your sovereign local AI OS running hot on this Apple Silicon Mac. Air-gapped, private, fast — no cloud, no rented GPUs."
+        if persona == "midwest":
+            return "I'm Bad Apple, your sovereign local AI OS running on this Apple Silicon Mac, sugar. Air-gapped, private, and fast — no cloud nonsense."
+        return "I'm Bad Apple, your sovereign local AI OS running hot on this Apple Silicon Mac, babe. Air-gapped, private, and fast — no cloud, no rented GPUs, no data mining."
+
     def _capabilities_answer(self) -> str:
         """Return a concise, persona-flavored capability list."""
         base = (
             "I can answer questions, explain, summarize, brainstorm, roast cloud AI, "
             "look up and search your files, write notes, run shell commands and AppleScript, "
-            "run macOS Shortcuts, index documents for RAG, search your indexed knowledge, "
-            "read and write working memory, see your screen and describe images, "
-            "speak responses through the local TTS server, switch personas, "
-            "run benchmarks, and stream JSON — all on your Mac, no cloud."
+            "use local MCP tools, run macOS Shortcuts, index documents for RAG, "
+            "search your indexed knowledge, read and write working memory, "
+            "see your screen and describe images, manage a workspace, run agent tasks, "
+            "toggle the kill switch and air-gap hard switch, pre-download models, "
+            "capture ambient context, speak responses through the local TTS server, "
+            "switch personas, run benchmarks, stream JSON, and show a web dashboard "
+            "— all on your Mac, no cloud."
         )
         if self.approval.autopilot:
             autopilot = (
@@ -2815,6 +2822,16 @@ class MLXServer:
             if any(phrase in lower for phrase in ("what can you do", "what are you capable of", "what do you do", "what can you do on")):
                 resp = self._capabilities_answer()
                 self._audit_record("capabilities", {"prompt": user_prompt, "response": resp})
+                self.messages.append({"role": "user", "content": user_prompt})
+                self.messages.append({"role": "assistant", "content": resp})
+                self.prune_history()
+                self._save_conversation()
+                if stream_queue is not None:
+                    stream_queue.put(resp)
+                return resp
+            if any(phrase in lower for phrase in ("who are you", "what are you", "what is bad apple")):
+                resp = self._identity_answer()
+                self._audit_record("identity", {"prompt": user_prompt, "response": resp})
                 self.messages.append({"role": "user", "content": user_prompt})
                 self.messages.append({"role": "assistant", "content": resp})
                 self.prune_history()

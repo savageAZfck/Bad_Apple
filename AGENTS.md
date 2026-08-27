@@ -125,7 +125,7 @@ badapple --speak "What do you think of Siri?"
 
 ## Edit the persona
 
-Edit `prompt.txt`. The daemon hot-reloads it on the next query. Voice mode uses `VOICE_SYSTEM_PROMPT` inside `badapple_mlx_server.py`, which requires a daemon restart to change.
+Edit `prompt.txt`. The daemon hot-reloads it on the next query. The default voice prompt lives in `badapple_extras.py` as `DEFAULT_VOICE_SYSTEM_PROMPT`; persona-specific voice prompts are in `personas.json` under `voice_system_prompt`. Voice prompt changes require a daemon restart.
 
 ## Persona packs
 
