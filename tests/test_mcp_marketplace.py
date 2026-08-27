@@ -35,9 +35,9 @@ class CatalogTests(unittest.TestCase):
         catalog = badapple_mcp_marketplace.marketplace_catalog()
         self.assertIn(str(Path.home()), catalog)
         self.assertIn("Documents", catalog)
-        self.assertIn(".bad_apple/mcp_data", catalog)
         self.assertIn("filesystem", catalog)
-        self.assertIn("sqlite", catalog)
+        self.assertIn("fetch", catalog)
+        self.assertIn("time", catalog)
 
     def test_install_unknown_server(self) -> None:
         """Installing an unknown catalog server returns an error."""

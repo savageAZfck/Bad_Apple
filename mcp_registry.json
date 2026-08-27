@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "name": "filesystem",
+      "description": "Read and write files on your local filesystem through a sandboxed MCP server.",
+      "publisher": "modelcontextprotocol",
+      "install_type": "command",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "~/Documents"],
+      "env": {}
+    },
+
+    {
+      "name": "fetch",
+      "description": "Fetch web pages and convert them to Markdown for LLM context.",
+      "publisher": "modelcontextprotocol",
+      "install_type": "pip",
+      "pip_package": "mcp-server-fetch",
+      "command": ["python", "-m", "mcp_server_fetch"],
+      "env": {}
+    },
+    {
+      "name": "time",
+      "description": "Get the current time and convert between timezones.",
+      "publisher": "modelcontextprotocol",
+      "install_type": "pip",
+      "pip_package": "mcp-server-time",
+      "command": ["python", "-m", "mcp_server_time"],
+      "env": {}
+    }
+  ]
+}

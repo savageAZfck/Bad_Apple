@@ -13,14 +13,49 @@ cloud dependency.  Servers must be installed locally (npx, uvx, python, etc.).
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+_extra_path = ":".join([
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+])
+
+
+def _resolve_command(command: list[str]) -> list[str]:
+    """Expand ~ and resolve the executable in common bin paths if needed."""
+    if not command:
+        return command
+    home = Path.home()
+    expanded: list[str] = []
+    for c in command:
+        if c == "~":
+            expanded.append(str(home))
+        elif c.startswith("~/"):
+            expanded.append(str(home / c[2:]))
+        else:
+            expanded.append(c)
+    exe = expanded[0]
+    if exe and not Path(exe).is_absolute():
+        search_path = os.environ.get("PATH", "") + ":" + _extra_path
+        resolved = shutil.which(exe, path=search_path)
+        if resolved:
+            expanded[0] = resolved
+    return expanded
 
 
 def _is_safe_name(name: str) -> bool:
@@ -66,12 +101,25 @@ def _install_pip_server(entry: dict[str, Any]) -> list[str]:
         subprocess.run([sys.executable or "python3", "-m", "venv", str(venv_dir)], check=True)
     subprocess.run([str(python), "-m", "pip", "install", "-q", "--upgrade", "pip"], check=True)
     subprocess.run([str(python), "-m", "pip", "install", "-q", pkg], check=True)
+
     command = list(entry.get("command", [str(python), "-m", pkg.replace("-", "_")]))
+    # Prefer a console script entry point if it exists (e.g. mcp-server-time, mcp-server-sqlite).
+    entry_point = venv_dir / "bin" / pkg
+    if entry_point.is_file():
+        # Drop the common [python, -m, module] prefix and keep the remaining args.
+        if len(command) >= 3 and command[0] in ("python", str(python)) and command[1] == "-m" and command[2] == pkg.replace("-", "_"):
+            args = command[3:]
+        else:
+            args = command[1:]
+        command = [str(entry_point), *args]
+
     # Expand any ~ or $HOME in command strings for this venv.
     expanded = []
     for c in command:
         if c == "python":
             expanded.append(str(python))
+        elif c == "~":
+            expanded.append(str(Path.home()))
         elif c.startswith("~/"):
             expanded.append(str(Path.home() / c[2:]))
         else:
@@ -89,7 +137,7 @@ def install_catalog_server(name: str, catalog_path: Path | None = None) -> str:
             if install_type == "pip":
                 command = _install_pip_server(entry)
             elif install_type == "command":
-                command = list(entry.get("command", []))
+                command = _resolve_command(list(entry.get("command", [])))
                 if not command:
                     return f"MCP server '{name}' has no command in the catalog."
             else:
@@ -107,7 +155,7 @@ class MCPClient:
 
     def __init__(self, name: str, command: list[str], env: dict[str, str] | None = None):
         self.name = name
-        self.command = command
+        self.command = _resolve_command(command)
         self.env = env or {}
         self._proc: subprocess.Popen | None = None
         self._lock = threading.RLock()
@@ -169,6 +217,7 @@ class MCPClient:
 
     def start(self) -> bool:
         env = os.environ.copy()
+        env["PATH"] = (env.get("PATH", "") + ":" + _extra_path).strip(":")
         env.update(self.env)
         try:
             self._proc = subprocess.Popen(
@@ -184,10 +233,16 @@ class MCPClient:
             return False
         self._reader = threading.Thread(target=self._reader_loop, name=f"mcp-{self.name}-reader", daemon=True)
         self._reader.start()
+        time.sleep(0.5)
+        if self._proc and self._proc.poll() is not None:
+            self._reader.join(timeout=1)
+            self._proc = None
+            print(f"[mcp_client] could not start {self.name}: process exited with code {self._proc} before initialize", flush=True)
+            return False
         try:
-            self._call("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "badapple", "version": "0.1"}}, timeout=15)
+            self._call("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "badapple", "version": "0.1"}}, timeout=60)
             self._send_line({"jsonrpc": "2.0", "method": "notifications/initialized"})
-            tools = self._call("tools/list", timeout=15)
+            tools = self._call("tools/list", timeout=30)
             self._tools = tools.get("tools", []) if isinstance(tools, dict) else []
             return True
         except Exception as e:  # noqa: BLE001 - catch-all wrapper
@@ -355,40 +410,17 @@ def _mcp_workspace_dir() -> Path:
 
 def marketplace_catalog() -> str:
     """Return a curated list of local MCP servers the user can install."""
-    workspace = _mcp_workspace_dir()
-    db_path = _mcp_data_dir() / "memory.db"
-    catalog = [
-        {
-            "name": "filesystem",
-            "description": "Read, search, and edit files under a workspace path.",
-            "command": f"npx -y @modelcontextprotocol/server-filesystem {workspace}",
-        },
-        {
-            "name": "sqlite",
-            "description": "Query local SQLite databases with read-only access.",
-            "command": f"npx -y @modelcontextprotocol/server-sqlite {db_path}",
-        },
-        {
-            "name": "fetch",
-            "description": "Fetch and sanitize web pages. Disabled in air-gap mode by default.",
-            "command": "uvx mcp-server-fetch",
-        },
-    ]
-    return "Available MCP servers:\n" + "\n".join(
-        f"- {c['name']}: {c['description']}\n  install: add mcp server {c['name']} command \"{c['command']}\""
-        for c in catalog
-    )
+    catalog = _load_catalog(Path(__file__).with_name("mcp_registry.json"))
+    lines = []
+    for c in catalog.get("servers", []):
+        cmd = _resolve_command(list(c.get("command", [])))
+        install = c.get("install_note") or (cmd and " ".join(cmd)) or f"add mcp server {c['name']}"
+        lines.append(f"- {c['name']}: {c['description']}\n  install: {install}")
+    if not lines:
+        return "No MCP servers are currently available."
+    return "Available MCP servers:\n" + "\n".join(lines)
 
 
 def install_mcp_server_from_marketplace(name: str) -> str:
     """Install a server from the built-in catalog by name."""
-    db_path = _mcp_data_dir() / "memory.db"
-    catalog = {
-        "filesystem": ["npx", "-y", "@modelcontextprotocol/server-filesystem", str(_mcp_workspace_dir())],
-        "sqlite": ["npx", "-y", "@modelcontextprotocol/server-sqlite", str(db_path)],
-        "fetch": ["uvx", "mcp-server-fetch"],
-    }
-    command = catalog.get(name)
-    if not command:
-        return f"Unknown marketplace server '{name}'. Available: {', '.join(catalog)}."
-    return _MARKETPLACE.add_server(name, command)
+    return install_catalog_server(name, catalog_path=Path(__file__).with_name("mcp_registry.json"))
