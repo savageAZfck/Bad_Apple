@@ -12,12 +12,12 @@ const ROUTES = {
 
 let currentView = 'dashboard';
 
-function csrfToken() {
-  if (window.csrfToken) return window.csrfToken();
+function appCsrfToken() {
+  if (window.csrfToken) return window.appCsrfToken();
   return document.querySelector('meta[name="csrf-token"]')?.content || '';
 }
-function csrfHeader() {
-  const token = csrfToken();
+function appCsrfHeader() {
+  const token = appCsrfToken();
   return token ? { 'X-CSRF-Token': token } : {};
 }
 
@@ -321,11 +321,11 @@ async function api(path, opts = {}) {
   const headers = new Headers(options.headers || {});
   const isMutating = options.method && options.method.toUpperCase() !== 'GET';
   if (isMutating) {
-    Object.entries(csrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
+    Object.entries(appCsrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
     if (options.body) {
       try {
         const payload = JSON.parse(options.body);
-        payload.csrf_token = csrfToken();
+        payload.csrf_token = appCsrfToken();
         options.body = JSON.stringify(payload);
       } catch (e) { /* non-JSON body, ignore */ }
     }
@@ -337,7 +337,7 @@ async function api(path, opts = {}) {
     if (options.body) {
       try {
         const payload = JSON.parse(options.body);
-        payload.csrf_token = csrfToken();
+        payload.csrf_token = appCsrfToken();
         options.body = JSON.stringify(payload);
       } catch (e) {}
     }
@@ -945,11 +945,11 @@ async function retryMessage(id) {
 async function doChatRequest(prompt) {
   const makeReq = async () => {
     const headers = new Headers({ 'Content-Type': 'application/json' });
-    Object.entries(csrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
+    Object.entries(appCsrfHeader()).forEach(([k, v]) => { if (!headers.get(k)) headers.set(k, v); });
     return fetch(window.location.origin + '/api/chat', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ prompt, stream: true, csrf_token: csrfToken() }),
+      body: JSON.stringify({ prompt, stream: true, csrf_token: appCsrfToken() }),
     });
   };
   let r = await makeReq();

@@ -850,7 +850,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             if "</head>" in html:
                 html = html.replace(
                     "</head>",
-                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js?v=5"></script>\n</head>',
+                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js?v=6"></script>\n</head>',
                 )
             self._send_html(html)
         else:

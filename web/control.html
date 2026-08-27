@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bad Apple — Control Center</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4">
+  <link rel="stylesheet" href="/static/styles.css?v=6">
 </head>
 <body>
   <nav class="sidebar">
@@ -85,18 +85,18 @@
       });
     }
 
-    function csrfToken() {
+    function controlCsrfToken() {
       return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
     }
-    function csrfHeaders() {
-      const token = csrfToken();
+    function controlCsrfHeaders() {
+      const token = controlCsrfToken();
       return token ? { 'X-CSRF-Token': token } : {};
     }
     async function control(command) {
       if (!command) return;
       try {
-        const headers = { 'Content-Type': 'application/json', ...csrfHeaders() };
-        const res = await fetch('/api/control', { method: 'POST', headers, body: JSON.stringify({command, csrf_token: csrfToken()}) });
+        const headers = { 'Content-Type': 'application/json', ...controlCsrfHeaders() };
+        const res = await fetch('/api/control', { method: 'POST', headers, body: JSON.stringify({command, csrf_token: controlCsrfToken()}) });
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         document.getElementById('cli-result').textContent = JSON.stringify(data, null, 2);

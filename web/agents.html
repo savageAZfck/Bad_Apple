@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bad Apple — Agent Tasks</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4">
+  <link rel="stylesheet" href="/static/styles.css?v=6">
 </head>
 <body>
   <nav class="sidebar">
@@ -41,18 +41,18 @@
   </main>
 
   <script>
-    function csrfToken() {
+    function agentsCsrfToken() {
       return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
     }
-    function csrfHeaders() {
-      const token = csrfToken();
+    function agentsCsrfHeaders() {
+      const token = agentsCsrfToken();
       return token ? { 'X-CSRF-Token': token } : {};
     }
     async function api(action, body = {}) {
       const res = await fetch('/api/agents', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json', ...csrfHeaders()},
-        body: JSON.stringify({action, ...body, csrf_token: csrfToken()}),
+        headers: {'Content-Type': 'application/json', ...agentsCsrfHeaders()},
+        body: JSON.stringify({action, ...body, csrf_token: agentsCsrfToken()}),
       });
       return res.json();
     }

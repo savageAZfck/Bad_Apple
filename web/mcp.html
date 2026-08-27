@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bad Apple — MCP Marketplace</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4">
+  <link rel="stylesheet" href="/static/styles.css?v=6">
 </head>
 <body>
   <nav class="sidebar">
@@ -56,15 +56,15 @@
   </main>
 
   <script>
-    function csrfToken() {
+    function mcpCsrfToken() {
       return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
     }
-    function csrfHeaders() {
-      const token = csrfToken();
+    function mcpCsrfHeaders() {
+      const token = mcpCsrfToken();
       return token ? { 'X-CSRF-Token': token } : {};
     }
     async function api(path, body) {
-      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json', ...csrfHeaders()}, body: JSON.stringify({...body, csrf_token: csrfToken()}) });
+      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json', ...mcpCsrfHeaders()}, body: JSON.stringify({...body, csrf_token: mcpCsrfToken()}) });
       if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
       return r.json();
     }
