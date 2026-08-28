@@ -984,8 +984,8 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             return
         if path == "/api/metrics":
             try:
-                if _server_instance is not None and hasattr(_server_instance, "metrics"):
-                    self._send_json(_server_instance.metrics.summary())
+                if _server_instance is not None and hasattr(_server_instance, "metrics_collector"):
+                    self._send_json(_server_instance.metrics_collector.summary())
                 else:
                     self._send_json({"count": 0, "error": "daemon not running"}, 503)
             except Exception as e:  # noqa: BLE001 - catch-all wrapper

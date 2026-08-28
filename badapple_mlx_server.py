@@ -37,6 +37,7 @@ from mlx_lm.sample_utils import make_sampler
 import badapple_agent_tasks
 import badapple_ambient
 import badapple_ambient_memory
+import badapple_audit_actor
 import badapple_dashboard
 import badapple_ocular
 import badapple_fact_extractor
@@ -44,7 +45,7 @@ import badapple_fast_model
 import badapple_identity
 import badapple_keychain
 import badapple_metrics
-import badapple_model_manager
+import badapple_model_actor
 import badapple_model_registry
 import badapple_p2p
 import badapple_scheduler
@@ -2214,13 +2215,17 @@ class MLXServer:
             encoder=self.knowledge._encode_texts,
         )
         self.model_registry = badapple_model_registry.ModelRegistry(self.data_dir)
-        self.model_manager = badapple_model_manager.ModelManager(self.data_dir)
+        self._model_actor = badapple_model_actor.ModelActor(self.data_dir)
+        self._model_actor.start()
+        self.model_manager = badapple_model_actor.ModelActorProxy(self._model_actor)
         self.agent_task_manager = badapple_agent_tasks.AgentTaskManager(self.data_dir)
         self.max_kv_size = MAX_KV_SIZE
         self.prefill_step_size = PREFILL_STEP_SIZE
         self._roast_index = 0
         self.last_metrics: dict[str, Any] | None = None
-        self.metrics = badapple_metrics.MetricsCollector()
+        self.metrics_collector = badapple_metrics.MetricsCollector()
+        self.metrics_actor = badapple_metrics.MetricsActor(existing_collector=self.metrics_collector)
+        self.metrics_actor.start()
 
         # Reusable prompt KV cache. _system_prompt_cache holds the pristine
         # system-prefix KV; _prompt_cache is a per-query deep copy that gets
@@ -2247,7 +2252,9 @@ class MLXServer:
         # legacy short-term memory is folded into the memory graph
         self.personas = PersonaPack(self.data_dir, self.prompt_file)
         self.firewall = StreamingFirewall(self.data_dir)
-        self.audit = AuditLedger(self.data_dir)
+        self.audit_collector = AuditLedger(self.data_dir)
+        self.audit_actor = badapple_audit_actor.AuditActor(existing=self.audit_collector)
+        self.audit_actor.start()
         self.cache = SemanticCache(self.data_dir)
         self.policy = Policy(self.data_dir)
         self.workspace = Workspace(self.data_dir)
@@ -2330,7 +2337,7 @@ class MLXServer:
         self.health.register("main_model", "readiness", lambda: self.model is not None and self.tokenizer is not None)
         self.health.register("slicks_secret", "correctness", lambda: len(self.secret) >= 16)
         self.health.register("secure_enclave_identity", "correctness", lambda: badapple_identity.status().startswith("secure-enclave:"))
-        self.health.register("audit_ledger", "correctness", lambda: all(item.get("valid", False) for item in self.audit.verify()))
+        self.health.register("audit_ledger", "correctness", lambda: all(item.get("valid", False) for item in self.audit_collector.verify()))
 
         # Dynamic tiering gate.  Fast tier runs deterministic handlers for
         # greetings, time, simple math, and identity without waking the 9B model.
@@ -2557,7 +2564,11 @@ class MLXServer:
 
     def _audit_record(self, event_type: str, data: Any):
         if not self.runtime.private_mode:
-            self.audit.record(event_type, data)
+            self.audit_actor.tell({
+                "method": "record",
+                "event_type": event_type,
+                "data": data,
+            })
 
     def _save_conversation(self):
         if not self.runtime.private_mode:
@@ -3505,9 +3516,9 @@ class MLXServer:
             model_ids = self.model_manager.preload_priority()
         results = []
         for mid in model_ids:
-            if not self.model_manager._profiles.get(mid):
-                continue
             state = self.model_manager.ensure_cached(mid, download=True)
+            if "error" in state:
+                continue
             results.append({"id": mid, "status": state.get("status")})
         return results
 
@@ -3692,7 +3703,7 @@ class MLXServer:
                 "model_id": MAIN_MODEL,
             }
             try:
-                self.metrics.record(**self.last_metrics)
+                self.metrics_actor.tell({"method": "record", **self.last_metrics})
             except Exception:  # noqa: BLE001,S110 - metrics best-effort
                 pass
         _maybe_purge_metal_cache()
@@ -4229,9 +4240,9 @@ class MLXServer:
         if method == "audit_tail":
             n = int(params.get("n", 20))
             entries = []
-            if self.audit.ledger_path.is_file():
+            if self.audit_collector.ledger_path.is_file():
                 try:
-                    with open(self.audit.ledger_path, encoding="utf-8") as f:
+                    with open(self.audit_collector.ledger_path, encoding="utf-8") as f:
                         lines = f.readlines()
                     entries = [json.loads(line) for line in lines[-n:] if line.strip()]
                 except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
