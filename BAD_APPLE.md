@@ -28,16 +28,17 @@ Live numbers from the daemon log on a 16 GB Apple Silicon M-series Mac with the 
 
 | Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
 |---|---|---:|---:|---:|---:|
-| `Who are you?` | ~540 | 9.4 s | 31 | 16.5 | 5.84 GB |
-| `What is the capital of France?` | ~540 | 9.5 s | 25 | 15.9 | 5.85 GB |
-| `Tell me about Rome.` | ~540 | 7.6 s | 48 | 15.6 | 5.85 GB |
-| `What do you think of Siri?` | ~540 | 7.1 s | 41 | 15.6 | 5.85 GB |
-| `How does a car engine work?` | ~540 | 8.3 s | 41 | 15.6 | 5.85 GB |
+| `Who are you?` | ~1800 | 0.00 s | 0 | — | 6.08 GB |
+| `What is the capital of France?` | ~1800 | 4.23 s | 20 | 10.2 | 6.08 GB |
+| `Tell me about Rome.` | ~1800 | 3.98 s | 20 | 10.2 | 6.08 GB |
+| `What do you think of Siri?` | ~1800 | 4.28 s | 66 | 10.3 | 6.08 GB |
+| `How does a car engine work?` | ~1800 | 4.92 s | 66 | 10.3 | 6.08 GB |
 
-- Typical first-token latency: **~7–9.5 s** for ~540 token prompts.
-- Typical decode throughput: **~15.5–16.5 tok/s**.
-- Benchmark total wall time for the 5-prompt suite: **~49 s** on the M3 Max test Mac.
-- Peak memory stays **~5.8–5.9 GB**.
+- Typical first-token latency: **~4.0–4.9 s** for ~1800 token prompts once the system-prompt KV cache is loaded (down from ~7–9.5 s without the cache).
+- The `Who are you?` prompt is handled by fast meta-response logic, so it does not run the 9B brain and reports 0 output tokens.
+- Typical decode throughput: **~10.2–10.3 tok/s** on this quant.
+- Benchmark total wall time for the 5-prompt suite: **~26.8 s** on the M3 Max test Mac.
+- Peak memory stays **~6.0–6.1 GB**.
 - The `total` column in the benchmark is **end-to-end tok/s including TTFT**, not the raw decode rate; look at the `decode` column for the model's actual token generation speed.
 
 ### Fast tier (0.5B)
