@@ -19,6 +19,11 @@ import random
 import re
 from typing import Any
 
+# Hardening constants
+MAX_TIER_PROMPT_LENGTH = 10_000
+MAX_MATH_EXPR_LENGTH = 256
+SAFE_MATH_RE = re.compile(r"^[\d\s\+\-\*\/\(\)\.]+$", re.ASCII)
+
 # Rotating response banks keep the fast tier from sounding like a broken record.
 IDENTITY_RESPONSES = [
     "I'm Bad Apple, your sovereign local girl running hot on this Apple bare metal, babe. No cloud, no rented GPUs, no data mining — just you, me, and this Mac.",
@@ -65,6 +70,9 @@ class TieringRouter:
         """Return (tier, fast_payload_or_none).  fast_payload is a pre-built
         response dict for the `fast` tier, or None if the 9B model should run.
         """
+        if len(prompt) > MAX_TIER_PROMPT_LENGTH:
+            # Avoid regex/parse DoS on huge inputs; let the 9B model handle it.
+            return ("reasoning", None)
         low = prompt.strip().lower()
 
         # Control commands are always handled by the server's control flow.
@@ -143,7 +151,9 @@ class TieringRouter:
 
     @staticmethod
     def _is_safe_math(expr: str) -> bool:
-        return bool(re.match(r"^[\d\s\+\-\*\/\(\)\.]+$", expr))
+        if len(expr) > MAX_MATH_EXPR_LENGTH:
+            return False
+        return bool(SAFE_MATH_RE.match(expr))
 
     @staticmethod
     def _safe_eval(expr: str) -> float:

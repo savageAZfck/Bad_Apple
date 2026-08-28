@@ -51,6 +51,15 @@ from badapple_dashboard_data import (
 # the HTTP handler can return daemon-internal status.
 _server_instance: Any | None = None
 
+# Hardening constants
+MAX_BODY_SIZE = 1_000_000  # 1 MB per POST body
+MAX_PROMPT_LENGTH = 8_000  # characters
+MAX_TAIL_LINES = 1_000
+MAX_PERSONA_NAME_LENGTH = 64
+MAX_PERSONA_PROMPT_LENGTH = 64_000
+PERSONA_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+SAFE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+
 
 def _csrf_token_path() -> Path:
     data_dir = Path(os.environ.get("BADAPPLE_DATA_DIR") or "/var/lib/bad_apple").expanduser()
@@ -68,6 +77,10 @@ def _get_csrf_token() -> str:
         return token_path.read_text(encoding="utf-8").strip()
     token = _generate_csrf_token()
     token_path.write_text(token, encoding="utf-8")
+    try:
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass
     return token
 
 
@@ -705,7 +718,17 @@ def _list_personas() -> tuple[list[str], str, str]:
     return list(personas.keys()), active, prompt
 
 
+def _sanitize_persona_name(name: str) -> str:
+    name = name.strip()
+    if name == "default":
+        return name
+    if not PERSONA_NAME_RE.match(name) or len(name) > MAX_PERSONA_NAME_LENGTH:
+        raise ValueError(f"invalid persona name: {name!r}")
+    return name
+
+
 def _load_persona_prompt(name: str) -> tuple[str, Path | None]:
+    name = _sanitize_persona_name(name)
     active_file: Path | None = None
     if name == "default":
         active_file = _prompt_file()
@@ -721,6 +744,9 @@ def _load_persona_prompt(name: str) -> tuple[str, Path | None]:
 
 
 def _save_persona_prompt(name: str, prompt: str) -> None:
+    name = _sanitize_persona_name(name)
+    if len(prompt) > MAX_PERSONA_PROMPT_LENGTH:
+        raise ValueError("persona prompt too long")
     if name == "default":
         _prompt_file().write_text(prompt, encoding="utf-8")
         return
@@ -741,14 +767,26 @@ def _badapple_cli() -> str | None:
     return cli
 
 
+def _safe_prompt(_prompt: str) -> str:
+    # Guard against command-line length limits and log-injection.
+    prompt = _prompt.strip()
+    if not prompt:
+        return ""
+    prompt = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", "", prompt)
+    return prompt[:MAX_PROMPT_LENGTH]
+
+
 def _run_cli(prompt: str, max_tokens: int = 240) -> str:
     """Call the local badapple CLI as a simple bridge for the web chat."""
+    safe = _safe_prompt(prompt)
+    if not safe:
+        return "Error: empty prompt."
     exe = _badapple_cli()
     if not exe:
         return "Error: badapple CLI not found."
     try:
         result = subprocess.run(
-            [exe, "-n", str(max_tokens), prompt],
+            [exe, "-n", str(max(1, min(4000, max_tokens))), safe],
             capture_output=True,
             text=True,
             timeout=120,
@@ -762,6 +800,13 @@ def _run_cli(prompt: str, max_tokens: int = 240) -> str:
 
 def _stream_cli(handler: http.server.BaseHTTPRequestHandler, prompt: str, max_tokens: int = 240) -> None:
     """Stream the badapple CLI --json output as Server-Sent Events."""
+    safe = _safe_prompt(prompt)
+    if not safe:
+        handler.send_response(400)
+        handler.send_header("Content-Type", "text/plain")
+        handler.end_headers()
+        handler.wfile.write(b"Error: empty prompt.")
+        return
 
     exe = _badapple_cli()
     if not exe:
@@ -786,7 +831,7 @@ def _stream_cli(handler: http.server.BaseHTTPRequestHandler, prompt: str, max_to
 
     try:
         proc = subprocess.Popen(
-            [exe, "--json", "-n", str(max_tokens), prompt],
+            [exe, "--json", "-n", str(max(1, min(4000, max_tokens))), safe],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -872,7 +917,14 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_static(self, relative: str) -> None:
-        target = (STATIC_ROOT / relative).resolve()
+        if "\x00" in relative or relative.startswith("/"):
+            self._send_text("Not found", 404)
+            return
+        try:
+            target = (STATIC_ROOT / relative).resolve()
+        except (OSError, ValueError):
+            self._send_text("Not found", 404)
+            return
         if not str(target).startswith(str(STATIC_ROOT.resolve())):
             self._send_text("Not found", 404)
             return
@@ -884,24 +936,31 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             content_type = "text/css"
         elif target.suffix == ".js":
             content_type = "application/javascript"
-        elif target.suffix in (".png", ".jpg", ".jpeg", ".gif", ".svg"):
+        elif target.suffix in SAFE_IMAGE_SUFFIXES:
             content_type = f"image/{target.suffix.lstrip('.')}"
         self._send_file(target, content_type)
 
     def _serve_html_file(self, name: str) -> None:
-        file_path = WEB_ROOT / name
-        if file_path.is_file():
-            html = file_path.read_text(encoding="utf-8")
-            token = _get_csrf_token()
-            html = html.replace("{{CSRF_TOKEN}}", token)
-            if "</head>" in html:
-                html = html.replace(
-                    "</head>",
-                    f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js?v=7"></script>\n</head>',
-                )
-            self._send_html(html)
-        else:
+        if "\x00" in name:
             self._send_text("Not found", 404)
+            return
+        try:
+            file_path = (WEB_ROOT / name).resolve()
+        except (OSError, ValueError):
+            self._send_text("Not found", 404)
+            return
+        if not str(file_path).startswith(str(WEB_ROOT.resolve())) or not file_path.is_file():
+            self._send_text("Not found", 404)
+            return
+        html = file_path.read_text(encoding="utf-8")
+        token = _get_csrf_token()
+        html = html.replace("{{CSRF_TOKEN}}", token)
+        if "</head>" in html:
+            html = html.replace(
+                "</head>",
+                f'<meta name="csrf-token" content="{token}">\n<script src="/static/csrf.js?v=7"></script>\n</head>',
+            )
+        self._send_html(html)
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -945,7 +1004,10 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/api/snapshot":
-            self._send_json(json.loads(snapshot()))
+            try:
+                self._send_json(json.loads(snapshot()))
+            except (json.JSONDecodeError, ValueError) as e:
+                self._send_json({"error": f"snapshot failed: {e}"}, 500)
             return
         if path == "/api/status":
             self._send_json(_daemon_status())
@@ -1006,12 +1068,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         if path.startswith("/api/image/"):
             filename = urllib.parse.unquote(path[11:])
             safe = Path(filename).name
-            img_dir = Path(os.environ.get("BADAPPLE_DATA_DIR", "/var/lib/bad_apple")) / "generated_images"
-            img_path = img_dir / safe
-            if img_path.is_file():
-                self._send_file(img_path, "image/png")
-            else:
+            if not safe or Path(safe).suffix.lower() not in SAFE_IMAGE_SUFFIXES:
                 self._send_text("Image not found", 404)
+                return
+            img_dir = Path(os.environ.get("BADAPPLE_DATA_DIR", "/var/lib/bad_apple")).expanduser() / "generated_images"
+            img_path = (img_dir / safe).resolve()
+            if not str(img_path).startswith(str(img_dir.resolve())) or not img_path.is_file():
+                self._send_text("Image not found", 404)
+                return
+            content_type = f"image/{img_path.suffix.lstrip('.').lower()}"
+            if content_type == "image/jpg":
+                content_type = "image/jpeg"
+            self._send_file(img_path, content_type)
             return
 
         if path == "/api/models":
@@ -1060,11 +1128,21 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._send_json({"error": "invalid Content-Length"}, 400)
+            return
+        if length > MAX_BODY_SIZE:
+            self._send_json({"error": f"body too large (max {MAX_BODY_SIZE})"}, 413)
+            return
+        if length < 0:
+            self._send_json({"error": "invalid Content-Length"}, 400)
+            return
         body_bytes = self.rfile.read(length) if length > 0 else b"{}"
         try:
             self._post_body = json.loads(body_bytes.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             self._post_body = {}
 
         if not _check_csrf_token({k: v for k, v in self.headers.items()}, self._post_body):

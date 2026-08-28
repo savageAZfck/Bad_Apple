@@ -178,6 +178,9 @@ final class BadAppleFFI {
 
 // MARK: - Local neural TTS playback controller (crossfade)
 
+/// Threading contract: all public and internal methods must run on the main queue.
+/// The controller crossfades queued WAVs and falls back to `afplay` when `AVAudioPlayer`
+/// cannot handle the file.
 private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate {
     private let crossfadeDuration: TimeInterval = 0.05
     private let pollInterval: TimeInterval = 0.010
@@ -200,38 +203,70 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
     private var current: PlayItem?
     private var previous: [PlayItem] = []
     private var timer: Timer?
+    private var isCrossfading = false
 
-    func enqueue(_ url: URL, completion: ((Bool) -> Void)? = nil) {
-        if let player = try? AVAudioPlayer(contentsOf: url) {
-            player.delegate = self
-            player.prepareToPlay()
-            let item = PlayItem(url: url, player: player, completion: completion)
-            if current == nil {
-                start(item)
-            } else {
-                pending.append(item)
-            }
+    private func ensureMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
         } else {
-            badAppleVoiceLog("PiperTTSPlayback: AVAudioPlayer failed for \(url.path), falling back to afplay")
-            let item = PlayItem(url: url, completion: completion)
-            item.afplayTask = makeAfplayTask(item)
-            if current == nil {
-                start(item)
-            } else {
-                pending.append(item)
-            }
+            DispatchQueue.main.async(execute: work)
         }
     }
 
+    func enqueue(_ url: URL, completion: ((Bool) -> Void)? = nil) {
+        ensureMain { [weak self] in
+            self?._enqueue(url, completion: completion)
+        }
+    }
+
+    private func _enqueue(_ url: URL, completion: ((Bool) -> Void)?) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            badAppleVoiceLog("PiperTTSPlayback: missing file \(url.path)")
+            notifyCompletion(completion, success: false)
+            return
+        }
+
+        let item = makePlayItem(url: url, completion: completion)
+        if current == nil {
+            start(item)
+        } else {
+            pending.append(item)
+        }
+    }
+
+    private func makePlayItem(url: URL, completion: ((Bool) -> Void)?) -> PlayItem {
+        if let player = try? AVAudioPlayer(contentsOf: url) {
+            player.delegate = self
+            if !player.prepareToPlay() {
+                badAppleVoiceLog("PiperTTSPlayback: prepareToPlay() failed for \(url.path), will attempt afplay fallback")
+            }
+            return PlayItem(url: url, player: player, completion: completion)
+        }
+
+        badAppleVoiceLog("PiperTTSPlayback: AVAudioPlayer failed for \(url.path), falling back to afplay")
+        let item = PlayItem(url: url, completion: completion)
+        item.afplayTask = makeAfplayTask(item)
+        return item
+    }
+
     func stop() {
-        timer?.invalidate()
-        timer = nil
-        current?.player?.stop()
-        current?.afplayTask?.terminate()
-        previous.forEach { $0.player?.stop(); $0.afplayTask?.terminate() }
-        pending.removeAll()
-        current = nil
-        previous.removeAll()
+        ensureMain { [weak self] in
+            guard let self = self else { return }
+            self.isCrossfading = false
+            self.timer?.invalidate()
+            self.timer = nil
+            self.current?.player?.stop()
+            self.current?.player?.delegate = nil
+            self.current?.afplayTask?.terminate()
+            self.previous.forEach {
+                $0.player?.stop()
+                $0.player?.delegate = nil
+                $0.afplayTask?.terminate()
+            }
+            self.pending.removeAll()
+            self.current = nil
+            self.previous.removeAll()
+        }
     }
 
     private func start(_ item: PlayItem) {
@@ -239,15 +274,19 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
             player.volume = 1.0
             guard player.play() else {
                 badAppleVoiceLog("PiperTTSPlayback: play() failed for \(item.url.path)")
-                notifyCompletion(item.completion, success: false)
-                advanceIfIdle()
+                // Fall back to afplay for this item.
+                item.player = nil
+                item.afplayTask = makeAfplayTask(item)
+                start(item)
                 return
             }
             current = item
+            isCrossfading = false
             startTimer()
             badAppleVoiceLog("PiperTTSPlayback: playing \(item.url.path)")
         } else if let task = item.afplayTask {
             current = item
+            isCrossfading = false
             do {
                 try task.run()
             } catch {
@@ -256,6 +295,10 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
                 current = nil
                 advanceIfIdle()
             }
+        } else {
+            badAppleVoiceLog("PiperTTSPlayback: no player or afplay task for \(item.url.path)")
+            notifyCompletion(item.completion, success: false)
+            advanceIfIdle()
         }
     }
 
@@ -267,7 +310,7 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
         task.terminationHandler = { [weak self, weak item] task in
             guard let self = self, let item = item else { return }
             let code = task.terminationStatus
-            if code != 0 {
+            if code != 0 && code != 15 && code != -1 {
                 badAppleVoiceLog("PiperTTSPlayback afplay exited with \(code)")
             }
             DispatchQueue.main.async {
@@ -285,18 +328,20 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
     }
 
     private func tick() {
-        guard let item = current, let player = item.player, player.isPlaying else {
+        guard !isCrossfading, let item = current, let player = item.player, player.isPlaying else {
             return
         }
         let remaining = player.duration - player.currentTime
-        guard !pending.isEmpty, remaining <= crossfadeDuration else { return }
+        guard !pending.isEmpty, remaining <= crossfadeDuration, remaining > 0 else { return }
 
+        isCrossfading = true
         let next = pending.removeFirst()
         if let nextPlayer = next.player {
             nextPlayer.volume = 0.0
             guard nextPlayer.play() else {
                 badAppleVoiceLog("PiperTTSPlayback: next play() failed for \(next.url.path)")
                 pending.insert(next, at: 0)
+                isCrossfading = false
                 return
             }
             player.setVolume(0.0, fadeDuration: crossfadeDuration)
@@ -305,8 +350,14 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
             current = next
             badAppleVoiceLog("PiperTTSPlayback: crossfading to \(next.url.path)")
         } else if next.afplayTask != nil {
-            // Can't crossfade to an afplay-backed item; play it sequentially.
+            // Can\'t crossfade to an afplay-backed item; play it sequentially after the current.
             pending.insert(next, at: 0)
+            isCrossfading = false
+        } else {
+            badAppleVoiceLog("PiperTTSPlayback: next item has no player or afplay task")
+            notifyCompletion(next.completion, success: false)
+            isCrossfading = false
+            advanceIfIdle()
         }
     }
 
@@ -317,6 +368,10 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
             timer = nil
         } else if let idx = previous.firstIndex(where: { $0 === item }) {
             previous.remove(at: idx)
+            // The crossfade transition is now complete.
+            if previous.isEmpty {
+                isCrossfading = false
+            }
         }
         notifyCompletion(item.completion, success: success)
         advanceIfIdle()
@@ -334,6 +389,9 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         if let idx = previous.firstIndex(where: { $0.player === player }) {
             let finished = previous.remove(at: idx)
+            if previous.isEmpty {
+                isCrossfading = false
+            }
             notifyCompletion(finished.completion, success: flag)
             return
         }
@@ -358,16 +416,23 @@ final class PiperTTSClient {
         let text: String
         let voice: String
         let id: Int
+        let sessionID: Int
         let completion: ((Bool) -> Void)?
     }
     private var queue: [QueueItem] = []
     private let queueLock = NSLock()
     private var isProcessing = false
+    private var sessionID = 0
+    private var hasErrorInSession = false
+    private var lastCompletion: ((Bool) -> Void)?
 
     func stop() {
         queueLock.lock()
         queue.removeAll()
         isProcessing = false
+        sessionID += 1
+        hasErrorInSession = false
+        lastCompletion = nil
         queueLock.unlock()
         playback.stop()
     }
@@ -444,12 +509,24 @@ final class PiperTTSClient {
     /// Long text is broken into sentence chunks so the voice starts earlier.
     func speak(_ text: String, voice: String, completion: ((Bool) -> Void)? = nil) {
         let chunks = chunkText(text)
+        guard !chunks.isEmpty else {
+            DispatchQueue.main.async { completion?(false) }
+            return
+        }
 
         queueLock.lock()
+        hasErrorInSession = false
+        lastCompletion = completion
+        let session = sessionID
         for (index, chunk) in chunks.enumerated() {
             let isLast = index == chunks.count - 1
             itemCounter += 1
-            queue.append(QueueItem(text: chunk, voice: voice, id: itemCounter, completion: isLast ? completion : nil))
+            queue.append(QueueItem(text: chunk, voice: voice, id: itemCounter, sessionID: session, completion: isLast ? { [weak self] success in
+                guard let self = self else { return }
+                let finalSuccess = success && !self.hasErrorInSession
+                self.lastCompletion?(finalSuccess)
+                self.lastCompletion = nil
+            } : nil))
         }
         let shouldStart = !isProcessing
         if shouldStart { isProcessing = true }
@@ -479,22 +556,29 @@ final class PiperTTSClient {
                 let wavURL = try self.synthesize(item.text, voice: item.voice)
                 badAppleVoiceLog("PiperTTS got wav \(wavURL.path)")
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
+                    guard let self = self, item.sessionID == self.sessionID else { return }
+                    guard self.isProcessing else { return }
                     self.playback.enqueue(wavURL, completion: item.completion)
                     self.processNext()
                 }
             } catch {
                 badAppleVoiceLog("PiperTTS synthesize error: \(error.localizedDescription)")
-                item.completion?(false)
                 DispatchQueue.main.async { [weak self] in
-                    self?.processNext()
+                    guard let self = self, item.sessionID == self.sessionID else { return }
+                    self.hasErrorInSession = true
+                    item.completion?(false)
+                    self.processNext()
                 }
             }
         }
     }
 
     private func synthesize(_ text: String, voice: String) throws -> URL {
-        let request: [String: Any] = ["text": text, "voice": voice]
+        guard !PiperTTSClient.availableVoices.isEmpty else {
+            throw NSError(domain: "PiperTTS", code: 1, userInfo: [NSLocalizedDescriptionKey: "no voices configured"])
+        }
+        let safeVoice = PiperTTSClient.availableVoices.contains(voice) ? voice : PiperTTSClient.defaultVoice
+        let request: [String: Any] = ["text": text, "voice": safeVoice]
         let data = try JSONSerialization.data(withJSONObject: request, options: [])
         let response = try unixSocketRequest(data)
         guard let json = try JSONSerialization.jsonObject(with: response) as? [String: Any] else {
@@ -504,22 +588,41 @@ final class PiperTTSClient {
             let err = json["error"] as? String ?? "unknown"
             throw NSError(domain: "PiperTTS", code: 3, userInfo: [NSLocalizedDescriptionKey: err])
         }
-        return URL(fileURLWithPath: wavPath)
+        let url = URL(fileURLWithPath: wavPath)
+        guard isTrustedTTSPath(url) else {
+            throw NSError(domain: "PiperTTS", code: 4, userInfo: [NSLocalizedDescriptionKey: "untrusted wav path"])
+        }
+        return url
+    }
+
+    private func isTrustedTTSPath(_ url: URL) -> Bool {
+        let path = url.path
+        let normalized = (path as NSString).standardizingPath
+        guard normalized.hasPrefix("/tmp/badapple_tts_"), normalized.hasSuffix(".wav") else { return false }
+        return true
+    }
+
+    private func effectiveSocketPath() -> String {
+        if let env = ProcessInfo.processInfo.environment["BADAPPLE_TTS_SOCKET"], !env.isEmpty {
+            return env
+        }
+        return socketPath
     }
 
     private func unixSocketRequest(_ data: Data) throws -> Data {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
-            throw NSError(domain: "PiperTTS", code: 11, userInfo: [NSLocalizedDescriptionKey: "socket() failed"])
+            throw makeError(code: 11, "socket() failed")
         }
         defer { close(fd) }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(socketPath.utf8)
+        let resolvedPath = effectiveSocketPath()
+        let pathBytes = Array(resolvedPath.utf8)
         let maxPath = MemoryLayout.size(ofValue: addr.sun_path) - 1
         guard pathBytes.count < maxPath else {
-            throw NSError(domain: "PiperTTS", code: 12, userInfo: [NSLocalizedDescriptionKey: "socket path too long"])
+            throw makeError(code: 12, "socket path too long")
         }
         pathBytes.withUnsafeBufferPointer { src in
             _ = withUnsafeMutablePointer(to: &addr.sun_path) { dst in
@@ -540,23 +643,58 @@ final class PiperTTSClient {
             }
         }
         guard connectResult == 0 else {
-            throw NSError(domain: "PiperTTS", code: 13, userInfo: [NSLocalizedDescriptionKey: "connect() failed: \(errno)"])
+            throw makeError(code: 13, "connect() failed: \(errno)")
         }
 
-        _ = data.withUnsafeBytes { write(fd, $0.baseAddress!, $0.count) }
-        var newline: UInt8 = 0x0A
-        _ = write(fd, &newline, 1)
+        try writeAll(fd, data: data)
+        let newline: UInt8 = 0x0A
+        try writeAll(fd, data: Data([newline]))
 
         var response = Data()
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
         defer { buffer.deallocate() }
         while true {
             let n = read(fd, buffer, 4096)
-            if n <= 0 { break }
-            response.append(buffer, count: n)
-            if response.contains(0x0A) { break }
+            if n > 0 {
+                response.append(buffer, count: n)
+                if response.contains(0x0A) { break }
+            } else if n == 0 {
+                break
+            } else {
+                let err = errno
+                if err == EINTR { continue }
+                throw makeError(code: 14, "read() failed: \(err)")
+            }
+        }
+        guard !response.isEmpty else {
+            throw makeError(code: 15, "empty response from TTS server")
         }
         return response
+    }
+
+    private func writeAll(_ fd: Int32, data: Data) throws {
+        var total = 0
+        try data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            let ptr = UnsafeRawPointer(base)
+            let count = data.count
+            while total < count {
+                let n = write(fd, ptr.advanced(by: total), count - total)
+                if n < 0 {
+                    let err = errno
+                    if err == EINTR { continue }
+                    throw makeError(code: 16, "write() failed: \(err)")
+                }
+                guard n > 0 else {
+                    throw makeError(code: 16, "write() returned 0")
+                }
+                total += n
+            }
+        }
+    }
+
+    private func makeError(code: Int, _ message: String) -> NSError {
+        return NSError(domain: "PiperTTS", code: code, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
 }

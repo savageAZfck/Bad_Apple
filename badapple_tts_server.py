@@ -30,6 +30,7 @@ import sys
 import tempfile
 import threading
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from piper.config import SynthesisConfig
@@ -38,12 +39,31 @@ from piper.voice import PiperVoice
 DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "en_US-amy-medium")
 DEFAULT_SOCKET = os.environ.get("BADAPPLE_TTS_SOCKET", "/tmp/badapple_tts.sock")
 
+# Hardening constants
+MAX_TEXT_LENGTH = 2_000
+MAX_REQUEST_BYTES = 8_388_608
+MAX_VOICE_NAME_LENGTH = 64
+VOICE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$", re.ASCII)
+MAX_WORKERS = 4
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_VOICES_DIR = os.environ.get("BADAPPLE_TTS_VOICES_DIR", str(SCRIPT_DIR / "voices"))
 
 # Piper voices are not shipped in git (they are ~60 MB). The server resolves the
 # model relative to the voices dir. If missing, it prints a one-time download
 # command and returns an error.
+
+def _validate_voice_name(name: str) -> str:
+    """Sanitize the requested voice name to prevent path traversal / URL injection."""
+    if not isinstance(name, str):
+        raise ValueError("voice name must be a string")
+    name = name.strip()
+    if not name:
+        raise ValueError("voice name is empty")
+    if len(name) > MAX_VOICE_NAME_LENGTH or not VOICE_NAME_RE.match(name):
+        raise ValueError(f"invalid voice name: {name!r}")
+    return name
+
 
 def _voices_dir() -> Path:
     return Path(DEFAULT_VOICES_DIR).expanduser().resolve()
@@ -98,6 +118,7 @@ def _ensure_voice(name: str):
 
 _lock = threading.Lock()
 _voice_cache: dict[str, PiperVoice] = {}
+_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="badapple_tts")
 
 def _load_voice(name: str) -> PiperVoice:
     with _lock:
@@ -127,6 +148,12 @@ def _clean_text(text: str) -> str:
 
 
 def _synthesize(text: str, voice_name: str = DEFAULT_VOICE) -> Path:
+    if not isinstance(text, str):
+        raise ValueError("text must be a string")
+    if len(text) > MAX_TEXT_LENGTH:
+        raise ValueError(f"text too long (max {MAX_TEXT_LENGTH} characters)")
+
+    voice_name = _validate_voice_name(voice_name)
     text = _clean_text(text)
     if not text:
         raise ValueError("empty text after cleaning")
@@ -137,21 +164,34 @@ def _synthesize(text: str, voice_name: str = DEFAULT_VOICE) -> Path:
     fd, wav_path = tempfile.mkstemp(prefix="badapple_tts_", suffix=".wav", dir="/tmp")
     os.close(fd)
 
-    with wave.open(wav_path, "wb") as wav_file:
-        voice.synthesize_wav(text, wav_file, syn_config=cfg)
+    try:
+        with wave.open(wav_path, "wb") as wav_file:
+            voice.synthesize_wav(text, wav_file, syn_config=cfg)
+    except Exception:
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+        raise
 
     return Path(wav_path)
 
 
 def _handle_request(raw: bytes) -> dict:
+    if len(raw) > MAX_REQUEST_BYTES:
+        return {"ok": False, "error": f"request too large (max {MAX_REQUEST_BYTES} bytes)"}
     try:
         req = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as e:
         return {"ok": False, "error": f"invalid JSON: {e}"}
+    except UnicodeDecodeError as e:
+        return {"ok": False, "error": f"invalid UTF-8: {e}"}
 
     text = req.get("text")
-    if not text or not isinstance(text, str):
+    if not isinstance(text, str) or not text.strip():
         return {"ok": False, "error": "missing or invalid 'text' field"}
+    if len(text) > MAX_TEXT_LENGTH:
+        return {"ok": False, "error": f"text too long (max {MAX_TEXT_LENGTH} characters)"}
 
     voice_name = req.get("voice", DEFAULT_VOICE)
     text_preview = text[:60].replace("\n", " ")
@@ -179,14 +219,16 @@ def _send_json(conn: socket.socket, obj: dict):
 
 
 def _serve_client(conn: socket.socket):
-    chunks = []
     conn.settimeout(None)
     try:
-        while True:
+        chunks: list[bytes] = []
+        total = 0
+        while total < MAX_REQUEST_BYTES:
             data = conn.recv(4096)
             if not data:
                 break
             chunks.append(data)
+            total += len(data)
             if b"\n" in data:
                 break
         raw = b"".join(chunks)
@@ -235,11 +277,11 @@ def main():
     try:
         while True:
             conn, _ = server.accept()
-            client = threading.Thread(target=_serve_client, args=(conn,), daemon=True)
-            client.start()
+            _executor.submit(_serve_client, conn)
     except KeyboardInterrupt:
         print("badapple_tts: shutting down", file=sys.stderr)
     finally:
+        _executor.shutdown(wait=False)
         try:
             socket_path.unlink()
         except OSError:

@@ -6,6 +6,7 @@ by both the dashboard HTTP handlers and ``badapple_tools.system_dashboard``.
 """
 
 import json
+import os
 import re
 import subprocess
 import urllib.parse
@@ -106,8 +107,14 @@ def _tail_lines(path: str, n: int = 20, current_process_only: bool = True) -> li
     If current_process_only is True, skip all lines before the most recent
     daemon startup marker so the tail only shows the running process.
     """
+    # Read at most ~8 MB of a log to avoid memory bombs.
     try:
         with open(path, encoding="utf-8", errors="ignore") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 8_388_608), os.SEEK_SET)
+            if f.tell() != 0:
+                f.readline()  # drop the partial first line
             lines = f.readlines()
     except (OSError, ValueError):
         return []
@@ -197,14 +204,14 @@ def _voice_activity(n: int = 20) -> list[dict[str, Any]]:
     return list(reversed(events[-n:]))
 
 
-def _query_int(path: str, key: str, default: int) -> int:
-    """Parse a query string integer parameter."""
+def _query_int(path: str, key: str, default: int, max_value: int = 1000) -> int:
+    """Parse a query string integer parameter, clamped to [1, max_value]."""
     parsed = urllib.parse.urlparse(path)
     values = urllib.parse.parse_qs(parsed.query).get(key)
     if not values:
         return default
     try:
-        return max(1, int(values[0]))
+        return max(1, min(max_value, int(values[0])))
     except ValueError:
         return default
 
