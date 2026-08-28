@@ -20,9 +20,11 @@ import sys
 import time
 from pathlib import Path
 
-SLICKS_VERSION = 1
+import badapple_slicks
+
+SLICKS_VERSION = badapple_slicks.SLICKS_VERSION
 DEFAULT_SOCKET_PATH = "/var/run/badapple/substrate_mlx.sock"
-DEFAULT_KEY_PATH = "/var/lib/bad_apple/slicks.key"
+DEFAULT_KEY_PATH = badapple_slicks.DEFAULT_KEY_PATH
 
 
 def load_secret() -> bytes:

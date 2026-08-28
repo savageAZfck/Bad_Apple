@@ -13,8 +13,6 @@ import asyncio
 import concurrent.futures
 import copy
 import gc
-import hashlib
-import hmac
 import json
 import os
 import queue
@@ -44,12 +42,12 @@ import badapple_ocular
 import badapple_fact_extractor
 import badapple_fast_model
 import badapple_identity
-import badapple_keychain
 import badapple_metrics
 import badapple_model_actor
 import badapple_model_registry
 import badapple_p2p
 import badapple_scheduler
+import badapple_slicks
 import badapple_speculate
 import badapple_tier
 import badapple_tool_router
@@ -100,10 +98,9 @@ except ImportError:
     _dflash_available = False
 
 # Protocol constants from bad_apple_ipc.rs
-SLICKS_VERSION = 1
+SLICKS_VERSION = badapple_slicks.SLICKS_VERSION
 DEFAULT_SOCKET_PATH = "/var/run/badapple/substrate.sock"
-DEFAULT_KEY_PATH = "/var/lib/bad_apple/slicks.key"
-HANDSHAKE_MAX_SKEW_MS = 60_000
+HANDSHAKE_MAX_SKEW_MS = badapple_slicks.HANDSHAKE_MAX_SKEW_MS
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_NEW_TOKENS = 512
 MAX_FRAME_BYTES = 1024 * 1024
@@ -1691,59 +1688,15 @@ def tools_for_prompt(prompt: str) -> list[dict[str, Any]]:
     return [t for t in TOOLS if t.get("function", {}).get("name") in selected]
 
 
-def load_slicks_secret() -> bytes:
-    if "BADAPPLE_SLICKS_SECRET" in os.environ:
-        raw = os.environ["BADAPPLE_SLICKS_SECRET"]
-    elif os.environ.get("BADAPPLE_SLICKS_KEYCHAIN", "0") == "1":
-        try:
-            return badapple_keychain.get_or_create_secret()
-        except Exception as e:  # noqa: BLE001 - catch-all wrapper
-            print(f"[slicks] keychain load failed: {e}; falling back to key file", flush=True)
-            key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
-            with open(key_path) as f:
-                raw = f.read()
-    else:
-        key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
-        with open(key_path) as f:
-            raw = f.read()
-    trimmed = raw.strip()
-    if all(c in "0123456789abcdefABCDEF" for c in trimmed) and len(trimmed) >= 32:
-        return bytes.fromhex(trimmed)
-    return trimmed.encode()
-
-
-def sign(secret: bytes, material: bytes) -> str:
-    mac = hmac.new(secret, material, hashlib.sha256)
-    return mac.hexdigest()
-
-
-def verify(secret: bytes, material: bytes, proof: str) -> bool:
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", proof or ""):
-        return False
-    return hmac.compare_digest(sign(secret, material).lower(), proof.lower())
+load_slicks_secret = badapple_slicks.load_slicks_secret
 
 
 def random_nonce() -> str:
     return os.urandom(32).hex()
 
 
-def nonce_is_valid(nonce: str) -> bool:
-    return len(nonce) == 64 and all(c in "0123456789abcdefABCDEF" for c in nonce)
-
-
-def server_proof(secret, timestamp_ms, client_nonce, server_nonce):
-    material = f"BADAPPLE-SLICKS/{SLICKS_VERSION}|server|{timestamp_ms}|{client_nonce}|{server_nonce}".encode()
-    return sign(secret, material)
-
-
-def client_material(timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens):
-    prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-    return f"BADAPPLE-SLICKS/{SLICKS_VERSION}|client|{timestamp_ms}|{client_nonce}|{server_nonce}|{max_new_tokens}|{prompt_hash}".encode()
-
-
-def timestamp_is_fresh(timestamp_ms):
-    now = int(time.time() * 1000)
-    return abs(now - timestamp_ms) <= HANDSHAKE_MAX_SKEW_MS
+def timestamp_is_fresh(timestamp_ms: int) -> bool:
+    return badapple_slicks.timestamp_is_fresh(timestamp_ms)
 
 
 def validate_request(prompt, max_new_tokens):
@@ -4291,8 +4244,12 @@ class MLXServer:
             if not line:
                 return
             hello = json.loads(line.decode())
-            if not (hello.get("type") == "hello" and hello.get("version") == SLICKS_VERSION and timestamp_is_fresh(hello.get("timestamp_ms")) and nonce_is_valid(hello.get("client_nonce"))):
-                await _write_frame(writer, {"type": "error", "message": "invalid or stale SLICKS hello"})
+            client_version = hello.get("version")
+            if not (hello.get("type") == "hello" and client_version == SLICKS_VERSION and timestamp_is_fresh(hello.get("timestamp_ms")) and badapple_slicks.nonce_is_valid(hello.get("client_nonce", ""))):
+                if client_version == badapple_slicks.SLICKS_VERSION_2:
+                    await _write_frame(writer, {"type": "error", "message": "SLICKS v2 is not yet enabled"})
+                else:
+                    await _write_frame(writer, {"type": "error", "message": "invalid or stale SLICKS hello"})
                 return
 
             timestamp_ms = hello["timestamp_ms"]
@@ -4302,7 +4259,7 @@ class MLXServer:
                 "type": "challenge",
                 "version": SLICKS_VERSION,
                 "server_nonce": server_nonce,
-                "proof": server_proof(self.secret, timestamp_ms, client_nonce, server_nonce),
+                "proof": badapple_slicks.v1_server_proof(self.secret, timestamp_ms, client_nonce, server_nonce),
             })
 
             line = await reader.readline()
@@ -4323,8 +4280,7 @@ class MLXServer:
                 await _write_frame(writer, {"type": "error", "message": str(e)})
                 return
 
-            material = client_material(timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens)
-            if not verify(self.secret, material, proof):
+            if not badapple_slicks.v1_verify_client_proof(self.secret, timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens, proof):
                 await _write_frame(writer, {"type": "error", "message": "SLICKS client authentication failed"})
                 return
 
