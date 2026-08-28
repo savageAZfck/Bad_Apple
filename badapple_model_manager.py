@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
+import badapple_model_provenance
+
 
 
 @dataclass
@@ -42,6 +44,7 @@ class ModelState:
     downloaded_bytes: int = 0
     total_bytes: int = 0
     last_updated: float = field(default_factory=time.time)
+    verified: bool = False
 
 
 _KNOWN_MODELS: list[ModelProfile] = [
@@ -110,6 +113,8 @@ class ModelManager:
         self._allow_downloads = os.environ.get("BADAPPLE_ALLOW_DOWNLOADS", "0") == "1"
         self._online_override = os.environ.get("BADAPPLE_ONLINE_MODELS", "0") == "1"
         self._download_futures: dict[str, Any] = {}
+        self._provenance = badapple_model_provenance.ModelProvenance(self.data_dir)
+        self._verify_hashes = os.environ.get("BADAPPLE_VERIFY_MODEL_HASHES", "1") != "0"
 
         # Restore persisted state (status only; we re-verify cache on demand).
         self._load_state()
@@ -137,6 +142,9 @@ class ModelManager:
         if not profile:
             return {"error": f"unknown model {model_id}"}
         state = self._state[model_id]
+        provenance = {"status": "unknown"}
+        if state.local_path:
+            provenance = self._provenance.verify(model_id, state.local_path)
         return {
             "id": profile.id,
             "name": profile.name,
@@ -149,6 +157,8 @@ class ModelManager:
             "local_path": state.local_path,
             "allow_downloads": self.allow_downloads,
             "loaded_in": profile.loaded_in,
+            "verified": state.verified,
+            "provenance": provenance,
         }
 
     def _load_state(self) -> None:
@@ -182,6 +192,7 @@ class ModelManager:
                             "downloaded_bytes": s.downloaded_bytes,
                             "total_bytes": s.total_bytes,
                             "last_updated": s.last_updated,
+                            "verified": s.verified,
                         }
                         for mid, s in self._state.items()
                     }
@@ -267,7 +278,17 @@ class ModelManager:
         self._update_state(model_id, status="downloading", progress=0.0, error="")
         try:
             path = self._resolve_cache_path(profile.repo_id, allow_download=True)
-            self._update_state(model_id, status="cached", progress=1.0, local_path=path or "", error="")
+            if path:
+                try:
+                    result = self._provenance.record(model_id, profile.repo_id, path)
+                    if result.get("status") != "recorded":
+                        print(f"[model_manager] provenance record for {model_id}: {result}", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[model_manager] provenance recording failed for {model_id}: {e}", flush=True)
+            verified = False
+            if path and self._verify_hashes:
+                verified = self._provenance.verify(model_id, path).get("status") == "verified"
+            self._update_state(model_id, status="cached", progress=1.0, local_path=path or "", error="", verified=verified)
         except Exception as e:  # noqa: BLE001
             self._update_state(model_id, status="error", error=str(e), progress=0.0)
             print(f"[model_manager] download failed for {model_id}: {e}", flush=True)
@@ -325,14 +346,38 @@ class ModelManager:
             return False
 
     def mark_loaded(self, model_id: str, local_path: str | None = None) -> None:
-        """Mark a model as loaded in RAM."""
+        """Mark a model as loaded in RAM after verifying provenance.
+
+        A missing manifest is recorded in the background so the next load is fast.
+        A mismatch is treated as fatal; a missing local path is allowed.
+        """
         if model_id not in self._state:
             return
         if local_path is None:
             profile = self._profiles.get(model_id)
             if profile:
                 local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
-        self._update_state(model_id, status="loaded", progress=1.0, local_path=local_path or "", error="")
+
+        verified = False
+        root = Path(local_path).expanduser().resolve() if local_path else None
+        if root and self._verify_hashes:
+            result = self._provenance.verify(model_id, str(root))
+            status = result.get("status")
+            if status == "verified":
+                verified = True
+            elif status == "mismatch":
+                print(f"[model_manager] load rejected for {model_id}: {result.get('error')}", flush=True)
+                self._update_state(model_id, status="error", progress=1.0, local_path=local_path, error=result.get("error", "provenance verification failed"), verified=False)
+                return
+            elif status == "unknown" and root.is_dir():
+                # Record in background so future loads are fast.
+                profile = self._profiles.get(model_id)
+                if profile:
+                    self._download_executor.submit(
+                        self._record_provenance_worker, model_id, profile.repo_id, str(root)
+                    )
+
+        self._update_state(model_id, status="loaded", progress=1.0, local_path=local_path or "", error="", verified=verified)
 
     def mark_unloaded(self, model_id: str, local_path: str | None = None) -> None:
         """Mark a model as cached but not resident."""
@@ -342,7 +387,7 @@ class ModelManager:
             profile = self._profiles.get(model_id)
             if profile:
                 local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
-        self._update_state(model_id, status="cached", progress=1.0, local_path=local_path or "", error="")
+        self._update_state(model_id, status="cached", progress=1.0, local_path=local_path or "", error="", verified=False)
 
     def refresh_cache_status(self, model_id: str) -> dict[str, Any]:
         """Check the local HF cache for a model without downloading.
@@ -399,6 +444,70 @@ class ModelManager:
         import badapple_vram_governor as vg
 
         return vg.model_preload_priority()
+
+    def record_provenance(self, model_id: str, local_path: str | None = None) -> dict[str, Any]:
+        """Record the manifest for a cached model."""
+        profile = self._profiles.get(model_id)
+        if not profile:
+            return {"error": f"unknown model {model_id}"}
+        if local_path is None:
+            local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
+        if not local_path:
+            return {"error": f"model {model_id} is not cached"}
+        return self._provenance.record(model_id, profile.repo_id, local_path)
+
+    def verify_provenance(self, model_id: str, local_path: str | None = None) -> dict[str, Any]:
+        """Verify the manifest for a cached model."""
+        profile = self._profiles.get(model_id)
+        if not profile:
+            return {"error": f"unknown model {model_id}"}
+        if local_path is None:
+            local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
+        if not local_path:
+            return {"status": "missing", "error": f"model {model_id} is not cached"}
+        result = self._provenance.verify(model_id, local_path)
+        with self._lock:
+            if model_id in self._state:
+                self._state[model_id].verified = result.get("status") == "verified"
+        return result
+
+    def verify_before_load(self, model_id: str) -> dict[str, Any]:
+        """Fast provenance check before loading. Records in the background if no manifest exists."""
+        if not self._verify_hashes:
+            return {"status": "skipped"}
+        profile = self._profiles.get(model_id)
+        if not profile:
+            return {"error": f"unknown model {model_id}"}
+        local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
+        if not local_path:
+            return {"status": "missing", "error": f"model {model_id} is not cached"}
+
+        result = self._provenance.verify(model_id, local_path)
+        if result.get("status") == "verified":
+            with self._lock:
+                self._state[model_id].verified = True
+            return result
+        if result.get("status") == "mismatch":
+            with self._lock:
+                self._state[model_id].verified = False
+            return result
+        if result.get("status") == "unknown":
+            # No manifest yet; record it in the background so future loads are fast.
+            self._download_executor.submit(self._record_provenance_worker, model_id, profile.repo_id, local_path)
+            with self._lock:
+                self._state[model_id].verified = False
+            return {"status": "recording", "error": "no manifest; recording in background"}
+        return result
+
+    def _record_provenance_worker(self, model_id: str, repo_id: str, local_path: str) -> None:
+        try:
+            self._provenance.record(model_id, repo_id, local_path)
+            result = self._provenance.verify(model_id, local_path)
+            if result.get("status") == "verified":
+                with self._lock:
+                    self._state[model_id].verified = True
+        except Exception as e:  # noqa: BLE001
+            print(f"[model_manager] background provenance recording failed for {model_id}: {e}", flush=True)
 
     def shutdown(self) -> None:
         self._download_executor.shutdown(wait=False, cancel_futures=True)

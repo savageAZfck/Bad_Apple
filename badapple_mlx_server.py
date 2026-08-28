@@ -43,6 +43,7 @@ import badapple_fact_extractor
 import badapple_fast_model
 import badapple_identity
 import badapple_keychain
+import badapple_metrics
 import badapple_model_manager
 import badapple_model_registry
 import badapple_p2p
@@ -2219,6 +2220,7 @@ class MLXServer:
         self.prefill_step_size = PREFILL_STEP_SIZE
         self._roast_index = 0
         self.last_metrics: dict[str, Any] | None = None
+        self.metrics = badapple_metrics.MetricsCollector()
 
         # Reusable prompt KV cache. _system_prompt_cache holds the pristine
         # system-prefix KV; _prompt_cache is a per-query deep copy that gets
@@ -2394,6 +2396,11 @@ class MLXServer:
                 if state.get("status") in ("queued", "downloading"):
                     if not self.model_manager.wait_for_download("main_9b", timeout=600):
                         print("[lazy] main model download did not complete in 600s", flush=True)
+                prov = self.model_manager.verify_before_load("main_9b")
+                if prov.get("status") == "mismatch":
+                    raise RuntimeError(f"main model provenance check failed: {prov.get('error')}")
+                if prov.get("status") == "missing":
+                    raise RuntimeError(f"main model not available: {prov.get('error')}")
             self.model, self.tokenizer = load(MAIN_MODEL)
             print("Bad Apple MLX brain loaded.", flush=True)
             if getattr(self, "model_manager", None) is not None:
@@ -3603,12 +3610,14 @@ class MLXServer:
             gen_kwargs["num_draft_tokens"] = NUM_DRAFT_TOKENS
         gen_t0 = time.time()
         first_token_logged = False
+        first_token_latency: float | None = None
         for response in stream_generate(**gen_kwargs):
             if self.runtime.cancel_event.is_set():
                 accumulated = accumulated or "Generation cancelled by kill switch."
                 break
             if not first_token_logged:
-                print(f"[perf] first token after {time.time() - gen_t0:.2f}s", flush=True)
+                first_token_latency = time.time() - gen_t0
+                print(f"[perf] first token after {first_token_latency:.2f}s", flush=True)
                 first_token_logged = True
             accumulated += response.text
             if stream_queue is not None:
@@ -3646,26 +3655,46 @@ class MLXServer:
                         chunk += " "
                     if not _emit(chunk):
                         return "[Output firewall: blocked streaming content]"
-        # No sign-off injection.
+        # No sign-off injection; but always compute and record metrics so every
+        # turn is visible, even if a hard stop string prevented a clean finish.
+        total_time = time.time() - gen_t0
         if final_metrics is not None:
-            pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
-            total_time = time.time() - gen_t0
-            total_tps = final_metrics.generation_tokens / total_time if total_time > 0 else 0.0
+            token_count = int(final_metrics.generation_tokens)
+            decode_tps = float(final_metrics.generation_tps)
+            peak_memory = float(final_metrics.peak_memory)
+        else:
+            token_count = total_tokens
+            decode_tps = total_tokens / total_time if total_time > 0 else 0.0
+            peak_memory = float(mx.get_peak_memory() / (1024 ** 3))
+
+        if token_count > 0:
+            pct = (100.0 * draft_tokens / token_count) if token_count > 0 else 0.0
+            total_tps = token_count / total_time if total_time > 0 else 0.0
             print(
-                f"[perf] {final_metrics.generation_tokens} tokens @ "
-                f"{final_metrics.generation_tps:.1f} t/s, "
+                f"[perf] {token_count} tokens @ "
+                f"{decode_tps:.1f} t/s, "
                 f"draft_accept_ratio={pct:.0f}%, "
                 f"num_draft_tokens={NUM_DRAFT_TOKENS}, "
-                f"peak_memory={final_metrics.peak_memory:.2f} GB",
+                f"peak_memory={peak_memory:.2f} GB",
                 flush=True,
             )
             self.last_metrics = {
-                "tokens": int(final_metrics.generation_tokens),
-                "decode_tps": float(final_metrics.generation_tps),
+                "tokens": token_count,
+                "decode_tps": decode_tps,
                 "total_tps": float(total_tps),
                 "draft_accept_pct": float(pct),
-                "peak_memory_gb": float(final_metrics.peak_memory),
+                "peak_memory_gb": peak_memory,
+                "ttft_s": round(first_token_latency, 3) if first_token_latency is not None else None,
+                "prompt_tokens": len(tokens),
+                "voice_mode": voice_mode,
+                "persona": self.personas.active,
+                "airgap": self.airgap,
+                "model_id": MAIN_MODEL,
             }
+            try:
+                self.metrics.record(**self.last_metrics)
+            except Exception:  # noqa: BLE001,S110 - metrics best-effort
+                pass
         _maybe_purge_metal_cache()
         return accumulated
 

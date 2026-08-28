@@ -982,6 +982,15 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 self._send_json({"error": str(e)}, 500)
             return
+        if path == "/api/metrics":
+            try:
+                if _server_instance is not None and hasattr(_server_instance, "metrics"):
+                    self._send_json(_server_instance.metrics.summary())
+                else:
+                    self._send_json({"count": 0, "error": "daemon not running"}, 503)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
+            return
         if path == "/models" or path == "/models.html":
             self._serve_html_file("models.html")
             return
