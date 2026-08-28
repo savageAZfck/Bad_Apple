@@ -38,6 +38,7 @@ import badapple_agent_tasks
 import badapple_ambient
 import badapple_ambient_memory
 import badapple_audit_actor
+import badapple_cache_actor
 import badapple_dashboard
 import badapple_ocular
 import badapple_fact_extractor
@@ -62,7 +63,6 @@ from badapple_extras import (
     MemoryGraph,
     PersonaPack,
     Policy,
-    SemanticCache,
     StreamingFirewall,
     Workspace,
 )
@@ -2255,7 +2255,9 @@ class MLXServer:
         self.audit_collector = AuditLedger(self.data_dir)
         self.audit_actor = badapple_audit_actor.AuditActor(existing=self.audit_collector)
         self.audit_actor.start()
-        self.cache = SemanticCache(self.data_dir)
+        self._cache_actor = badapple_cache_actor.CacheActor(self.data_dir)
+        self._cache_actor.start()
+        self.cache = badapple_cache_actor.CacheActorProxy(self._cache_actor)
         self.policy = Policy(self.data_dir)
         self.workspace = Workspace(self.data_dir)
         self.workspace_watcher = badapple_workspace_watcher.WorkspaceWatcher(self.knowledge)
