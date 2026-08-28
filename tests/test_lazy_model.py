@@ -44,9 +44,10 @@ class TestLazyModel(unittest.TestCase):
             return
         self.assertTrue(Path(path).is_dir())
 
+    @mock.patch("badapple_mlx_server.MLXServer._init_prompt_cache")
     @mock.patch("badapple_mlx_server.BadAppleKnowledge")
     @mock.patch("badapple_mlx_server.load")
-    def test_ensure_main_model_loads_on_demand(self, mock_load, mock_knowledge) -> None:
+    def test_ensure_main_model_loads_on_demand(self, mock_load, mock_knowledge, mock_init_prompt_cache) -> None:
         from tests._test_utils import fake_encoder
 
         os.environ["BADAPPLE_LAZY_MAIN_MODEL"] = "1"
