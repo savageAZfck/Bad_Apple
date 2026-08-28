@@ -198,12 +198,21 @@ final class PiperTTSClient {
     private var isProcessing = false
     private var runningTask: Process?
 
+    // Pipelined pre-synthesis: the next chunk is rendered while the current one plays.
+    private var preparedWavs: [Int: URL] = [:]
+    private var preparingIDs: Set<Int> = []
+    private let prepLock = NSLock()
+
     func stop() {
         queueLock.lock()
         queue.removeAll()
         isProcessing = false
         runningTask?.terminate()
         queueLock.unlock()
+        prepLock.lock()
+        preparedWavs.removeAll()
+        preparingIDs.removeAll()
+        prepLock.unlock()
     }
 
     static let defaultVoice = "en_US-amy-medium"
@@ -227,9 +236,14 @@ final class PiperTTSClient {
 
     /// Split text into sentence-ish chunks so the first WAV is small and
     /// starts playing while the rest of the queue is still being synthesized.
+    /// Uses the *rightmost* sentence boundary in each window so chunks end
+    /// naturally and the next chunk starts on a new sentence.
     private func chunkText(_ text: String, maxLength: Int = 160) -> [String] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
+
+        // Match ., ?, ! followed by whitespace or end of string, or a line break.
+        let regex = try! NSRegularExpression(pattern: "[.!?]+(?:\\s+|$)|\\n+", options: [])
 
         var chunks: [String] = []
         var remaining = trimmed
@@ -239,24 +253,31 @@ final class PiperTTSClient {
                 break
             }
 
-            // Prefer splitting after sentence punctuation.
-            let sentencePattern = "[.!?;:—…\\n]+[\\s]+"
-            var bestBreak = remaining.range(of: sentencePattern, options: .regularExpression, range: remaining.startIndex..<remaining.index(remaining.startIndex, offsetBy: min(maxLength, remaining.count)))
+            let prefix = String(remaining.prefix(maxLength))
+            let nsRange = NSRange(location: 0, length: (prefix as NSString).length)
+            let matches = regex.matches(in: prefix, options: [], range: nsRange)
+            var splitIndex: String.Index? = nil
+            if let last = matches.last {
+                splitIndex = Range(last.range, in: prefix)?.upperBound
+            }
 
-            // Fall back to the nearest whitespace.
-            if bestBreak == nil || bestBreak!.upperBound <= remaining.index(remaining.startIndex, offsetBy: maxLength / 2) {
-                let searchEnd = remaining.index(remaining.startIndex, offsetBy: min(maxLength, remaining.count))
-                if let spaceRange = remaining[..<searchEnd].range(of: " ", options: .backwards) {
-                    bestBreak = spaceRange
+            // No sentence boundary in this window — fall back to the last whitespace.
+            if splitIndex == nil || splitIndex! <= prefix.index(prefix.startIndex, offsetBy: 20) {
+                if let spaceRange = prefix.range(of: " ", options: .backwards) {
+                    splitIndex = spaceRange.upperBound
                 }
             }
 
-            let splitIndex = bestBreak?.upperBound ?? remaining.index(remaining.startIndex, offsetBy: maxLength)
-            let chunk = String(remaining[..<splitIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            // If nothing reasonable was found, hard split at the max length.
+            if splitIndex == nil || splitIndex! <= prefix.index(prefix.startIndex, offsetBy: 5) {
+                splitIndex = prefix.index(prefix.startIndex, offsetBy: maxLength)
+            }
+
+            let chunk = String(remaining[..<splitIndex!]).trimmingCharacters(in: .whitespacesAndNewlines)
             if !chunk.isEmpty {
                 chunks.append(chunk)
             }
-            remaining = String(remaining[splitIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            remaining = String(remaining[splitIndex!...]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         return chunks.isEmpty ? [trimmed] : chunks
@@ -292,16 +313,29 @@ final class PiperTTSClient {
         }
         let item = queue.removeFirst()
         queueLock.unlock()
-        badAppleVoiceLog("PiperTTS processNext: \(queue.count) left, text='\(item.text.prefix(40))...' voice='\(item.voice)'")
+
+        // Reclaim a pre-rendered WAV if the pipeline already made it.
+        var wavURL: URL?
+        prepLock.lock()
+        wavURL = preparedWavs.removeValue(forKey: item.id)
+        prepLock.unlock()
+
+        badAppleVoiceLog("PiperTTS processNext: \(queue.count) left, prepared=\(wavURL != nil), text='\(item.text.prefix(40))...'")
+
+        // Pre-render the next chunk in parallel with playback so transitions are smooth.
+        preheatNext()
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                badAppleVoiceLog("PiperTTS synthesizing \(item.text.prefix(40))...")
-                let wavURL = try self.synthesize(item.text, voice: item.voice)
-                badAppleVoiceLog("PiperTTS got wav \(wavURL.path)")
+                if wavURL == nil {
+                    badAppleVoiceLog("PiperTTS synthesizing \(item.text.prefix(40))...")
+                    wavURL = try self.synthesize(item.text, voice: item.voice)
+                    badAppleVoiceLog("PiperTTS got wav \(wavURL!.path)")
+                }
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
-                    self.play(url: wavURL) { [weak self] success in
+                    self.play(url: wavURL!) { [weak self] success in
                         item.completion?(success)
                         self?.processNext()
                     }
@@ -313,6 +347,39 @@ final class PiperTTSClient {
                     self?.processNext()
                 }
             }
+        }
+    }
+
+    /// Start synthesizing the next queued item in the background so playback
+    /// of the chunk after the current one can begin immediately.
+    private func preheatNext() {
+        queueLock.lock()
+        let nextItem = queue.first
+        queueLock.unlock()
+
+        guard let next = nextItem else { return }
+
+        prepLock.lock()
+        let already = preparedWavs[next.id] != nil || preparingIDs.contains(next.id)
+        if !already {
+            preparingIDs.insert(next.id)
+        }
+        prepLock.unlock()
+        guard !already else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let url = try self.synthesize(next.text, voice: next.voice)
+                self.prepLock.lock()
+                self.preparedWavs[next.id] = url
+                self.prepLock.unlock()
+            } catch {
+                badAppleVoiceLog("PiperTTS preheat failed: \(error.localizedDescription)")
+            }
+            self.prepLock.lock()
+            self.preparingIDs.remove(next.id)
+            self.prepLock.unlock()
         }
     }
 
