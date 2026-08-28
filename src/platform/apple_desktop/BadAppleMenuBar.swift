@@ -176,15 +176,182 @@ final class BadAppleFFI {
     }
 }
 
+// MARK: - Local neural TTS playback controller (crossfade)
+
+private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate {
+    private let crossfadeDuration: TimeInterval = 0.05
+    private let pollInterval: TimeInterval = 0.010
+
+    private final class PlayItem {
+        let url: URL
+        var player: AVAudioPlayer?
+        var afplayTask: Process?
+        let completion: ((Bool) -> Void)?
+
+        init(url: URL, player: AVAudioPlayer? = nil, afplayTask: Process? = nil, completion: ((Bool) -> Void)? = nil) {
+            self.url = url
+            self.player = player
+            self.afplayTask = afplayTask
+            self.completion = completion
+        }
+    }
+
+    private var pending: [PlayItem] = []
+    private var current: PlayItem?
+    private var previous: [PlayItem] = []
+    private var timer: Timer?
+
+    func enqueue(_ url: URL, completion: ((Bool) -> Void)? = nil) {
+        if let player = try? AVAudioPlayer(contentsOf: url) {
+            player.delegate = self
+            player.prepareToPlay()
+            let item = PlayItem(url: url, player: player, completion: completion)
+            if current == nil {
+                start(item)
+            } else {
+                pending.append(item)
+            }
+        } else {
+            badAppleVoiceLog("PiperTTSPlayback: AVAudioPlayer failed for \(url.path), falling back to afplay")
+            let item = PlayItem(url: url, completion: completion)
+            item.afplayTask = makeAfplayTask(item)
+            if current == nil {
+                start(item)
+            } else {
+                pending.append(item)
+            }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        current?.player?.stop()
+        current?.afplayTask?.terminate()
+        previous.forEach { $0.player?.stop(); $0.afplayTask?.terminate() }
+        pending.removeAll()
+        current = nil
+        previous.removeAll()
+    }
+
+    private func start(_ item: PlayItem) {
+        if let player = item.player {
+            player.volume = 1.0
+            guard player.play() else {
+                badAppleVoiceLog("PiperTTSPlayback: play() failed for \(item.url.path)")
+                notifyCompletion(item.completion, success: false)
+                advanceIfIdle()
+                return
+            }
+            current = item
+            startTimer()
+            badAppleVoiceLog("PiperTTSPlayback: playing \(item.url.path)")
+        } else if let task = item.afplayTask {
+            current = item
+            do {
+                try task.run()
+            } catch {
+                badAppleVoiceLog("PiperTTSPlayback afplay launch failed: \(error.localizedDescription)")
+                notifyCompletion(item.completion, success: false)
+                current = nil
+                advanceIfIdle()
+            }
+        }
+    }
+
+    private func makeAfplayTask(_ item: PlayItem) -> Process {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        let uid = getuid()
+        task.arguments = ["asuser", "\(uid)", "/usr/bin/afplay", item.url.path]
+        task.terminationHandler = { [weak self, weak item] task in
+            guard let self = self, let item = item else { return }
+            let code = task.terminationStatus
+            if code != 0 {
+                badAppleVoiceLog("PiperTTSPlayback afplay exited with \(code)")
+            }
+            DispatchQueue.main.async {
+                self.finishCurrent(item, success: code == 0)
+            }
+        }
+        return task
+    }
+
+    private func startTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+    }
+
+    private func tick() {
+        guard let item = current, let player = item.player, player.isPlaying else {
+            return
+        }
+        let remaining = player.duration - player.currentTime
+        guard !pending.isEmpty, remaining <= crossfadeDuration else { return }
+
+        let next = pending.removeFirst()
+        if let nextPlayer = next.player {
+            nextPlayer.volume = 0.0
+            guard nextPlayer.play() else {
+                badAppleVoiceLog("PiperTTSPlayback: next play() failed for \(next.url.path)")
+                pending.insert(next, at: 0)
+                return
+            }
+            player.setVolume(0.0, fadeDuration: crossfadeDuration)
+            nextPlayer.setVolume(1.0, fadeDuration: crossfadeDuration)
+            previous.append(item)
+            current = next
+            badAppleVoiceLog("PiperTTSPlayback: crossfading to \(next.url.path)")
+        } else if next.afplayTask != nil {
+            // Can't crossfade to an afplay-backed item; play it sequentially.
+            pending.insert(next, at: 0)
+        }
+    }
+
+    private func finishCurrent(_ item: PlayItem, success: Bool) {
+        if current === item {
+            current = nil
+            timer?.invalidate()
+            timer = nil
+        } else if let idx = previous.firstIndex(where: { $0 === item }) {
+            previous.remove(at: idx)
+        }
+        notifyCompletion(item.completion, success: success)
+        advanceIfIdle()
+    }
+
+    private func notifyCompletion(_ completion: ((Bool) -> Void)?, success: Bool) {
+        DispatchQueue.main.async { completion?(success) }
+    }
+
+    private func advanceIfIdle() {
+        guard current == nil, !pending.isEmpty else { return }
+        start(pending.removeFirst())
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        if let idx = previous.firstIndex(where: { $0.player === player }) {
+            let finished = previous.remove(at: idx)
+            notifyCompletion(finished.completion, success: flag)
+            return
+        }
+        guard let item = current, item.player === player else { return }
+        finishCurrent(item, success: flag)
+    }
+}
+
 // MARK: - Local neural TTS client (Piper)
 
 final class PiperTTSClient {
     static let shared = PiperTTSClient()
 
+    private let playback = PiperTTSPlaybackController()
     private let socketPath = "/tmp/badapple_tts.sock"
     private let requestTimeout: TimeInterval = 2.0
     private let responseTimeout: TimeInterval = 60.0
-    private var requestID = 0
+    private var itemCounter = 0
 
     // Simple queue for streaming TTS chunks in order.
     private struct QueueItem {
@@ -196,23 +363,13 @@ final class PiperTTSClient {
     private var queue: [QueueItem] = []
     private let queueLock = NSLock()
     private var isProcessing = false
-    private var runningTask: Process?
-
-    // Pipelined pre-synthesis: the next chunk is rendered while the current one plays.
-    private var preparedWavs: [Int: URL] = [:]
-    private var preparingIDs: Set<Int> = []
-    private let prepLock = NSLock()
 
     func stop() {
         queueLock.lock()
         queue.removeAll()
         isProcessing = false
-        runningTask?.terminate()
         queueLock.unlock()
-        prepLock.lock()
-        preparedWavs.removeAll()
-        preparingIDs.removeAll()
-        prepLock.unlock()
+        playback.stop()
     }
 
     static let defaultVoice = "en_US-amy-medium"
@@ -286,14 +443,13 @@ final class PiperTTSClient {
     /// Enqueue a chunk for synthesis. Chunks play in order so streaming stays smooth.
     /// Long text is broken into sentence chunks so the voice starts earlier.
     func speak(_ text: String, voice: String, completion: ((Bool) -> Void)? = nil) {
-        requestID += 1
-        let myID = requestID
         let chunks = chunkText(text)
 
         queueLock.lock()
         for (index, chunk) in chunks.enumerated() {
             let isLast = index == chunks.count - 1
-            queue.append(QueueItem(text: chunk, voice: voice, id: myID, completion: isLast ? completion : nil))
+            itemCounter += 1
+            queue.append(QueueItem(text: chunk, voice: voice, id: itemCounter, completion: isLast ? completion : nil))
         }
         let shouldStart = !isProcessing
         if shouldStart { isProcessing = true }
@@ -314,31 +470,18 @@ final class PiperTTSClient {
         let item = queue.removeFirst()
         queueLock.unlock()
 
-        // Reclaim a pre-rendered WAV if the pipeline already made it.
-        var wavURL: URL?
-        prepLock.lock()
-        wavURL = preparedWavs.removeValue(forKey: item.id)
-        prepLock.unlock()
-
-        badAppleVoiceLog("PiperTTS processNext: \(queue.count) left, prepared=\(wavURL != nil), text='\(item.text.prefix(40))...'")
-
-        // Pre-render the next chunk in parallel with playback so transitions are smooth.
-        preheatNext()
+        badAppleVoiceLog("PiperTTS processNext: \(queue.count) left, text='\(item.text.prefix(40))...'")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                if wavURL == nil {
-                    badAppleVoiceLog("PiperTTS synthesizing \(item.text.prefix(40))...")
-                    wavURL = try self.synthesize(item.text, voice: item.voice)
-                    badAppleVoiceLog("PiperTTS got wav \(wavURL!.path)")
-                }
+                badAppleVoiceLog("PiperTTS synthesizing \(item.text.prefix(40))...")
+                let wavURL = try self.synthesize(item.text, voice: item.voice)
+                badAppleVoiceLog("PiperTTS got wav \(wavURL.path)")
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
-                    self.play(url: wavURL!) { [weak self] success in
-                        item.completion?(success)
-                        self?.processNext()
-                    }
+                    self.playback.enqueue(wavURL, completion: item.completion)
+                    self.processNext()
                 }
             } catch {
                 badAppleVoiceLog("PiperTTS synthesize error: \(error.localizedDescription)")
@@ -347,39 +490,6 @@ final class PiperTTSClient {
                     self?.processNext()
                 }
             }
-        }
-    }
-
-    /// Start synthesizing the next queued item in the background so playback
-    /// of the chunk after the current one can begin immediately.
-    private func preheatNext() {
-        queueLock.lock()
-        let nextItem = queue.first
-        queueLock.unlock()
-
-        guard let next = nextItem else { return }
-
-        prepLock.lock()
-        let already = preparedWavs[next.id] != nil || preparingIDs.contains(next.id)
-        if !already {
-            preparingIDs.insert(next.id)
-        }
-        prepLock.unlock()
-        guard !already else { return }
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            do {
-                let url = try self.synthesize(next.text, voice: next.voice)
-                self.prepLock.lock()
-                self.preparedWavs[next.id] = url
-                self.prepLock.unlock()
-            } catch {
-                badAppleVoiceLog("PiperTTS preheat failed: \(error.localizedDescription)")
-            }
-            self.prepLock.lock()
-            self.preparingIDs.remove(next.id)
-            self.prepLock.unlock()
         }
     }
 
@@ -449,36 +559,6 @@ final class PiperTTSClient {
         return response
     }
 
-    /// Play the synthesized WAV via afplay in the user session for reliability.
-    /// LSUIElement/background apps can fail to open CoreAudio; launching afplay
-    /// with `launchctl asuser` puts it in the user's login bootstrap where audio
-    /// actually works.
-    private func play(url: URL, completion: @escaping (Bool) -> Void) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        let uid = getuid()
-        task.arguments = ["asuser", "\(uid)", "/usr/bin/afplay", url.path]
-        task.standardOutput = nil
-        task.standardError = nil
-        badAppleVoiceLog("PiperTTS playing \(url.path)")
-        runningTask = task
-        task.terminationHandler = { [weak self] task in
-            self?.runningTask = nil
-            let code = task.terminationStatus
-            if code != 0 {
-                badAppleVoiceLog("PiperTTS afplay exited with \(code)")
-            }
-            DispatchQueue.main.async { completion(code == 0) }
-        }
-        do {
-            try task.run()
-            badAppleVoiceLog("PiperTTS afplay launched for \(url.path)")
-        } catch {
-            badAppleVoiceLog("PiperTTS play error: \(error.localizedDescription)")
-            runningTask = nil
-            completion(false)
-        }
-    }
 }
 
 // MARK: - Native voice host

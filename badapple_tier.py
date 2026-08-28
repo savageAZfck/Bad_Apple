@@ -23,7 +23,7 @@ from typing import Any
 IDENTITY_RESPONSES = [
     "I'm Bad Apple, your sovereign local girl running hot on this Apple bare metal, babe. No cloud, no rented GPUs, no data mining — just you, me, and this Mac.",
     "I'm Bad Apple, babe. I live on your Mac, not in some cloud server farm. Bare metal, no data mining, no rented GPUs.",
-    "Your local AI bestie, babe. I run on this Apple Silicon Mac — sovereign, air-gapped, and totally not feeding some cloud.",
+    "I'm Bad Apple, your local AI bestie, babe. I run on this Apple Silicon Mac — sovereign, air-gapped, and totally not feeding some cloud.",
 ]
 
 GREETING_RESPONSES = [
@@ -119,7 +119,7 @@ class TieringRouter:
 
         # Fast tier: capabilities. Return the full list without waking the 9B.
         if re.search(r"\b(what can you do|what are you capable of|what can you do on my mac|list your capabilities|tell me what you can do)\b", low):
-            return ("fast", {"text": "I can answer questions, explain, summarize, brainstorm, and roast cloud AI. I can run local tools like time, file read/list/write, read-only shell, AppleScript, macOS Shortcuts, git, document indexing and search, working memory, calendar, reminders, and mail. I can see your screen and describe images, switch personas or roast mode, teach a quip, speak responses, run benchmarks, stream JSON tokens, keep multi-turn chat, and remember facts. All of it stays on your Mac, babe."})
+            return ("fast", {"text": "I can answer questions, run local tools and MCP servers, search files, write notes, run Shortcuts, manage a workspace, run agent tasks, use the kill switch and air-gap switch, pre-download models, capture ambient context, speak responses, switch personas, run benchmarks, stream JSON, and show a web dashboard — all on your Mac, no cloud."})
 
         # Fast tier: very short greetings / thanks.  Anything that needs a real
         # answer (a joke, good morning/evening) goes to the 9B so the 0.5B fast

@@ -432,3 +432,9 @@ In `badapple_mlx_server.py`:
   `status`, `download`, `allow_downloads`, `refresh`.
 - The onboarding wizard now includes a model-download step that links to
   `/models` so first-time users can pre-download before asking deep questions.
+
+## Capabilities endpoint and menu bar TTS
+
+- `GET /api/capabilities` in `badapple_dashboard.py` returns the current feature list, preferring the server's `_capabilities_answer` and falling back to a static list.
+- The dashboard renders the capabilities list as a full-width panel with `id="capabilities-list"`, fetched and updated by `web/static/app.js`.
+- The menu bar `PiperTTSClient` streams chunked TTS through `PiperTTSPlaybackController`, which queues WAVs and crossfades consecutive chunks with a 50 ms volume ramp. If `AVAudioPlayer` fails, it falls back to the previous `afplay` path. Apple TTS fallback for a full Piper failure remains in `BadAppleVoiceHost`.

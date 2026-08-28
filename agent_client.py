@@ -148,7 +148,7 @@ def main():
             return 1
         print(json.dumps(call_agent("private_mode", {"enabled": sys.argv[2] == "on"}), indent=2))
     elif cmd == "airgap":
-        if len(sys.argv) == 1:
+        if len(sys.argv) == 2:
             print(json.dumps(call_agent("airgap_status"), indent=2))
         elif sys.argv[2] in ("on", "off"):
             print(json.dumps(call_agent("set_airgap", {"enabled": sys.argv[2] == "on"}), indent=2))

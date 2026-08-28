@@ -291,6 +291,23 @@ button.suggestion:hover { border-color: var(--accent); color: var(--text); }
   border-top: 1px solid var(--border-subtle); padding-top: 0.5rem;
 }
 
+.cap-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.6rem;
+}
+.cap-list li {
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
 .typing {
   display: flex; gap: 0.25rem; padding: 0.75rem 1rem;
 }

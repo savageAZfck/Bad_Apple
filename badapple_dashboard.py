@@ -17,6 +17,7 @@ Endpoints:
 import http.server
 import json
 import os
+import re
 import secrets
 import shutil
 import socketserver
@@ -72,6 +73,38 @@ def _get_csrf_token() -> str:
 
 def _csrf_cookie() -> str:
     return f"csrf_token={_get_csrf_token()}; Path=/; SameSite=Strict"
+
+
+_DEFAULT_CAPABILITIES = [
+    "Answer questions, explain, summarize, brainstorm, and chat — fully local and air-gapped.",
+    "Run local tools: shell, AppleScript, file read/write/search, and macOS Shortcuts with your approval.",
+    "Use local MCP servers (time, filesystem, fetch, sqlite, etc.) with per-tool write approvals.",
+    "Index documents for RAG, remember facts, and manage a workspace / project context.",
+    "Run multi-step agent tasks and capture ambient context (screen, active app).",
+    "Engage the kill switch / emergency stop and the air-gap hard switch to lock down network access.",
+    "Pre-download models with a one-click memory check, switch personas, run benchmarks, and stream JSON.",
+    "Speak responses through the local Piper TTS server and integrate with macOS Shortcuts and Siri.",
+    "Show a local web dashboard / control center at http://127.0.0.1:8787.",
+    "Sync with other Bad Apple peers over P2P — off by default.",
+]
+
+
+def _capabilities_list() -> list[str]:
+    """Return the current capability list, preferring the server's persona-flavored answer."""
+    if _server_instance is not None and hasattr(_server_instance, "_capabilities_answer"):
+        try:
+            answer = _server_instance._capabilities_answer(voice_mode=False)
+            items: list[str] = []
+            for line in answer.splitlines():
+                m = re.match(r"^\d+\.\s*(.*)$", line.strip())
+                if m:
+                    text = m.group(1).strip()
+                    if text:
+                        items.append(text)
+            return items if items else _DEFAULT_CAPABILITIES
+        except Exception:
+            pass
+    return _DEFAULT_CAPABILITIES
 
 
 def _check_csrf_token(headers: dict[str, str], body: dict[str, Any] | None = None) -> bool:
@@ -883,6 +916,12 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             return
         if path == "/api/csrf":
             self._send_json({"csrf_token": _get_csrf_token()})
+            return
+        if path == "/api/capabilities":
+            try:
+                self._send_json({"capabilities": _capabilities_list()})
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                self._send_json({"error": str(e)}, 500)
             return
         if path == "/models" or path == "/models.html":
             self._serve_html_file("models.html")

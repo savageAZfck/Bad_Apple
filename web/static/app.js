@@ -488,6 +488,7 @@ async function updateDashboard() {
     { key: 'ledger', path: '/api/ledger?n=50' },
     { key: 'mcp', path: '/api/mcp_servers' },
     { key: 'voice', path: '/api/voice?n=12' },
+    { key: 'capabilities', path: '/api/capabilities' },
   ];
   const settled = await Promise.allSettled(endpoints.map(e => api(e.path)));
   const data = {};
@@ -501,7 +502,7 @@ async function updateDashboard() {
     }
   });
   setDashboardSkeletons(false);
-  renderDashboard(status, data.snap || {}, data.tail || [], data.ledger || [], data.mcp || [], data.voice || [], errors);
+  renderDashboard(status, data.snap || {}, data.tail || [], data.ledger || [], data.mcp || [], data.voice || {}, data.capabilities || {}, errors);
 }
 
 function setDashboardSkeletons(loading) {
@@ -518,6 +519,7 @@ function setDashboardSkeletons(loading) {
     const panels = [
       { id: 'p2p-peers', lines: 2 },
       { id: 'mcp-status', lines: 2 },
+      { id: 'capabilities-list', lines: 4 },
       { id: 'tool-calls', lines: 4 },
       { id: 'voice-activity', lines: 4 },
     ];
@@ -543,7 +545,7 @@ function errorState(title, detail) {
   return `<div class="error-state"><div class="error-title">${title}</div><div class="error-body">${short}</div><button class="secondary" onclick="loadDashboard()">Retry</button></div>`;
 }
 
-function renderDashboard(status, snap, tail, ledger, mcp, voice, errors = {}) {
+function renderDashboard(status, snap, tail, ledger, mcp, voice, capabilities, errors = {}) {
   const rt = status.runtime || {};
   const flags = [];
   if (rt.killed) flags.push('killed');
@@ -639,6 +641,16 @@ function renderDashboard(status, snap, tail, ledger, mcp, voice, errors = {}) {
       }).join('');
   } else {
     voiceEl.innerHTML = emptyState('No voice activity yet', 'Voice events appear here when voice mode is enabled.');
+  }
+
+  const capList = capabilities?.capabilities || [];
+  const capEl = $('#capabilities-list');
+  if (errors.capabilities) {
+    capEl.innerHTML = errorState('Could not load capabilities', errors.capabilities);
+  } else if (capList.length) {
+    capEl.innerHTML = capList.map(c => `<li>${escapeHtml(c)}</li>`).join('');
+  } else {
+    capEl.innerHTML = emptyState('Capabilities not loaded', 'The daemon may still be starting.');
   }
 
   updateMetricsChart(snap, status);
