@@ -30,6 +30,7 @@ import mlx.core as mx
 from langdetect import LangDetectException, detect
 from mlx_lm import load
 from mlx_lm.generate import stream_generate
+from mlx_lm.models.cache import make_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 
 import badapple_agent_tasks
@@ -2218,6 +2219,11 @@ class MLXServer:
         self._roast_index = 0
         self.last_metrics: dict[str, Any] | None = None
 
+        # Reusable prompt KV cache. Primed with the system prompt so the
+        # expensive system prefill is not repeated on every query.
+        self.prompt_cache: list[Any] | None = None
+        self._cache_system_hash: str | None = None
+
         # Runtime/health/breakers
         self.runtime = RuntimeControl(self.data_dir)
         self.health = HealthRegistry()
@@ -2391,8 +2397,51 @@ class MLXServer:
             self.model_registry.set_current(MAIN_MODEL)
             self._load_speculative_draft()
             self.mlx_device = mx.default_device()
+            self._init_prompt_cache()
         finally:
             self._main_model_loading = False
+
+    def _init_prompt_cache(self) -> None:
+        """Create a reusable prompt cache and prime it with the default system prompt."""
+        if self.model is None or self.tokenizer is None:
+            return
+        if self.prompt_cache is None:
+            self.prompt_cache = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
+        system = self.personas.get_system_prompt(voice_mode=False)
+        self._prime_system_cache(system, voice_mode=False)
+
+    def _prime_system_cache(self, system_content: str, voice_mode: bool) -> None:
+        """Run the system message through the model to populate the prompt cache.
+
+        The cache is reset to the system prefix after every response so the next
+        query only has to prefill the user/history suffix, not the system prompt.
+        """
+        if self.model is None or self.tokenizer is None or self.prompt_cache is None:
+            return
+        t0 = time.time()
+        rendered = self.tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_content}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        tokens = self.tokenizer.encode(rendered, add_special_tokens=False)
+        self._cache_system_hash = f"{voice_mode}:{hash(rendered)}"
+        try:
+            _ = self.model(mx.array(tokens)[None], cache=self.prompt_cache)
+            mx.eval([c.state for c in self.prompt_cache])
+            mx.clear_cache()
+            print(f"[perf] system prompt cache primed ({len(tokens)} tokens) in {time.time() - t0:.2f}s", flush=True)
+        except Exception as e:  # noqa: BLE001 - cache priming is best-effort
+            print(f"[main] system prompt cache priming failed: {e}", flush=True)
+            self._cache_system_hash = None
+
+    def _ensure_prompt_cache(self, system_content: str, voice_mode: bool) -> None:
+        """Re-prime the cache if the system prompt or voice mode changed."""
+        expected_hash = f"{voice_mode}:{hash(system_content)}"
+        if self.prompt_cache is None or self._cache_system_hash != expected_hash:
+            if self.prompt_cache is None:
+                self.prompt_cache = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
+            self._prime_system_cache(system_content, voice_mode=voice_mode)
 
     def flush_vram(self) -> dict[str, Any]:
         """Clear the Metal allocation cache instantly."""
@@ -3445,8 +3494,28 @@ class MLXServer:
     ) -> str:
         self._ensure_main_model()
         t0 = time.time()
-        tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
-        print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(tokens)} tokens)", flush=True)
+        full_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
+        print(f"[perf] prompt encoded in {time.time() - t0:.2f}s ({len(full_tokens)} tokens)", flush=True)
+
+        # Use a system-prompt KV cache so the expensive system prefill is not repeated.
+        system_content = self.personas.get_system_prompt(voice_mode=voice_mode)
+        self._ensure_prompt_cache(system_content, voice_mode=voice_mode)
+        system_rendered = self.tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_content}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        system_tokens = self.tokenizer.encode(system_rendered, add_special_tokens=False)
+        if (
+            self.prompt_cache is not None
+            and len(full_tokens) >= len(system_tokens)
+            and full_tokens[: len(system_tokens)] == system_tokens
+        ):
+            tokens = full_tokens[len(system_tokens) :]
+            print(f"[perf] using system-prompt cache ({len(system_tokens)} tokens); prefill {len(tokens)} tokens", flush=True)
+        else:
+            tokens = full_tokens
+            print("[perf] system-prompt cache mismatch, doing full prefill", flush=True)
 
         self.firewall.reset()
 
@@ -3499,77 +3568,83 @@ class MLXServer:
             # These are tunable at runtime with `set max kv size to N`.
             "prefill_step_size": self.prefill_step_size,
             "max_kv_size": self.max_kv_size,
+            "prompt_cache": self.prompt_cache,
         }
         if self.draft_model is not None:
             gen_kwargs["draft_model"] = self.draft_model
             gen_kwargs["num_draft_tokens"] = NUM_DRAFT_TOKENS
         gen_t0 = time.time()
         first_token_logged = False
-        for response in stream_generate(**gen_kwargs):
-            if self.runtime.cancel_event.is_set():
-                accumulated = accumulated or "Generation cancelled by kill switch."
-                break
-            if not first_token_logged:
-                print(f"[perf] first token after {time.time() - gen_t0:.2f}s", flush=True)
-                first_token_logged = True
-            accumulated += response.text
-            if stream_queue is not None:
-                stream_buffer += response.text
-                if _is_sentence_end(stream_buffer):
+        try:
+            for response in stream_generate(**gen_kwargs):
+                if self.runtime.cancel_event.is_set():
+                    accumulated = accumulated or "Generation cancelled by kill switch."
+                    break
+                if not first_token_logged:
+                    print(f"[perf] first token after {time.time() - gen_t0:.2f}s", flush=True)
+                    first_token_logged = True
+                accumulated += response.text
+                if stream_queue is not None:
+                    stream_buffer += response.text
+                    if _is_sentence_end(stream_buffer):
+                        chunk = polish_text(stream_buffer)
+                        if chunk:
+                            # Add a trailing space after sentence-ending punctuation so the
+                            # next streamed chunk doesn't run into this one.
+                            if chunk.endswith((".", "!", "?", "…")):
+                                chunk += " "
+                            if not _emit(chunk):
+                                return "[Output firewall: blocked streaming content]"
+                        stream_buffer = ""
+                total_tokens += 1
+                if response.from_draft:
+                    draft_tokens += 1
+                # Hard stop on persona boundaries.
+                if any(s in accumulated for s in ("\n\n", "—besos")):
+                    if stream_queue is not None and stream_buffer.strip():
+                        if not _emit(polish_text(stream_buffer) + " "):
+                            return "[Output firewall: blocked streaming content]"
+                    break
+                if response.finish_reason is not None:
+                    final_metrics = response
+            if stream_queue is not None and stream_buffer.strip():
+                # If we hit the token limit and the final fragment is incomplete,
+                # don't speak a cut-off word. We add the sign-off below instead.
+                if final_metrics is not None and final_metrics.finish_reason == "length" and not _is_sentence_end(stream_buffer):
+                    pass
+                else:
                     chunk = polish_text(stream_buffer)
                     if chunk:
-                        # Add a trailing space after sentence-ending punctuation so the
-                        # next streamed chunk doesn't run into this one.
                         if chunk.endswith((".", "!", "?", "…")):
                             chunk += " "
                         if not _emit(chunk):
                             return "[Output firewall: blocked streaming content]"
-                    stream_buffer = ""
-            total_tokens += 1
-            if response.from_draft:
-                draft_tokens += 1
-            # Hard stop on persona boundaries.
-            if any(s in accumulated for s in ("\n\n", "—besos")):
-                if stream_queue is not None and stream_buffer.strip():
-                    if not _emit(polish_text(stream_buffer) + " "):
-                        return "[Output firewall: blocked streaming content]"
-                break
-            if response.finish_reason is not None:
-                final_metrics = response
-        if stream_queue is not None and stream_buffer.strip():
-            # If we hit the token limit and the final fragment is incomplete,
-            # don't speak a cut-off word. We add the sign-off below instead.
-            if final_metrics is not None and final_metrics.finish_reason == "length" and not _is_sentence_end(stream_buffer):
-                pass
-            else:
-                chunk = polish_text(stream_buffer)
-                if chunk:
-                    if chunk.endswith((".", "!", "?", "…")):
-                        chunk += " "
-                    if not _emit(chunk):
-                        return "[Output firewall: blocked streaming content]"
-        # No sign-off injection.
-        if final_metrics is not None:
-            pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
-            total_time = time.time() - gen_t0
-            total_tps = final_metrics.generation_tokens / total_time if total_time > 0 else 0.0
-            print(
-                f"[perf] {final_metrics.generation_tokens} tokens @ "
-                f"{final_metrics.generation_tps:.1f} t/s, "
-                f"draft_accept_ratio={pct:.0f}%, "
-                f"num_draft_tokens={NUM_DRAFT_TOKENS}, "
-                f"peak_memory={final_metrics.peak_memory:.2f} GB",
-                flush=True,
-            )
-            self.last_metrics = {
-                "tokens": int(final_metrics.generation_tokens),
-                "decode_tps": float(final_metrics.generation_tps),
-                "total_tps": float(total_tps),
-                "draft_accept_pct": float(pct),
-                "peak_memory_gb": float(final_metrics.peak_memory),
-            }
-        _maybe_purge_metal_cache()
-        return accumulated
+            # No sign-off injection.
+            if final_metrics is not None:
+                pct = (100.0 * draft_tokens / total_tokens) if total_tokens > 0 else 0.0
+                total_time = time.time() - gen_t0
+                total_tps = final_metrics.generation_tokens / total_time if total_time > 0 else 0.0
+                print(
+                    f"[perf] {final_metrics.generation_tokens} tokens @ "
+                    f"{final_metrics.generation_tps:.1f} t/s, "
+                    f"draft_accept_ratio={pct:.0f}%, "
+                    f"num_draft_tokens={NUM_DRAFT_TOKENS}, "
+                    f"peak_memory={final_metrics.peak_memory:.2f} GB",
+                    flush=True,
+                )
+                self.last_metrics = {
+                    "tokens": int(final_metrics.generation_tokens),
+                    "decode_tps": float(final_metrics.generation_tps),
+                    "total_tps": float(total_tps),
+                    "draft_accept_pct": float(pct),
+                    "peak_memory_gb": float(final_metrics.peak_memory),
+                }
+            _maybe_purge_metal_cache()
+            return accumulated
+        finally:
+            # Reset the cache to the system prompt so the next query only prefills
+            # the new user/history suffix, not the expensive system message.
+            self._prime_system_cache(system_content, voice_mode=voice_mode)
 
     def _stream_dflash(
         self,
