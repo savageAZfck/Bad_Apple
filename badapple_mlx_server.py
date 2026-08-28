@@ -2574,6 +2574,46 @@ class MLXServer:
             tail = " That's the vibe, babe."
         return base + autopilot + tail
 
+    def _try_meta_response(self, prompt: str, voice_mode: bool = False) -> str | None:
+        """Return a direct answer for identity, creator, or capability questions.
+
+        These must be intercepted before the tool fast path, otherwise phrases like
+        "list all your features" get treated as directory-listing commands.
+        """
+        lower = prompt.strip().lower()
+        capability_phrases = (
+            "what can you do", "what are you capable of", "what do you do",
+            "what can you do on", "what can you do for", "what can you do?",
+            "what can you do for me", "what can you do for us",
+            "list your capabilities", "list all your capabilities",
+            "list all of your capabilities", "list your features",
+            "list all your features", "list all of your features",
+            "list all bad apple", "list all bad apples",
+            "what are your features", "what are all your features",
+            "what are your capabilities", "what are all your capabilities",
+            "what features do you have", "what features do you offer",
+            "tell me everything you can do", "tell me what you can do",
+            "tell me your features", "tell me your capabilities",
+            "what are you able to do", "what can you help me with",
+            "what do you support", "what can you do exactly",
+        )
+        identity_phrases = (
+            "who are you", "what are you", "what is bad apple",
+            "tell me about yourself", "who is bad apple", "what are you exactly",
+            "what is this", "what is badapple",
+        )
+        creator_phrases = (
+            "who created you", "who is your creator", "who made you",
+            "who built you", "who owns you",
+        )
+        if any(phrase in lower for phrase in capability_phrases):
+            return self._capabilities_answer(voice_mode=voice_mode)
+        if any(phrase in lower for phrase in identity_phrases):
+            return self._identity_answer()
+        if any(phrase in lower for phrase in creator_phrases):
+            return self._creator_answer()
+        return None
+
     def check_prompt_reload(self):
         """Hot-reload the system prompt if prompt.txt changed on disk."""
         try:
@@ -2830,52 +2870,17 @@ class MLXServer:
 
             # Capability and creator questions are answered directly so the 9B does
             # not fall back into generic model identity or skip the useful part.
-            lower = user_prompt.strip().lower()
-            capability_phrases = (
-                "what can you do", "what are you capable of", "what do you do",
-                "what can you do on", "what can you do for", "list your capabilities",
-                "list all your capabilities", "list all of your capabilities",
-                "list your features", "list all your features",
-                "list all of your features", "list all bad apple",
-                "what are your features", "what are all your features",
-                "what are your capabilities", "what are all your capabilities",
-                "what features do you have", "what can you do?",
-                "tell me everything you can do", "tell me what you can do",
-            )
-            if any(phrase in lower for phrase in capability_phrases):
-                resp = self._capabilities_answer(voice_mode=voice_mode)
-                self._audit_record("capabilities", {"prompt": user_prompt, "response": resp})
+            meta_resp = self._try_meta_response(user_prompt, voice_mode=voice_mode)
+            if meta_resp is not None:
+                kind = "capabilities" if "can do" in meta_resp or "what I can do" in meta_resp else "identity"
+                self._audit_record(kind, {"prompt": user_prompt, "response": meta_resp})
                 self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": resp})
+                self.messages.append({"role": "assistant", "content": meta_resp})
                 self.prune_history()
                 self._save_conversation()
                 if stream_queue is not None:
-                    stream_queue.put(resp)
-                return resp
-            identity_phrases = (
-                "who are you", "what are you", "what is bad apple",
-                "tell me about yourself", "who is bad apple", "what are you exactly",
-            )
-            if any(phrase in lower for phrase in identity_phrases):
-                resp = self._identity_answer()
-                self._audit_record("identity", {"prompt": user_prompt, "response": resp})
-                self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": resp})
-                self.prune_history()
-                self._save_conversation()
-                if stream_queue is not None:
-                    stream_queue.put(resp)
-                return resp
-            if any(phrase in lower for phrase in ("who created you", "who is your creator", "who made you", "who built you")):
-                resp = self._creator_answer()
-                self._audit_record("creator", {"prompt": user_prompt, "response": resp})
-                self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": resp})
-                self.prune_history()
-                self._save_conversation()
-                if stream_queue is not None:
-                    stream_queue.put(resp)
-                return resp
+                    stream_queue.put(meta_resp)
+                return meta_resp
 
             # Semantic cache: bypass the 9B for repeated questions.
             if not self.runtime.private_mode and not voice_mode and not should_use_tools(user_prompt):
@@ -4568,6 +4573,22 @@ class MLXServer:
 
             # Fast deterministic path for direct tool commands (read, list, run, search, write).
             # This avoids a full 8B generation for simple local actions and stays air-gapped.
+            # Intercept identity/capability/creator questions first, otherwise "list all your features"
+            # is mistaken for a directory listing.
+            meta_resp = self._try_meta_response(prompt, voice_mode=voice_mode)
+            if meta_resp is not None:
+                meta_resp = self.polish_response(postprocess_output(meta_resp))
+                self.record_fact(prompt, source="user")
+                self._add_episode(prompt, meta_resp)
+                self.messages.append({"role": "user", "content": prompt})
+                self.messages.append({"role": "assistant", "content": meta_resp})
+                self.prune_history()
+                self._save_conversation()
+                kind = "capabilities" if "what I can do" in meta_resp else "identity"
+                self._audit_record(kind, {"prompt": prompt, "response": meta_resp})
+                await _write_frame(writer, {"type": "done", "text": meta_resp})
+                return
+
             fast = None if (benchmark_mode or self.runtime.safe_mode) else fast_execute(
                 prompt,
                 self.knowledge,
