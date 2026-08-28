@@ -3303,6 +3303,7 @@ class MLXServer:
                     self.mcp_process.wait(timeout=2)
             except Exception as e:  # noqa: BLE001 - cleanup
                 print(f"[main] MCP server terminate failed: {e}", flush=True)
+        _kill_stale_mcp_servers()
         try:
             mcp_env = os.environ.copy()
             mcp_env.setdefault("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock")
@@ -4713,6 +4714,14 @@ class DashboardServer:
         self._web.start(self.mlx_server)
 
 
+def _kill_stale_mcp_servers() -> None:
+    """Kill any running badapple_mcp_server.py processes so a new one can own the socket."""
+    try:
+        subprocess.run(["pkill", "-f", "badapple_mcp_server.py"], check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _rotate_log_if_needed() -> None:
     """Keep the daemon log from growing without bound and reopen stdout."""
     log = Path("/var/log/bad_apple_mlx_server.log")
@@ -4816,6 +4825,7 @@ async def main():
         print(f"[main] Scheduler failed to start: {e}", flush=True)
 
     # Start the local MCP server (Unix socket only; uses the same SLICKS agent channel).
+    _kill_stale_mcp_servers()
     mcp_process: subprocess.Popen | None = None
     try:
         mcp_env = os.environ.copy()
