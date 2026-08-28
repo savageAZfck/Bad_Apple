@@ -12,6 +12,26 @@ After the model weights are cached once, **nothing leaves your machine**.
 
 ---
 
+## What's new
+
+- **50 ms Piper TTS crossfade** — the menu bar queues WAV chunks and crossfades
+  each into the next with a 50 ms volume ramp, so long spoken responses no
+  longer gap between sentences. If `AVAudioPlayer` cannot play, it falls back
+  to `afplay`; a full Piper failure falls back to Apple TTS.
+- **Capabilities endpoint and dashboard panel** — `GET /api/capabilities` returns
+  the current feature list, and the dashboard at `http://127.0.0.1:8787/dashboard`
+  renders it as a live panel.
+- **Persona-consistent fast tier** — `badapple_tier.py` routes identity and
+  capability questions to short, persona-flavored responses that match the
+  full numbered feature list.
+- **Fast-path tests** — `tests/test_fast_paths.py` verifies identity, capability,
+  feature-list, kill switch, and air-gap shortcuts without loading the 9B model.
+- **Model manager and lazy 9B loading** — skip the 9B load at startup with
+  `BADAPPLE_LAZY_MAIN_MODEL=1`, and use the dashboard `/models` page to
+  pre-download the 9B, 32B, 70B, vision, and FLUX models before first use.
+
+---
+
 ## What it is
 
 Bad Apple is both a product and a proof-of-concept for a **Bare-Metal AI OS**:
@@ -43,8 +63,10 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
 - **Streaming output** — tokens stream to the terminal, TTS, or the menu bar
   as they are generated.
 - **Hot-reloadable prompt** — edit `prompt.txt` without restarting the daemon.
-- **Voice + TTS** — local Piper TTS via `badapple_tts_server.py`, played
-  through `afplay`; optional menu-bar voice input.
+- **Voice + TTS** — local Piper TTS via `badapple_tts_server.py`, queued and
+  crossfaded in the menu bar with a 50 ms volume ramp so multi-sentence speech
+  is continuous. Menu bar playback uses `AVAudioPlayer` with an `afplay` fallback;
+  full Piper failure falls back to Apple TTS. Optional voice input is supported.
 
 ### Memory & retrieval
 
@@ -113,8 +135,10 @@ and the roadmap in [ROADMAP.md](ROADMAP.md).
   use only the local repo.
 - **Power dashboard / control center** — `system_dashboard` returns CPU, memory,
   swap, disk, battery, thermal pressure, and Bad Apple process stats. The local
-  web UI at `http://127.0.0.1:8787/control` exposes kill/resume, autopilot,
-  fast tier, ambient, P2P, and CLI overrides.
+  web UI at `http://127.0.0.1:8787/dashboard` exposes a live capabilities panel,
+  runtime cards, log/ledger tail, MCP status, P2P peers, voice activity, and
+  performance charts. The control page at `/control` provides kill/resume,
+  autopilot, fast tier, ambient, P2P, and CLI overrides.
 - **Deterministic sessions** — `set_session_seed` pins the MLX random stream;
   same prompt, same output.
 - **Scheduler + Shortcuts** — `schedule_task`, `list_scheduled_tasks`, and
@@ -477,7 +501,10 @@ What works now:
 - Homebrew Cask formula and tap generator
 - lazy 9B loading and a 0.5B fast tier
 - background model manager with dashboard checklist
-- 52 passing unit tests, `ruff` clean, `cargo build --release`
+- 50 ms crossfaded Piper TTS in the menu bar, with Apple TTS fallback
+- live capabilities panel on the dashboard
+- fast-path integration tests for identity, capabilities, kill switch, and air-gap
+- `ruff` clean, `cargo build --release`, and the full test suite passing
 
 Remaining blockers to 8+:
 - signed and notarized release as the default artifact
