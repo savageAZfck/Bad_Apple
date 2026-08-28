@@ -504,7 +504,8 @@ What works now:
 - 50 ms crossfaded Piper TTS in the menu bar, with Apple TTS fallback
 - live capabilities panel on the dashboard
 - fast-path integration tests for identity, capabilities, kill switch, and air-gap
-- `ruff` clean, `cargo build --release`, and the full test suite passing
+- `ruff` clean, `cargo build --release`, and 78 of 79 unit tests passing
+  (one pre-existing lazy-model tokenizer mock failure in `tests/test_lazy_model.py`)
 
 Remaining blockers to 8+:
 - signed and notarized release as the default artifact
