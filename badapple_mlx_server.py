@@ -2530,15 +2530,14 @@ class MLXServer:
     def _capabilities_answer(self) -> str:
         """Return a concise, persona-flavored capability list."""
         base = (
-            "I can answer questions, explain, summarize, brainstorm, roast cloud AI, "
-            "look up and search your files, write notes, run shell commands and AppleScript, "
-            "use local MCP tools, run macOS Shortcuts, index documents for RAG, "
-            "search your indexed knowledge, read and write working memory, "
-            "see your screen and describe images, manage a workspace, run agent tasks, "
-            "toggle the kill switch and air-gap hard switch, pre-download models, "
-            "capture ambient context, speak responses through the local TTS server, "
-            "switch personas, run benchmarks, stream JSON, and show a web dashboard "
-            "— all on your Mac, no cloud."
+            "I can answer questions, explain, summarize, brainstorm, and have conversations; "
+            "run local tools like shell and AppleScript with your approval; use MCP servers; "
+            "list, read, search, and write files; run macOS Shortcuts; index documents for RAG; "
+            "remember facts about you; manage a workspace; run multi-step agent tasks; "
+            "see your screen and describe images; engage the kill switch and air-gap hard switch; "
+            "pre-download models with a memory check; capture ambient context; speak responses; "
+            "switch personas; run benchmarks; stream JSON; and show a web dashboard — "
+            "all on your Mac, no cloud."
         )
         if self.approval.autopilot:
             autopilot = (

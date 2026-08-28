@@ -59,36 +59,72 @@ All models are cached on disk after the first download. Nothing is re-downloaded
 
 When asked, it should say:
 
-> I can answer questions, run local tools, search files, write notes, run shell/AppleScript/Shortcuts, index documents, manage working memory, switch personas, speak, stream JSON, and run benchmarks — all on your Mac, babe.
+> I can answer questions, run local tools and MCP servers, search files, write notes, manage a workspace, run agent tasks, use the kill switch and air-gap hard switch, pre-download models, capture ambient context, speak, switch personas, run benchmarks, stream JSON, and show a web dashboard — all on your Mac, no cloud, babe.
 
-### Core capabilities
+### 1. Core AI
+1. Answer questions, explain, summarize, brainstorm, and write short notes
+2. Run a local 9B Qwen 3.5 brain and a 0.5B fast tier on Apple Silicon
+3. Switch persona at runtime: `switch to default`, `wicket`, `genz`, `drill`, `midwest`
+4. `switch to roast` or `--roast` for the drill persona
+5. `teach <line>` to store a custom quip
+6. Multi-turn conversation with local JSONL history
+7. Hot-reloadable system prompt via `prompt.txt`
 
-- Answer questions, explain concepts, summarize text, brainstorm, write short notes
-- Roast cloud AI / Siri / Alexa / Google / ChatGPT / Gemini / etc. when asked about bare metal or identity
-- Switch persona at runtime: `switch to wicket`, `switch to drill`, `switch to genz`, `switch to midwest`, `switch to default`
-- `switch to roast` or `--roast` for drill persona
-- `teach <line>` to store a custom quip
-- `--speak` / voice mode to stream responses through local Piper TTS
-- `--benchmark` to run the prompt suite
-- `--json` to stream tokens as JSON
-- Multi-turn conversation with local JSONL history
-- Persistent user memory and RAG over indexed local documents
-- Hot-reloadable system prompt via `prompt.txt`
+### 2. Memory and knowledge
+1. Working memory / scratchpad
+2. Persistent user memory graph and episodic recall
+3. Semantic cache for repeated questions
+4. Local document indexing and RAG search
+5. Workspace / project context
 
-### Local tools (no cloud)
+### 3. Voice and interface
+1. Text input via the Rust CLI
+2. Voice mode with STT / "hey bad apple" wake
+3. Local Piper neural TTS with `--speak`
+4. macOS menu bar app with voice HUD
+5. macOS Shortcuts and Siri AppIntents
+6. Local web dashboard at `http://127.0.0.1:8787`
+7. REST `/api/chat` endpoint and web chat UI
 
-- `get_current_time` — local system time
-- `list_directory` — list files in a path
-- `read_file` — read a file with size limit
-- `write_file` — write a note to `~/.bad_apple/notes/`
-- `search_content` — `grep -R` over a directory
-- `search_local_files` — Spotlight search via `mdfind`
-- `run_shell` — sandboxed shell (read-only by default: `ls`, `cat`, `head`, `tail`, `find`, `grep`, `wc`, `file`, `pwd`, `mdfind`, `ps`, `df`, `du`)
-- `run_applescript` — execute AppleScript
-- `run_shortcut` — run a macOS Shortcuts shortcut
-- `index_documents` — index a directory into the local RAG store
-- `git_status`, `git_diff`, `git_log`, `git_commit` — local git helpers
-- `read_working_memory`, `write_working_memory`, `clear_working_memory` — scratchpad at `/var/lib/bad_apple/working_memory.txt`
+### 4. Tools and agent OS
+1. Natural-language tool router
+2. Shell command execution and AppleScript execution
+3. Run macOS Shortcuts and list installed shortcuts
+4. File read / write / search / list / grep
+5. Spotlight search via `mdfind`
+6. Vision and screen description
+7. Image generation
+8. Xcode project indexing and local git helpers
+9. Multi-step agent tasks and planning
+10. Local MCP server marketplace with per-tool write approvals
+
+### 5. Security and control
+1. Human-in-the-loop approval gate
+2. Autopilot mode to skip approvals
+3. Private mode to pause persistence
+4. Kill switch / emergency stop
+5. Air-gap hard switch to block network MCP and downloads
+6. Output firewall with blocklist patterns
+7. Hash-chained audit ledger with redaction
+8. SLICKS Unix socket authentication with HMAC
+
+### 6. Mesh and networking
+1. P2P encrypted LAN sync (off by default)
+2. Peer discovery and sync beacons
+
+### 7. Model and memory management
+1. Model manager with cache status
+2. One-click model pre-download with memory check
+3. Runtime model switching and recommendations
+4. VRAM governor and memory pressure handling
+5. `/api/models` dashboard page
+
+### 8. Observability and platform
+1. Health supervisor and launchd daemon management
+2. Rust gatekeeper proxy
+3. Log rotation and current-process log filtering
+4. Audit ledger tail and live log tail in the dashboard
+5. Unsigned release packaging and auto-updater
 
 ### Menu bar app
 
