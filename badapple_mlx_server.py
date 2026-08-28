@@ -2527,18 +2527,30 @@ class MLXServer:
             return "I'm Bad Apple, your sovereign local AI OS running on this Apple Silicon Mac, sugar. Air-gapped, private, and fast — no cloud nonsense."
         return "I'm Bad Apple, your sovereign local AI OS running hot on this Apple Silicon Mac, babe. Air-gapped, private, and fast — no cloud, no rented GPUs, no data mining."
 
-    def _capabilities_answer(self) -> str:
-        """Return a concise, persona-flavored capability list."""
-        base = (
-            "I can answer questions, explain, summarize, brainstorm, and have conversations; "
-            "run local tools like shell and AppleScript with your approval; use MCP servers; "
-            "list, read, search, and write files; run macOS Shortcuts; index documents for RAG; "
-            "remember facts about you; manage a workspace; run multi-step agent tasks; "
-            "see your screen and describe images; engage the kill switch and air-gap hard switch; "
-            "pre-download models with a memory check; capture ambient context; speak responses; "
-            "switch personas; run benchmarks; stream JSON; and show a web dashboard — "
-            "all on your Mac, no cloud."
-        )
+    def _capabilities_answer(self, voice_mode: bool = False) -> str:
+        """Return a persona-flavored capability list; numbered for text, condensed for voice."""
+        if voice_mode:
+            base = (
+                "I can answer questions, run local tools and MCP servers, search files, write notes, "
+                "run Shortcuts, manage a workspace, run agent tasks, use the kill switch and air-gap switch, "
+                "pre-download models, capture ambient context, speak responses, switch personas, run benchmarks, "
+                "stream JSON, and show a web dashboard — all on your Mac, no cloud."
+            )
+        else:
+            base = (
+                "Here's what I can do, babe:\n"
+                "1. Answer questions, explain, summarize, brainstorm, and chat — fully local and air-gapped.\n"
+                "2. Run local tools: shell, AppleScript, file read/write/search, and macOS Shortcuts with your approval.\n"
+                "3. Use local MCP servers (time, filesystem, fetch, sqlite, etc.) with per-tool write approvals.\n"
+                "4. Index documents for RAG, remember facts, and manage a workspace / project context.\n"
+                "5. Run multi-step agent tasks and capture ambient context (screen, active app).\n"
+                "6. Engage the kill switch / emergency stop and the air-gap hard switch to lock down network access.\n"
+                "7. Pre-download models with a one-click memory check, switch personas, run benchmarks, and stream JSON.\n"
+                "8. Speak responses through the local Piper TTS server and integrate with macOS Shortcuts and Siri.\n"
+                "9. Show a local web dashboard / control center at http://127.0.0.1:8787.\n"
+                "10. Sync with other Bad Apple peers over P2P — off by default.\n"
+                "Everything stays on your Mac."
+            )
         if self.approval.autopilot:
             autopilot = (
                 " Autopilot is on, so I can run what you ask without bugging "
@@ -2819,8 +2831,19 @@ class MLXServer:
             # Capability and creator questions are answered directly so the 9B does
             # not fall back into generic model identity or skip the useful part.
             lower = user_prompt.strip().lower()
-            if any(phrase in lower for phrase in ("what can you do", "what are you capable of", "what do you do", "what can you do on")):
-                resp = self._capabilities_answer()
+            capability_phrases = (
+                "what can you do", "what are you capable of", "what do you do",
+                "what can you do on", "what can you do for", "list your capabilities",
+                "list all your capabilities", "list all of your capabilities",
+                "list your features", "list all your features",
+                "list all of your features", "list all bad apple",
+                "what are your features", "what are all your features",
+                "what are your capabilities", "what are all your capabilities",
+                "what features do you have", "what can you do?",
+                "tell me everything you can do", "tell me what you can do",
+            )
+            if any(phrase in lower for phrase in capability_phrases):
+                resp = self._capabilities_answer(voice_mode=voice_mode)
                 self._audit_record("capabilities", {"prompt": user_prompt, "response": resp})
                 self.messages.append({"role": "user", "content": user_prompt})
                 self.messages.append({"role": "assistant", "content": resp})
@@ -2829,7 +2852,11 @@ class MLXServer:
                 if stream_queue is not None:
                     stream_queue.put(resp)
                 return resp
-            if any(phrase in lower for phrase in ("who are you", "what are you", "what is bad apple")):
+            identity_phrases = (
+                "who are you", "what are you", "what is bad apple",
+                "tell me about yourself", "who is bad apple", "what are you exactly",
+            )
+            if any(phrase in lower for phrase in identity_phrases):
                 resp = self._identity_answer()
                 self._audit_record("identity", {"prompt": user_prompt, "response": resp})
                 self.messages.append({"role": "user", "content": user_prompt})

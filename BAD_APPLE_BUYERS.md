@@ -59,7 +59,18 @@ All models are cached on disk after the first download. Nothing is re-downloaded
 
 When asked, it should say:
 
-> I can answer questions, run local tools and MCP servers, search files, write notes, manage a workspace, run agent tasks, use the kill switch and air-gap hard switch, pre-download models, capture ambient context, speak, switch personas, run benchmarks, stream JSON, and show a web dashboard — all on your Mac, no cloud, babe.
+> Here's what I can do, babe:
+> 1. Answer questions, explain, summarize, brainstorm, and chat — fully local and air-gapped.
+> 2. Run local tools: shell, AppleScript, file read/write/search, and macOS Shortcuts with your approval.
+> 3. Use local MCP servers with per-tool write approvals.
+> 4. Index documents for RAG, remember facts, and manage a workspace / project context.
+> 5. Run multi-step agent tasks and capture ambient context.
+> 6. Engage the kill switch and the air-gap hard switch.
+> 7. Pre-download models, switch personas, run benchmarks, and stream JSON.
+> 8. Speak responses through the local TTS server and integrate with macOS Shortcuts and Siri.
+> 9. Show a local web dashboard / control center at http://127.0.0.1:8787.
+> 10. Sync with other Bad Apple peers over P2P — off by default.
+> Everything stays on your Mac.
 
 ### 1. Core AI
 1. Answer questions, explain, summarize, brainstorm, and write short notes
