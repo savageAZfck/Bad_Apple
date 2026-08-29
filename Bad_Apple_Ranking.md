@@ -290,12 +290,25 @@ READMEs, feature lists, and install paths as of August 2026.
 
 ### Where Bad Apple loses
 
-1. **Signing and notarization — the only remaining major gap.** M1K3,
-   Ka1zen, MLX Studio, macMLX, iClaw, and mlx-bun all ship signed/notarized
-   apps. Bad Apple's default artifact is unsigned, which means every user
-   sees a Gatekeeper warning and must run `strip_quarantine.sh`. This is
-   the single biggest consumer-readiness blocker and the reason the
-   security score is 1.5/2 instead of 2.0/2.
+1. **No Apple notarization — by design.** Bad Apple will not be submitted
+   to Apple's notarization pipeline. Notarization requires uploading the
+   compiled binary to Apple's servers for malware scanning, which
+   contradicts the product's core promise: nothing leaves your machine.
+   This is a deliberate philosophical choice, not an oversight.
+
+   **Impact:** Users who download the DMG directly will see a Gatekeeper
+   warning. This is mitigated by the **Homebrew Cask** install path
+   (`brew install --cask bad-apple`), which strips quarantine automatically
+   in `postflight` and is the recommended install method. Homebrew is
+   trusted by millions of developers and does not route through Apple's
+   notarization pipeline. The DMG also includes `Install.command` and
+   `strip_quarantine.sh` for direct-download users.
+
+   **Competitive context:** M1K3, Ka1zen, MLX Studio, macMLX, iClaw, and
+   mlx-bun all ship signed/notarized apps. Bad Apple is the only
+   privacy-first assistant that refuses to submit binaries to Apple. This
+   is a feature for the target audience (security-first users), not a bug,
+   but it does create friction for casual consumers who download directly.
 
 2. ~~Native chat UI~~ **Fixed.** Bad Apple now has a native multi-turn chat
    window (`BadAppleChatWindow`) with streaming responses, message bubbles,
@@ -356,6 +369,17 @@ The path to #1 overall is now a single change: **ship a signed/notarized
 DMG as the default artifact.** The native chat window and model selector
 are done. The security architecture is best-in-class. Signing is the only
 remaining gate.
+
+**Note on notarization:** Bad Apple will not be submitted to Apple's
+notarization pipeline, because it requires uploading binaries to Apple's
+servers — a violation of the product's "nothing leaves your machine" promise.
+This is a deliberate philosophical choice. The Homebrew Cask
+(`brew install --cask bad-apple`) is the recommended install path: it
+strips quarantine automatically, does not route through Apple, and is
+trusted by millions of developers. For direct-download users, the DMG
+includes `Install.command` which handles quarantine stripping. The
+Gatekeeper warning on direct download is the trade-off for being the only
+assistant in this list that refuses to phone home to Apple.
 
 ---
 
