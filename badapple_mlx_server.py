@@ -14,6 +14,7 @@ import base64
 import concurrent.futures
 import copy
 import gc
+import hashlib
 import json
 import os
 import queue
@@ -1546,6 +1547,44 @@ TOOLS.extend([
     {
         "type": "function",
         "function": {
+            "name": "browser_action",
+            "description": "Drive Safari autonomously via AppleScript. Actions: 'navigate' opens a URL; 'url' returns the current page URL; 'title' returns the page title; 'text' returns visible page text; 'click' clicks an element by CSS selector; 'type' fills an input by CSS selector; 'scroll' scrolls the page; 'exec' runs arbitrary JavaScript in the page and returns the result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["navigate", "url", "title", "text", "click", "type", "scroll", "exec"],
+                        "description": "The browser action to perform.",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "For navigate, the URL to open.",
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "For click/type, a CSS selector for the target element.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "For type, the text to enter into the field.",
+                    },
+                    "amount": {
+                        "type": "integer",
+                        "description": "For scroll, pixels to scroll (positive=down, negative=up).",
+                    },
+                    "javascript": {
+                        "type": "string",
+                        "description": "For exec, the JavaScript code to run in the page.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_agent_task",
             "description": "Execute a multi-step goal autonomously by planning, acting with tools, observing results, and correcting. Use when the user says 'do X', 'plan and do X', or asks for a task that requires multiple tools.",
             "parameters": {
@@ -1665,6 +1704,7 @@ KEYWORD_TOOL_MAP = [
     (["run shortcut", "list shortcuts", "shortcut"], ["run_shortcut"]),
     (["run applescript", "run script", "applescript"], ["run_applescript"]),
     (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
+    (["browser", "safari", "web page", "website", "navigate to", "open url", "click on page", "fill form", "search the web", "go to website"], ["browser_action"]),
     (["mcp", "model context protocol", "mcp server", "mcp tool", "mcp marketplace"], ["list_mcp_servers", "add_mcp_server", "list_mcp_tools", "invoke_mcp_tool", "mcp_marketplace"]),
     (["do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step"], ["run_agent_task"]),
     (["set project", "this project is", "project context", "project goals"], ["set_project_context", "get_project_context"]),
@@ -1676,7 +1716,7 @@ DEFAULT_TOOL_NAMES = {
     "get_current_time", "list_directory", "read_file", "write_file", "run_shell",
     "run_applescript", "run_shortcut", "search_content", "search_local_files",
     "git_status", "index_documents", "search_notes", "read_working_memory",
-    "capture_and_describe_screen", "workspace_status", "ui_action",
+    "capture_and_describe_screen", "workspace_status", "ui_action", "browser_action",
 }
 
 
@@ -2201,6 +2241,10 @@ class MLXServer:
         self.prompt_cache: list[Any] | None = None
         self._cache_system_hash: str | None = None
 
+        # Persistent KV cache directory (saved across daemon restarts so the
+        # ~9 s system-prompt prefill is only paid once, not after every reboot).
+        self._kv_cache_dir = self.data_dir / "kv_cache"
+
         # Runtime/health/breakers
         self.runtime = RuntimeControl(self.data_dir)
         self._health_actor = badapple_health_actor.HealthActor()
@@ -2424,6 +2468,9 @@ class MLXServer:
         This populates `_system_prompt_cache` once. `_stream` deep-copies it for
         each query, so the expensive system prefill is paid once on model load
         (or when the system prompt changes), not after every response.
+
+        If a persisted KV cache matching the current model + system prompt exists
+        on disk, it is warm-loaded instead of re-prefilling.
         """
         if self.model is None or self.tokenizer is None:
             return
@@ -2442,7 +2489,17 @@ class MLXServer:
         else:
             rendered = rendered_dummy[:idx]
         tokens = self.tokenizer.encode(rendered, add_special_tokens=False)
-        self._cache_system_hash = f"{voice_mode}:{hash(rendered)}"
+        self._cache_system_hash = f"{voice_mode}:{hashlib.sha256(rendered.encode()).hexdigest()[:16]}"
+
+        # Try warm-loading a persisted cache before paying the prefill cost.
+        # Create a throwaway cache to learn the expected layer count for validation.
+        _probe = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
+        expected_layer_count = len(_probe)
+        del _probe
+        if self._load_kv_cache(expected_layer_count=expected_layer_count):
+            print(f"[perf] system prompt cache warm-loaded ({len(tokens)} tokens) in {time.time() - t0:.2f}s", flush=True)
+            return
+
         try:
             self._system_prompt_cache = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
             _ = self.model(mx.array(tokens)[None], cache=self._system_prompt_cache)
@@ -2453,6 +2510,118 @@ class MLXServer:
             print(f"[main] system prompt cache priming failed: {e}", flush=True)
             self._cache_system_hash = None
             self._system_prompt_cache = None
+        else:
+            # Persist the freshly primed cache so the next daemon restart
+            # can warm-load it instead of re-prefilling the system prompt.
+            self._save_kv_cache()
+
+    def _kv_cache_paths(self) -> tuple[Path, Path]:
+        """Return (safetensors_path, metadata_path) for the current model+prompt."""
+        from hashlib import sha256
+        model_ref = os.environ.get("BADAPPLE_MAIN_MODEL", "unknown")
+        key = f"{model_ref}:{self.max_kv_size}:{self._cache_system_hash}"
+        digest = sha256(key.encode()).hexdigest()[:16]
+        self._kv_cache_dir.mkdir(parents=True, exist_ok=True)
+        return self._kv_cache_dir / f"sys_{digest}.safetensors", self._kv_cache_dir / f"sys_{digest}.json"
+
+    def _save_kv_cache(self) -> None:
+        """Persist the system prompt KV cache to disk for warm-loading on restart."""
+        if self._system_prompt_cache is None or self._cache_system_hash is None:
+            return
+        try:
+            arrays: dict[str, mx.array] = {}
+            metadata: list[dict[str, Any]] = []
+            for i, c in enumerate(self._system_prompt_cache):
+                ctype = type(c).__name__
+                state = c.state
+                meta = c.meta_state
+                if ctype == "ArraysCache":
+                    # state is a list of arrays (or None); save each non-None entry.
+                    cache_list = state if isinstance(state, list) else list(state)
+                    none_indices = []
+                    for j, arr in enumerate(cache_list):
+                        if arr is not None:
+                            arrays[f"layer_{i}_arr_{j}"] = arr
+                        else:
+                            none_indices.append(j)
+                    metadata.append({
+                        "type": ctype,
+                        "meta_state": list(meta) if not isinstance(meta, str) else meta,
+                        "cache_size": len(cache_list),
+                        "none_indices": none_indices,
+                    })
+                else:
+                    # KVCache / RotatingKVCache: state is (keys, values).
+                    k, v = state
+                    arrays[f"layer_{i}_keys"] = k
+                    arrays[f"layer_{i}_values"] = v
+                    metadata.append({
+                        "type": ctype,
+                        "meta_state": list(meta),
+                    })
+            weights_path, meta_path = self._kv_cache_paths()
+            # mx.save_safetensors appends .safetensors if not already present.
+            tmp_w = weights_path.with_name(weights_path.stem + ".tmp.safetensors")
+            tmp_m = meta_path.with_name(meta_path.stem + ".tmp.json")
+            mx.save_safetensors(str(tmp_w), arrays)
+            import json
+            tmp_m.write_text(json.dumps({
+                "model": os.environ.get("BADAPPLE_MAIN_MODEL", ""),
+                "max_kv_size": self.max_kv_size,
+                "system_hash": self._cache_system_hash,
+                "num_layers": len(self._system_prompt_cache),
+                "layers": metadata,
+            }), encoding="utf-8")
+            tmp_w.replace(weights_path)
+            tmp_m.replace(meta_path)
+            print(f"[kv] system prompt cache saved to {weights_path.name}", flush=True)
+        except Exception as e:  # noqa: BLE001 - persistence is best-effort
+            print(f"[kv] failed to save system cache: {e}", flush=True)
+
+    def _load_kv_cache(self, expected_layer_count: int = 0) -> bool:
+        """Try to warm-load a persisted system prompt KV cache. Returns True on success."""
+        if self._cache_system_hash is None or self.model is None:
+            return False
+        try:
+            weights_path, meta_path = self._kv_cache_paths()
+            if not weights_path.is_file() or not meta_path.is_file():
+                return False
+            import json
+            from mlx_lm.models.cache import ArraysCache, RotatingKVCache, KVCache
+            _cache_types = {"ArraysCache": ArraysCache, "RotatingKVCache": RotatingKVCache, "KVCache": KVCache}
+            meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
+            # Validate the persisted cache matches the current model architecture.
+            if expected_layer_count and meta_doc.get("num_layers") != expected_layer_count:
+                return False
+            if meta_doc.get("max_kv_size") != self.max_kv_size:
+                return False
+            loaded = mx.load(str(weights_path))
+            reconstructed: list[Any] = []
+            for i, layer_meta in enumerate(meta_doc["layers"]):
+                ctype = layer_meta["type"]
+                cls = _cache_types.get(ctype, KVCache)
+                if ctype == "ArraysCache":
+                    cache_size = layer_meta.get("cache_size", 0)
+                    none_indices = set(layer_meta.get("none_indices", []))
+                    cache_list: list[Any] = []
+                    for j in range(cache_size):
+                        if j in none_indices:
+                            cache_list.append(None)
+                        else:
+                            cache_list.append(loaded[f"layer_{i}_arr_{j}"])
+                    meta_state = layer_meta["meta_state"]
+                    obj = cls.from_state(cache_list, meta_state)
+                else:
+                    state = (loaded[f"layer_{i}_keys"], loaded[f"layer_{i}_values"])
+                    meta_state = tuple(layer_meta["meta_state"])
+                    obj = cls.from_state(state, meta_state)
+                reconstructed.append(obj)
+            self._system_prompt_cache = reconstructed
+            print(f"[kv] system prompt cache warm-loaded from {weights_path.name}", flush=True)
+            return True
+        except Exception as e:  # noqa: BLE001 - loading is best-effort
+            print(f"[kv] failed to warm-load system cache: {e}", flush=True)
+            return False
 
     def _ensure_prompt_cache(self, system_content: str, voice_mode: bool) -> None:
         """Re-prime the pristine system cache if the system prompt or voice mode changed."""
@@ -2465,7 +2634,7 @@ class MLXServer:
         user_marker = "<|im_start|>user\n"
         idx = rendered_dummy.find(user_marker)
         rendered = rendered_dummy if idx == -1 else rendered_dummy[:idx]
-        expected_hash = f"{voice_mode}:{hash(rendered)}"
+        expected_hash = f"{voice_mode}:{hashlib.sha256(rendered.encode()).hexdigest()[:16]}"
         if self._system_prompt_cache is None or self._cache_system_hash != expected_hash:
             self._prime_system_cache(system_content, voice_mode=voice_mode)
 

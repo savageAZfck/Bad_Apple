@@ -142,6 +142,75 @@ def _run_as_user(cmd: list[str], user: str | None = None, input_text: str | None
         return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
 
+def _safari_do_javascript(js: str, timeout: int = 15) -> str:
+    """Run JavaScript in the frontmost Safari document via AppleScript."""
+    # Escape double quotes and backslashes for the AppleScript string.
+    escaped = js.replace("\\", "\\\\").replace('"', '\\"')
+    script = f'tell application "Safari" to do JavaScript "{escaped}" in front document'
+    result = _run_as_user(["osascript", "-e", script], timeout=timeout)
+    out = (result.stdout or "").strip()
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        if "not authorized" in err.lower() or "not allowed" in err.lower():
+            return "Error: Safari does not allow Apple Events. Enable Safari > Develop > Allow Apple Events in Automation."
+        return f"Error ({result.returncode}): {err or 'AppleScript failed'}"
+    return out[:8000] or "(no output)"
+
+
+def _browser_action(args: dict) -> str:
+    """Drive Safari via AppleScript and do JavaScript."""
+    action = args.get("action", "")
+    if not action:
+        return "Error: no action specified"
+    try:
+        if action == "navigate":
+            url = args.get("url", "")
+            if not url:
+                return "Error: navigate requires a url"
+            escaped_url = url.replace("\\", "\\\\").replace('"', '\\"')
+            script = f'tell application "Safari" to open location "{escaped_url}"'
+            result = _run_as_user(["osascript", "-e", script], timeout=10)
+            if result.returncode != 0:
+                return f"Error: {result.stderr.strip() or 'navigate failed'}"
+            return f"Navigated to {url}"
+        if action == "url":
+            result = _run_as_user(["osascript", "-e", 'tell application "Safari" to get URL of front document'], timeout=10)
+            return result.stdout.strip() or "Error: could not get URL"
+        if action == "title":
+            result = _run_as_user(["osascript", "-e", 'tell application "Safari" to get name of front document'], timeout=10)
+            return result.stdout.strip() or "Error: could not get title"
+        if action == "text":
+            return _safari_do_javascript("document.body.innerText.slice(0, 8000)")
+        if action == "click":
+            selector = args.get("selector", "")
+            if not selector:
+                return "Error: click requires a selector"
+            escaped_sel = selector.replace("\\", "\\\\").replace("'", "\\'")
+            js = f"var el = document.querySelector('{escaped_sel}'); if (el) {{ el.click(); 'clicked'; }} else {{ 'element not found'; }}"
+            return _safari_do_javascript(js)
+        if action == "type":
+            selector = args.get("selector", "")
+            text = args.get("text", "")
+            if not selector:
+                return "Error: type requires a selector"
+            escaped_sel = selector.replace("\\", "\\\\").replace("'", "\\'")
+            escaped_text = text.replace("\\", "\\\\").replace("'", "\\'")
+            js = f"var el = document.querySelector('{escaped_sel}'); if (el) {{ el.value = '{escaped_text}'; 'typed'; }} else {{ 'element not found'; }}"
+            return _safari_do_javascript(js)
+        if action == "scroll":
+            amount = int(args.get("amount", 500))
+            js = f"window.scrollBy(0, {amount}); 'scrolled ' + window.scrollY"
+            return _safari_do_javascript(js)
+        if action == "exec":
+            js_code = args.get("javascript", "")
+            if not js_code:
+                return "Error: exec requires javascript"
+            return _safari_do_javascript(js_code, timeout=20)
+        return f"Error: unknown action '{action}'"
+    except (TypeError, ValueError, KeyError) as e:
+        return f"Error: {e}"
+
+
 def run_tool(
     name: str,
     args: dict,
@@ -275,6 +344,8 @@ def run_tool(
             if aqua:
                 return f"UI action error: {aqua.get('error')}"
             return "UI action failed (Aqua helper not available)"
+        if name == "browser_action":
+            return _browser_action(args)
         if name == "list_shortcuts":
             aqua = badapple_aqua_helper.call_aqua("list_shortcuts", timeout=15)
             if aqua and aqua.get("ok"):
