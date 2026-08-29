@@ -1,6 +1,8 @@
-# Bad Apple — Local AI for macOS
+# Bad Apple — Bare-Metal AI Operating System for macOS
 
-Bad Apple is an on-device, air-gapped AI assistant for macOS. It runs Qwen 3.5 on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
+Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs Qwen 3.5 on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
+
+Internally it is built as a supervised **actor OS**: every major subsystem — resources, circuit breakers, workspace, persona, P2P, MCP, health, audit, cache, and model registry — runs as a dedicated actor. The Rust CLI, the menu bar, and any MCP client authenticate to the daemon through **SLICKS v2**, a hardware-bound challenge/response protocol signed by the Apple Secure Enclave.
 
 ---
 
@@ -89,7 +91,7 @@ When asked, it can say:
 - **0.5B fast tier** for instant greetings, identity, time, simple math, and deterministic queries
 - **Single 9B brain** for both text and voice, no dual-model swap
 - **Streaming token output** to terminal or TTS
-- **SLICKS authenticated Unix socket** (HMAC-SHA256 challenge-response)
+- **SLICKS v2 authenticated Unix socket** (Secure Enclave–signed challenge/response, with HMAC-SHA256 v1 fallback)
 - **launchd-managed daemon** (`com.badapple.mlx`) that runs as root and auto-restarts
 
 ### Conversation & memory
@@ -132,8 +134,8 @@ The current build covers the following roadmap phases:
 - **Phase 4 — Working memory dashboard** ✅: read/write/clear working memory directly with natural-language commands.
 - **Phase 5 — Plugin / signed tool registry** ✅: `PluginRegistry` in `badapple_plugins.py` loads signed plugin manifests and exposes their tools as first-class `run_tool`/`_run_approved_tool` actions.
 - **Phase 6 — Long-horizon episodic memory graph** ✅: `MemoryGraph` stores facts, entities, relations, episodes, and workflows, and recalls them via semantic search.
-- **Phase 7 — MCP server expansion** ✅: `badapple_mcp_server.py` exposes a Unix-socket MCP transport at `/var/run/badapple/mcp.sock` for external tool clients.
-- **Phase 8 — Encrypted P2P sync** 🔄: `badapple_p2p.py` is implemented but left off by default for the air-gap `cert_suite`; enable with `BADAPPLE_P2P=1`.
+- **Phase 7 — MCP server expansion** ✅: `badapple_mcp_server.py` exposes a Unix-socket MCP transport at `/var/run/badapple/mcp.sock`, hardened with request size limits, tool allowlists, and per-call timeouts. The MCP marketplace runs as a supervised actor.
+- **Phase 8 — Encrypted P2P sync** ✅: `badapple_p2p.py` is implemented with AES-256-GCM link-local sync and Secure Enclave–signed origin authentication. It is off by default for the air-gap `cert_suite`; enable with `BADAPPLE_P2P=1`.
 - **Phase 9 — Local image generation** ✅: `generate_image` uses the cached local `mflux` FLUX.2-klein-4B model.
 - **Phase 10 — Streaming first-token preview** ✅: token streaming is live via `--json` and the `stream_queue` in `generate_with_tools`.
 - **Phase 11 — Personal on-device LoRA fine-tuning** ✅: `lora_add_example`, `lora_train`, `lora_adapters`, and `lora_generate` use `mlx-lm` on local datasets.
@@ -216,12 +218,12 @@ New flags:
 │  target/release/badapple              │
 │  (Rust client)                        │
 └───────────┬───────────────────────────┘
-            │ Unix socket + SLICKS auth
+            │ Unix socket + SLICKS v2 auth (Secure Enclave / HMAC fallback)
             ▼
 ┌───────────────────────────────────────┐
 │  com.badapple.gatekeeper              │
 │  target/release/gatekeeper            │
-│  - SLICKS proxy, fast actions,        │
+│  - SLICKS v2 proxy, fast actions,     │
 │    automation cage                    │
 └───────────┬───────────────────────────┘
             │
@@ -230,7 +232,9 @@ New flags:
 │  com.badapple.mlx                     │
 │  badapple_mlx_server.py               │
 │  - loads single 9B target + optional small draft │
-│  - runs tools, memory, RAG, TTS       │
+│  - actor-ized subsystems              │
+│  - runs tools, memory, RAG, TTS, P2P, │
+│    MCP marketplace                    │
 └───────────────────────────────────────┘
             │
             ▼
@@ -251,7 +255,8 @@ New flags:
 ## Security & Privacy
 
 - **Air-gapped at runtime**: no network calls for inference or actions
-- **Authenticated**: every client proves itself with SLICKS HMAC-SHA256
+- **Hardware-bound identity**: every client and the daemon prove themselves with SLICKS v2 (Secure Enclave ECDSA), with SLICKS v1 (HMAC-SHA256) as a fallback
+- **Actor-isolated subsystems**: resources, circuit breakers, persona, workspace, P2P, MCP, cache, audit, model, and health run as supervised actors
 - **Fail-closed tools**: file writes are restricted to `BADAPPLE_NOTES_DIR`; shell/AppleScript calls are gated
 - **Local-only audio**: TTS happens on-device
 

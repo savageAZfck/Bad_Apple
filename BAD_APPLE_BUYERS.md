@@ -1,17 +1,19 @@
-# Bad Apple — Buyer's Overview
+# Bad Apple — Bare-Metal AI Operating System for macOS
 
 ## What it is
 
-Bad Apple is a private, on-device AI assistant for macOS. It runs a Qwen 3.5 9B brain and a Qwen 2.5 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, and speaks responses through a local Piper TTS server — all without sending prompts, responses, or actions to a cloud service after the initial model download.
+Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a Qwen 3.5 9B brain and a Qwen 2.5 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, speaks responses through a local Piper TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
 
 ## The pitch
 
 - **Air-gapped by default**: no prompt, no action, no memory leaves your Mac.
+- **Hardware-bound identity**: SLICKS v2 signs every client–daemon connection and P2P frame with the Apple Secure Enclave.
+- **Actor-ized OS**: resources, circuit breakers, persona, workspace, P2P, MCP, cache, audit, model, and health run as supervised actors.
 - **Two brains, one daemon**: the 0.5B fast tier handles instant greetings/time/math; the 9B brain handles reasoning.
 - **Local tooling**: search files, run AppleScript, run Shortcuts, get the time, write notes, index documents, git helpers, and more.
 - **Persistent memory + RAG**: remembers user facts and searches indexed local documents.
 - **Hot-reloadable persona**: edit `prompt.txt` without restarting the 9B model.
-- **Authenticated socket**: SLICKS HMAC challenge/response over a Unix socket.
+- **MCP + local marketplace**: exposes tools to MCP clients and can run local stdio MCP servers under the same policy gate.
 
 ## Models loaded
 
@@ -30,16 +32,16 @@ All models are cached on disk after the first download. Nothing is re-downloaded
 
 | Prompt | Prompt tokens | First token | Tokens out | Decode tok/s | Peak memory |
 |---|---|---:|---:|---:|---:|
-| `Who are you?` | ~540 | 9.4 s | 31 | 16.5 | 5.84 GB |
-| `What is the capital of France?` | ~540 | 9.5 s | 25 | 15.9 | 5.85 GB |
-| `Tell me about Rome.` | ~540 | 7.6 s | 48 | 15.6 | 5.85 GB |
-| `What do you think of Siri?` | ~540 | 7.1 s | 41 | 15.6 | 5.85 GB |
-| `How does a car engine work?` | ~540 | 8.3 s | 41 | 15.6 | 5.85 GB |
+| `Who are you?` | ~1800 | 0.00 s | 0 | — | 6.08 GB |
+| `What is the capital of France?` | ~1800 | 4.23 s | 20 | 10.2 | 6.08 GB |
+| `Tell me about Rome.` | ~1800 | 3.98 s | 20 | 10.2 | 6.08 GB |
+| `What do you think of Siri?` | ~1800 | 4.28 s | 66 | 10.3 | 6.08 GB |
+| `How does a car engine work?` | ~1800 | 4.92 s | 66 | 10.3 | 6.08 GB |
 
-- Typical first-token latency: **~7–9.5 s**.
-- Typical decode throughput: **~15.5–16.5 tok/s**.
-- Benchmark total wall time: **~49 s** for the 5-prompt suite.
-- Peak memory: **~5.8–5.9 GB**.
+- Typical first-token latency: **~4.0–4.9 s** once the system-prompt KV cache is loaded.
+- Typical decode throughput: **~10.2–10.3 tok/s**.
+- Benchmark total wall time: **~26.8 s** for the 5-prompt suite on an M3 Max test Mac.
+- Peak memory: **~6.0–6.1 GB**.
 
 ### 0.5B fast tier
 
@@ -69,7 +71,8 @@ When asked, it should say:
 > 7. Pre-download models, switch personas, run benchmarks, and stream JSON.
 > 8. Speak responses through the local TTS server and integrate with macOS Shortcuts and Siri.
 > 9. Show a local web dashboard / control center at http://127.0.0.1:8787.
-> 10. Sync with other Bad Apple peers over P2P — off by default.
+> 10. Sync with other Bad Apple peers over an encrypted, Secure Enclave–signed P2P mesh — off by default.
+> 11. Run as a supervised actor OS: every subsystem is isolated, restartable, and observable.
 > Everything stays on your Mac.
 
 ### 1. Core AI
@@ -116,8 +119,9 @@ When asked, it should say:
 4. Kill switch / emergency stop
 5. Air-gap hard switch to block network MCP and downloads
 6. Output firewall with blocklist patterns
-7. Hash-chained audit ledger with redaction
-8. SLICKS Unix socket authentication with HMAC
+7. Hash-chained audit ledger with secret/PII redaction
+8. SLICKS v2 Unix socket authentication with Secure Enclave ECDSA (HMAC fallback)
+9. Air-gap certification suite (`cert_suite.py`) that verifies local-only sockets, model provenance, and SE identity
 
 ### 6. Mesh and networking
 1. P2P encrypted LAN sync (off by default)
