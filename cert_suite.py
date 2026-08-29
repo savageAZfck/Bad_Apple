@@ -325,6 +325,121 @@ def check_hardware_identity() -> int:
     return 1
 
 
+def check_slicks_v2_handshake() -> int:
+    """End-to-end v2 SLICKS handshake against the live gatekeeper/daemon."""
+    print("\n[TEST] SLICKS v2 handshake")
+    import secrets
+    import time
+
+    try:
+        import badapple_slicks
+    except Exception as e:  # noqa: BLE001 - import may fail in minimal envs
+        _info(f"badapple_slicks not available: {e}")
+        return 0
+
+    if not badapple_slicks.v2_available():
+        _info("SLICKS v2 not available on this host; skipping")
+        return 0
+
+    socket_path = os.environ.get("BADAPPLE_SOCKET_PATH", "/var/run/badapple/substrate.sock")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(60)
+            sock.connect(socket_path)
+            reader = sock.makefile("r")
+
+            client_nonce = secrets.token_hex(32)
+            timestamp_ms = int(time.time() * 1000)
+            client_pubkey = badapple_slicks.v2_public_key_b64()
+
+            hello = {
+                "type": "hello",
+                "version": 2,
+                "timestamp_ms": timestamp_ms,
+                "client_nonce": client_nonce,
+                "client_pubkey": client_pubkey,
+            }
+            sock.sendall((json.dumps(hello) + "\n").encode())
+
+            challenge_raw = reader.readline()
+            challenge = json.loads(challenge_raw)
+            if challenge.get("type") != "challenge":
+                _fail(f"expected challenge, got {challenge.get('type')}")
+                return 1
+            server_nonce = challenge["server_nonce"]
+            server_proof = challenge["proof"]
+            server_pubkey = challenge.get("server_pubkey")
+            if not server_pubkey:
+                _fail("SLICKS v2 challenge did not include server_pubkey")
+                return 1
+
+            import base64
+
+            if not badapple_slicks.v2_verify_server_proof(
+                timestamp_ms,
+                client_nonce,
+                server_nonce,
+                server_proof,
+                base64.b64decode(server_pubkey),
+            ):
+                _fail("SLICKS v2 server authentication failed")
+                return 1
+
+            prompt = "Respond with exactly the word 'v2ok'."
+            max_new_tokens = 32
+            client_proof = badapple_slicks.v2_client_proof(
+                timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens
+            )
+
+            execute = {
+                "type": "execute",
+                "version": 2,
+                "timestamp_ms": timestamp_ms,
+                "client_nonce": client_nonce,
+                "server_nonce": server_nonce,
+                "prompt": prompt,
+                "max_new_tokens": max_new_tokens,
+                "proof": client_proof,
+                "client_pubkey": client_pubkey,
+            }
+            sock.sendall((json.dumps(execute) + "\n").encode())
+
+            accepted = False
+            final_text = ""
+            for _ in range(10_000):
+                line = reader.readline()
+                if not line:
+                    break
+                frame = json.loads(line)
+                frame_type = frame.get("type")
+                if frame_type == "accepted":
+                    accepted = True
+                elif frame_type == "token" and accepted:
+                    final_text += frame.get("text", "")
+                elif frame_type == "done" and accepted:
+                    final_text = frame.get("text", final_text)
+                    break
+                elif frame_type == "error":
+                    _fail(f"SLICKS v2 request failed: {frame.get('message')}")
+                    return 1
+
+            if not final_text.strip():
+                _fail("SLICKS v2 handshake succeeded but produced no response")
+                return 1
+
+            _ok("SLICKS v2 handshake completed and server identity verified")
+            return 0
+    except TimeoutError:
+        _fail("SLICKS v2 handshake timed out")
+        return 1
+    except json.JSONDecodeError as e:
+        _fail(f"SLICKS v2 handshake received invalid JSON: {e}")
+        return 1
+    except Exception as e:  # noqa: BLE001 - cert test wrapper
+        _fail(f"SLICKS v2 handshake failed: {e}")
+        return 1
+
+
 def check_supervisor() -> int:
     print("\n[TEST] bounded health supervisor")
     import subprocess
@@ -373,6 +488,7 @@ def main() -> int:
         check_cloud_references,
         check_model_provenance,
         check_hardware_identity,
+        check_slicks_v2_handshake,
         check_supervisor,
     ]
 
