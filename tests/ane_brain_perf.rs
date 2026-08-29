@@ -19,7 +19,7 @@ use sysinfo::{get_current_pid, ProcessRefreshKind, System};
 
 const DEFAULT_MAX_NEW_TOKENS: usize = 64;
 const WARMUP_MAX_NEW_TOKENS: usize = 8;
-const TIMEOUT: Duration = Duration::from_secs(180);
+const TIMEOUT: Duration = Duration::from_mins(3);
 
 #[derive(Debug)]
 struct BenchmarkReport {
@@ -108,13 +108,10 @@ fn ane_brain_perf() {
         }
     }
 
-    let (model, tokenizer) = match chosen {
-        Some(p) => p,
-        None => {
-            println!("ANE artifacts not present; skipping benchmark.");
-            println!("Run: python3 tests/ane_brain_perf/download_models.py");
-            return;
-        }
+    let Some((model, tokenizer)) = chosen else {
+        println!("ANE artifacts not present; skipping benchmark.");
+        println!("Run: python3 tests/ane_brain_perf/download_models.py");
+        return;
     };
 
     std::env::set_var("BADAPPLE_ANE_MODEL", &model);
@@ -319,7 +316,7 @@ fn timed_generation_with_cpu(prompt: &str, max_new_tokens: usize) -> (String, u6
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    panic!("ANE generation did not finish within {:?}", TIMEOUT);
+    panic!("ANE generation did not finish within {TIMEOUT:?}");
 }
 
 fn run_mastery_suite() -> (f64, usize) {
@@ -434,7 +431,7 @@ fn dir_size(path: &std::path::Path) -> u64 {
         return 0;
     }
     if path.is_file() {
-        return std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        return std::fs::metadata(path).map_or(0, |m| m.len());
     }
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(path) {

@@ -85,26 +85,24 @@ pub enum ServerFrame {
 
 pub fn socket_path() -> PathBuf {
     std::env::var_os("BADAPPLE_SOCKET_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH))
+        .map_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH), PathBuf::from)
 }
 
 pub fn mlx_socket_path() -> PathBuf {
     std::env::var_os("BADAPPLE_MLX_SOCKET_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MLX_SOCKET_PATH))
+        .map_or_else(|| PathBuf::from(DEFAULT_MLX_SOCKET_PATH), PathBuf::from)
 }
 
 pub fn identity_agent_socket_path() -> PathBuf {
-    std::env::var_os("BADAPPLE_IDENTITY_AGENT_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_IDENTITY_AGENT_SOCKET))
+    std::env::var_os("BADAPPLE_IDENTITY_AGENT_SOCKET").map_or_else(
+        || PathBuf::from(DEFAULT_IDENTITY_AGENT_SOCKET),
+        PathBuf::from,
+    )
 }
 
 pub fn key_path() -> PathBuf {
     std::env::var_os("BADAPPLE_SLICKS_KEY_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_PATH))
+        .map_or_else(|| PathBuf::from(DEFAULT_KEY_PATH), PathBuf::from)
 }
 
 pub fn load_slicks_secret() -> Result<Vec<u8>> {
@@ -299,7 +297,11 @@ impl IdentityAgentClient {
 
     pub fn public_key(&self) -> Result<String> {
         let resp = self.call(serde_json::json!({"command": "public_key"}))?;
-        if !resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !resp
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
             bail!(
                 "identity agent public_key failed: {}",
                 resp.get("error")
@@ -318,7 +320,11 @@ impl IdentityAgentClient {
             "command": "sign",
             "message_b64": message_b64,
         }))?;
-        if !resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !resp
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
             bail!(
                 "identity agent sign failed: {}",
                 resp.get("error")
@@ -339,7 +345,11 @@ impl IdentityAgentClient {
             "signature": signature,
             "public_key": public_key,
         }))?;
-        if !resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !resp
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
             bail!(
                 "identity agent verify failed: {}",
                 resp.get("error")
@@ -347,7 +357,10 @@ impl IdentityAgentClient {
                     .unwrap_or("unknown")
             );
         }
-        Ok(resp.get("valid").and_then(|v| v.as_bool()).unwrap_or(false))
+        Ok(resp
+            .get("valid")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false))
     }
 
     pub fn status(&self) -> Result<Value> {
@@ -404,16 +417,14 @@ fn resolve_slicks_mode() -> Result<SlicksMode> {
     };
 
     match std::env::var("BADAPPLE_SLICKS2").as_deref() {
-        Ok("0" | "false" | "no") => {
-            return Ok(SlicksMode::V1(load_slicks_secret()?));
-        }
-        Ok("1" | "true" | "yes") | Ok(_) => {
+        Ok("0" | "false" | "no") => Ok(SlicksMode::V1(load_slicks_secret()?)),
+        Ok("1" | "true" | "yes" | _) => {
             let client_pubkey =
                 agent_pubkey.context("BADAPPLE_SLICKS2=1 requires a running identity agent")?;
-            return Ok(SlicksMode::V2 {
+            Ok(SlicksMode::V2 {
                 agent,
                 client_pubkey,
-            });
+            })
         }
         Err(_) => {
             // Auto: prefer v2 when the identity agent is present, otherwise v1.
@@ -423,7 +434,7 @@ fn resolve_slicks_mode() -> Result<SlicksMode> {
                     client_pubkey,
                 });
             }
-            return Ok(SlicksMode::V1(load_slicks_secret()?));
+            Ok(SlicksMode::V1(load_slicks_secret()?))
         }
     }
 }
@@ -542,7 +553,7 @@ where
     let client_nonce = random_nonce();
     let mut stream =
         UnixStream::connect(socket_path()).context("unable to connect to Bad Apple")?;
-    stream.set_read_timeout(Some(Duration::from_secs(900)))?;
+    stream.set_read_timeout(Some(Duration::from_mins(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
 

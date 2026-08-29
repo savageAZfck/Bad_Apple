@@ -58,7 +58,10 @@ pub fn cosine_f64_f32(a: &[f64], b: &[f64]) -> f64 {
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn dot_f64x2_f32x4(a: &[f64], b: &[f64]) -> f32 {
-    use core::arch::aarch64::*;
+    use core::arch::aarch64::{
+        vaddq_f32, vaddvq_f32, vandq_u32, vbslq_f32, vceqq_f32, vcombine_f32, vcvt_f32_f64,
+        vdupq_n_f32, vld1q_f64, vmulq_f32,
+    };
 
     let n = a.len();
     let mut acc = vdupq_n_f32(0.0);

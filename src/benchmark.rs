@@ -266,7 +266,7 @@ impl RustValidator {
             key,
             source,
             compiled: false,
-            diagnostics: format!("spawn_blocking failed: {}", e),
+            diagnostics: format!("spawn_blocking failed: {e}"),
             competence: 0.0,
             wall_time_ms: 0.0,
             footprint_bytes: 0,
@@ -323,18 +323,18 @@ sha2 = "0.11"
                 match Self::format_source(source) {
                     Ok(fmt) => fmt,
                     Err(e) => {
-                        diagnostics.push_str(&format!("fmt attempt {} failed: {}\n", attempt, e));
+                        diagnostics.push_str(&format!("fmt attempt {attempt} failed: {e}\n"));
                         continue;
                     }
                 }
             };
 
             if let Err(e) = std::fs::write(base.join("Cargo.toml"), manifest) {
-                diagnostics.push_str(&format!("write Cargo.toml failed: {}\n", e));
+                diagnostics.push_str(&format!("write Cargo.toml failed: {e}\n"));
                 continue;
             }
             if let Err(e) = std::fs::write(base.join("src/main.rs"), &current) {
-                diagnostics.push_str(&format!("write main.rs failed: {}\n", e));
+                diagnostics.push_str(&format!("write main.rs failed: {e}\n"));
                 continue;
             }
 
@@ -351,12 +351,11 @@ sha2 = "0.11"
                         compiled = true;
                         diagnostics = String::from_utf8_lossy(&out.stderr).to_string();
                         break;
-                    } else {
-                        diagnostics = String::from_utf8_lossy(&out.stderr).to_string();
                     }
+                    diagnostics = String::from_utf8_lossy(&out.stderr).to_string();
                 }
                 Err(e) => {
-                    diagnostics.push_str(&format!("cargo check spawn failed: {}\n", e));
+                    diagnostics.push_str(&format!("cargo check spawn failed: {e}\n"));
                 }
             }
         }
@@ -446,7 +445,7 @@ impl PilotReport {
         code: Option<&str>,
     ) {
         let latency_us = latency.elapsed().as_micros();
-        let token_count = output.len() + code.map(|c| c.len()).unwrap_or(0) + domain.len();
+        let token_count = output.len() + code.map_or(0, str::len) + domain.len();
 
         let peak_rss_mb = Self::current_rss_mb().unwrap_or(0.0);
 
@@ -658,7 +657,7 @@ mod tests {
         let mut token_count = 0;
         let start = Instant::now();
         for i in 0..N {
-            let text = format!("load {}", i);
+            let text = format!("load {i}");
             token_count += text.len() + "ok".len() + "bench".len() + 4 * ENGRAM_DIM;
             let packet = CompactEngramPacket {
                 id: i as u64,
@@ -695,7 +694,7 @@ mod tests {
         let ring = crate::metrics::LatencyRingBuffer::<1024>::new();
         let mut samples = Vec::with_capacity(N * 10);
         for i in 0..N * 10 {
-            let (_, ns) = crate::ns_latency!(ring.push(i as u64));
+            let ((), ns) = crate::ns_latency!(ring.push(i as u64));
             samples.push(ns);
         }
         for ns in samples {

@@ -145,7 +145,7 @@ impl StrategyLibrary {
         let problem_lower = problem.to_lowercase();
         let problem_words: std::collections::HashSet<String> = problem_lower
             .split_whitespace()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         spawn_blocking(move || {
             let mut best: Option<Strategy> = None;
@@ -157,8 +157,10 @@ impl StrategyLibrary {
                         if s_lower.contains(&problem_lower) || problem_lower.contains(&s_lower) {
                             1.0
                         } else {
-                            let s_words: std::collections::HashSet<String> =
-                                s_lower.split_whitespace().map(|s| s.to_string()).collect();
+                            let s_words: std::collections::HashSet<String> = s_lower
+                                .split_whitespace()
+                                .map(std::string::ToString::to_string)
+                                .collect();
                             let total = problem_words.union(&s_words).count();
                             let overlap = problem_words.intersection(&s_words).count();
                             if total > 0 {
@@ -235,7 +237,7 @@ impl DialecticalEngine {
     pub fn antithesis(&self, error: &str) -> DialecticalNode {
         DialecticalNode {
             id: self.next_id(),
-            proposition: format!("Observed failure: {}", error),
+            proposition: format!("Observed failure: {error}"),
             truth_value: 1.0,
             antecedents: Vec::new(),
         }
@@ -524,7 +526,7 @@ async fn main() {
         } else if source.to_lowercase().contains("reverse") || source.to_lowercase().contains("rev")
         {
             "reverse_template"
-        } else if source.to_lowercase().contains("factorial") || source.to_lowercase().contains("!")
+        } else if source.to_lowercase().contains("factorial") || source.to_lowercase().contains('!')
         {
             "factorial_template"
         } else if source.to_lowercase().contains("json") || source.to_lowercase().contains("stream")
@@ -548,17 +550,13 @@ async fn main() {
         let base_template = self.templates.get(key).cloned().unwrap_or_default();
 
         let header = format!(
-            "// Synthesized from open-source script profile.\n// Overhead diagnosis: {} (severity {:.2})\n",
-            diagnosis, severity
+            "// Synthesized from open-source script profile.\n// Overhead diagnosis: {diagnosis} (severity {severity:.2})\n"
         );
         if base_template.is_empty() {
-            return format!(
-                "{}fn main() {{\n    println!(\"no matching template\");\n}}\n",
-                header
-            );
+            return format!("{header}fn main() {{\n    println!(\"no matching template\");\n}}\n");
         }
 
-        format!("{}{}", header, base_template)
+        format!("{header}{base_template}")
     }
 
     /// Repair a failed Rust source using raw `cargo check` diagnostics.
@@ -582,10 +580,10 @@ async fn main() {
             || diag_lower.contains("cannot find")
         {
             if diag_lower.contains("serde_json") && !repaired.contains("use serde_json") {
-                repaired = format!("use serde_json::Value;\n{}", repaired);
+                repaired = format!("use serde_json::Value;\n{repaired}");
             }
             if diag_lower.contains("sha2") && !repaired.contains("use sha2") {
-                repaired = format!("use sha2::{{Sha256, Digest}};\n{}", repaired);
+                repaired = format!("use sha2::{{Sha256, Digest}};\n{repaired}");
             }
         }
 
@@ -597,10 +595,10 @@ async fn main() {
 
         // Missing `std::fs` or `std::path` imports.
         if diag_lower.contains("fs::") && !repaired.contains("use std::fs") {
-            repaired = format!("use std::fs;\n{}", repaired);
+            repaired = format!("use std::fs;\n{repaired}");
         }
         if diag_lower.contains("path::") && !repaired.contains("use std::path") {
-            repaired = format!("use std::path::Path;\n{}", repaired);
+            repaired = format!("use std::path::Path;\n{repaired}");
         }
 
         // Missing semicolons: parse `--> src/main.rs:LINE:COL` snippets and
@@ -610,14 +608,17 @@ async fn main() {
             || diag_lower.contains("expected `;`, found")
         {
             let error_lines = Self::parse_cargo_error_lines(diagnostics);
-            let mut owned: Vec<String> = repaired.lines().map(|s| s.to_string()).collect();
+            let mut owned: Vec<String> = repaired
+                .lines()
+                .map(std::string::ToString::to_string)
+                .collect();
             for line_no in error_lines {
                 if line_no == 0 || line_no > owned.len() {
                     continue;
                 }
                 let l = owned[line_no - 1].trim_end();
                 if !l.ends_with(';') && !l.ends_with('{') && !l.ends_with('}') && !l.is_empty() {
-                    owned[line_no - 1] = format!("{};", l);
+                    owned[line_no - 1] = format!("{l};");
                 }
             }
             repaired = owned.join("\n");
@@ -700,7 +701,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let tid = std::thread::current().id();
-        let base = std::env::temp_dir().join(format!("bad_apple_test_{:?}_{}", tid, ts));
+        let base = std::env::temp_dir().join(format!("bad_apple_test_{tid:?}_{ts}"));
         std::fs::create_dir_all(&base).unwrap();
         StrategyLibrary::open(&base).unwrap()
     }

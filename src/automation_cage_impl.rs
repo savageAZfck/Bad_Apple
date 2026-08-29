@@ -135,8 +135,7 @@ impl AutomationCage {
             default_roots(&home)?
         };
         let log_path = env::var_os("BADAPPLE_AUTOMATION_LOG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".badapple/automation.jsonl"));
+            .map_or_else(|| home.join(".badapple/automation.jsonl"), PathBuf::from);
         Self::new_with_log(roots, home, log_path)
     }
 
@@ -223,8 +222,7 @@ impl AutomationCage {
             paths: action.paths().into_iter().map(Path::to_path_buf).collect(),
             result: result
                 .as_ref()
-                .map(|_| "success".into())
-                .unwrap_or_else(|error| format!("error: {error:#}")),
+                .map_or_else(|error| format!("error: {error:#}"), |()| "success".into()),
             elapsed_ms: started.elapsed().as_millis(),
         };
         self.append_log(&report)?;

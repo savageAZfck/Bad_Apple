@@ -60,7 +60,7 @@ impl AneCoreConfig {
         // Per-bucket environment overrides. These allow a future multi-shape
         // install where `qwen3b_ane_shards_seq{N}` directories exist.
         for &len in &[512, 1024, 2048] {
-            let key = format!("BADAPPLE_ANE_MODEL_{}", len);
+            let key = format!("BADAPPLE_ANE_MODEL_{len}");
             if let Some(path) = std::env::var_os(&key) {
                 bucket_paths.insert(len, PathBuf::from(path));
             }
@@ -114,8 +114,7 @@ fn read_seq_len_from_manifest(path: &Path) -> usize {
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|value| value["model"]["seq_len"].as_u64())
-        .map(|value| value as usize)
-        .unwrap_or(0)
+        .map_or(0, |value| value as usize)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,7 +280,7 @@ impl AneCore {
         let mut load = 0;
         let mut prewarm = 0;
         unsafe {
-            (self.selection_latency)(self.handle.as_ptr(), &mut load, &mut prewarm)
+            (self.selection_latency)(self.handle.as_ptr(), &raw mut load, &raw mut prewarm)
                 .then_some((load, prewarm))
         }
     }
@@ -324,7 +323,7 @@ impl AneCore {
             None if self.qwen_chat_fallback => (render_qwen_chat(prompt, system), false),
             None => (
                 match system {
-                    Some(system) => format!("{}\n\n{}", system, prompt),
+                    Some(system) => format!("{system}\n\n{prompt}"),
                     None => prompt.to_string(),
                 },
                 true,
@@ -375,15 +374,15 @@ impl AneCore {
                 .decode(&generated, true)
                 .map_err(|error| AneCoreError::Tokenizer(error.to_string()))?;
             if let Some(delta) = current.strip_prefix(&decoded) {
-                if !delta.is_empty() {
-                    empty_delta_count = 0;
-                    if !on_token(delta) {
-                        decoded = current;
+                if delta.is_empty() {
+                    empty_delta_count += 1;
+                    if empty_delta_count >= 8 {
                         break;
                     }
                 } else {
-                    empty_delta_count += 1;
-                    if empty_delta_count >= 8 {
+                    empty_delta_count = 0;
+                    if !on_token(delta) {
+                        decoded = current;
                         break;
                     }
                 }
@@ -649,7 +648,7 @@ pub fn probe_compiled_shard(
             path.as_ptr(),
             compute_units_raw_value,
             iterations.max(1),
-            &mut average_latency_us,
+            &raw mut average_latency_us,
         )
     };
     if succeeded {
@@ -808,7 +807,7 @@ where
 }
 
 pub fn placement_ratio() -> Option<f64> {
-    with_engine(|engine| engine.ane_placement_ratio())
+    with_engine(AneCore::ane_placement_ratio)
 }
 
 pub fn compute_units_raw_value() -> Option<i32> {
@@ -844,9 +843,7 @@ pub fn reset_counters() {
 pub fn decode_vitals(elapsed_us: u64) -> (u64, u64, f64) {
     let (last_token_us, token_count, _) = metrics();
     let first_token_us = first_token_latency_us();
-    let prewarm_us = selection_latency_us()
-        .map(|(_, prewarm)| prewarm)
-        .unwrap_or(0);
+    let prewarm_us = selection_latency_us().map_or(0, |(_, prewarm)| prewarm);
     let avg_decode_us = if token_count > 1 {
         elapsed_us.saturating_sub(first_token_us) / (token_count - 1)
     } else {

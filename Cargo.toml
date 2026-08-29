@@ -35,7 +35,7 @@ dashmap = "6.0"
 sysinfo = "0.30"
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
-starship-battery = "0.10"
+starship-battery = "0.11"
 chrono = "0.4"
 candle-core = { version = "0.10.2", features = ["metal", "accelerate"] }
 candle-nn = { version = "0.10.2", features = ["metal"] }
@@ -68,7 +68,7 @@ objc2-metal = "0.3.2"
 hf-chat-template = "1.0.0"
 
 [build-dependencies]
-cbindgen = "0.26"
+cbindgen = "0.29"
 
 [profile.release]
 opt-level = 3

@@ -85,42 +85,34 @@ fn fast_templates() -> Vec<String> {
             if p.is_empty() {
                 out.push(a.to_string());
             } else {
-                out.push(format!("{}, {}", p, a));
+                out.push(format!("{p}, {a}"));
             }
         }
     }
     for app in &apps {
-        out.push(format!("open {}", app));
-        out.push(format!("launch {}", app));
-        out.push(format!("open app {}", app));
+        out.push(format!("open {app}"));
+        out.push(format!("launch {app}"));
+        out.push(format!("open app {app}"));
     }
     for path in &paths {
-        out.push(format!("open {}", path));
-        out.push(format!("list files in {}", path));
-        out.push(format!("create directory {}", path));
-        out.push(format!("create file {}", path));
-        out.push(format!("show {}", path));
-        out.push(format!("delete {}", path));
-        out.push(format!("trash {}", path));
-        out.push(format!("remove {}", path));
+        out.push(format!("open {path}"));
+        out.push(format!("list files in {path}"));
+        out.push(format!("create directory {path}"));
+        out.push(format!("create file {path}"));
+        out.push(format!("show {path}"));
+        out.push(format!("delete {path}"));
+        out.push(format!("trash {path}"));
+        out.push(format!("remove {path}"));
     }
     for path in &full_paths {
-        out.push(format!("delete {}", path));
-        out.push(format!("trash {}", path));
-        out.push(format!("remove {}", path));
-        out.push(format!("create file {}", path));
-        out.push(format!("create directory {}", path));
-        out.push(format!("list files in {}", path));
-        out.push(format!(
-            "copy {} to {home}/bad_apple/test_cage/copy",
-            path,
-            home = home
-        ));
-        out.push(format!(
-            "move {} to {home}/bad_apple/test_cage/moved",
-            path,
-            home = home
-        ));
+        out.push(format!("delete {path}"));
+        out.push(format!("trash {path}"));
+        out.push(format!("remove {path}"));
+        out.push(format!("create file {path}"));
+        out.push(format!("create directory {path}"));
+        out.push(format!("list files in {path}"));
+        out.push(format!("copy {path} to {home}/bad_apple/test_cage/copy"));
+        out.push(format!("move {path} to {home}/bad_apple/test_cage/moved"));
     }
     out
 }
@@ -181,9 +173,9 @@ fn deep_templates() -> Vec<String> {
             for suffix in &suffixes {
                 let suffix = suffix.trim();
                 let s = if suffix.is_empty() {
-                    format!("{} {}", prefix, topic)
+                    format!("{prefix} {topic}")
                 } else {
-                    format!("{} {} {}", prefix, topic, suffix)
+                    format!("{prefix} {topic} {suffix}")
                 };
                 out.push(s);
             }
@@ -257,11 +249,11 @@ fn main() -> Result<()> {
         }
         let avg = total_loss / all.len() as f64;
         if epoch % 50 == 0 || (epoch > 0 && (prev_loss - avg).abs() > 0.01) {
-            println!("epoch {:3} avg loss {:.4}", epoch, avg);
+            println!("epoch {epoch:3} avg loss {avg:.4}");
         }
         prev_loss = avg;
         if avg < 0.01 {
-            println!("Converged at epoch {}", epoch);
+            println!("Converged at epoch {epoch}");
             break;
         }
     }

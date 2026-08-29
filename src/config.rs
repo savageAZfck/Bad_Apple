@@ -134,8 +134,7 @@ fn env_usize(key: &str, default: usize) -> usize {
 fn env_path(key: &str, default: &str) -> PathBuf {
     std::env::var(key)
         .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(default))
+        .map_or_else(|| PathBuf::from(default), PathBuf::from)
 }
 
 fn parse_peer_list(s: &str) -> Vec<String> {

@@ -94,7 +94,7 @@ pub unsafe extern "C" fn bad_apple_init(config_path: *const c_char) -> *mut BadA
     let state = BadAppleState::new(config);
     let boxed = Box::new(Mutex::new(state));
     let ctx = Box::new(BadAppleContext {
-        _private: Box::into_raw(boxed) as *mut c_void,
+        _private: Box::into_raw(boxed).cast::<c_void>(),
     });
     Box::into_raw(ctx)
 }
@@ -164,8 +164,7 @@ pub unsafe extern "C" fn bad_apple_get_mastery_index(context: *mut BadAppleConte
     let state = &*(ctx._private as *const Mutex<BadAppleState>);
     state
         .lock()
-        .map(|g| g.mastery_index.clamp(0.0, 1.0))
-        .unwrap_or(0.0)
+        .map_or(0.0, |g| g.mastery_index.clamp(0.0, 1.0))
 }
 
 /// Release a context previously allocated by `bad_apple_init`.
@@ -182,7 +181,7 @@ pub unsafe extern "C" fn bad_apple_free(context: *mut BadAppleContext) {
         return;
     }
     let ctx = Box::from_raw(context);
-    let state = Box::from_raw(ctx._private as *mut Mutex<BadAppleState>);
+    let state = Box::from_raw(ctx._private.cast::<Mutex<BadAppleState>>());
     drop(state);
     drop(ctx);
 }
@@ -271,7 +270,7 @@ pub unsafe extern "C" fn bad_apple_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
-    libc::free(s as *mut c_void);
+    libc::free(s.cast::<c_void>());
 }
 
 /// Alias for `bad_apple_free_string` that explicitly signals to the host

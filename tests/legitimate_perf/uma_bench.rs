@@ -34,16 +34,14 @@ fn uma_connectome_sized_write_latency() {
     let min = *samples.iter().min().unwrap();
     let max = *samples.iter().max().unwrap();
     eprintln!(
-        "[uma_bench] {}x{} f64 write: avg={} µs min={} µs max={} µs (samples: {:?})",
-        NODES, EMBEDDING_DIM, avg, min, max, samples
+        "[uma_bench] {NODES}x{EMBEDDING_DIM} f64 write: avg={avg} µs min={min} µs max={max} µs (samples: {samples:?})"
     );
 
     // This is a smoke check, not a strict benchmark. Loaded CI machines can
     // see 6-7 ms for an 8 MiB write; harden by allowing generous headroom.
     assert!(
         avg < 10_000,
-        "UMA connectome write averaged {} µs, expected < 10000 µs",
-        avg
+        "UMA connectome write averaged {avg} µs, expected < 10000 µs"
     );
 }
 

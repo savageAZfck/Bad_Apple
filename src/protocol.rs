@@ -215,7 +215,7 @@ unsafe impl<T: Send + Priority> Sync for LockFreeRing<T> {}
 pub fn multi_agent_secret() -> Vec<u8> {
     let host = System::host_name().unwrap_or_else(|| "localhost".to_string());
     std::env::var("MULTI_AGENT_SECRET")
-        .unwrap_or_else(|_| format!("bad-apple-{}-default", host))
+        .unwrap_or_else(|_| format!("bad-apple-{host}-default"))
         .into_bytes()
 }
 
@@ -227,7 +227,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Sign a compact engram payload, returning a JSON-safe signed packet.
@@ -490,12 +490,12 @@ impl ConnectionManager {
     }
 
     async fn start_tcp_listener(&self, port: u16) -> Result<SocketAddr, String> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+        let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
             .await
-            .map_err(|e| format!("WAN TCP listener bind failed: {}", e))?;
+            .map_err(|e| format!("WAN TCP listener bind failed: {e}"))?;
         let addr = listener
             .local_addr()
-            .map_err(|e| format!("WAN TCP listener local_addr failed: {}", e))?;
+            .map_err(|e| format!("WAN TCP listener local_addr failed: {e}"))?;
         if let Ok(mut guard) = self.listen_addr_tcp.lock() {
             *guard = Some(addr);
         }
@@ -520,12 +520,12 @@ impl ConnectionManager {
     }
 
     async fn start_ws_listener(&self, port: u16) -> Result<SocketAddr, String> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+        let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
             .await
-            .map_err(|e| format!("WAN WebSocket listener bind failed: {}", e))?;
+            .map_err(|e| format!("WAN WebSocket listener bind failed: {e}"))?;
         let addr = listener
             .local_addr()
-            .map_err(|e| format!("WAN WebSocket listener local_addr failed: {}", e))?;
+            .map_err(|e| format!("WAN WebSocket listener local_addr failed: {e}"))?;
         if let Ok(mut guard) = self.listen_addr_ws.lock() {
             *guard = Some(addr);
         }
@@ -599,7 +599,7 @@ impl ConnectionManager {
                 Ok(())
             }
             PeerTransport::WebSocket => {
-                let url = format!("ws://{}", peer_id);
+                let url = format!("ws://{peer_id}");
                 let (ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
                 self.handle_ws_stream(ws, peer_id).await;
                 Ok(())
@@ -610,7 +610,7 @@ impl ConnectionManager {
     async fn handle_tcp_stream(&self, stream: TcpStream, peer_addr: SocketAddr) {
         let (mut reader, mut writer) = stream.into_split();
         let outbound = Arc::new(LockFreeRing::<Vec<u8>>::new(256));
-        let peer_id = format!("tcp:{}", peer_addr);
+        let peer_id = format!("tcp:{peer_addr}");
 
         if self
             .register(
@@ -680,7 +680,7 @@ impl ConnectionManager {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let outbound = Arc::new(LockFreeRing::<Vec<u8>>::new(256));
-        let peer_id = format!("ws:{}", peer_display);
+        let peer_id = format!("ws:{peer_display}");
 
         if self
             .register(

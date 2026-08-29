@@ -94,7 +94,7 @@ impl MemoryArena {
         if aligned_offset + aligned_size > self.cap {
             return None;
         }
-        let start = self.ptr.as_ptr().wrapping_add(aligned_offset) as *mut T;
+        let start = self.ptr.as_ptr().wrapping_add(aligned_offset).cast::<T>();
         self.offset = aligned_offset + aligned_size;
         Some(unsafe { std::slice::from_raw_parts_mut(start, len) })
     }

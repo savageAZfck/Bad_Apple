@@ -67,11 +67,11 @@ fn main() -> Result<()> {
         return run_doctor();
     }
 
-    if prompt_parts.first().map(|s| s.as_str()) == Some("model") {
+    if prompt_parts.first().map(std::string::String::as_str) == Some("model") {
         return run_model_subcommand(&prompt_parts[1..]);
     }
 
-    if prompt_parts.first().map(|s| s.as_str()) == Some("p2p") {
+    if prompt_parts.first().map(std::string::String::as_str) == Some("p2p") {
         return run_p2p_subcommand(&prompt_parts[1..]);
     }
 
@@ -85,11 +85,11 @@ fn main() -> Result<()> {
     let wrap = |p: String| {
         let mut p = p;
         if voice_mode && !p.starts_with("__BADAPPLE_VOICE__ ") {
-            p = format!("__BADAPPLE_VOICE__ {}", p);
+            p = format!("__BADAPPLE_VOICE__ {p}");
         }
         if let Some(ref name) = persona {
             if !p.starts_with("__BADAPPLE_PERSONA__") {
-                p = format!("__BADAPPLE_PERSONA__{}__ {}", name, p);
+                p = format!("__BADAPPLE_PERSONA__{name}__ {p}");
             }
         }
         p
@@ -375,7 +375,7 @@ fn run_benchmark(single_prompt: Option<&str>, max_new_tokens: usize) -> Result<(
             "{:<38} {:>8} {:>10} {:>10.1} {:>10.1} {:>10.2}",
             "AVERAGE / MAX", total_tokens, "", avg_decode, avg_total, max_mem
         );
-        println!("Total wall time: {:.2}s", total_elapsed);
+        println!("Total wall time: {total_elapsed:.2}s");
     }
     Ok(())
 }
@@ -475,7 +475,7 @@ fn run_doctor() -> Result<()> {
     }
     if let Some(p) = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
     {
         bin_dirs.push(p);
     }
@@ -552,12 +552,12 @@ fn run_doctor() -> Result<()> {
         let mut status = "not found".to_string();
         let mut domains = vec![format!("system/{}", label)];
         if !uid.is_empty() {
-            domains.push(format!("gui/{}/{}", uid, label));
+            domains.push(format!("gui/{uid}/{label}"));
         }
         for domain in domains {
             if let Ok(out) = Command::new("launchctl").args(["print", &domain]).output() {
                 let text = String::from_utf8_lossy(&out.stdout);
-                if text.contains(&format!("{} = {{", label)) {
+                if text.contains(&format!("{label} = {{")) {
                     if let Some(st) = text.lines().find_map(|l| l.trim().strip_prefix("state = ")) {
                         status = st.trim().to_string();
                     } else if text.contains("active count =") {
@@ -567,7 +567,7 @@ fn run_doctor() -> Result<()> {
                 }
             }
         }
-        let _ = writeln!(report, "{}: {}", label, status);
+        let _ = writeln!(report, "{label}: {status}");
     }
 
     // Sockets
@@ -636,7 +636,7 @@ fn run_doctor() -> Result<()> {
             }
             let _ = writeln!(report, "cached models: {}", found.len());
             for m in found.iter().take(8) {
-                let _ = writeln!(report, "  - {}", m);
+                let _ = writeln!(report, "  - {m}");
             }
         } else {
             let _ = writeln!(report, "huggingface hub: missing");
@@ -651,7 +651,7 @@ fn run_doctor() -> Result<()> {
         let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
     }
 
-    println!("{}", report);
+    println!("{report}");
     Ok(())
 }
 

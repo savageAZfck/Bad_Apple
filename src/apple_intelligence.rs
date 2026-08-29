@@ -130,7 +130,7 @@ impl Drop for CStringOwner {
         if let Some(free) = FREE_CB.get() {
             free(self.0);
         } else {
-            unsafe { libc::free(self.0 as *mut c_void) };
+            unsafe { libc::free(self.0.cast::<c_void>()) };
         }
     }
 }
@@ -170,17 +170,17 @@ pub fn try_load_bridge() -> Result<(), String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(d) = dir.to_str() {
-                paths.push(format!("{}/libBadAppleBridge.dylib", d));
+                paths.push(format!("{d}/libBadAppleBridge.dylib"));
             }
             if let Some(d) = dir.parent().and_then(|p| p.to_str()) {
-                paths.push(format!("{}/libBadAppleBridge.dylib", d));
+                paths.push(format!("{d}/libBadAppleBridge.dylib"));
             }
         }
     }
 
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        paths.push(format!("{}/release/libBadAppleBridge.dylib", target_dir));
-        paths.push(format!("{}/debug/libBadAppleBridge.dylib", target_dir));
+        paths.push(format!("{target_dir}/release/libBadAppleBridge.dylib"));
+        paths.push(format!("{target_dir}/debug/libBadAppleBridge.dylib"));
     }
 
     paths.push("target/release/libBadAppleBridge.dylib".to_string());
@@ -193,7 +193,7 @@ pub fn try_load_bridge() -> Result<(), String> {
         };
 
         let init: Symbol<InitFn> = unsafe { lib.get(b"init_bad_apple_bridge\0") }
-            .map_err(|e| format!("Swift bridge lacks init symbol: {}", e))?;
+            .map_err(|e| format!("Swift bridge lacks init symbol: {e}"))?;
 
         init();
 

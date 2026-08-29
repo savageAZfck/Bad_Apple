@@ -203,7 +203,7 @@ impl MetricsLogger {
             .open(&self.path)
         {
             if let Ok(line) = serde_json::to_string(entry) {
-                let _ = writeln!(file, "{}", line);
+                let _ = writeln!(file, "{line}");
             }
         }
     }
@@ -285,7 +285,7 @@ impl MetricsLogger {
                 .map(|(i, v)| {
                     let x = i as f64 * w;
                     let y = 100.0 - ((v - min) / range) * 100.0;
-                    format!("{:.2},{:.2}", x, y)
+                    format!("{x:.2},{y:.2}")
                 })
                 .collect();
             format!(

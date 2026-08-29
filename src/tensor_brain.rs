@@ -92,7 +92,7 @@ impl DropHead {
         let num_heads = q.dim(1)?;
         let mut mask = vec![0.0f32; num_heads];
         let mut rng = rand::thread_rng();
-        for m in mask.iter_mut() {
+        for m in &mut mask {
             if !rng.gen_bool(self.p) {
                 *m = self.scale as f32;
             }
@@ -957,7 +957,7 @@ impl BpeTokenizer {
         let encoding = match self.tokenizer.encode(text, false) {
             Ok(enc) => enc,
             Err(e) => {
-                eprintln!("⚠️ BPE tokenize failed ({}); returning empty.", e);
+                eprintln!("⚠️ BPE tokenize failed ({e}); returning empty.");
                 return Vec::new();
             }
         };
@@ -972,7 +972,7 @@ impl BpeTokenizer {
         out.fill(0.0);
 
         let encoding = self.tokenizer.encode(text, false).unwrap_or_else(|e| {
-            eprintln!("⚠️ BPE encode failed ({}); using empty encoding.", e);
+            eprintln!("⚠️ BPE encode failed ({e}); using empty encoding.");
             // Return a zero-length encoding from an empty string.
             self.tokenizer
                 .encode("", false)
@@ -1065,14 +1065,14 @@ impl LiquidStateMachine {
         let scale_rec = 0.1;
 
         let mut input_weights = vec![Vec::with_capacity(input_dim); reservoir_size];
-        for row in input_weights.iter_mut() {
+        for row in &mut input_weights {
             for _ in 0..input_dim {
                 row.push(rng.gen_range(-scale_in..scale_in));
             }
         }
 
         let mut recurrent_weights = vec![Vec::with_capacity(reservoir_size); reservoir_size];
-        for row in recurrent_weights.iter_mut() {
+        for row in &mut recurrent_weights {
             for _ in 0..reservoir_size {
                 row.push(rng.gen_range(-scale_rec..scale_rec));
             }
@@ -1145,7 +1145,7 @@ impl ContinuousBrain {
     pub fn new(input_dim: usize, reservoir_size: usize, output_dim: usize, seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed.wrapping_add(1));
         let mut readout = vec![Vec::with_capacity(reservoir_size); output_dim];
-        for row in readout.iter_mut() {
+        for row in &mut readout {
             for _ in 0..reservoir_size {
                 row.push(rng.gen_range(-0.1..0.1));
             }

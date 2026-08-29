@@ -68,7 +68,7 @@ impl<T: Copy + Send + Sync + 'static> UmaBuffer<T> {
     }
 
     fn ptr(&self) -> *mut T {
-        self.buffer.contents() as *mut T
+        self.buffer.contents().cast::<T>()
     }
 
     /// Return a shared slice into the buffer.
@@ -243,7 +243,7 @@ impl View for UmaSafetensorView {
     }
 
     fn data(&self) -> Cow<'_, [u8]> {
-        let ptr = self.storage.buffer().contents() as *const u8;
+        let ptr = self.storage.buffer().contents().cast_const();
         assert!(
             !ptr.is_null(),
             "UmaSafetensorView::data called on a private/non-readable MTLBuffer"
@@ -488,14 +488,13 @@ mod tests {
         let min = *samples.iter().min().unwrap();
         let max = *samples.iter().max().unwrap();
         eprintln!(
-            "[uma_connectome_write] avg={} µs min={} µs max={} µs (samples: {:?})",
-            avg, min, max, samples
+            "[uma_connectome_write] avg={avg} µs min={min} µs max={max} µs (samples: {samples:?})"
         );
 
         // A 500 * 2048 f64 write should complete in well under a millisecond on
         // UMA (the allocation is ~8 MiB).  Keep a generous ceiling for CI and
         // other loaded hosts; this is a smoke check, not a strict benchmark.
-        assert!(avg < 10_000, "UMA connectome write averaged {} µs", avg);
+        assert!(avg < 10_000, "UMA connectome write averaged {avg} µs");
     }
 
     /// Round-trip a small Metal tensor through the UMA safetensors save path.
@@ -553,10 +552,7 @@ mod tests {
             let e0 = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
             assert!(
                 (a0 - e0).abs() < 1e-3,
-                "tensor {} mismatch: {} vs {}",
-                name,
-                a0,
-                e0
+                "tensor {name} mismatch: {a0} vs {e0}"
             );
         }
     }
@@ -582,7 +578,7 @@ mod tests {
             start.elapsed().as_micros() as u64
         };
 
-        eprintln!("[uma_vs_vec] uma={} µs vec={} µs", uma_us, vec_us);
+        eprintln!("[uma_vs_vec] uma={uma_us} µs vec={vec_us} µs");
 
         assert_eq!(buf.as_slice(), &src[..]);
         assert_eq!(&vec[..], &src[..]);
@@ -591,9 +587,7 @@ mod tests {
         // Give it a 3x ceiling to account for first-touch / page-fault noise.
         assert!(
             uma_us < vec_us * 3,
-            "UMA copy {} µs was more than 3x slower than Vec copy {} µs",
-            uma_us,
-            vec_us
+            "UMA copy {uma_us} µs was more than 3x slower than Vec copy {vec_us} µs"
         );
     }
 }

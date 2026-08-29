@@ -133,7 +133,12 @@ impl Hypervector {
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64 {
-    use core::arch::aarch64::*;
+    use core::arch::aarch64::{
+        int16x8_t, vaddq_s32, vaddvq_s32, vaddvq_u8, vaddw_s16, vceqq_s8, vcombine_s16,
+        vcombine_s8, vdupq_n_s16, vdupq_n_s32, vget_high_s16, vget_high_s8, vget_low_s16,
+        vget_low_s8, vld1q_s32, vld1q_s8, vmlal_s8, vmovl_s16, vmovl_s8, vmulq_s8, vmvnq_u8,
+        vorrq_s32, vqmovn_s16, vqmovn_s32, vshrq_n_s32, vshrq_n_u8, vst1q_s32, vst1q_s8,
+    };
 
     use super::HD_DIM;
 
@@ -364,7 +369,7 @@ impl ScriptEncoder {
     /// Encode a token id as a stable HDC symbol. The first call for an id
     /// allocates a random vector; subsequent calls reuse it.
     fn token_hv(&mut self, id: u32) -> &Hypervector {
-        let key = format!("tok_{}", id);
+        let key = format!("tok_{id}");
         if !self.token_memory.symbols.contains_key(&key) {
             self.token_memory.allocate(&key);
         }
@@ -391,7 +396,7 @@ impl ScriptEncoder {
         let loop_count = lower.matches("for ").count()
             + lower.matches("while ").count()
             + lower.matches("loop").count();
-        let string_alloc_count = lower.matches("+").count()
+        let string_alloc_count = lower.matches('+').count()
             + lower.matches(".append(").count()
             + lower.matches(".join(").count();
         let function_count = lower.matches("def ").count()

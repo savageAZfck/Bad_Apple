@@ -15,8 +15,7 @@ fn main() {
 
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing");
     let target_dir = env::var("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(&crate_dir).join("target"))
+        .map_or_else(|_| PathBuf::from(&crate_dir).join("target"), PathBuf::from)
         .join(env::var("PROFILE").unwrap_or_else(|_| "debug".into()));
     std::fs::create_dir_all(&target_dir).ok();
 

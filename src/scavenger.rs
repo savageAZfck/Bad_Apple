@@ -78,8 +78,7 @@ impl ScavengerConfig {
         };
 
         let sled_db_path = std::env::var_os("BADAPPLE_SLED_DB_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("strategy_db"));
+            .map_or_else(|| PathBuf::from("strategy_db"), PathBuf::from);
 
         let reset_db = std::env::var("BADAPPLE_SLED_DB_RESET")
             .ok()
@@ -120,11 +119,11 @@ impl ScavengerConfig {
                 if let Some(model) = value.get("model") {
                     let hidden = model
                         .get("hidden_size")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(2048) as usize;
                     let vocab = model
                         .get("vocab_size")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(151_936) as usize;
                     return Ok((hidden, vocab));
                 }
@@ -149,9 +148,8 @@ impl ScavengerConfig {
 
     /// Discover the Bad Apple repo and any adjacent local source folders.
     fn discover_source_dirs() -> Vec<PathBuf> {
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/Users/YourName"));
+        let home =
+            std::env::var("HOME").map_or_else(|_| PathBuf::from("/Users/YourName"), PathBuf::from);
         let primary = home.join("bad_apple");
         let mut dirs = vec![primary.clone()];
         if let Ok(entries) = fs::read_dir(&home) {
@@ -364,8 +362,7 @@ impl Scavenger {
                                 .modified()
                                 .ok()
                                 .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
+                                .map_or(0, |d| d.as_secs());
                             pending.insert(path.clone(), mtime);
                         }
                     }
@@ -398,8 +395,7 @@ impl Scavenger {
                                     .modified()
                                     .ok()
                                     .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0);
+                                    .map_or(0, |d| d.as_secs());
                                 pending.insert(path.clone(), mtime);
                             }
                         }
@@ -459,7 +455,9 @@ impl Scavenger {
             }
         }
 
-        if !files.is_empty() {
+        if files.is_empty() {
+            tracing::info!("scavenger found no tracked files in watch directories");
+        } else {
             let file_count = files.len();
             tracing::info!(
                 "scavenger starting first repository index pass: {} files across {} watch roots",
@@ -492,8 +490,6 @@ impl Scavenger {
                 free_mb,
                 total_mb
             );
-        } else {
-            tracing::info!("scavenger found no tracked files in watch directories");
         }
         Ok(())
     }
@@ -502,7 +498,7 @@ impl Scavenger {
         let mut paths = self
             .db
             .scan_prefix(METADATA_PREFIX)
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|(_, raw)| serde_json::from_slice::<FileMetadata>(&raw).ok())
             .map(|metadata| metadata.path)
             .collect::<Vec<_>>();
@@ -616,12 +612,11 @@ impl Scavenger {
 
         let mut chunks: Vec<String> = Vec::new();
         for paragraph in paragraphs {
-            let tokens = match self.tokenizer.encode(paragraph, true) {
-                Ok(encoding) => encoding.get_ids().to_vec(),
-                Err(_) => {
-                    chunks.push(paragraph.to_string());
-                    continue;
-                }
+            let tokens = if let Ok(encoding) = self.tokenizer.encode(paragraph, true) {
+                encoding.get_ids().to_vec()
+            } else {
+                chunks.push(paragraph.to_string());
+                continue;
             };
 
             if tokens.len() <= CHUNK_TOKEN_TARGET {
@@ -648,7 +643,7 @@ impl Scavenger {
         let mut merged: Vec<String> = Vec::new();
         for chunk in chunks {
             if let Some(last) = merged.last_mut() {
-                let candidate = format!("{}\n\n{}", last, chunk);
+                let candidate = format!("{last}\n\n{chunk}");
                 if let Ok(merged_tokens) = self.tokenizer.encode(candidate.as_str(), true) {
                     if merged_tokens.get_ids().len() <= CHUNK_TOKEN_TARGET {
                         *last = candidate;
@@ -672,7 +667,7 @@ impl Scavenger {
         let encoding = self
             .tokenizer
             .encode(text, true)
-            .map_err(|e| anyhow!("unable to tokenize chunk: {}", e))?;
+            .map_err(|e| anyhow!("unable to tokenize chunk: {e}"))?;
         let token_ids = encoding.get_ids().to_vec();
 
         let mut mean = vec![0.0f32; self.config.hidden_size];
@@ -736,8 +731,7 @@ fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
                         .modified()
                         .ok()
                         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
+                        .map_or(0, |d| d.as_secs());
                     out.push((path, mtime));
                 }
             }
@@ -775,7 +769,7 @@ fn content_hash_bytes(bytes: &[u8]) -> String {
     hasher
         .finalize()
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect()
 }
 
@@ -790,7 +784,7 @@ fn meta_key(path_key: &str) -> Vec<u8> {
 }
 
 fn chunk_key(path_key: &str, index: usize) -> Vec<u8> {
-    format!("{}:{}:{}", CHUNK_PREFIX, path_key, index).into_bytes()
+    format!("{CHUNK_PREFIX}:{path_key}:{index}").into_bytes()
 }
 
 /// Return the number of records whose keys start with `prefix`.

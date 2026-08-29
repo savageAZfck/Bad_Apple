@@ -73,7 +73,7 @@ fn daemon_mode_initializes_and_holds_zero_network_sockets() {
     let mut line = String::new();
 
     loop {
-        if start.elapsed() > Duration::from_secs(120) {
+        if start.elapsed() > Duration::from_mins(2) {
             let _ = child.kill();
             panic!("daemon did not emit a heartbeat within 120 seconds");
         }
@@ -111,8 +111,7 @@ fn daemon_mode_initializes_and_holds_zero_network_sockets() {
     );
     assert_eq!(
         socket_count, 0,
-        "Bad Apple daemon must have zero network sockets; lsof -i reported {}",
-        socket_count
+        "Bad Apple daemon must have zero network sockets; lsof -i reported {socket_count}"
     );
 }
 

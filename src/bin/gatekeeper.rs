@@ -263,7 +263,7 @@ fn list_directory_safe(path: &str, cage: &AutomationCage) -> Result<String> {
         bail!("path escapes allowlisted automation roots");
     }
     let entries: Vec<_> = fs::read_dir(&expanded)?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .take(20)
         .collect();
@@ -407,7 +407,11 @@ fn execute_wasm_blocks(text: &str) -> String {
     for cap in re.captures_iter(text) {
         let body = cap.get(1).unwrap().as_str().trim();
         let result: Result<String> = (|| {
-            let bytes = if body.starts_with('/') || body.starts_with('~') || body.ends_with(".wasm")
+            let bytes = if body.starts_with('/')
+                || body.starts_with('~')
+                || std::path::Path::new(body)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
             {
                 let path = expand_path(body);
                 fs::read(&path).with_context(|| format!("cannot read WASM {path}"))?
@@ -465,7 +469,7 @@ fn forward_to_mlx(
 
     let mut mlx_stream = UnixStream::connect(&mlx_path)
         .with_context(|| format!("cannot connect to MLX backend at {mlx_path:?}"))?;
-    mlx_stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    mlx_stream.set_read_timeout(Some(Duration::from_mins(2)))?;
     mlx_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     let timestamp_ms = now_unix_ms()?;
@@ -556,11 +560,10 @@ fn forward_v2_to_mlx(
     cage: &AutomationCage,
 ) -> Result<()> {
     let mlx_path = std::env::var_os("BADAPPLE_MLX_SOCKET_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(MLX_SOCKET_PATH));
+        .map_or_else(|| PathBuf::from(MLX_SOCKET_PATH), PathBuf::from);
     let mut mlx_stream =
         UnixStream::connect(&mlx_path).context("unable to connect to MLX daemon for v2 proxy")?;
-    mlx_stream.set_read_timeout(Some(Duration::from_secs(900)))?;
+    mlx_stream.set_read_timeout(Some(Duration::from_mins(15)))?;
     mlx_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     let mut mlx_reader = BufReader::new(mlx_stream.try_clone()?);
@@ -572,7 +575,7 @@ fn forward_v2_to_mlx(
     let challenge: ServerFrame = read_frame(&mut mlx_reader)?;
     match challenge {
         ServerFrame::Challenge { .. } | ServerFrame::Error { .. } => {
-            write_frame(client_writer, &challenge)?
+            write_frame(client_writer, &challenge)?;
         }
         _ => bail!("MLX daemon returned an invalid v2 challenge"),
     }
@@ -631,6 +634,36 @@ fn write_frame<W: Write, T: serde::Serialize>(writer: &mut W, value: &T) -> Resu
     Ok(())
 }
 
+/// Recognize the class of I/O error produced when a client (very often a
+/// bare TCP/Unix-socket health-check probe, e.g. badapple_supervisor.py's
+/// `_socket_ready`) connects and disconnects without completing the SLICKS
+/// handshake. On macOS in particular, a client that closes its socket in a
+/// tight race right after `connect()` can surface to the server's `read()`
+/// as `EINVAL` rather than a clean end-of-stream, in addition to the more
+/// familiar broken-pipe/connection-reset/unexpected-EOF kinds seen on other
+/// platforms or in other early-disconnect timings. None of these indicate a
+/// real protocol or server problem, so they are logged quietly rather than
+/// as alarming "client error" lines.
+fn is_benign_disconnect(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    if msg.contains("connection closed") || msg.contains("out-of-order IPC frame") {
+        return true;
+    }
+    // anyhow::Error::downcast_ref searches the entire cause chain, not just
+    // the outermost error, so this finds an io::Error wrapped at any depth.
+    let Some(io_err) = err.downcast_ref::<std::io::Error>() else {
+        return false;
+    };
+    match io_err.kind() {
+        std::io::ErrorKind::UnexpectedEof
+        | std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted
+        | std::io::ErrorKind::BrokenPipe => true,
+        std::io::ErrorKind::InvalidInput => io_err.raw_os_error() == Some(22), // EINVAL
+        _ => false,
+    }
+}
+
 fn handle_client(
     mut stream: UnixStream,
     router: &SemanticRouter,
@@ -639,7 +672,7 @@ fn handle_client(
 ) -> Result<()> {
     let secret = load_slicks_secret()?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(120)))?;
+    stream.set_write_timeout(Some(Duration::from_mins(2)))?;
 
     let mut reader = BufReader::new(stream.try_clone()?);
 
@@ -824,7 +857,16 @@ fn main() -> Result<()> {
                 let cage = cage.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = handle_client(stream, &router, &resolver, &cage) {
-                        eprintln!("[gatekeeper] client error: {e:#}");
+                        if is_benign_disconnect(&e) {
+                            // A client (very often a health-check probe that
+                            // connects and disconnects without ever sending a
+                            // hello frame) went away before or during the
+                            // handshake. This is routine, not an error worth
+                            // alarming a human over; log it quietly.
+                            eprintln!("[gatekeeper] client disconnected before completing handshake: {e:#}");
+                        } else {
+                            eprintln!("[gatekeeper] client error: {e:#}");
+                        }
                     }
                 });
             }

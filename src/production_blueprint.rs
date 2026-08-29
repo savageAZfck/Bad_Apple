@@ -43,7 +43,7 @@ impl GlobalWorkspace {
                 return;
             }
 
-            for agent in self.sub_agent_channels.iter() {
+            for agent in &self.sub_agent_channels {
                 let callback = Arc::clone(agent.value());
                 let payload_clone = payload.clone();
                 let saliency_val = *saliency;
@@ -99,7 +99,7 @@ impl NeuroSymbolicEngine {
         let calibrated_learning_rate =
             COGNITIVE_VELOCITY * learning_rate_modifier * COGNITIVE_AROUSAL;
 
-        for rule in self.rule_register.iter() {
+        for rule in &self.rule_register {
             let premise = rule.key();
             let conclusion = rule.value();
 
@@ -353,7 +353,7 @@ impl CausalGraph {
         }
 
         if antecedents.is_empty() {
-            Some(format!("Failure at isolated node [{}]", failed_node))
+            Some(format!("Failure at isolated node [{failed_node}]"))
         } else {
             Some(format!(
                 "Causal chain for failure at [{}]:\n{}",
@@ -369,7 +369,7 @@ impl CausalGraph {
         self.nodes
             .iter()
             .find(|n| failure.to_lowercase().contains(&n.to_lowercase()))
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
     }
 
     /// Built-in causal map for the Bad Apple architecture.
