@@ -3000,6 +3000,10 @@ class MLXServer:
                 return "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
             return text
 
+        # Ensure the main model is loaded before we try to use its tokenizer
+        # in render_prompt (lazy loading defers this until the first request).
+        self._ensure_main_model()
+
         # First generation. Only stream when tools are not offered, because tool
         # reasoning can produce intermediate <tool_call> blocks we don't want
         # mixed into the streamed voice/text output.
