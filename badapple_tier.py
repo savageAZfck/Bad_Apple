@@ -62,6 +62,22 @@ def _rotated(responses: list[str]) -> str:
     return random.choice(responses)
 
 
+def _spoken_time(now: datetime.datetime) -> str:
+    """Return a TTS-friendly, human-readable local time string."""
+    hour = now.hour % 12 or 12
+    minute = now.minute
+    ampm = "AM" if now.hour < 12 else "PM"
+    day = now.day
+    # 11th, 12th, 13th are exceptions.
+    if 11 <= day <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    minute_str = f"{minute:02d}"
+    time_part = f"{hour}:{minute_str} {ampm}"
+    return f"It's {time_part} on {now:%A}, {now:%B} {day}{suffix}."
+
+
 class TieringRouter:
     def __init__(self, fast_model_enabled: bool = False):
         self.fast_model_enabled = fast_model_enabled
@@ -110,8 +126,8 @@ class TieringRouter:
 
         # Fast tier: time.
         if re.search(r"\b(what time is it|current time|time is it)\b", low):
-            now = datetime.datetime.now(tz=datetime.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-            return ("fast", {"text": f"It's {now}, bestie."})
+            now = datetime.datetime.now(tz=datetime.timezone.utc).astimezone()
+            return ("fast", {"text": _spoken_time(now)})
 
         # Vision tier.
         if any(k in low for k in ("screen", "screenshot", "image", "describe this", "what's in this", "extract text from image")):
