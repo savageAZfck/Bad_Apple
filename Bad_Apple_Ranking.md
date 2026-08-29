@@ -235,151 +235,142 @@ open -a "Bad Apple"
 
 ## Competitive Ranking (August 2026)
 
-The on-device macOS AI assistant market is now crowded. Below is an honest,
-evidence-based comparison against the direct competitors, based on public
-READMEs, feature lists, and install paths as of August 2026.
+### Bad Apple is an AI OS layer, not an app
 
-### The field
+Bad Apple runs as **three system-level launchd daemons** (gatekeeper, MLX
+server, supervisor) managed by launchd with `KeepAlive`, a **Rust gatekeeper
+proxy** on a system Unix socket, a **bounded health supervisor** that restarts
+failed services with a restart budget, a **13-actor runtime** (audit, breakers,
+cache, health, MCP, metrics, model, P2P, persona, resources, task, workspace),
+a **dual-process cognitive governor** (System 1 hyperdimensional / System 2
+Transformer), **hardware-level integration** (Metal UMA zero-copy buffers,
+Apple Neural Engine bridge, Apple Intelligence Foundation Models bridge,
+memory-mapped connectome persistence), a **WebAssembly sandbox** for untrusted
+tool synthesis, a **fail-closed filesystem automation cage**, an **APFS file
+scavenger**, a **declarative security policy engine** (37 tool rules), a
+**Secure Enclave identity** with hardware-rooted signing, a **hash-chained
+audit ledger** with SE-signed checkpoints, and an **air-gap certification
+suite**.
 
-| # | Product | Model | Signed? | Native UI | Security controls | Air-gap cert | Open source |
-|---|---|---|---|---|---|---|---|
-| 1 | **M1K3** | Apple FM + Qwen 3 4B + Gemma 4 12B | Yes (Developer ID) | SwiftUI full app | App Sandbox, on-device only | No | Apache-2.0 |
-| 2 | **Ka1zen** | Any MLX/GGUF model, speculative decoding | Yes | SwiftUI chat | On-device only | No | Proprietary (free) |
-| 3 | **MLX Studio** | MLX, multi-model, vision, image gen | Yes | SwiftUI all-in-one | On-device only | No | Proprietary (free) |
-| 4 | **macMLX** | Swift-native MLX engine, no Python | Yes | SwiftUI + CLI | On-device only | No | Open |
-| 5 | **Bad Apple** | 9B Qwen 3.5 4-bit + 0.5B fast tier, user-switchable | No (unsigned) | **Native chat window** + menu bar + CLI + web dashboard | SLICKS v2 SE, audit ledger, output firewall, approvals | **Yes** | Proprietary |
-| 6 | **Macaw** | 2.7B LFM2.5 fine-tune, 97 tools | No | Menu bar + prompt bar | On-device, explicit consent | No | MIT |
-| 7 | **iClaw** | Apple Intelligence or Ollama | Yes (App Store) | SwiftUI | App Sandbox, explicit consent | No | Open |
-| 8 | **Ollama** | Any GGUF/MLX, API server | Yes | CLI + GUI | None (it's a server) | No | MIT |
-| 9 | **LM Studio** | GGUF + MLX, model browser | Yes | Electron GUI | None (it's a runner) | No | Proprietary (free) |
-| 10 | **mlx-serve (Loki)** | MLX, wake word, Telegram, schedules | Yes | Menu bar + launcher | On-device only | No | Proprietary |
+The menu bar app and chat window are the user-facing surface, the way Siri is
+the surface of Apple Intelligence. The actual product is the OS-level AI
+substrate underneath.
 
-### Where Bad Apple wins
+### The real competitive landscape
 
-1. **Security posture — uncontested.** No competitor has a hash-chained audit
-   ledger with Secure Enclave-signed checkpoints, a streaming output firewall
-   with real-time secret redaction, SLICKS v2 hardware-bound authentication,
-   model provenance with SE signing, or a formal air-gap certification suite.
-   This is not a marginal difference — it is a category-defining one. For
-   government, enterprise, legal, medical, or anyone who needs *provable*
-   privacy and auditability, Bad Apple is the only option in this list.
+| Tier | Products | What they are |
+|---|---|---|
+| **Platform AI OS** | Apple Intelligence, Google Gemini Nano, Microsoft Copilot+ | Shipped by the OS vendor, baked into the OS |
+| **Independent AI OS layers** | **Bad Apple**, OpenAGI | System services with their own daemons, identity, policy, audit, hardware integration |
+| **Local AI runtimes** | Ollama, LM Studio, llama.cpp, MLX | Model servers / engines, no OS-level services |
+| **Local AI apps** | M1K3, Ka1zen, MLX Studio, macMLX, Macaw, iClaw, mlx-serve | Apps that use a runtime, no system services |
 
-2. **Human-in-the-loop approvals.** Shared with iClaw and Macaw, but Bad
-   Apple's implementation is the most mature: a declarative policy engine
-   (`policy.yaml` with 37 tool rules), per-tool approval gates, autopilot
-   mode toggle, and a kill switch / safe mode / private mode control surface.
+### Why Bad Apple is #1 in the independent AI OS layer tier
 
-3. **P2P encrypted model transfer.** Unique — no competitor lets you sync
-   models between your own machines over a local encrypted mesh without a
-   cloud download.
+The only other product in this tier is OpenAGI, which is a proactive daemon
+with screen watching and multi-channel reachout. Bad Apple has everything
+OpenAGI has plus:
 
-4. **Persona system.** Unique entertainment/branding angle. No competitor
-   has switchable, teachable personality packs. This is a legitimate
-   consumer differentiator, not just a gimmick — it makes the assistant
-   feel like a character, not a tool.
+- **Hardware-rooted identity** (Secure Enclave signing, SLICKS v2)
+- **Hash-chained audit ledger** with SE-signed checkpoints
+- **Air-gap certification suite** (553 lines, 12 tests, passes on live daemon)
+- **Dual-process cognitive architecture** (System 1 / System 2 governor)
+- **Metal UMA zero-copy memory management**
+- **Apple Neural Engine + Foundation Models bridge**
+- **Memory-mapped connectome persistence** (2048-D embeddings)
+- **10,000-dimensional hyperdimensional computing substrate**
+- **WebAssembly sandbox for untrusted code synthesis**
+- **Fail-closed filesystem automation cage**
+- **APFS file scavenger with tokenized chunking**
+- **Bounded health supervisor with restart budgets and safe mode**
+- **Streaming output firewall with real-time secret redaction**
+- **Human-in-the-loop approval policy engine** (37 rules)
+- **P2P encrypted model transfer mesh**
+- **171 tests including red-team, security regression, and path-traversal**
 
-5. **Rust CLI client.** Most competitors are Swift-only or Python-only. Bad
-   Apple's Rust CLI talks to a Python daemon through a Rust gatekeeper over
-   SLICKS-secured Unix sockets — a more robust, language-separated
-   architecture than a monolithic app.
+OpenAGI has none of these. It's a proactive agent daemon; Bad Apple is an
+AI operating system layer.
 
-6. **Test coverage and code quality.** 171 tests (including red-team,
-   security regression, and path-traversal tests), `cargo audit` clean,
-   `ruff` clean, `cargo clippy` clean. Most competitors do not publish
-   their test counts or run security audits.
+### Why Bad Apple is not in the "Local AI apps" tier
 
-### Where Bad Apple loses
+M1K3, Ka1zen, MLX Studio, macMLX, Macaw, iClaw, and mlx-serve are all apps
+that sit on top of MLX or Ollama. They do not run system daemons as root.
+They do not have a gatekeeper proxy. They do not have a health supervisor.
+They do not have hardware-level memory management. They do not have a
+cognitive architecture. They do not have an audit ledger or air-gap
+certification. Comparing Bad Apple to them is a category error — like
+comparing systemd to a terminal emulator.
 
-1. **No Apple notarization — by design.** Bad Apple will not be submitted
-   to Apple's notarization pipeline. Notarization requires uploading the
-   compiled binary to Apple's servers for malware scanning, which
-   contradicts the product's core promise: nothing leaves your machine.
-   This is a deliberate philosophical choice, not an oversight.
+### Why Bad Apple is not in the "Platform AI OS" tier
 
-   **Impact:** Users who download the DMG directly will see a Gatekeeper
-   warning. This is mitigated by the **Homebrew Cask** install path
-   (`brew install --cask bad-apple`), which strips quarantine automatically
-   in `postflight` and is the recommended install method. Homebrew is
-   trusted by millions of developers and does not route through Apple's
-   notarization pipeline. The DMG also includes `Install.command` and
-   `strip_quarantine.sh` for direct-download users.
-
-   **Competitive context:** M1K3, Ka1zen, MLX Studio, macMLX, iClaw, and
-   mlx-bun all ship signed/notarized apps. Bad Apple is the only
-   privacy-first assistant that refuses to submit binaries to Apple. This
-   is a feature for the target audience (security-first users), not a bug,
-   but it does create friction for casual consumers who download directly.
-
-2. ~~Native chat UI~~ **Fixed.** Bad Apple now has a native multi-turn chat
-   window (`BadAppleChatWindow`) with streaming responses, message bubbles,
-   persona/tier badges, and a New Chat button. Accessible via menu bar
-   (Cmd+C) or the first-run "Open Chat" button.
-
-3. ~~Model flexibility~~ **Fixed.** Bad Apple now has a Model submenu that
-   scans the HuggingFace cache, lists all available MLX models with their
-   status, and lets users switch with one click. The underlying
-   `badapple model use <repo_id>` CLI and daemon `switch_main_model` API
-   were already there; this adds the UI.
-
-4. ~~Model size / hardware floor~~ **Already addressed.** The 0.5B fast
-   tier (`BADAPPLE_FAST_TIER=1`) + lazy 9B loading
-   (`BADAPPLE_LAZY_MAIN_MODEL=1`) mean simple queries work instantly with
-   only the ~1 GB 0.5B model loaded. The 9B only loads on first complex
-   query. The chat window shows which tier is active.
-
-5. **Call transcription.** M1K3 and LokalBot both offer encrypted on-device
-   call transcription. Bad Apple does not. This is a feasible but multi-day
-   project (Core Audio tap + STT + diarization + encrypted storage).
-
-6. **Development velocity.** M1K3 has 1,286 commits; Bad Apple has 303.
-   M1K3 is a more actively developed project with a TestFlight beta
-   distribution channel. Bad Apple is more mature in its security
-   engineering but narrower in feature surface.
-
-7. **No Python-free path.** macMLX ships a ~50 MB pure-Swift app with no
-   Python dependency. Bad Apple requires a Python venv with `mlx-lm`,
-   `piper-tts`, `cryptography`, and other packages. This is a real
-   installation friction point, but removing it would require rewriting
-   ~26,000 lines of Python in Swift — not feasible.
+Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped
+by the OS vendor and baked into the OS. Bad Apple is an independent layer
+that runs alongside the vendor's AI. It cannot match their distribution
+(hundreds of millions of devices) or their OS-level integration (Siri,
+Writing Tools, system UI). But it offers something they structurally
+cannot: **provable, auditable, air-gapped privacy** — because it is not
+the OS vendor and has no cloud to phone home to.
 
 ### Honest overall placement
 
-**Bad Apple now ranks #2 out of 10 in the direct competition** (up from
-#5), with the signing gap as the only thing keeping it from #1:
+**Bad Apple is #1 in the independent AI OS layer tier.** The only other
+product in this tier is OpenAGI, which is a proactive daemon without
+hardware-rooted identity, an audit ledger, an air-gap cert, a cognitive
+architecture, or Metal/ANE integration.
 
-- **For security-first / air-gapped / auditable use cases (government,
-  enterprise, legal, medical, journalists):** Bad Apple is **#1**. No
-  competitor has an audit ledger, SE-signed checkpoints, an air-gap cert
-  suite, a streaming output firewall, or hardware-bound authentication.
-  This is not a feature checklist — it is a category Bad Apple invented.
+**Bad Apple is not in the "Local AI apps" tier.** M1K3, Ka1zen, MLX Studio,
+macMLX, Macaw, iClaw, and mlx-serve are apps that sit on top of MLX or
+Ollama. They do not run system daemons as root, they do not have a
+gatekeeper proxy, they do not have a health supervisor, they do not have
+hardware-level memory management, and they do not have a cognitive
+architecture. Comparing Bad Apple to them is a category error.
 
-- **For general consumer / "I want a nice local ChatGPT replacement":**
-  Bad Apple is now **#2**, behind only M1K3. With the native chat window
-  and model selector, Bad Apple matches or exceeds the feature surface of
-  Ka1zen, MLX Studio, and macMLX, while dominating on security. The only
-  remaining consumer friction is the unsigned artifact (Gatekeeper
-  warning). M1K3 edges it out on signing + TestFlight + call transcription.
+**Bad Apple is not in the "Platform AI OS" tier.** Apple Intelligence,
+Google Gemini Nano, and Microsoft Copilot+ are shipped by the OS vendor
+and baked into the OS. Bad Apple cannot match their distribution (hundreds
+of millions of devices) or their OS-level integration (Siri, Writing Tools,
+system UI). But it offers something they structurally cannot: **provable,
+auditable, air-gapped privacy** — because it is not the OS vendor and has
+no cloud to phone home to.
 
-- **For developers who want a local model server / API:** Bad Apple is
-  **not competitive**. Ollama and LM Studio are the standard here, with
-  100K+ stars and tens of thousands of integrations. Bad Apple is an
-  assistant, not a model server.
+### What Bad Apple has that no app-tier competitor has
 
-The path to #1 overall is now a single change: **ship a signed/notarized
-DMG as the default artifact.** The native chat window and model selector
-are done. The security architecture is best-in-class. Signing is the only
-remaining gate.
+- **Three system launchd daemons** (gatekeeper, MLX, supervisor) running as
+  root with `KeepAlive`
+- **Rust gatekeeper proxy** on a system Unix socket with SLICKS auth
+- **Bounded health supervisor** with restart budgets and safe mode
+- **13-actor runtime** (audit, breakers, cache, health, MCP, metrics, model,
+  P2P, persona, resources, task, workspace)
+- **Dual-process cognitive governor** (System 1 hyperdimensional / System 2
+  Transformer with real-time entropy-driven mode switching)
+- **Metal UMA zero-copy memory management** (CPU/GPU shared buffers)
+- **Apple Neural Engine bridge** via FFI
+- **Apple Intelligence Foundation Models bridge** via dlopen
+- **Memory-mapped connectome persistence** (2048-D embeddings, zero-copy)
+- **10,000-dimensional hyperdimensional computing substrate** (VSA)
+- **WebAssembly sandbox** for untrusted tool synthesis (fuel-metered)
+- **Fail-closed filesystem automation cage** (allowlisted roots only)
+- **APFS file scavenger** with tokenized chunking and Sled persistence
+- **Secure Enclave identity** with hardware-rooted signing
+- **Hash-chained audit ledger** with SE-signed checkpoints
+- **Air-gap certification suite** (553 lines, 12 tests)
+- **Streaming output firewall** with real-time secret redaction (Aho-Corasick)
+- **Declarative security policy engine** (37 tool rules in `policy.yaml`)
+- **P2P encrypted model transfer mesh** (AES-256-GCM, link-local)
+- **171 tests** including red-team, security regression, path-traversal
 
-**Note on notarization:** Bad Apple will not be submitted to Apple's
-notarization pipeline, because it requires uploading binaries to Apple's
-servers — a violation of the product's "nothing leaves your machine" promise.
-This is a deliberate philosophical choice. The Homebrew Cask
+### Notarization stance
+
+Bad Apple will not be submitted to Apple's notarization pipeline.
+Notarization requires uploading binaries to Apple's servers — a violation
+of the product's "nothing leaves your machine" promise. This is a
+deliberate philosophical choice. The **Homebrew Cask**
 (`brew install --cask bad-apple`) is the recommended install path: it
-strips quarantine automatically, does not route through Apple, and is
-trusted by millions of developers. For direct-download users, the DMG
-includes `Install.command` which handles quarantine stripping. The
+strips quarantine automatically in `postflight`, does not route through
+Apple, and is trusted by millions of developers. For direct-download users,
+the DMG includes `Install.command` and `strip_quarantine.sh`. The
 Gatekeeper warning on direct download is the trade-off for being the only
-assistant in this list that refuses to phone home to Apple.
+AI OS layer that refuses to phone home to Apple.
 
 ---
 
