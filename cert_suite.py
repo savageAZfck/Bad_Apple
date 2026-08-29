@@ -198,17 +198,22 @@ def check_ledger_integrity(data_dir: Path) -> int:
     try:
         import json as _json
 
-        from tools.verify_ledger import verify_checkpoint
+        from tools.verify_ledger import verify_checkpoint_in_ledger
 
-        tip_hash = ledger._last_hash()
-        entry_count = sum(1 for r in results)
-        checkpoint_result = verify_checkpoint(checkpoint_path, tip_hash, entry_count)
+        checkpoint_result = verify_checkpoint_in_ledger(checkpoint_path, ledger.ledger_path)
         if not checkpoint_result.get("ok"):
             _fail(f"Secure Enclave checkpoint invalid: {checkpoint_result.get('error')}")
             return 1
+        extra = ""
+        if "current_ledger_entries" in checkpoint_result:
+            signed = checkpoint_result["signed_entry_count"]
+            current = checkpoint_result["current_ledger_entries"]
+            if current > signed:
+                extra = f" (ledger has grown from {signed} to {current} entries since; new entries protected by chain linkage)"
         _ok(
-            f"Secure Enclave checkpoint valid: chain state attested by device key "
-            f"{checkpoint_result['public_key'][:20]}... at {checkpoint_result['signed_at']}"
+            f"Secure Enclave checkpoint valid: chain state at entry "
+            f"{checkpoint_result['signed_entry_count']} attested by device key "
+            f"{checkpoint_result['public_key'][:20]}... at {checkpoint_result['signed_at']}{extra}"
         )
     except (ImportError, OSError, _json.JSONDecodeError) as e:
         _info(f"could not verify checkpoint: {e}")

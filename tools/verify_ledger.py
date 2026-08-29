@@ -114,7 +114,17 @@ def verify_chain(ledger_path: Path, genesis: str, secret: bytes | None) -> dict[
 
 
 def verify_checkpoint(checkpoint_path: Path, chain_tip_hash: str, chain_entry_count: int) -> dict[str, Any]:
-    """Verify a Secure-Enclave-signed checkpoint against the recomputed chain."""
+    """Verify a Secure-Enclave-signed checkpoint against a specific chain state.
+
+    This is the low-level signature verifier. ``chain_tip_hash`` and
+    ``chain_entry_count`` must describe the chain state **at the checkpoint's
+    recorded position**, not necessarily the current tip — a checkpoint vouches
+    for the chain up to its own tip; entries added after are protected by
+    ongoing hash-chain linkage but not by this signature.
+
+    Use :func:`verify_checkpoint_in_ledger` for the common case of verifying
+    a checkpoint against a live, growing ledger.
+    """
     try:
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -127,15 +137,15 @@ def verify_checkpoint(checkpoint_path: Path, chain_tip_hash: str, chain_entry_co
     if checkpoint["tip_hash"] != chain_tip_hash:
         return {
             "ok": False,
-            "error": "checkpoint tip_hash does not match the ledger's actual current tip -- "
-                     "either the ledger has changed since the checkpoint was signed, or entries "
-                     "were added/removed without a new checkpoint.",
+            "error": "checkpoint tip_hash does not match the chain state at the recorded "
+                     f"position (entry {checkpoint['entry_count']}) -- either the ledger was "
+                     "rewritten below that point, or the checkpoint is for a different ledger.",
         }
     if checkpoint["entry_count"] != chain_entry_count:
         return {
             "ok": False,
-            "error": f"checkpoint recorded {checkpoint['entry_count']} entries but the ledger "
-                     f"currently has {chain_entry_count}.",
+            "error": f"checkpoint recorded {checkpoint['entry_count']} entries but the chain "
+                     f"state supplied has {chain_entry_count}.",
         }
 
     payload = _canonical_json({
@@ -170,6 +180,101 @@ def verify_checkpoint(checkpoint_path: Path, chain_tip_hash: str, chain_entry_co
     }
 
 
+def _hash_at_position(ledger_path: Path, genesis: str, secret: bytes | None, target_count: int) -> dict[str, Any]:
+    """Recompute the chain up to ``target_count`` entries and return the hash at that position.
+
+    This lets us verify a checkpoint against the chain state *at the time it
+    was signed*, even if the ledger has grown since.
+    """
+    if target_count < 0:
+        return {"ok": False, "error": f"invalid target_count: {target_count}"}
+
+    prev = hashlib.sha256(genesis.encode()).hexdigest()
+    total = 0
+    with open(ledger_path, encoding="utf-8") as f:
+        for lineno, raw_line in enumerate(f, 1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            total += 1
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as e:
+                return {"ok": False, "error": f"line {lineno}: invalid JSON: {e}"}
+
+            for field in ("ts", "type", "data", "prev_hash", "hash"):
+                if field not in entry:
+                    return {"ok": False, "error": f"line {lineno}: missing field {field!r}"}
+
+            if entry["prev_hash"] != prev:
+                return {"ok": False, "error": f"line {lineno}: chain broken before checkpoint position"}
+
+            calc = _canonical_json({
+                "ts": entry["ts"],
+                "type": entry["type"],
+                "data": entry["data"],
+                "prev_hash": entry["prev_hash"],
+            })
+            if secret:
+                expected = hmac.new(secret, calc.encode(), hashlib.sha256).hexdigest()
+            else:
+                expected = hashlib.sha256(calc.encode()).hexdigest()
+
+            if expected != entry["hash"]:
+                return {"ok": False, "error": f"line {lineno}: hash mismatch before checkpoint position"}
+
+            prev = entry["hash"]
+
+            if total == target_count:
+                return {"ok": True, "hash_at_position": prev, "entries_checked": total}
+
+    return {
+        "ok": False,
+        "error": f"ledger has only {total} entries but checkpoint was signed at position {target_count}",
+    }
+
+
+def verify_checkpoint_in_ledger(
+    checkpoint_path: Path, ledger_path: Path, genesis: str = DEFAULT_GENESIS, secret: bytes | None = None
+) -> dict[str, Any]:
+    """Verify a Secure-Enclave-signed checkpoint against a live, growing ledger.
+
+    Unlike :func:`verify_checkpoint`, this reads the ledger to find the chain
+    state at the checkpoint's recorded position, so it works correctly even
+    when new entries have been appended after the checkpoint was signed.
+    The checkpoint vouches for the chain up to its own tip; entries after
+    are protected by the ongoing hash-chain linkage (verified separately by
+    :func:`verify_chain`).
+    """
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return {"ok": False, "error": f"could not read checkpoint: {e}"}
+
+    for field in ("tip_hash", "entry_count", "signature", "public_key", "genesis", "signed_at"):
+        if field not in checkpoint:
+            return {"ok": False, "error": f"checkpoint missing field {field!r}"}
+
+    if checkpoint["genesis"] != genesis:
+        return {"ok": False, "error": f"checkpoint genesis mismatch: {checkpoint['genesis']!r} != {genesis!r}"}
+
+    pos_result = _hash_at_position(ledger_path, genesis, secret, checkpoint["entry_count"])
+    if not pos_result["ok"]:
+        return pos_result
+
+    # Count total entries in the ledger (for informational reporting)
+    total_entries = 0
+    with open(ledger_path, encoding="utf-8") as f:
+        for raw_line in f:
+            if raw_line.strip():
+                total_entries += 1
+
+    result = verify_checkpoint(checkpoint_path, pos_result["hash_at_position"], checkpoint["entry_count"])
+    if result.get("ok"):
+        result["current_ledger_entries"] = total_entries
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("ledger", type=Path, help="Path to ledger.jsonl")
@@ -191,14 +296,18 @@ def main() -> int:
 
     if args.checkpoint:
         print(f"\nVerifying Secure Enclave checkpoint: {args.checkpoint}")
-        cp_result = verify_checkpoint(args.checkpoint, chain_result["tip_hash"], chain_result["entries_checked"])
+        cp_result = verify_checkpoint_in_ledger(args.checkpoint, args.ledger, args.genesis, secret)
         if not cp_result["ok"]:
             print(f"  [FAIL] {cp_result['error']}")
             print("\nOverall: FAILED")
             return 1
-        print(f"  [PASS] Signature valid. This exact chain state (tip {chain_result['tip_hash'][:16]}..., "
-              f"{cp_result['signed_entry_count']} entries) was attested by device key "
-              f"{cp_result['public_key'][:20]}... at {cp_result['signed_at']}.")
+        extra = ""
+        if "current_ledger_entries" in cp_result and cp_result["current_ledger_entries"] != cp_result["signed_entry_count"]:
+            extra = (f" (ledger has grown to {cp_result['current_ledger_entries']} entries since; "
+                     f"those are protected by chain linkage)")
+        print(f"  [PASS] Signature valid. Chain state at entry {cp_result['signed_entry_count']} "
+              f"(tip {cp_result.get('tip_hash', '???')[:16]}...) was attested by device key "
+              f"{cp_result['public_key'][:20]}... at {cp_result['signed_at']}.{extra}")
 
     print("\nOverall: VERIFIED")
     return 0

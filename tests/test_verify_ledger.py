@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.verify_ledger import verify_chain, verify_checkpoint  # noqa: E402
+from tools.verify_ledger import verify_chain, verify_checkpoint, verify_checkpoint_in_ledger  # noqa: E402
 
 
 def _canonical(data) -> str:
@@ -183,6 +183,104 @@ class VerifyCheckpointTests(unittest.TestCase):
             result = verify_checkpoint(checkpoint_path, tip_hash, 999)
             self.assertFalse(result["ok"])
             self.assertIn("entries", result["error"])
+
+
+class VerifyCheckpointInLedgerTests(unittest.TestCase):
+    """Integration tests: a checkpoint must still verify after the ledger grows.
+
+    This is the real-world scenario the cert suite exercises — a checkpoint
+    is signed at entry N, then the daemon keeps running and appends entries
+    N+1, N+2, ... The checkpoint must still verify against the chain state
+    at position N, and the cert suite must not report a failure just because
+    the ledger has grown.
+    """
+
+    def _build_ledger_and_checkpoint(self, tmp: Path, n_entries: int):
+        """Write n_entries ledger entries, then sign a checkpoint at the current tip."""
+        ledger = AuditLedger(tmp, genesis="test-genesis")
+        for i in range(n_entries):
+            ledger.record("query", {"prompt": f"message {i}"})
+
+        # Recompute the tip hash at the current position using verify_chain.
+        chain_result = verify_chain(ledger.ledger_path, "test-genesis", secret=None)
+        assert chain_result["ok"], chain_result.get("error")
+        tip_hash = chain_result["tip_hash"]
+        entry_count = chain_result["entries_checked"]
+
+        checkpoint_path, _ = self._make_signed_checkpoint(tmp, tip_hash, entry_count)
+        return ledger, checkpoint_path, tip_hash, entry_count
+
+    def _make_signed_checkpoint(self, tmp: Path, tip_hash: str, entry_count: int):
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        public_key = private_key.public_key()
+        pubkey_bytes = public_key.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint,
+        )
+
+        checkpoint = {
+            "genesis": "test-genesis",
+            "tip_hash": tip_hash,
+            "entry_count": entry_count,
+            "signed_at": "2026-01-01T00:00:00+00:00",
+        }
+        payload = _canonical(checkpoint).encode("utf-8")
+        signature = private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
+
+        checkpoint["signature"] = base64.b64encode(signature).decode("ascii")
+        checkpoint["public_key"] = base64.b64encode(pubkey_bytes).decode("ascii")
+
+        checkpoint_path = tmp / "ledger_checkpoint.json"
+        checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+        return checkpoint_path, private_key
+
+    def test_checkpoint_verifies_at_exact_position(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, checkpoint_path, _, _ = self._build_ledger_and_checkpoint(Path(tmp), 10)
+            result = verify_checkpoint_in_ledger(checkpoint_path, ledger.ledger_path, "test-genesis")
+            self.assertTrue(result["ok"], result.get("error"))
+            self.assertEqual(result["signed_entry_count"], 10)
+
+    def test_checkpoint_still_valid_after_ledger_grows(self):
+        """The bug that prompted this fix: a checkpoint signed at entry N
+        must still verify when the ledger has grown to N+M entries."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, checkpoint_path, _, _ = self._build_ledger_and_checkpoint(Path(tmp), 10)
+            # Append more entries (simulating the daemon running after the checkpoint)
+            for i in range(10, 15):
+                ledger.record("query", {"prompt": f"message {i}"})
+
+            result = verify_checkpoint_in_ledger(checkpoint_path, ledger.ledger_path, "test-genesis")
+            self.assertTrue(result["ok"], result.get("error"))
+            self.assertEqual(result["signed_entry_count"], 10)
+            self.assertEqual(result["current_ledger_entries"], 15)
+
+    def test_checkpoint_detects_tamper_below_position(self):
+        """If an entry below the checkpoint position is edited, the checkpoint
+        must fail because the hash at that position no longer matches."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, checkpoint_path, _, _ = self._build_ledger_and_checkpoint(Path(tmp), 10)
+
+            # Tamper with entry 5 (below the checkpoint at entry 10)
+            lines = ledger.ledger_path.read_text(encoding="utf-8").splitlines()
+            entry = json.loads(lines[5])
+            entry["data"]["prompt"] = "TAMPERED"
+            # Recompute this entry's hash and all downstream hashes to simulate
+            # a sophisticated attacker who tries to keep the chain consistent.
+            # But the checkpoint's tip_hash was signed for the original state,
+            # so even a perfectly recomputed chain won't match.
+            lines[5] = json.dumps(entry)
+            ledger.ledger_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            result = verify_checkpoint_in_ledger(checkpoint_path, ledger.ledger_path, "test-genesis")
+            self.assertFalse(result["ok"])
+
+    def test_checkpoint_rejects_genesis_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, checkpoint_path, _, _ = self._build_ledger_and_checkpoint(Path(tmp), 5)
+            result = verify_checkpoint_in_ledger(checkpoint_path, ledger.ledger_path, "wrong-genesis")
+            self.assertFalse(result["ok"])
+            self.assertIn("genesis", result["error"])
 
 
 if __name__ == "__main__":
