@@ -388,6 +388,41 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// Try to locate the Bad Apple repo root for diagnostics.
+fn badapple_root() -> Option<std::path::PathBuf> {
+    if let Ok(root) = std::env::var("BADAPPLE_ROOT") {
+        let p = std::path::PathBuf::from(root);
+        if p.join("Cargo.toml").is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut p = exe.clone();
+        for _ in 0..5 {
+            p.pop();
+            if p.join("Cargo.toml").is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::PathBuf::from(home);
+        for candidate in &[
+            "bad_apple",
+            "Bad_Apple",
+            "Code/bad_apple",
+            "Projects/bad_apple",
+            "src/bad_apple",
+        ] {
+            let p = home.join(candidate);
+            if p.join("Cargo.toml").is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// Run a local support diagnostic and print a redacted report.
 fn run_doctor() -> Result<()> {
     use std::fmt::Write;
@@ -417,14 +452,12 @@ fn run_doctor() -> Result<()> {
     let venv: std::path::PathBuf = std::env::var("VIRTUAL_ENV")
         .map(std::path::PathBuf::from)
         .ok()
+        .filter(|p| p.is_dir())
+        .or_else(|| badapple_root().map(|r| r.join(".venv")))
         .or_else(|| {
-            std::env::current_exe().ok().map(|mut p| {
-                // bad_apple/target/release/badapple -> bad_apple
-                for _ in 0..3 {
-                    p.pop();
-                }
-                p.join(".venv")
-            })
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".local/share/badapple/venv"))
         })
         .unwrap_or_default();
     let _ = writeln!(report, "venv: {}", venv.display());
@@ -436,12 +469,23 @@ fn run_doctor() -> Result<()> {
 
     // Binaries
     let _ = writeln!(report, "\n[binaries]");
-    let bin_dirs: Vec<std::path::PathBuf> = std::env::current_exe()
+    let mut bin_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(root) = badapple_root() {
+        bin_dirs.push(root.join("target/release"));
+    }
+    if let Some(p) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .into_iter()
-        .chain(std::iter::once(std::path::PathBuf::from("/usr/local/bin")))
-        .collect();
+    {
+        bin_dirs.push(p);
+    }
+    bin_dirs.push(std::path::PathBuf::from("/usr/local/bin"));
+    bin_dirs.push(std::path::PathBuf::from(
+        "/Applications/Bad Apple.app/Contents/Helpers",
+    ));
+    bin_dirs.push(std::path::PathBuf::from(
+        "/Applications/Bad Apple.app/Contents/MacOS",
+    ));
     for bin in ["badapple", "gatekeeper", "badapple-identity"] {
         let mut found = None;
         if let Ok(p) = Command::new("which").arg(bin).output() {
