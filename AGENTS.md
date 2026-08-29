@@ -216,6 +216,28 @@ tail -n 20 /var/log/bad_apple_mlx_server.log
 
 # memory pressure on macOS
 memory_pressure
+
+## SLICKS 2.0 identity
+
+The identity agent (`badapple_identity_agent.py`) owns the Secure Enclave signing
+context and runs as a user LaunchAgent. The Rust CLI and menu bar default to v2
+when the agent socket is present.
+
+```bash
+# Socket and key paths
+/var/run/badapple/identity.sock            # identity agent socket
+/var/run/badapple/substrate_mlx.sock       # MLX daemon socket
+/var/run/badapple/substrate.sock           # gatekeeper socket (default for CLI)
+
+# Force SLICKS version
+BADAPPLE_SLICKS2=1  target/release/badapple "prompt"   # v2 (Secure Enclave)
+BADAPPLE_SLICKS2=0  target/release/badapple "prompt"   # v1 (HMAC)
+
+# Restart the identity agent after changing badapple_identity_agent.py
+rm -f /var/run/badapple/identity.sock
+launchctl unload ~/Library/LaunchAgents/com.badapple.identity_agent.plist 2>/dev/null
+src/platform/apple_bridge/install_identity_agent.sh
+```
 ```
 
 Look for log lines like:

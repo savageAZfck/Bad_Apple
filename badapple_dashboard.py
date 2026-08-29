@@ -25,7 +25,6 @@ import subprocess
 import threading
 import time
 import urllib.parse
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -205,10 +204,7 @@ def _daemon_status() -> dict[str, Any]:
         "health": _server_instance.health.snapshot(),
         "resources": _server_instance.resources.snapshot(),
         "active_models": _server_instance.active_models(),
-        "breakers": {
-            name: asdict(cb.snapshot())
-            for name, cb in _server_instance.breakers.items()
-        },
+        "breakers": _server_instance.breakers.snapshot_all(),
         "autopilot": _server_instance.policy.autopilot,
         "fast_tier": _server_instance.fast_tier_enabled,
         "ambient_running": badapple_ambient.is_running(),

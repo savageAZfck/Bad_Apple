@@ -142,7 +142,16 @@ def _run_as_user(cmd: list[str], user: str | None = None, input_text: str | None
         return type("TimeoutResult", (), {"returncode": -1, "stdout": "", "stderr": f"timed out after {timeout}s"})()
 
 
-def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, approval: Any | None = None, policy: Any | None = None, workspace: Any | None = None, user_prompt: str = "") -> str:
+def run_tool(
+    name: str,
+    args: dict,
+    knowledge: BadAppleKnowledge | None = None,
+    approval: Any | None = None,
+    policy: Any | None = None,
+    workspace: Any | None = None,
+    user_prompt: str = "",
+    mcp_marketplace: Any | None = None,
+) -> str:
     if policy is not None:
         if not policy.is_allowed(name):
             return f"Policy: tool '{name}' is not allowed."
@@ -563,22 +572,23 @@ def run_tool(name: str, args: dict, knowledge: BadAppleKnowledge | None = None, 
             if not results:
                 return "No relevant notes found."
             return "\n\n".join(f"(score: {s:.2f})\n{c}" for c, s in results)
+        mcp = mcp_marketplace or badapple_mcp_marketplace
         if name == "add_mcp_server":
-            return badapple_mcp_marketplace.add_mcp_server(
+            return mcp.add_mcp_server(
                 args.get("name", ""), args.get("command", ""), args.get("env")
             )
         if name == "mcp_marketplace":
-            return badapple_mcp_marketplace.marketplace_catalog()
+            return getattr(mcp, "mcp_marketplace", mcp.marketplace_catalog)()
         if name == "mcp_install":
-            return badapple_mcp_marketplace.install_mcp_server_from_marketplace(args.get("name", ""))
+            return getattr(mcp, "mcp_install", mcp.install_mcp_server_from_marketplace)(args.get("name", ""))
         if name == "remove_mcp_server":
-            return badapple_mcp_marketplace.remove_mcp_server(args.get("name", ""))
+            return mcp.remove_mcp_server(args.get("name", ""))
         if name == "list_mcp_servers":
-            return badapple_mcp_marketplace.list_mcp_servers()
+            return mcp.list_mcp_servers()
         if name == "list_mcp_tools":
-            return badapple_mcp_marketplace.list_mcp_tools(args.get("server", ""))
+            return mcp.list_mcp_tools(args.get("server", ""))
         if name == "invoke_mcp_tool":
-            return badapple_mcp_marketplace.invoke_mcp_tool(
+            return mcp.invoke_mcp_tool(
                 args.get("server", ""), args.get("tool", ""), args.get("arguments") or {}
             )
     except Exception as e:  # noqa: BLE001 - catch-all wrapper

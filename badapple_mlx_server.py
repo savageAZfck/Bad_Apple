@@ -35,11 +35,17 @@ from mlx_lm.sample_utils import make_sampler
 
 import badapple_agent_tasks
 import badapple_ambient
+import badapple_breakers_actor
 import badapple_health_actor
 import badapple_ambient_memory
 import badapple_audit_actor
 import badapple_cache_actor
 import badapple_dashboard
+import badapple_mcp_actor
+import badapple_persona_actor
+import badapple_p2p_actor
+import badapple_resources_actor
+import badapple_workspace_actor
 import badapple_ocular
 import badapple_fact_extractor
 import badapple_fast_model
@@ -57,12 +63,10 @@ import badapple_tool_router
 import badapple_vision
 import badapple_vram_governor
 import badapple_workspace_watcher
-import badapple_mcp_marketplace
 from badapple_extras import (
     ApprovalGate,
     AuditLedger,
     MemoryGraph,
-    PersonaPack,
     Policy,
     StreamingFirewall,
     Workspace,
@@ -70,8 +74,6 @@ from badapple_extras import (
 from badapple_knowledge import BadAppleKnowledge
 from badapple_plugins import PluginRegistry
 from badapple_runtime import (
-    CircuitBreaker,
-    ResourceGovernor,
     RuntimeControl,
 )
 from badapple_vault import GenerationStore
@@ -1803,7 +1805,14 @@ def is_multi_step(prompt: str) -> bool:
     return any(re.search(p, low) for p in MULTI_STEP_PATTERNS)
 
 
-def fast_execute(prompt: str, knowledge: BadAppleKnowledge | None = None, approval: Any | None = None, policy: Any | None = None, workspace: Any | None = None) -> str | None:
+def fast_execute(
+    prompt: str,
+    knowledge: BadAppleKnowledge | None = None,
+    approval: Any | None = None,
+    policy: Any | None = None,
+    workspace: Any | None = None,
+    mcp_marketplace: Any | None = None,
+) -> str | None:
     """Fast deterministic path for common local tool commands.
 
     Recognizes patterns like:
@@ -1816,7 +1825,7 @@ def fast_execute(prompt: str, knowledge: BadAppleKnowledge | None = None, approv
     low = prompt.lower().strip()
 
     def _rt(name, args):
-        return run_tool(name, args, knowledge, approval=approval, policy=policy, workspace=workspace, user_prompt=prompt)
+        return run_tool(name, args, knowledge, approval=approval, policy=policy, workspace=workspace, user_prompt=prompt, mcp_marketplace=mcp_marketplace)
 
     # Working memory read/clear are deterministic; writes use quoted or trailing text.
     if re.search(r"\b(working memory|scratchpad)\b", low):
@@ -2197,19 +2206,27 @@ class MLXServer:
         self._health_actor = badapple_health_actor.HealthActor()
         self._health_actor.start()
         self.health = badapple_health_actor.HealthActorProxy(self._health_actor)
-        self.resources = ResourceGovernor()
-        self.breakers = {
-            name: CircuitBreaker(name)
-            for name in ("main_model", "dflash", "embedding", "tts", "tools", "ledger", "p2p")
-        }
+
+        # Resource governor and circuit breakers run on dedicated actor threads.
+        self._resources_actor = badapple_resources_actor.ResourcesActor()
+        self._resources_actor.start()
+        self.resources = badapple_resources_actor.ResourcesActorProxy(self._resources_actor)
+        self._breakers_actor = badapple_breakers_actor.BreakersActor()
+        self._breakers_actor.start()
+        self.breakers = badapple_breakers_actor.BreakersActorProxy(self._breakers_actor)
+
         self.generations = GenerationStore(self.data_dir)
         self.plugins = PluginRegistry(self.data_dir)
         registered = {item.get("function", {}).get("name") for item in TOOLS}
         TOOLS.extend(schema for schema in self.plugins.tool_schemas() if schema["function"]["name"] not in registered)
         self.memory = MemoryGraph(self.data_dir, encoder=self.knowledge._encode_texts)
         self.ambient_memory = badapple_ambient_memory.AmbientMemory(self.memory, self.data_dir)
-        # legacy short-term memory is folded into the memory graph
-        self.personas = PersonaPack(self.data_dir, self.prompt_file)
+
+        # Persona pack runs on a dedicated actor thread.
+        self._persona_actor = badapple_persona_actor.PersonaActor(self.data_dir, self.prompt_file)
+        self._persona_actor.start()
+        self.personas = badapple_persona_actor.PersonaActorProxy(self._persona_actor)
+
         self.firewall = StreamingFirewall(self.data_dir)
         self.audit_collector = AuditLedger(self.data_dir)
         self.audit_actor = badapple_audit_actor.AuditActor(existing=self.audit_collector)
@@ -2218,16 +2235,31 @@ class MLXServer:
         self._cache_actor.start()
         self.cache = badapple_cache_actor.CacheActorProxy(self._cache_actor)
         self.policy = Policy(self.data_dir)
-        self.workspace = Workspace(self.data_dir)
+
+        # Workspace runs on a dedicated actor thread.  We keep a reference to
+        # the underlying object so P2P can read workspace context directly.
+        _workspace_obj = Workspace(self.data_dir)
+        self._workspace_actor = badapple_workspace_actor.WorkspaceActor(existing=_workspace_obj)
+        self._workspace_actor.start()
+        self.workspace = badapple_workspace_actor.WorkspaceActorProxy(self._workspace_actor)
         self.workspace_watcher = badapple_workspace_watcher.WorkspaceWatcher(self.knowledge)
         if os.environ.get("BADAPPLE_WORKSPACE_DIR"):
             self.workspace.set(os.environ["BADAPPLE_WORKSPACE_DIR"])
             self.workspace_watcher.set_workspace(Path(os.environ["BADAPPLE_WORKSPACE_DIR"]).expanduser())
         self.workspace_watcher.start()
-        # P2P sync is created and started unless BADAPPLE_P2P=0. It shares
-        # memory and workspace context with peers on the local network.
-        self.p2p = badapple_p2p.P2PDaemon(secret, self.data_dir, memory=self.memory, workspace=self.workspace)
+
+        # P2P sync daemon runs on its own asyncio thread inside an actor.
+        self._p2p_actor = badapple_p2p_actor.P2PActor(secret, self.data_dir, memory=self.memory, workspace=_workspace_obj)
+        self._p2p_actor.start()
+        self.p2p = badapple_p2p_actor.P2PActorProxy(self._p2p_actor)
         badapple_p2p.set_p2p_daemon(self.p2p)
+
+        # MCP marketplace runs on a dedicated actor thread.
+        self._mcp_actor = badapple_mcp_actor.MCPActor()
+        self._mcp_actor.start()
+        self.mcp_actor = self._mcp_actor
+        self.mcp_marketplace = badapple_mcp_actor.MCPActorProxy(self._mcp_actor)
+
         self.approval = ApprovalGate(self.data_dir, policy=self.policy)
 
         # MCP server process handle and air-gap state.
@@ -2236,7 +2268,7 @@ class MLXServer:
         if self.airgap:
             os.environ["HF_HUB_OFFLINE"] = "1"
             self.model_manager.set_allow_downloads(False)
-            badapple_mcp_marketplace.set_airgap(True)
+            self.mcp_marketplace.set_airgap(True)
 
         # Keep the last few turns in context. When it grows, older turns are
         # still persisted to disk and a rolling summary keeps context alive.
@@ -3028,7 +3060,7 @@ class MLXServer:
         admitted, reason, _ = self.resources.admit(capability)
         if not admitted:
             return f"Resource governor: {reason}."
-        if not self.breakers["tools"].allow():
+        if not self.breakers.allow("tools"):
             return "Tool circuit breaker is open; retry after the cooldown."
         if not self.policy.is_allowed(name):
             return f"Policy: tool '{name}' is not allowed."
@@ -3082,14 +3114,14 @@ class MLXServer:
             elif self.plugins.has_tool(name):
                 result = self.plugins.invoke(name, args, timeout=self.policy.timeout(name))
             else:
-                result = run_tool(name, args, self.knowledge, approval=self.approval, policy=self.policy, workspace=self.workspace, user_prompt=user_prompt)
+                result = run_tool(name, args, self.knowledge, approval=self.approval, policy=self.policy, workspace=self.workspace, user_prompt=user_prompt, mcp_marketplace=self.mcp_marketplace)
             if result.lower().startswith("error"):
-                self.breakers["tools"].failure()
+                self.breakers.failure("tools")
             else:
-                self.breakers["tools"].success()
+                self.breakers.success("tools")
             return result
         except (TypeError, ValueError, LookupError) as e:
-            self.breakers["tools"].failure()
+            self.breakers.failure("tools")
             return f"Tool error: {e}"
 
     def _extract_agent_json(self, text: str) -> dict[str, Any] | None:
@@ -3357,7 +3389,7 @@ class MLXServer:
         """Enable or disable air-gap mode: offline weights, blocked network MCP."""
         self.airgap = enabled
         os.environ["BADAPPLE_AIRGAP"] = "1" if enabled else "0"
-        badapple_mcp_marketplace.set_airgap(enabled)
+        self.mcp_marketplace.set_airgap(enabled)
         if enabled:
             os.environ["HF_HUB_OFFLINE"] = "1"
             self.model_manager.set_allow_downloads(False)
@@ -4026,7 +4058,7 @@ class MLXServer:
                 "health": self.health.snapshot(),
                 "resources": self.resources.snapshot(),
                 "active_models": self.active_models(),
-                "breakers": {name: vars(breaker.snapshot()) for name, breaker in self.breakers.items()},
+                "breakers": self.breakers.snapshot_all(),
                 "autopilot": self.policy.autopilot,
                 "fast_tier": self.fast_tier_enabled,
                 "ambient_running": ambient_running,
@@ -4173,9 +4205,9 @@ class MLXServer:
                 return
             try:
                 if enabled:
-                    await self.p2p.start()
+                    await asyncio.to_thread(self.p2p.start)
                 else:
-                    await self.p2p.stop()
+                    await asyncio.to_thread(self.p2p.stop)
             except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 await _respond(req_id, None, f"P2P toggle failed: {e}")
                 return
@@ -4501,7 +4533,7 @@ class MLXServer:
                     await _write_frame(writer, {"type": "error", "message": "P2P is not available."})
                     return
                 try:
-                    await self.p2p.start()
+                    await asyncio.to_thread(self.p2p.start)
                 except Exception as e:  # noqa: BLE001 - catch-all wrapper
                     await _write_frame(writer, {"type": "error", "message": f"P2P start failed: {e}"})
                     return
@@ -4511,7 +4543,7 @@ class MLXServer:
                 if self.p2p is None:
                     await _write_frame(writer, {"type": "error", "message": "P2P is not available."})
                     return
-                await self.p2p.stop()
+                await asyncio.to_thread(self.p2p.stop)
                 await _write_frame(writer, {"type": "done", "text": "P2P discovery and sync stopped."})
                 return
             if not self.runtime.allows_generation():
@@ -4531,7 +4563,7 @@ class MLXServer:
                     await _write_frame(writer, {"type": "error", "message": "Runtime is stopped or in safe mode; approval execution is disabled."})
                     return
                 tool_name, args = approval_action
-                result = run_tool(tool_name, args, self.knowledge, policy=self.policy, workspace=self.workspace)
+                result = run_tool(tool_name, args, self.knowledge, policy=self.policy, workspace=self.workspace, mcp_marketplace=self.mcp_marketplace)
                 self._audit_record("approval_execute", {"tool": tool_name, "args": args, "result": result[:500]})
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
@@ -4546,14 +4578,14 @@ class MLXServer:
                 if self.p2p is None:
                     await _write_frame(writer, {"type": "done", "text": "P2P daemon is not running."})
                     return
-                result = await self.p2p.sync_memory()
+                result = await asyncio.to_thread(self.p2p.sync)
                 await _write_frame(writer, {"type": "done", "text": result})
                 return
             if low in ("p2p peers", "discovered peers", "list peers"):
                 if self.p2p is None:
                     await _write_frame(writer, {"type": "done", "text": "P2P daemon is not running."})
                     return
-                await _write_frame(writer, {"type": "done", "text": self.p2p.get_peers()})
+                await _write_frame(writer, {"type": "done", "text": self.p2p.peers()})
                 return
             if low.startswith("p2p add peer "):
                 spec = low[13:].strip()
@@ -4564,7 +4596,7 @@ class MLXServer:
                 if not host or not port.isdigit():
                     await _write_frame(writer, {"type": "error", "message": "Usage: p2p add peer <host>:<port>"})
                     return
-                text = self.p2p.add_peer(host, int(port))
+                text = await asyncio.to_thread(self.p2p.add_peer, host, int(port))
                 await _write_frame(writer, {"type": "done", "text": text})
                 return
             if low.startswith("p2p remove peer "):
@@ -4572,7 +4604,7 @@ class MLXServer:
                 if self.p2p is None:
                     await _write_frame(writer, {"type": "done", "text": "P2P daemon is not running."})
                     return
-                self.p2p.remove_peer(spec)
+                await asyncio.to_thread(self.p2p.remove_peer, spec)
                 await _write_frame(writer, {"type": "done", "text": f"Removed peer {spec} if it existed."})
                 return
 
@@ -4720,6 +4752,7 @@ class MLXServer:
                 approval=self.approval,
                 policy=self.policy,
                 workspace=self.workspace,
+                mcp_marketplace=self.mcp_marketplace,
             )
             if fast:
                 fast = self.polish_response(postprocess_output(fast))
@@ -4986,7 +5019,7 @@ async def main():
     # P2P is off by default for air-gap certification; set BADAPPLE_P2P=1 to enable LAN sync.
     if server.p2p is not None and os.environ.get("BADAPPLE_P2P", "0") == "1":
         try:
-            await server.p2p.start()
+            await asyncio.to_thread(server.p2p.start)
         except Exception as e:  # noqa: BLE001 - catch-all wrapper
             print(f"[main] P2P daemon failed to start: {e}", flush=True)
 
