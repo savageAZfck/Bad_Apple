@@ -166,7 +166,13 @@ def check_policy_present() -> int:
 
 
 def check_ledger_integrity(data_dir: Path) -> int:
-    """Verify the audit ledger hash chain if it exists."""
+    """Verify the audit ledger hash chain if it exists.
+
+    This is the same check `tools/verify_ledger.py` performs, but importing
+    the live AuditLedger class rather than re-parsing the file. Run
+    `tools/verify_ledger.py` directly if you want a check that trusts
+    nothing from this codebase at all -- see that file's own docstring.
+    """
     print("\n[TEST] audit ledger integrity")
     from badapple_extras import AuditLedger
 
@@ -180,6 +186,32 @@ def check_ledger_integrity(data_dir: Path) -> int:
         _fail(f"ledger has {len(invalid)} invalid entries out of {len(results)}")
         return len(invalid)
     _ok(f"ledger {ledger.ledger_path} hash chain valid ({len(results)} entries)")
+
+    checkpoint_path = data_dir / "ledger_checkpoint.json"
+    if not checkpoint_path.is_file():
+        _info(
+            "no Secure Enclave checkpoint found; a hash chain alone does not protect "
+            "against a full-chain rewrite by anyone with file write access. Run "
+            "`agent_client.py audit checkpoint` to create one."
+        )
+        return 0
+    try:
+        import json as _json
+
+        from tools.verify_ledger import verify_checkpoint
+
+        tip_hash = ledger._last_hash()
+        entry_count = sum(1 for r in results)
+        checkpoint_result = verify_checkpoint(checkpoint_path, tip_hash, entry_count)
+        if not checkpoint_result.get("ok"):
+            _fail(f"Secure Enclave checkpoint invalid: {checkpoint_result.get('error')}")
+            return 1
+        _ok(
+            f"Secure Enclave checkpoint valid: chain state attested by device key "
+            f"{checkpoint_result['public_key'][:20]}... at {checkpoint_result['signed_at']}"
+        )
+    except (ImportError, OSError, _json.JSONDecodeError) as e:
+        _info(f"could not verify checkpoint: {e}")
     return 0
 
 

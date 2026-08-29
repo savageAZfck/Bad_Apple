@@ -2703,11 +2703,16 @@ class MLXServer:
                 self.hibernating = True
 
     def active_models(self) -> list[str]:
-        """Return a list of currently resident heavy models."""
+        """Return a list of currently resident heavy models.
+
+        Uses getattr() defensively: this can be called (e.g. via
+        runtime_status/the dashboard) while __init__ is still running and
+        before self.model/self.draft_model have been assigned.
+        """
         models: list[str] = []
-        if self.model is not None and self.tokenizer is not None:
+        if getattr(self, "model", None) is not None and getattr(self, "tokenizer", None) is not None:
             models.append("main_9b")
-        if self.draft_model is not None:
+        if getattr(self, "draft_model", None) is not None:
             models.append("dflash")
         if getattr(self, "fast_model", None) is not None:
             models.append("fast_0.5b")
@@ -4375,6 +4380,9 @@ class MLXServer:
                     # The inference API is stateless: it must not mutate the
                     # conversational turn cache or return a cached conversational
                     # response. Build a single-turn prompt and stream directly.
+                    # Ensure the lazily-loaded main model (and its tokenizer) exist
+                    # before render_prompt needs them.
+                    self._ensure_main_model()
                     messages = [
                         {"role": "system", "content": self.personas.get_system_prompt()},
                         {"role": "user", "content": prompt},
@@ -4484,6 +4492,25 @@ class MLXServer:
 
         if method == "get_pending_approvals":
             await _respond(req_id, {"pending": self.approval.get_pending_summary()})
+            return
+        if method == "audit_checkpoint":
+            # Actor .ask() blocks on a queue; run off the event loop thread.
+            result = await asyncio.get_event_loop().run_in_executor(
+                self.executor, self.audit_actor.ask, {"method": "sign_checkpoint"}
+            )
+            await _respond(req_id, {"result": result})
+            return
+        if method == "audit_verify":
+            results = await asyncio.get_event_loop().run_in_executor(
+                self.executor, self.audit_actor.ask, {"method": "verify"}
+            )
+            invalid = [r for r in (results or []) if not r.get("valid")]
+            await _respond(req_id, {"result": {
+                "total_entries": len(results or []),
+                "invalid_entries": len(invalid),
+                "valid": not invalid,
+                "first_invalid": invalid[0] if invalid else None,
+            }})
             return
         if method == "p2p_peers":
             daemon = badapple_p2p.get_p2p_daemon()
@@ -5130,6 +5157,9 @@ class MLXServer:
                     if benchmark_mode:
                         # Benchmark needs a clean, single 9B generation with metrics:
                         # no tools, cache, fast paths, multi-step loops, or retrieved context.
+                        # Ensure the lazily-loaded main model (and its tokenizer) exist
+                        # before render_prompt needs them.
+                        self._ensure_main_model()
                         messages = [
                             {"role": "system", "content": self.personas.get_system_prompt()},
                             {"role": "user", "content": prompt},

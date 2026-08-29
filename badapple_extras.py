@@ -482,6 +482,50 @@ class AuditLedger:
             results.append({"ts": None, "type": "verify_error", "valid": False, "error": str(e)})
         return results
 
+    def sign_checkpoint(self) -> dict[str, Any]:
+        """Sign the current chain tip with this device's Secure Enclave identity.
+
+        Writes `<data_dir>/ledger_checkpoint.json` containing the tip hash,
+        entry count, timestamp, an ECDSA P-256 signature, and the public key.
+        Anyone holding the checkpoint file, the ledger file, and
+        `tools/verify_ledger.py` can independently confirm the ledger has not
+        been tampered with since the checkpoint was signed -- without
+        trusting the live daemon, the operator, or a shared HMAC secret.
+        """
+        try:
+            import badapple_slicks
+        except ImportError as e:
+            return {"ok": False, "error": f"badapple_slicks unavailable: {e}"}
+
+        tip_hash = self._last_hash()
+        entry_count = 0
+        try:
+            with open(self.ledger_path, encoding="utf-8") as f:
+                entry_count = sum(1 for line in f if line.strip())
+        except OSError:
+            pass
+
+        checkpoint: dict[str, Any] = {
+            "genesis": self.genesis,
+            "tip_hash": tip_hash,
+            "entry_count": entry_count,
+            "signed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        payload = _safe_json(checkpoint).encode("utf-8")
+        signature = badapple_slicks.v2_sign_message(payload)
+        if not signature:
+            return {"ok": False, "error": "Secure Enclave identity not available on this device"}
+        checkpoint["signature"] = signature
+        checkpoint["public_key"] = badapple_slicks.v2_public_key_b64()
+
+        checkpoint_path = self.data_dir / "ledger_checkpoint.json"
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "path": str(checkpoint_path), "tip_hash": tip_hash, "entry_count": entry_count}
+
 
 # =============================================================================
 # 4. SEMANTIC CACHE + INTENT CLASSIFIER

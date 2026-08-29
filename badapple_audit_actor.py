@@ -38,4 +38,6 @@ class AuditActor(badapple_actor.Actor):
             return self._ledger.verify()
         if method == "ledger_path":
             return str(self._ledger.ledger_path)
+        if method == "sign_checkpoint":
+            return self._ledger.sign_checkpoint()
         return None
