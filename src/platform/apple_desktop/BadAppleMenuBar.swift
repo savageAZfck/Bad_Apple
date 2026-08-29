@@ -2636,10 +2636,15 @@ private final class BadAppleFirstRunOnboarding {
     var onDismiss: (() -> Void)?
 
     var isPlatformInstalled: Bool {
+        // Check both the gatekeeper's front-door socket and the MLX daemon's
+        // own socket -- the two run as independent LaunchDaemons, and only
+        // checking the gatekeeper's socket can report "installed" even when
+        // the MLX daemon itself failed to start.
         UserDefaults.standard.bool(forKey: "BadApplePlatformInstalled")
             || (FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.mlx.plist")
                 && FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.gatekeeper.plist")
-                && FileManager.default.fileExists(atPath: "/var/run/badapple/substrate.sock"))
+                && FileManager.default.fileExists(atPath: "/var/run/badapple/substrate.sock")
+                && FileManager.default.fileExists(atPath: BadAppleBrain.directSocket))
     }
 
     func showIfNeeded() {

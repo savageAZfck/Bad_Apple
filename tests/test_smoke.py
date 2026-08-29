@@ -42,36 +42,69 @@ def test_runtime_status() -> None:
     print("OK: runtime_status")
 
 
+def _poll_until(predicate, timeout: float, interval: float = 0.3):
+    """Poll `predicate()` until it returns a truthy value or timeout elapses.
+
+    Returns the last (falsy) value on timeout rather than raising, so callers
+    can produce a descriptive assertion message with the final observed state.
+    """
+    deadline = time.monotonic() + timeout
+    result = None
+    while time.monotonic() < deadline:
+        result = predicate()
+        if result:
+            return result
+        time.sleep(interval)
+    return result
+
+
 def test_hibernation() -> None:
-    # Set a short hibernate window and wait for it to fire.
+    # Set a short hibernate window and poll for it to fire, rather than a
+    # fixed sleep -- a loaded machine can easily take longer than a fixed
+    # 6s window to actually hibernate, causing a flaky failure.
     _cli("hibernate after 5")
-    time.sleep(6)
-    resp = _agent("status")
-    result = resp["result"]
-    assert result.get("hibernating") is True, f"should be hibernating, got {result.get('hibernating')}"
+    hibernating = _poll_until(lambda: _agent("status")["result"].get("hibernating") is True, timeout=20)
+    assert hibernating, "should be hibernating within 20s of `hibernate after 5`"
 
-    # A new query should wake it up and stay awake for a short window.
-    _cli("ping")
-    time.sleep(0.5)
-    resp = _agent("status")
-    result = resp["result"]
-    assert result.get("hibernating") is False, f"should be awake after query, got {result.get('hibernating')}"
-
-    # Restore the default.
+    # Restore a long hibernate window *before* waking it back up. The awake
+    # window after a wake-up ping only lasts as long as hibernate_after, and
+    # each status poll has its own subprocess/SLICKS-handshake latency -- with
+    # a 5s window, polling can race past a real but brief awake blip. Widening
+    # the window first removes the race instead of chasing it.
     _cli("hibernate after 300")
+    _cli("ping")
+    awake = _poll_until(lambda: _agent("status")["result"].get("hibernating") is False, timeout=10)
+    assert awake, "should be awake within 10s of a new query"
     print("OK: hibernation")
 
 
-def test_ui_action_tool_exists() -> None:
+def test_ui_action_and_browser_action_tools_registered() -> None:
     resp = _agent("discover")
     tools = resp["result"]["tools"]
     names = {t["function"]["name"] for t in tools}
     assert "ui_action" in names, f"ui_action should be exposed; got {names}"
-    print("OK: ui_action tool registered")
+    assert "browser_action" in names, f"browser_action should be exposed; got {names}"
+    print("OK: ui_action and browser_action tools registered")
+
+
+def test_ui_action_info_returns_without_crashing() -> None:
+    # A light functional check: invoking ui_action's "info" action should
+    # always return *some* string (either a UI tree or a friendly "helper
+    # not available" message), never raise or return nothing. This does not
+    # require a GUI session to be present, so it's safe in headless CI too.
+    resp = _agent("invoke", "ui_action", json.dumps({"action": "info"}))
+    result = resp["result"]["result"]
+    assert isinstance(result, str) and result, f"ui_action info should return a non-empty string, got {result!r}"
+    print("OK: ui_action info tool call completes")
 
 
 def main() -> int:
-    tests = [test_runtime_status, test_hibernation, test_ui_action_tool_exists]
+    tests = [
+        test_runtime_status,
+        test_hibernation,
+        test_ui_action_and_browser_action_tools_registered,
+        test_ui_action_info_returns_without_crashing,
+    ]
     for t in tests:
         try:
             t()

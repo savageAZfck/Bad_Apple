@@ -172,8 +172,8 @@ const tourSteps = [
   { title: 'Logs', body: 'Tail the daemon log for debugging and performance details.', view: 'logs' },
 ];
 let tourIndex = 0;
-function startTour() {
-  dismissOnboarding();
+async function startTour() {
+  await finishWizard();
   tourIndex = 0;
   showTourStep();
 }
@@ -276,8 +276,7 @@ async function finishWizard() {
     }
   }
 
-  wizardStep = wizardSteps.length - 1;
-  renderWizardStep();
+  dismissOnboarding();
 }
 
 function setupNav() {

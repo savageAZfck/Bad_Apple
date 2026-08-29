@@ -343,7 +343,10 @@ def run_tool(
                 return aqua.get("result") or "done"
             if aqua:
                 return f"UI action error: {aqua.get('error')}"
-            return "UI action failed (Aqua helper not available)"
+            return (
+                "I can't control other apps' UI right now -- the menu bar helper isn't "
+                "running. Open Bad Apple from the menu bar (not just the daemon) and try again."
+            )
         if name == "browser_action":
             return _browser_action(args)
         if name == "list_shortcuts":
