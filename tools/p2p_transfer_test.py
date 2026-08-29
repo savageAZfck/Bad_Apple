@@ -20,8 +20,8 @@ script_dir = Path(__file__).resolve().parent
 repo_root = script_dir.parent
 sys.path.insert(0, str(repo_root))
 
-import badapple_model_registry
-import badapple_p2p_actor
+import badapple_model_registry  # noqa: E402
+import badapple_p2p_actor  # noqa: E402
 
 
 SECRET = b"p2p transfer test secret"
