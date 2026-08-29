@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.badapple.identity_agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BADAPPLE_ROOT__/.venv/bin/python</string>
+        <string>__BADAPPLE_ROOT__/badapple_identity_agent.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>WorkingDirectory</key>
+    <string>__BADAPPLE_ROOT__</string>
+    <key>UserName</key>
+    <string>__CONSOLE_USER__</string>
+    <key>GroupName</key>
+    <string>__CONSOLE_GROUP__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BADAPPLE_IDENTITY_AGENT_SOCKET</key>
+        <string>/var/run/badapple/identity.sock</string>
+        <key>BADAPPLE_IDENTITY_BLOB</key>
+        <string>__CONSOLE_HOME__/Library/Application Support/BadApple/identity.sekey</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/bad_apple_identity_agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/bad_apple_identity_agent.log</string>
+</dict>
+</plist>

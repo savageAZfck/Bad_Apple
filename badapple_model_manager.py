@@ -9,9 +9,10 @@ responsive. Loading still happens in the main MLX executor on demand.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -99,6 +100,104 @@ _KNOWN_MODELS: list[ModelProfile] = [
 ]
 
 
+MAX_MODEL_ID_LEN = 64
+MAX_REPO_ID_LEN = 128
+DEFAULT_MAX_DOWNLOAD_GB = 50.0
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 1800.0
+DEFAULT_PROVENANCE_TIMEOUT_SECONDS = 300.0
+
+# Safe identifiers: alphanumeric, underscore, dash, and dot, but never ".." or
+# path separators. Model IDs are single path components; repo IDs have exactly
+# one slash separating two safe components.
+SAFE_MODEL_ID_RE = re.compile(
+    r"^(?!.*\.\.)[A-Za-z0-9_\-](?:[A-Za-z0-9_\-\.]{0,"
+    + str(MAX_MODEL_ID_LEN - 2)
+    + r"}[A-Za-z0-9_\-])?$"
+)
+SAFE_REPO_ID_RE = re.compile(
+    r"^(?!.*\.\.)[A-Za-z0-9_\-](?:[A-Za-z0-9_\-\.]{0,"
+    + str(MAX_REPO_ID_LEN - 2)
+    + r"}[A-Za-z0-9_\-])?/[A-Za-z0-9_\-](?:[A-Za-z0-9_\-\.]{0,"
+    + str(MAX_REPO_ID_LEN - 2)
+    + r"}[A-Za-z0-9_\-])?$"
+)
+
+
+def _is_safe_model_id(model_id: str) -> bool:
+    """Return True if ``model_id`` is a non-traversing identifier."""
+    if not isinstance(model_id, str):
+        return False
+    if len(model_id) > MAX_MODEL_ID_LEN or not model_id:
+        return False
+    return bool(SAFE_MODEL_ID_RE.match(model_id))
+
+
+def _validate_model_id(model_id: str) -> None:
+    """Raise ValueError if ``model_id`` is not a safe identifier."""
+    if not _is_safe_model_id(model_id):
+        raise ValueError(f"invalid model_id: {model_id!r}")
+
+
+def _is_safe_repo_id(repo_id: str) -> bool:
+    """Return True if ``repo_id`` is a valid ``namespace/repo`` reference."""
+    if not isinstance(repo_id, str):
+        return False
+    if len(repo_id) > MAX_REPO_ID_LEN * 2 + 1 or not repo_id:
+        return False
+    return bool(SAFE_REPO_ID_RE.match(repo_id))
+
+
+def _validate_repo_id(repo_id: str) -> None:
+    """Raise ValueError if ``repo_id`` is not a safe namespace/repo reference."""
+    if not _is_safe_repo_id(repo_id):
+        raise ValueError(f"invalid repo_id: {repo_id!r}")
+
+
+def _hf_cache_root() -> Path:
+    """Return the resolved HuggingFace hub cache directory."""
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    return Path(HF_HUB_CACHE).expanduser().resolve()
+
+
+def _is_path_under_root(path: Path, root: Path) -> bool:
+    """Return True if ``path`` resolves to a location under ``root``."""
+    try:
+        resolved = path.expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    try:
+        resolved.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_local_path(local_path: str | Path | None, must_exist: bool = True) -> Path | None:
+    """Resolve and validate that a local model path stays under the HF cache.
+
+    Non-existent paths cannot be verified, so they are returned as-is when
+    ``must_exist`` is False. Existing paths must be directories under
+    ``HF_HUB_CACHE``. This prevents an attacker from pointing a cached model at
+    an existing file or directory outside the hub cache.
+    """
+    if local_path is None:
+        return None
+    root = Path(local_path).expanduser()
+    try:
+        resolved = root.resolve()
+    except (OSError, ValueError, RuntimeError) as e:
+        raise ValueError(f"cannot resolve local path {local_path!r}: {e}") from e
+    if resolved.exists():
+        if not resolved.is_dir():
+            raise ValueError(f"local path is not a directory: {local_path!r}")
+        if not _is_path_under_root(resolved, _hf_cache_root()):
+            raise ValueError(f"local path is outside HF cache: {local_path!r}")
+    elif must_exist:
+        raise ValueError(f"local path does not exist: {local_path!r}")
+    return resolved
+
+
 class ModelManager:
     """Download, cache, and load status for the optional Bad Apple models."""
 
@@ -110,11 +209,21 @@ class ModelManager:
         self._state: dict[str, ModelState] = {p.id: ModelState() for p in _KNOWN_MODELS}
         self._lock = threading.Lock()
         self._download_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="badapple_model_dl")
+        self._timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="badapple_model_timeout")
         self._allow_downloads = os.environ.get("BADAPPLE_ALLOW_DOWNLOADS", "0") == "1"
         self._online_override = os.environ.get("BADAPPLE_ONLINE_MODELS", "0") == "1"
         self._download_futures: dict[str, Any] = {}
         self._provenance = badapple_model_provenance.ModelProvenance(self.data_dir)
         self._verify_hashes = os.environ.get("BADAPPLE_VERIFY_MODEL_HASHES", "1") != "0"
+        self._max_download_gb = float(
+            os.environ.get("BADAPPLE_MAX_DOWNLOAD_GB", str(DEFAULT_MAX_DOWNLOAD_GB))
+        )
+        self._download_timeout = float(
+            os.environ.get("BADAPPLE_DOWNLOAD_TIMEOUT_SECONDS", str(DEFAULT_DOWNLOAD_TIMEOUT_SECONDS))
+        )
+        self._provenance_timeout = float(
+            os.environ.get("BADAPPLE_PROVENANCE_TIMEOUT_SECONDS", str(DEFAULT_PROVENANCE_TIMEOUT_SECONDS))
+        )
 
         # Restore persisted state (status only; we re-verify cache on demand).
         self._load_state()
@@ -138,13 +247,21 @@ class ModelManager:
             return {mid: self._status_for(mid) for mid in self._profiles}
 
     def _status_for(self, model_id: str) -> dict[str, Any]:
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return {"error": f"invalid model_id: {model_id!r}"}
         profile = self._profiles.get(model_id)
         if not profile:
             return {"error": f"unknown model {model_id}"}
         state = self._state[model_id]
         provenance = {"status": "unknown"}
         if state.local_path:
-            provenance = self._provenance.verify(model_id, state.local_path)
+            try:
+                _validate_local_path(state.local_path, must_exist=False)
+                provenance = self._provenance.verify(model_id, state.local_path)
+            except ValueError as e:
+                provenance = {"status": "invalid_path", "error": str(e)}
         return {
             "id": profile.id,
             "name": profile.name,
@@ -231,8 +348,33 @@ class ModelManager:
             else:
                 os.environ["HF_HUB_OFFLINE"] = old_offline
 
+    def _run_with_timeout(self, fn: Callable[[], Any], timeout: float | None = None) -> Any:
+        """Run a callable in a separate thread and return its result, or raise TimeoutError.
+
+        This is a safe wrapper for long-running threaded operations such as a
+        model download or a full provenance hash pass. The function is executed
+        in a dedicated single-thread executor so the calling thread never blocks
+        beyond ``timeout``.
+        """
+        if timeout is None or timeout <= 0:
+            return fn()
+        try:
+            future = self._timeout_executor.submit(fn)
+        except RuntimeError as e:
+            # The executor has already been shut down; treat as a timeout.
+            raise TimeoutError(f"long-operation executor unavailable: {e}") from e
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError as e:
+            # We cannot forcibly stop a running worker, but we stop waiting and
+            # let the caller decide whether to treat the operation as failed.
+            raise TimeoutError(f"operation timed out after {timeout}s") from e
+        except CancelledError as e:
+            raise TimeoutError("operation was cancelled") from e
+
     def _resolve_cache_path(self, repo_id: str, allow_download: bool = False) -> str | None:
         try:
+            _validate_repo_id(repo_id)
             from huggingface_hub import snapshot_download
 
             # Essential model artifacts only; incomplete snapshots with missing
@@ -261,8 +403,31 @@ class ModelManager:
                 )
 
             if allow_download:
-                return self._with_downloads_enabled(_download)
-            return _download()
+                path = self._with_downloads_enabled(
+                    lambda: self._run_with_timeout(_download, timeout=self._download_timeout)
+                )
+            else:
+                path = _download()
+            if not path:
+                return None
+            resolved = _validate_local_path(path, must_exist=False)
+            if resolved is None:
+                return None
+            if resolved.exists():
+                if not _is_path_under_root(resolved, _hf_cache_root()):
+                    raise ValueError(f"resolved path is outside HF cache: {path!r}")
+                if allow_download:
+                    total_size = sum(f.stat().st_size for f in resolved.rglob("*") if f.is_file())
+                    max_bytes = int(self._max_download_gb * 1024 ** 3)
+                    if total_size > max_bytes:
+                        raise ValueError(
+                            f"download size {total_size} exceeds BADAPPLE_MAX_DOWNLOAD_GB ({self._max_download_gb} GB)"
+                        )
+            return str(resolved)
+        except (ValueError, TimeoutError):
+            if not allow_download:
+                return None
+            raise
         except Exception:  # noqa: BLE001
             if not allow_download:
                 return None
@@ -272,6 +437,11 @@ class ModelManager:
         return self._resolve_cache_path(repo_id, allow_download=False) is not None
 
     def _download_worker(self, model_id: str) -> None:
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            print(f"[model_manager] download rejected invalid model_id: {model_id!r}", flush=True)
+            return
         profile = self._profiles.get(model_id)
         if not profile:
             return
@@ -280,7 +450,11 @@ class ModelManager:
             path = self._resolve_cache_path(profile.repo_id, allow_download=True)
             if path:
                 try:
-                    result = self._provenance.record(model_id, profile.repo_id, path)
+                    _validate_local_path(path, must_exist=False)
+                    result = self._run_with_timeout(
+                        lambda: self._provenance.record(model_id, profile.repo_id, path),
+                        timeout=self._provenance_timeout,
+                    )
                     if result.get("status") != "recorded":
                         print(f"[model_manager] provenance record for {model_id}: {result}", flush=True)
                 except Exception as e:  # noqa: BLE001
@@ -300,6 +474,10 @@ class ModelManager:
         """Queue a background download for the given model."""
         if not self.allow_downloads:
             raise RuntimeError("Downloads are disabled. Set BADAPPLE_ALLOW_DOWNLOADS=1 or enable in the dashboard.")
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return {"error": f"invalid model_id: {model_id!r}"}
         profile = self._profiles.get(model_id)
         if not profile:
             return {"error": f"unknown model {model_id}"}
@@ -319,6 +497,10 @@ class ModelManager:
 
     def ensure_cached(self, model_id: str, download: bool = True) -> dict[str, Any]:
         """Return cached status; start a download if missing and allowed."""
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return {"error": f"invalid model_id: {model_id!r}"}
         state = self._state.get(model_id)
         if not state:
             return {"error": f"unknown model {model_id}"}
@@ -335,10 +517,14 @@ class ModelManager:
 
         Returns True if the model reached cached/loaded status, False on timeout.
         """
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return False
         with self._lock:
             future = self._download_futures.get(model_id)
         if not future:
-            return self._state[model_id].status in ("cached", "loaded")
+            return self._state.get(model_id, ModelState()).status in ("cached", "loaded")
         try:
             future.result(timeout=timeout)
             return self._state[model_id].status in ("cached", "loaded")
@@ -351,6 +537,10 @@ class ModelManager:
         A missing manifest is recorded in the background so the next load is fast.
         A mismatch is treated as fatal; a missing local path is allowed.
         """
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return
         if model_id not in self._state:
             return
         if local_path is None:
@@ -358,9 +548,15 @@ class ModelManager:
             if profile:
                 local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
 
+        try:
+            root = _validate_local_path(local_path, must_exist=False) if local_path else None
+        except ValueError as e:
+            print(f"[model_manager] load rejected for {model_id}: {e}", flush=True)
+            self._update_state(model_id, status="error", progress=1.0, local_path=local_path or "", error=str(e), verified=False)
+            return
+
         verified = False
-        root = Path(local_path).expanduser().resolve() if local_path else None
-        if root and self._verify_hashes:
+        if root and self._verify_hashes and root.is_dir():
             result = self._provenance.verify(model_id, str(root))
             status = result.get("status")
             if status == "verified":
@@ -381,12 +577,23 @@ class ModelManager:
 
     def mark_unloaded(self, model_id: str, local_path: str | None = None) -> None:
         """Mark a model as cached but not resident."""
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return
         if model_id not in self._state:
             return
         if local_path is None:
             profile = self._profiles.get(model_id)
             if profile:
                 local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
+        else:
+            try:
+                _validate_local_path(local_path, must_exist=False)
+            except ValueError as e:
+                print(f"[model_manager] unload rejected for {model_id}: {e}", flush=True)
+                self._update_state(model_id, status="error", progress=1.0, local_path=local_path or "", error=str(e), verified=False)
+                return
         self._update_state(model_id, status="cached", progress=1.0, local_path=local_path or "", error="", verified=False)
 
     def refresh_cache_status(self, model_id: str) -> dict[str, Any]:
@@ -395,6 +602,10 @@ class ModelManager:
         Do not overwrite a model that is currently loaded in RAM; a load in
         progress takes precedence over a cache scan.
         """
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return {"error": f"invalid model_id: {model_id!r}"}
         profile = self._profiles.get(model_id)
         if not profile:
             return {"error": f"unknown model {model_id}"}
@@ -413,6 +624,10 @@ class ModelManager:
             self._download_executor.submit(self.refresh_cache_status, model_id)
 
     def memory_required(self, model_id: str) -> float:
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return 0.0
         profile = self._profiles.get(model_id)
         return profile.size_gb * 1.4 if profile else 0.0
 
@@ -443,10 +658,14 @@ class ModelManager:
     def preload_priority(self) -> list[str]:
         import badapple_vram_governor as vg
 
-        return vg.model_preload_priority()
+        return [mid for mid in vg.model_preload_priority() if _is_safe_model_id(mid)]
 
     def record_provenance(self, model_id: str, local_path: str | None = None) -> dict[str, Any]:
         """Record the manifest for a cached model."""
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return {"error": f"invalid model_id: {model_id!r}"}
         profile = self._profiles.get(model_id)
         if not profile:
             return {"error": f"unknown model {model_id}"}
@@ -454,10 +673,18 @@ class ModelManager:
             local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
         if not local_path:
             return {"error": f"model {model_id} is not cached"}
+        try:
+            _validate_local_path(local_path, must_exist=False)
+        except ValueError as e:
+            return {"status": "invalid_path", "error": str(e)}
         return self._provenance.record(model_id, profile.repo_id, local_path)
 
     def verify_provenance(self, model_id: str, local_path: str | None = None) -> dict[str, Any]:
         """Verify the manifest for a cached model."""
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return {"error": f"invalid model_id: {model_id!r}"}
         profile = self._profiles.get(model_id)
         if not profile:
             return {"error": f"unknown model {model_id}"}
@@ -465,6 +692,10 @@ class ModelManager:
             local_path = self._resolve_cache_path(profile.repo_id, allow_download=False) or ""
         if not local_path:
             return {"status": "missing", "error": f"model {model_id} is not cached"}
+        try:
+            _validate_local_path(local_path, must_exist=False)
+        except ValueError as e:
+            return {"status": "invalid_path", "error": str(e)}
         result = self._provenance.verify(model_id, local_path)
         with self._lock:
             if model_id in self._state:
@@ -475,6 +706,10 @@ class ModelManager:
         """Fast provenance check before loading. Records in the background if no manifest exists."""
         if not self._verify_hashes:
             return {"status": "skipped"}
+        try:
+            _validate_model_id(model_id)
+        except ValueError:
+            return {"error": f"invalid model_id: {model_id!r}"}
         profile = self._profiles.get(model_id)
         if not profile:
             return {"error": f"unknown model {model_id}"}
@@ -501,13 +736,26 @@ class ModelManager:
 
     def _record_provenance_worker(self, model_id: str, repo_id: str, local_path: str) -> None:
         try:
-            self._provenance.record(model_id, repo_id, local_path)
-            result = self._provenance.verify(model_id, local_path)
-            if result.get("status") == "verified":
-                with self._lock:
-                    self._state[model_id].verified = True
+            _validate_model_id(model_id)
+            _validate_repo_id(repo_id)
+            _validate_local_path(local_path, must_exist=False)
+            result = self._run_with_timeout(
+                lambda: self._provenance.record(model_id, repo_id, local_path),
+                timeout=self._provenance_timeout,
+            )
+            if result.get("status") == "recorded":
+                verify = self._run_with_timeout(
+                    lambda: self._provenance.verify(model_id, local_path),
+                    timeout=self._provenance_timeout,
+                )
+                if verify.get("status") == "verified":
+                    with self._lock:
+                        self._state[model_id].verified = True
         except Exception as e:  # noqa: BLE001
             print(f"[model_manager] background provenance recording failed for {model_id}: {e}", flush=True)
 
     def shutdown(self) -> None:
+        # Stop accepting new download work first so workers don't try to use a
+        # timeout executor that is about to be shut down.
         self._download_executor.shutdown(wait=False, cancel_futures=True)
+        self._timeout_executor.shutdown(wait=False, cancel_futures=True)

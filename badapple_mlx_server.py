@@ -10,6 +10,7 @@ Features:
 - SLICKS authenticated Unix socket
 """
 import asyncio
+import base64
 import concurrent.futures
 import copy
 import gc
@@ -34,6 +35,7 @@ from mlx_lm.sample_utils import make_sampler
 
 import badapple_agent_tasks
 import badapple_ambient
+import badapple_health_actor
 import badapple_ambient_memory
 import badapple_audit_actor
 import badapple_cache_actor
@@ -49,6 +51,7 @@ import badapple_p2p
 import badapple_scheduler
 import badapple_slicks
 import badapple_speculate
+import badapple_task_actor
 import badapple_tier
 import badapple_tool_router
 import badapple_vision
@@ -68,7 +71,6 @@ from badapple_knowledge import BadAppleKnowledge
 from badapple_plugins import PluginRegistry
 from badapple_runtime import (
     CircuitBreaker,
-    HealthRegistry,
     ResourceGovernor,
     RuntimeControl,
 )
@@ -2171,7 +2173,9 @@ class MLXServer:
         self._model_actor = badapple_model_actor.ModelActor(self.data_dir)
         self._model_actor.start()
         self.model_manager = badapple_model_actor.ModelActorProxy(self._model_actor)
-        self.agent_task_manager = badapple_agent_tasks.AgentTaskManager(self.data_dir)
+        self._task_actor = badapple_task_actor.TaskActor(self.data_dir)
+        self._task_actor.start()
+        self.agent_task_manager = badapple_task_actor.TaskActorProxy(self._task_actor)
         self.max_kv_size = MAX_KV_SIZE
         self.prefill_step_size = PREFILL_STEP_SIZE
         self._roast_index = 0
@@ -2190,7 +2194,9 @@ class MLXServer:
 
         # Runtime/health/breakers
         self.runtime = RuntimeControl(self.data_dir)
-        self.health = HealthRegistry()
+        self._health_actor = badapple_health_actor.HealthActor()
+        self._health_actor.start()
+        self.health = badapple_health_actor.HealthActorProxy(self._health_actor)
         self.resources = ResourceGovernor()
         self.breakers = {
             name: CircuitBreaker(name)
@@ -4245,28 +4251,45 @@ class MLXServer:
                 return
             hello = json.loads(line.decode())
             client_version = hello.get("version")
-            if not (hello.get("type") == "hello" and client_version == SLICKS_VERSION and timestamp_is_fresh(hello.get("timestamp_ms")) and badapple_slicks.nonce_is_valid(hello.get("client_nonce", ""))):
-                if client_version == badapple_slicks.SLICKS_VERSION_2:
-                    await _write_frame(writer, {"type": "error", "message": "SLICKS v2 is not yet enabled"})
-                else:
-                    await _write_frame(writer, {"type": "error", "message": "invalid or stale SLICKS hello"})
+            accepted_version = None
+            if hello.get("type") == "hello" and timestamp_is_fresh(hello.get("timestamp_ms")) and badapple_slicks.nonce_is_valid(hello.get("client_nonce", "")):
+                if client_version == SLICKS_VERSION:
+                    accepted_version = SLICKS_VERSION
+                elif client_version == badapple_slicks.SLICKS_VERSION_2 and badapple_slicks.v2_available():
+                    accepted_version = badapple_slicks.SLICKS_VERSION_2
+            if accepted_version is None:
+                await _write_frame(writer, {"type": "error", "message": "invalid or stale SLICKS hello"})
                 return
 
             timestamp_ms = hello["timestamp_ms"]
             client_nonce = hello["client_nonce"]
             server_nonce = random_nonce()
-            await _write_frame(writer, {
-                "type": "challenge",
-                "version": SLICKS_VERSION,
-                "server_nonce": server_nonce,
-                "proof": badapple_slicks.v1_server_proof(self.secret, timestamp_ms, client_nonce, server_nonce),
-            })
+            if accepted_version == SLICKS_VERSION:
+                challenge = {
+                    "type": "challenge",
+                    "version": SLICKS_VERSION,
+                    "server_nonce": server_nonce,
+                    "proof": badapple_slicks.v1_server_proof(self.secret, timestamp_ms, client_nonce, server_nonce),
+                }
+            else:
+                server_pubkey = badapple_slicks.v2_public_key_b64()
+                if server_pubkey is None:
+                    await _write_frame(writer, {"type": "error", "message": "SLICKS v2 public key unavailable"})
+                    return
+                challenge = {
+                    "type": "challenge",
+                    "version": badapple_slicks.SLICKS_VERSION_2,
+                    "server_nonce": server_nonce,
+                    "server_pubkey": server_pubkey,
+                    "proof": badapple_slicks.v2_server_proof(timestamp_ms, client_nonce, server_nonce),
+                }
+            await _write_frame(writer, challenge)
 
             line = await reader.readline()
             if not line:
                 return
             execute = json.loads(line.decode())
-            if not (execute.get("type") == "execute" and execute.get("version") == SLICKS_VERSION and execute.get("timestamp_ms") == timestamp_ms and execute.get("client_nonce") == client_nonce and execute.get("server_nonce") == server_nonce):
+            if not (execute.get("type") == "execute" and execute.get("version") == accepted_version and execute.get("timestamp_ms") == timestamp_ms and execute.get("client_nonce") == client_nonce and execute.get("server_nonce") == server_nonce):
                 await _write_frame(writer, {"type": "error", "message": "invalid SLICKS execute frame"})
                 return
 
@@ -4280,7 +4303,13 @@ class MLXServer:
                 await _write_frame(writer, {"type": "error", "message": str(e)})
                 return
 
-            if not badapple_slicks.v1_verify_client_proof(self.secret, timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens, proof):
+            if accepted_version == SLICKS_VERSION:
+                client_ok = badapple_slicks.v1_verify_client_proof(self.secret, timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens, proof)
+            else:
+                client_pubkey_b64 = execute.get("client_pubkey") or badapple_slicks.v2_public_key_b64()
+                client_pubkey = base64.b64decode(client_pubkey_b64) if client_pubkey_b64 and client_pubkey_b64 != server_pubkey else badapple_slicks.v2_public_key()
+                client_ok = badapple_slicks.v2_verify_client_proof(timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens, proof, client_pubkey)
+            if not client_ok:
                 await _write_frame(writer, {"type": "error", "message": "SLICKS client authentication failed"})
                 return
 

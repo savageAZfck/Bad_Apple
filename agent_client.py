@@ -10,8 +10,7 @@ Usage:
 This is a reference / test client, not the production `badapple` CLI.
 """
 
-import hashlib
-import hmac
+import base64
 import json
 import os
 import random
@@ -22,7 +21,6 @@ from pathlib import Path
 
 import badapple_slicks
 
-SLICKS_VERSION = badapple_slicks.SLICKS_VERSION
 DEFAULT_SOCKET_PATH = "/var/run/badapple/substrate_mlx.sock"
 DEFAULT_KEY_PATH = badapple_slicks.DEFAULT_KEY_PATH
 
@@ -37,15 +35,6 @@ def load_secret() -> bytes:
             return bytes.fromhex(raw)
         return raw.encode()
     raise RuntimeError("No SLICKS secret found")
-
-
-def sign(secret: bytes, material: bytes) -> str:
-    return hmac.new(secret, material, hashlib.sha256).hexdigest()
-
-
-def client_material(timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens):
-    prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-    return f"BADAPPLE-SLICKS/{SLICKS_VERSION}|client|{timestamp_ms}|{client_nonce}|{server_nonce}|{max_new_tokens}|{prompt_hash}".encode()
 
 
 def random_nonce() -> str:
@@ -66,7 +55,6 @@ def recv_frame(sock) -> dict:
 
 
 def call_agent(method: str, params: dict | None = None, prompt_text: str | None = None, max_tokens: int = 1):
-    secret = load_secret()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(os.environ.get("BADAPPLE_SOCKET_PATH", DEFAULT_SOCKET_PATH))
 
@@ -81,30 +69,49 @@ def call_agent(method: str, params: dict | None = None, prompt_text: str | None 
             req["params"] = params
         prompt = "__BADAPPLE_AGENT__ " + json.dumps(req)
 
+    use_v2 = os.environ.get("BADAPPLE_SLICKS2") == "1" and badapple_slicks.v2_available()
+    if use_v2:
+        client_version = badapple_slicks.SLICKS_VERSION_2
+        client_pubkey_b64 = badapple_slicks.v2_public_key_b64() or ""
+    else:
+        client_version = badapple_slicks.SLICKS_VERSION
+        client_pubkey_b64 = ""
+
     hello = {
         "type": "hello",
-        "version": SLICKS_VERSION,
+        "version": client_version,
         "timestamp_ms": timestamp_ms,
         "client_nonce": client_nonce,
-        "client_pubkey": "",
-        "signature": sign(secret, f"slicks/{SLICKS_VERSION}/{timestamp_ms}/{client_nonce}".encode()),
+        "client_pubkey": client_pubkey_b64,
     }
-    # The server currently only checks type/version/timestamp/nonce.
     send_frame(sock, hello)
     resp = recv_frame(sock)
     if resp.get("type") != "challenge":
         raise RuntimeError(f"unexpected challenge: {resp}")
     server_nonce = resp["server_nonce"]
+    server_version = resp.get("version", client_version)
 
-    proof = sign(secret, client_material(timestamp_ms, client_nonce, server_nonce, prompt, max_tokens))
+    if server_version == badapple_slicks.SLICKS_VERSION:
+        secret = load_secret()
+        if not badapple_slicks.v1_verify_server_proof(secret, timestamp_ms, client_nonce, server_nonce, resp["proof"]):
+            raise RuntimeError("SLICKS v1 server authentication failed")
+        proof = badapple_slicks.v1_client_proof(secret, timestamp_ms, client_nonce, server_nonce, prompt, max_tokens)
+    else:
+        server_pubkey_b64 = resp.get("server_pubkey")
+        server_pubkey = base64.b64decode(server_pubkey_b64) if server_pubkey_b64 else None
+        if not badapple_slicks.v2_verify_server_proof(timestamp_ms, client_nonce, server_nonce, resp["proof"], server_pubkey):
+            raise RuntimeError("SLICKS v2 server authentication failed")
+        proof = badapple_slicks.v2_client_proof(timestamp_ms, client_nonce, server_nonce, prompt, max_tokens)
+
     execute = {
         "type": "execute",
-        "version": SLICKS_VERSION,
+        "version": server_version,
         "timestamp_ms": timestamp_ms,
         "client_nonce": client_nonce,
         "server_nonce": server_nonce,
         "prompt": prompt,
         "max_new_tokens": max_tokens,
+        "client_pubkey": client_pubkey_b64,
         "proof": proof,
     }
     send_frame(sock, execute)

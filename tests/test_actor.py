@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Tests for the minimal actor framework."""
 
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from typing import Any
 
+import badapple_health_actor
+import badapple_task_actor
 from badapple_actor import Actor, Ask, Envelope, Inbox, Supervisor
 
 
@@ -107,6 +111,31 @@ class ActorFrameworkTests(unittest.TestCase):
         time.sleep(0.1)
         sup.stop_all()
         self.assertFalse(actor.is_alive())
+
+    def test_health_actor_register_and_snapshot(self) -> None:
+        actor = badapple_health_actor.HealthActor()
+        actor.start()
+        try:
+            proxy = badapple_health_actor.HealthActorProxy(actor)
+            proxy.register("test", "liveness", lambda: True)
+            snap = proxy.snapshot()
+            self.assertIn("test", snap.get("checks", {}))
+        finally:
+            actor.stop()
+
+    def test_task_actor_create_and_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            actor = badapple_task_actor.TaskActor(Path(td))
+            actor.start()
+            try:
+                proxy = badapple_task_actor.TaskActorProxy(actor)
+                task = proxy.create("test goal", 5)
+                self.assertIsNotNone(task)
+                self.assertEqual(task.status, "queued")
+                self.assertTrue(proxy.cancel(task.task_id))
+                self.assertEqual(proxy.get(task.task_id).status, "cancelled")
+            finally:
+                actor.stop()
 
 
 if __name__ == "__main__":

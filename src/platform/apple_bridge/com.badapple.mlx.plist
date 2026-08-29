@@ -53,6 +53,8 @@
         <string>__CONSOLE_HOME__/.bad_apple/notes</string>
         <key>BADAPPLE_IDENTITY_BLOB</key>
         <string>__CONSOLE_HOME__/Library/Application Support/BadApple/identity.sekey</string>
+        <key>BADAPPLE_IDENTITY_AGENT_SOCKET</key>
+        <string>/var/run/badapple/identity.sock</string>
         <key>BADAPPLE_FAST_TIER</key>
         <string>1</string>
         <key>BADAPPLE_LAZY_MAIN_MODEL</key>

@@ -92,6 +92,14 @@ def v1_server_proof(secret: bytes, timestamp_ms: int, client_nonce: str, server_
     return _sign(secret, server_material_v1(timestamp_ms, client_nonce, server_nonce))
 
 
+def v1_client_proof(secret: bytes, timestamp_ms: int, client_nonce: str, server_nonce: str, prompt: str, max_new_tokens: int) -> str:
+    return _sign(secret, client_material_v1(timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens))
+
+
+def v1_verify_server_proof(secret: bytes, timestamp_ms: int, client_nonce: str, server_nonce: str, proof: str) -> bool:
+    return _verify(secret, server_material_v1(timestamp_ms, client_nonce, server_nonce), proof)
+
+
 def v1_verify_client_proof(secret: bytes, timestamp_ms: int, client_nonce: str, server_nonce: str, prompt: str, max_new_tokens: int, proof: str) -> bool:
     return _verify(secret, client_material_v1(timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens), proof)
 
@@ -121,9 +129,10 @@ class Slicks2State:
 
     def public_key_b64(self) -> str | None:
         with self._lock:
-            if self._public_key_b64 is None and self.available():
+            if self._public_key_b64 is None:
                 try:
                     self._public_key_b64 = badapple_identity.public_key()
+                    self._available = True
                 except Exception:  # noqa: BLE001
                     pass
             return self._public_key_b64

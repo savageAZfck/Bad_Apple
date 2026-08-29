@@ -161,6 +161,7 @@ done
 [[ "${ready}" -eq 1 ]] || rollback
 trap - ERR
 
+launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_bridge/install_identity_agent.sh"
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_tts_agent.sh"
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
 
