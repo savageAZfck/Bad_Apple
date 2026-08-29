@@ -9,24 +9,27 @@ import Foundation
 import ServiceManagement
 import Speech
 
-private let badAppleVoiceLogURL = URL(fileURLWithPath: "/tmp/badapple_voice_debug.log")
+private let badAppleVoiceLogPath = "/tmp/badapple_voice_debug.log"
 
+/// Append a line to the voice debug log using a raw POSIX `open()` with
+/// `O_NOFOLLOW`, rather than FileManager/FileHandle. `/tmp` is world-writable,
+/// so anything else running as this user could pre-create this path as a
+/// symlink to an arbitrary file the user can write (e.g. a LaunchAgent plist
+/// or shell rc file); the previous FileManager-based check-then-write was a
+/// classic TOCTOU race that would happily append debug text through such a
+/// symlink. O_NOFOLLOW makes the kernel refuse to open it if the final path
+/// component is a symlink, and 0600 keeps the log private to this user.
 private func badAppleVoiceLog(_ message: String) {
     let stamp = ISO8601DateFormatter().string(from: Date())
     let line = "\(stamp) \(message)\n"
-    do {
-        if !FileManager.default.fileExists(atPath: badAppleVoiceLogURL.path) {
-            try line.write(to: badAppleVoiceLogURL, atomically: true, encoding: .utf8)
-        } else {
-            let data = line.data(using: .utf8)!
-            if let fh = try? FileHandle(forWritingTo: badAppleVoiceLogURL) {
-                _ = try? fh.seekToEnd()
-                fh.write(data)
-                fh.closeFile()
-            }
+    let fd = open(badAppleVoiceLogPath, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
+    if fd >= 0 {
+        line.withCString { cstr in
+            _ = Darwin.write(fd, cstr, strlen(cstr))
         }
-    } catch {
-        NSLog("badAppleVoiceLog failed: %@", error.localizedDescription)
+        close(fd)
+    } else {
+        NSLog("badAppleVoiceLog failed: open() errno %d", errno)
     }
     NSLog("[BadAppleVoice] %@", message)
 }
