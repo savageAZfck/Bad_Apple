@@ -4860,6 +4860,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             menu.addItem(NSMenuItem(title: "Push Pursuit...", action: #selector(pushPursuit), keyEquivalent: "p"))
         }
         menu.addItem(NSMenuItem.separator())
+        let helpMenu = NSMenu(title: "Troubleshooting")
+        let restartDaemonItem = NSMenuItem(title: "Restart Daemon", action: #selector(restartDaemon), keyEquivalent: "")
+        restartDaemonItem.toolTip = "Unload and reload the Bad Apple system LaunchDaemons."
+        helpMenu.addItem(restartDaemonItem)
+        let openLogItem = NSMenuItem(title: "Open Log", action: #selector(openLog), keyEquivalent: "")
+        openLogItem.toolTip = "Open /var/log/bad_apple_mlx_server.log in the default editor."
+        helpMenu.addItem(openLogItem)
+        if let mcpSocket = runtime["mcp_socket"] as? String, !mcpSocket.isEmpty {
+            let copyMCPItem = NSMenuItem(title: "Copy MCP Socket", action: #selector(copyMCPSocket), keyEquivalent: "")
+            copyMCPItem.toolTip = mcpSocket
+            helpMenu.addItem(copyMCPItem)
+        }
+        let helpParent = NSMenuItem(title: "Troubleshooting", action: nil, keyEquivalent: "")
+        helpParent.submenu = helpMenu
+        menu.addItem(helpParent)
+
+        menu.addItem(NSMenuItem.separator())
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         updateItem.toolTip = "Download and install the latest unsigned release from GitHub."
         menu.addItem(updateItem)
@@ -5265,6 +5282,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     @objc private func terminate() { NSApp.terminate(nil) }
+
+    @objc private func openLog() {
+        let logURL = URL(fileURLWithPath: "/var/log/bad_apple_mlx_server.log")
+        NSWorkspace.shared.open(logURL)
+    }
+
+    @objc private func copyMCPSocket() {
+        guard let socket = lastRuntimeStatus["mcp_socket"] as? String, !socket.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(socket, forType: .string)
+    }
 }
 
 // MARK: - Chat history window
