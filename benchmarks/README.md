@@ -59,15 +59,57 @@ This benchmark run directly surfaced and led to fixing two real bugs:
    `AttributeError: 'MLXServer' object has no attribute 'model'` during the
    startup window before `__init__` finishes.
 
-## Known follow-up work (not yet done)
+## Follow-up investigation (2026-08-29)
 
-- One prompt showed a 42.7s time-to-first-token outlier — a real anomaly
-  worth root-causing (candidates: system prompt cache invalidation, thermal
-  throttling, or memory-pressure-induced swapping) rather than averaged away.
-- Re-run on an idle machine (nothing else open) to get a genuinely fair
-  best-case number instead of one confounded by this being a live dev machine.
-- If Bad Apple's decode throughput remains behind Ollama/llama.cpp on
-  comparable hardware even when idle, investigate `prefill_step_size`,
-  `max_kv_size`, and whether the per-query context-building work in
-  `render_prompt` (RAG retrieval, workspace summary, memory graph lookups)
-  is adding meaningful overhead versus Ollama's simpler stateless request path.
+Went looking for a code-level fix for the decode-speed gap. Ruled out two
+plausible hypotheses, confirmed a third as the likely primary cause, and
+fixed one real (if unrelated) memory-safety issue along the way:
+
+- **Speculative decoding was not the cause.** Every generation logs
+  `draft_accept_ratio=0%`, which looks damning (paying a draft model's cost
+  for zero benefit), but traced the code and confirmed `BADAPPLE_SPECULATIVE_DRAFT`
+  is unset in the actual installed plist, `self.draft_model` stays `None`,
+  and `grep -c "\[speculate\]" ` the daemon log (which `_load_speculative_draft()`
+  would print on to on a real load) turns up zero matches ever. The metric
+  reads `0%` unconditionally whenever no draft model is loaded at all
+  (`draft_tokens / token_count` where `draft_tokens` never increments) --
+  it looks like a smoking gun for a failing feature but actually just means
+  the feature was never turned on. If it *were* turned on, the only cached
+  compatible draft (`Qwen2.5-0.5B-Instruct`, generic/un-fine-tuned) predicting
+  continuations for the heavily custom-fine-tuned `Qwen3.5-9B-HLWQ` target
+  would plausibly have a genuinely low acceptance rate anyway -- but that's
+  a separate, hypothetical concern from what's actually configured today.
+- **`TOKENIZERS_PARALLELISM=false`** (the standard fix for HuggingFace
+  `tokenizers`-related "leaked semaphore" warnings) was tried and measured;
+  it did not change decode throughput. Not applied.
+- **Real, current system memory pressure was confirmed** on this specific
+  16 GB test Mac: `top` showed `PhysMem: 15G used (7670M wired, 2927M
+  compressor), 279M unused` -- 2.9 GB of memory *actively compressed* right
+  now, which costs real CPU cycles to decompress on every access, and a
+  cumulative swap counter in the tens of millions, both directly competing
+  with the daemon's own inference for CPU/GPU time. This machine is running
+  a full IDE/agent session (itself several GB of Electron helper processes)
+  concurrently with the 9B model, which is a genuinely tight budget on 16 GB
+  total. This is very likely the dominant real cause of the gap, and it is
+  environmental, not a Bad Apple code bug -- re-running this benchmark on an
+  otherwise-idle Mac remains the right way to get a fair number.
+- **Fixed regardless, as a real hardening improvement**: MLX's default
+  `set_memory_limit` is 1.5x the GPU's own recommended working set size --
+  on this 16 GB Mac, that let the daemon claim up to ~15.2 GB, leaving under
+  1 GB of *guaranteed* headroom for literally everything else running.
+  `badapple_mlx_server.py` now caps this to `mx.device_info()`'s
+  `max_recommended_working_set_size` (Apple's own guidance, ~11.8 GB here) at
+  startup. This did not measurably change decode tok/s in testing (the
+  daemon's actual peak usage, ~5.2-5.7 GB, was already well under both the
+  old and new ceiling, so the limit itself was never the bottleneck) but is
+  a correct, low-risk fix regardless: a background daemon has no business
+  defaulting to a memory policy sized for exclusive-use ML workstations.
+
+**Still open**: re-run this benchmark on an idle Mac (nothing else running)
+to get a number not confounded by this machine's current memory pressure. If
+the gap persists even then, the next things worth profiling are
+`prefill_step_size`/`max_kv_size` tuning and whether per-query context-building
+in `render_prompt` (RAG retrieval, workspace summary, memory graph lookups) adds
+meaningful overhead versus Ollama's simpler stateless request path. The 42.7s
+TTFT outlier from the original run was not reproduced in this session's testing
+(TTFT ranged 5-7s across several warm requests) and is not yet explained.

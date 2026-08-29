@@ -5283,9 +5283,35 @@ def _rotate_log_if_needed() -> None:
             pass
 
 
+def _cap_mlx_memory_to_recommended_working_set() -> None:
+    """Cap MLX's Metal memory (and cache) limit to Apple's own recommended
+    working set for this GPU, instead of MLX's default of 1.5x that value.
+
+    MLX's default is a reasonable choice for a dedicated ML workstation
+    where the process is the only significant consumer of RAM, but Bad
+    Apple runs as a background daemon alongside a full desktop session --
+    on a 16 GB Mac, the default lets MLX claim up to ~15.2 GB (of 16 GB
+    total), leaving well under 1 GB of guaranteed headroom for the OS and
+    every other running application. That is a direct path to system-wide
+    swapping (and the throughput collapse that comes with it) the moment
+    anything else on the machine needs meaningful memory. The daemon's own
+    peak usage has never been observed above ~6 GB, so capping to Apple's
+    recommended ceiling (rather than 1.5x it) costs nothing in practice
+    while leaving real headroom for the rest of the system.
+    """
+    try:
+        recommended = mx.device_info()["max_recommended_working_set_size"]
+        mx.set_memory_limit(recommended)
+        mx.set_cache_limit(recommended)
+        print(f"[main] MLX memory limit capped to {recommended / (1024 ** 3):.1f} GB (device-recommended working set)", flush=True)
+    except Exception as e:  # noqa: BLE001 - best-effort tuning, never block startup
+        print(f"[main] could not cap MLX memory limit: {e}", flush=True)
+
+
 async def main():
     # Rotate and reopen the log before anything is printed.
     _rotate_log_if_needed()
+    _cap_mlx_memory_to_recommended_working_set()
 
     secret = load_slicks_secret()
     # Support legacy env override; otherwise load from the prompt file and keep
