@@ -3774,6 +3774,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private let voiceHost = BadAppleVoiceHost()
     private let actionExecutor = BadAppleActionExecutor()
     private let chatHistoryWindow = ChatHistoryWindow()
+    private let chatWindow = BadAppleChatWindow()
     private var streamedTokenCount = 0
     private var lastPrompt = ""
     private var lastError: String?
@@ -3786,6 +3787,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var memoryTotalGB = 0.0
     private var memoryPressure = "normal"
     private var activeModels: [String] = ["main_9b"]
+    private var cachedModelList: [[String: Any]] = []
     private var lastTelemetryTime: TimeInterval = 0
     private var lastRuntimeStatus: [String: Any] = [:]
     private var lastRuntimeReachable = false
@@ -3935,6 +3937,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 DispatchQueue.main.async { finish() }
             }
         }
+        chatWindow.onSubmit = { [weak self] prompt, append, finish in
+            guard let self = self else { finish(); return }
+            Task {
+                do {
+                    _ = try await self.runBadAppleCLIStreaming(
+                        prompt: prompt,
+                        socketPath: BadAppleBrain.deepSocket,
+                        maxTokens: 512
+                    ) { chunk in
+                        DispatchQueue.main.async { append(chunk) }
+                    }
+                } catch {
+                    DispatchQueue.main.async { append("Error: \(error.localizedDescription)") }
+                }
+                DispatchQueue.main.async { finish() }
+            }
+        }
+        chatWindow.onNewChat = { [weak self] in
+            self?.newChat()
+        }
         briefingWindow.onRun = { [weak self] append, finish in
             guard let self = self else { finish(); return }
             let formatter = DateFormatter()
@@ -4039,7 +4061,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             self?.runFirstRunInstaller()
         }
         firstRunOnboarding.onOpenChat = { [weak self] in
-            self?.askPalette.show()
+            self?.chatWindow.show()
         }
         firstRunOnboarding.onOpenDashboard = { [weak self] in
             self?.openDashboard()
@@ -4068,6 +4090,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         memoryGovernor.start()
         refreshTelemetry()
+        // Scan for cached models on startup so the Model submenu is populated
+        scanModels()
 
         if UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false {
             PiperTTSClient.shared.warmup()
@@ -4306,6 +4330,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                         self.updateStatusIcon()
                         self.rebuildMenu()
                         self.splash.update(status: json)
+                        // Update chat window tier badge
+                        let tier = (json["fast_tier"] as? Bool == true) ? "0.5B Fast" : "9B"
+                        self.chatWindow.tierName = tier
                     }
                 } else {
                     await MainActor.run {
@@ -4685,6 +4712,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         chatHistoryWindow.show()
     }
 
+    @objc private func showChatWindow() {
+        chatWindow.show()
+    }
+
     @objc private func newChat() {
         Task {
             do {
@@ -4713,7 +4744,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @objc private func selectPersona(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         selectedPersona = name
+        let displayNames: [String: String] = ["default": "Default", "wicket": "Wicket", "genz": "Gen Z", "drill": "Drill", "midwest": "Midwest Aunt"]
+        chatWindow.personaName = displayNames[name] ?? name.capitalized
         rebuildMenu()
+    }
+
+    @objc private func scanModels() {
+        Task {
+            do {
+                let output = try await runBadAppleCLI(args: ["model", "scan"])
+                if let data = output.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let models = json["models"] as? [[String: Any]] {
+                    await MainActor.run {
+                        self.cachedModelList = models
+                        self.rebuildMenu()
+                    }
+                }
+            } catch {
+                badAppleVoiceLog("scanModels error: \(error)")
+            }
+        }
+    }
+
+    @objc private func selectModel(_ sender: NSMenuItem) {
+        guard let repo = sender.representedObject as? String else { return }
+        Task {
+            do {
+                let output = try await runBadAppleCLI(args: ["model", "use", repo])
+                if let data = output.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let text = json["text"] as? String ?? "Switched."
+                    await MainActor.run {
+                        self.lastError = nil
+                        self.rebuildMenu()
+                        badAppleVoiceLog("Model switched: \(text)")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.rebuildMenu()
+                }
+            }
+        }
     }
 
     @objc private func runBenchmark() {
@@ -5131,6 +5205,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let controlCenterItem = NSMenuItem(title: "Control Center", action: #selector(showControlCenter), keyEquivalent: "")
         controlCenterItem.toolTip = "Open the native glass control center window."
         menu.addItem(controlCenterItem)
+        let chatItem = NSMenuItem(title: "Chat", action: #selector(showChatWindow), keyEquivalent: "c")
+        chatItem.toolTip = "Open the native chat window."
+        menu.addItem(chatItem)
         let newChatItem = NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n")
         newChatItem.toolTip = "Start a new conversation."
         menu.addItem(newChatItem)
@@ -5157,6 +5234,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let personaParent = NSMenuItem(title: "Persona", action: nil, keyEquivalent: "")
         personaParent.submenu = personaMenu
         menu.addItem(personaParent)
+
+        // Model selector submenu
+        let modelMenu = NSMenu(title: "Model")
+        let scanItem = NSMenuItem(title: "Scan for Cached Models", action: #selector(scanModels), keyEquivalent: "")
+        scanItem.toolTip = "Scan the HuggingFace cache for available MLX models."
+        modelMenu.addItem(scanItem)
+        modelMenu.addItem(NSMenuItem.separator())
+        if cachedModelList.isEmpty {
+            let empty = NSMenuItem(title: "No models found — click Scan", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            modelMenu.addItem(empty)
+        } else {
+            let currentModel = (lastRuntimeStatus["model_id"] as? String) ?? ""
+            for m in cachedModelList.prefix(20) {
+                let id = m["id"] as? String ?? "?"
+                let repo = m["repo_id"] as? String ?? id
+                let status = m["status"] as? String ?? ""
+                let label = "\(id) — \(status)"
+                let item = NSMenuItem(title: label, action: #selector(selectModel(_:)), keyEquivalent: "")
+                item.representedObject = repo
+                item.state = (repo == currentModel || id == currentModel) ? .on : .off
+                item.toolTip = "Switch to \(repo)"
+                modelMenu.addItem(item)
+            }
+        }
+        let modelParent = NSMenuItem(title: "Model", action: nil, keyEquivalent: "m")
+        modelParent.submenu = modelMenu
+        menu.addItem(modelParent)
 
         let restartVoiceItem = NSMenuItem(title: "Restart Voice Recognition", action: #selector(restartVoice), keyEquivalent: "r")
         restartVoiceItem.toolTip = "Recycle the local speech recognizer pipeline."
@@ -5767,6 +5872,245 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         guard let socket = lastRuntimeStatus["mcp_socket"] as? String, !socket.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(socket, forType: .string)
+    }
+}
+
+// MARK: - Native chat window
+
+/// A multi-turn chat window with streaming responses, message bubbles,
+/// and persona/tier indicators. This is the consumer-grade chat surface
+/// that complements the menu bar icon and CLI.
+final class BadAppleChatWindow: NSObject, NSTextFieldDelegate {
+    private var window: NSWindow?
+    private var transcriptView: NSTextView?
+    private var inputField: NSTextField?
+    private var sendButton: NSButton?
+    private var spinner: NSProgressIndicator?
+    private var personaLabel: NSTextField?
+    private var tierLabel: NSTextField?
+    private var newChatButton: NSButton?
+    private var isSubmitting = false
+
+    /// Conversation messages for display. Each entry is (role, text).
+    private var messages: [(role: String, text: String)] = []
+    /// The text accumulated for the current streaming assistant response.
+    private var currentAssistantText = ""
+
+    var onSubmit: ((String, @escaping (String) -> Void, @escaping () -> Void) -> Void)?
+    var onNewChat: (() -> Void)?
+    var personaName: String = "Default" {
+        didSet { personaLabel?.stringValue = "Persona: \(personaName)" }
+    }
+    var tierName: String = "9B" {
+        didSet { tierLabel?.stringValue = "Model: \(tierName)" }
+    }
+
+    func show() {
+        if window == nil { buildWindow() }
+        window?.makeKeyAndOrderFront(nil)
+        inputField?.becomeFirstResponder()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func buildWindow() {
+        let size = NSSize(width: 720, height: 560)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 700) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 500) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        let wc = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        wc.title = "Bad Apple Chat"
+        wc.isReleasedWhenClosed = false
+        wc.minSize = NSSize(width: 480, height: 400)
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+
+        // Top bar: persona + tier + new chat
+        let topBar = NSView(frame: NSRect(x: 0, y: size.height - 36, width: size.width, height: 36))
+        topBar.autoresizingMask = [.width]
+
+        personaLabel = NSTextField(labelWithString: "Persona: \(personaName)")
+        personaLabel!.font = .systemFont(ofSize: 12, weight: .medium)
+        personaLabel!.textColor = .secondaryLabelColor
+        personaLabel!.frame = NSRect(x: 16, y: 8, width: 180, height: 20)
+        topBar.addSubview(personaLabel!)
+
+        tierLabel = NSTextField(labelWithString: "Model: \(tierName)")
+        tierLabel!.font = .systemFont(ofSize: 12, weight: .medium)
+        tierLabel!.textColor = .secondaryLabelColor
+        tierLabel!.frame = NSRect(x: 200, y: 8, width: 120, height: 20)
+        topBar.addSubview(tierLabel!)
+
+        newChatButton = NSButton(title: "New Chat", target: self, action: #selector(newChat(_:)))
+        newChatButton!.bezelStyle = .rounded
+        newChatButton!.frame = NSRect(x: size.width - 110, y: 4, width: 94, height: 28)
+        newChatButton!.autoresizingMask = [.minXMargin]
+        topBar.addSubview(newChatButton!)
+
+        visual.addSubview(topBar)
+
+        // Transcript scroll view
+        let transcriptHeight = size.height - 36 - 56
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 56, width: size.width, height: transcriptHeight))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.autoresizingMask = [.width, .height]
+        scroll.drawsBackground = false
+
+        let tv = NSTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.drawsBackground = false
+        tv.font = .systemFont(ofSize: 14)
+        tv.textColor = .labelColor
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: size.width - 24, height: .greatestFiniteMagnitude)
+        tv.textContainerInset = NSSize(width: 12, height: 8)
+        scroll.documentView = tv
+        visual.addSubview(scroll)
+        transcriptView = tv
+
+        // Input bar
+        let inputBar = NSView(frame: NSRect(x: 0, y: 0, width: size.width, height: 56))
+        inputBar.autoresizingMask = [.width]
+
+        inputField = NSTextField()
+        inputField!.placeholderString = "Ask Bad Apple anything... (⏎ to send)"
+        inputField!.bezelStyle = .roundedBezel
+        inputField!.delegate = self
+        inputField!.frame = NSRect(x: 16, y: 14, width: size.width - 130, height: 28)
+        inputField!.autoresizingMask = [.width]
+        inputBar.addSubview(inputField!)
+
+        sendButton = NSButton(title: "Send", target: self, action: #selector(send(_:)))
+        sendButton!.bezelStyle = .rounded
+        sendButton!.keyEquivalent = "\r"
+        sendButton!.frame = NSRect(x: size.width - 100, y: 14, width: 84, height: 28)
+        sendButton!.autoresizingMask = [.minXMargin]
+        inputBar.addSubview(sendButton!)
+
+        spinner = NSProgressIndicator()
+        spinner!.style = .spinning
+        spinner!.isIndeterminate = true
+        spinner!.isDisplayedWhenStopped = false
+        spinner!.frame = NSRect(x: size.width - 92, y: 16, width: 20, height: 20)
+        spinner!.autoresizingMask = [.minXMargin]
+        inputBar.addSubview(spinner!)
+
+        visual.addSubview(inputBar)
+
+        wc.contentView = visual
+        window = wc
+    }
+
+    // MARK: - Actions
+
+    @objc private func send(_ sender: Any?) {
+        guard !isSubmitting else { return }
+        let prompt = inputField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !prompt.isEmpty else { return }
+        isSubmitting = true
+        sendButton?.isHidden = true
+        spinner?.startAnimation(nil)
+        inputField?.stringValue = ""
+
+        // Add user message to transcript
+        appendMessage(role: "user", text: prompt)
+
+        // Start a new assistant message (streamed)
+        currentAssistantText = ""
+        appendMessage(role: "assistant", text: "")
+
+        let append: (String) -> Void = { [weak self] chunk in
+            guard let self = self else { return }
+            self.currentAssistantText += chunk
+            self.updateLastAssistantMessage(self.currentAssistantText)
+        }
+
+        let finish: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.isSubmitting = false
+            self.sendButton?.isHidden = false
+            self.spinner?.stopAnimation(nil)
+            self.inputField?.becomeFirstResponder()
+        }
+
+        onSubmit?(prompt, append, finish)
+    }
+
+    @objc private func newChat(_ sender: Any?) {
+        messages.removeAll()
+        currentAssistantText = ""
+        transcriptView?.string = ""
+        onNewChat?()
+        inputField?.becomeFirstResponder()
+    }
+
+    // MARK: - NSTextFieldDelegate
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            send(nil)
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Transcript management
+
+    private func appendMessage(role: String, text: String) {
+        messages.append((role: role, text: text))
+        renderTranscript()
+    }
+
+    private func updateLastAssistantMessage(_ text: String) {
+        if !messages.isEmpty && messages.last?.role == "assistant" {
+            messages[messages.count - 1].text = text
+            renderTranscript()
+        }
+    }
+
+    private func renderTranscript() {
+        guard let tv = transcriptView else { return }
+        let attr = NSMutableAttributedString()
+        let paraStyle = NSMutableParagraphStyle()
+        paraStyle.paragraphSpacing = 12
+
+        for (i, msg) in messages.enumerated() {
+            if i > 0 { attr.append(NSAttributedString(string: "\n")) }
+
+            let isUser = msg.role == "user"
+            let name = isUser ? "You" : "Bad Apple"
+            let nameAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: isUser ? NSColor.controlAccentColor : NSColor.systemPurple,
+                .paragraphStyle: paraStyle,
+            ]
+            attr.append(NSAttributedString(string: name + "\n", attributes: nameAttrs))
+
+            let bodyAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 14),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paraStyle,
+            ]
+            attr.append(NSAttributedString(string: msg.text, attributes: bodyAttrs))
+        }
+
+        tv.textStorage?.setAttributedString(attr)
+        tv.scrollToEndOfDocument(nil)
     }
 }
 
