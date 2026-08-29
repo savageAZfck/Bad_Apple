@@ -15,6 +15,7 @@ __pycache__/
 .badapple_dev_cert.*
 *.pyc
 /tests/ane_brain_perf/artifacts
+/tools/artifacts
 src/platform/apple_desktop/.build
 src/platform/apple_bridge/.build
 
@@ -36,9 +37,6 @@ src/platform/apple_bridge/.build
 metrics.jsonl
 bad_apple_state.json
 bad_apple_state_5001.*
-
-# Generated tool sandbox files
-/tools
 
 # Auto-generated curriculum
 /curriculum/auto_curriculum.txt
