@@ -470,4 +470,59 @@ In `badapple_mlx_server.py`:
 
 - `GET /api/capabilities` in `badapple_dashboard.py` returns the current feature list, preferring the server's `_capabilities_answer` and falling back to a static list.
 - The dashboard renders the capabilities list as a full-width panel with `id="capabilities-list"`, fetched and updated by `web/static/app.js`.
+
+## Full-repo lint sweeps: don't scope `--fix` narrower than the project's lint policy
+
+- `tools/` was gitignored for a long time under a stale "Generated tool sandbox
+  files" rule that no longer matched reality -- if you add real, reusable
+  scripts there, check `git ls-files tools/` actually tracks them, not just
+  that they exist on disk.
+- If you ever run `ruff check --fix` with a narrow `--select` (e.g. just the
+  mechanical/style rules) across the whole repo, know that its `RUF100`
+  (unused-noqa) check only considers rules enabled in *that specific
+  invocation* -- it will strip `# noqa: BLE001`, `S110`, `S104`, etc. comments
+  that are required by this project's separate, documented
+  `--select BLE001,S110` lint command (or by any security-motivated `noqa`
+  you've added earlier in the same session) purely because those codes
+  weren't in your narrower select list, not because they're actually unused.
+  This bit me once already: fix it by re-running the full documented lint
+  commands afterward and comparing against the known-good baseline (12
+  BLE001/S110 findings, in `badapple_dashboard.py`/`badapple_p2p.py`/
+  `badapple_slicks.py`, unrelated to anything an agent session touches --
+  if that count changes or new files appear, something regressed).
+- Before deleting an "unused" import ruff's F401 flags, grep for
+  `from <module> import <name>` elsewhere in the repo first -- ruff's
+  single-file analysis can't see that e.g. `badapple_extras.py` importing
+  `MemoryGraph` from `badapple_memory` without using it directly is actually
+  an intentional re-export that 4 other files depend on.
+
+## MLX daemon lifecycle and memory
+
+- `badapple_mlx_server.py`'s `main()` installs `SIGTERM`/`SIGINT` handlers
+  (`loop.add_signal_handler`) that cancel `serve_forever()` gracefully. Do
+  not remove this: without it, `launchctl unload`'s SIGTERM kills the process
+  at the OS level with zero Python involvement -- no `finally` blocks run
+  (the MCP subprocess leaks until the *next* startup's
+  `_kill_stale_mcp_servers()` sweep), and no library's own atexit/`__del__`
+  cleanup runs, which is what caused a "resource_tracker: leaked semaphore
+  objects" warning on essentially every restart.
+- `main()` also calls `mx.set_memory_limit()`/`mx.set_cache_limit()` at
+  startup, capped to `mx.device_info()["max_recommended_working_set_size"]`
+  (Apple's own guidance for this GPU) rather than MLX's default of 1.5x that
+  value. On a 16 GB Mac the default lets the daemon claim ~15.2 GB, leaving
+  under 1 GB guaranteed for the OS and everything else. Don't remove this
+  either, and don't hardcode a GB value if you touch it -- `device_info()`
+  scales correctly across different Macs.
+- `draft_accept_ratio=0%` in the `[perf]` log line does **not** by itself
+  mean speculative decoding is active and failing -- it reads exactly 0%
+  whenever `self.draft_model` is `None` too (which is the default: neither
+  plist sets `BADAPPLE_SPECULATIVE_DRAFT`). Grep the log for
+  `[speculate] draft model loaded` to confirm whether a draft model
+  actually loaded before concluding anything about acceptance rates.
+- If a benchmark shows Bad Apple slower than expected, check `top`'s
+  `PhysMem` line (compressor size, "unused" figure) and `vm_stat`'s
+  cumulative Swapins/Swapouts before assuming it's a code bug -- this dev
+  Mac has 16 GB total and routinely runs low on genuinely free memory with
+  an IDE/agent session open alongside the model, which alone is enough to
+  explain a real, reproducible slowdown that isn't Bad Apple's fault.
 - The menu bar `PiperTTSClient` streams chunked TTS through `PiperTTSPlaybackController`, which queues WAVs and crossfades consecutive chunks with a 50 ms volume ramp. If `AVAudioPlayer` fails, it falls back to the previous `afplay` path. Apple TTS fallback for a full Piper failure remains in `BadAppleVoiceHost`.
