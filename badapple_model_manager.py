@@ -417,6 +417,16 @@ class ModelManager:
             if resolved.exists():
                 if not _is_path_under_root(resolved, _hf_cache_root()):
                     raise ValueError(f"resolved path is outside HF cache: {path!r}")
+                # A cached snapshot is only usable if it contains weight files.
+                has_weights = any(
+                    f.suffix in (".safetensors", ".bin", ".gguf")
+                    for f in resolved.rglob("*")
+                    if f.is_file()
+                )
+                if not has_weights:
+                    if not allow_download:
+                        return None
+                    # allow_download=True: snapshot_download below will fetch them.
                 if allow_download:
                     total_size = sum(f.stat().st_size for f in resolved.rglob("*") if f.is_file())
                     max_bytes = int(self._max_download_gb * 1024 ** 3)

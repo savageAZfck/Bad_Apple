@@ -23,8 +23,15 @@ def _default_fast_model() -> str | None:
         str(hf_home / "models--mlx-community--Qwen2.5-0.5B-Instruct-4bit/snapshots/a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3"),
     ]
     for p in candidates:
-        if Path(p).is_dir() and (Path(p) / "config.json").is_file():
-            return p
+        root = Path(p)
+        if root.is_dir() and (root / "config.json").is_file():
+            has_weights = any(
+                f.suffix in (".safetensors", ".bin", ".gguf")
+                for f in root.rglob("*")
+                if f.is_file()
+            )
+            if has_weights:
+                return p
     return None
 
 
