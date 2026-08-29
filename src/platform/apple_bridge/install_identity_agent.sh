@@ -4,7 +4,7 @@ set -euo pipefail
 # Install the Bad Apple identity agent as a user LaunchAgent so it runs in the
 # Aqua session and can use the Secure Enclave on behalf of the MLX daemon.
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PLIST_SRC="${REPO_ROOT}/src/platform/apple_bridge/com.badapple.identity_agent.plist"
 PLIST_DST="${HOME}/Library/LaunchAgents/com.badapple.identity_agent.plist"
 
