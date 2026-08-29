@@ -34,6 +34,9 @@ P2P_BROADCAST_PORT = int(os.environ.get("BADAPPLE_P2P_UDP_PORT", "9999"))
 P2P_SYNC_PORT = int(os.environ.get("BADAPPLE_P2P_TCP_PORT", "10000"))
 P2P_BROADCAST_INTERVAL = 30.0
 P2P_BEACON_TTL = 120.0
+P2P_RATE_LIMIT_INTERVAL = 5.0
+P2P_MAX_BEACON_SIZE = 4096
+P2P_MAX_SYNC_SIZE = 64 * 1024
 
 
 def _derive_keys(secret: bytes) -> tuple:
@@ -133,6 +136,38 @@ class P2PDaemon:
         self._tasks: list[asyncio.Task] = []
         self._running = False
         self._aes = AESGCM(self.enc_key)
+        # Rate-limit incoming beacons and syncs per origin to avoid floods.
+        self._rate_limit: dict[str, float] = {}
+        # Optional allowlist/blocklist of origin public-key fingerprints or IDs.
+        self._allowlist: set[str] = self._load_id_set(data_dir / "p2p_allowlist.txt")
+        self._blocklist: set[str] = self._load_id_set(data_dir / "p2p_blocklist.txt")
+
+    # ------------------------------------------------------------------
+    # Peer identity lists
+    # ------------------------------------------------------------------
+    def _load_id_set(self, path: Path) -> set[str]:
+        """Load a list of origin IDs (public keys or HMAC origin IDs)."""
+        if not path.is_file():
+            return set()
+        try:
+            return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+        except OSError:
+            return set()
+
+    def _is_allowed(self, origin_id: str) -> bool:
+        if origin_id in self._blocklist:
+            return False
+        if self._allowlist and origin_id not in self._allowlist:
+            return False
+        return True
+
+    def _rate_limited(self, origin_id: str) -> bool:
+        now = time.time()
+        last = self._rate_limit.get(origin_id, 0.0)
+        if now - last < P2P_RATE_LIMIT_INTERVAL:
+            return True
+        self._rate_limit[origin_id] = now
+        return False
 
     # ------------------------------------------------------------------
     # Crypto
@@ -173,21 +208,23 @@ class P2PDaemon:
         loop = asyncio.get_running_loop()
 
         # UDP broadcast listener for peer discovery.
+        # TCP listener for sync payloads — start even if UDP discovery fails.
+        self._tcp_server = await asyncio.start_server(
+            self._handle_sync_client, host="0.0.0.0", port=self.sync_port
+        )
+
         self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self._udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (OSError, AttributeError):
+            pass
         self._udp_sock.setblocking(False)
         try:
             self._udp_sock.bind(("0.0.0.0", self.broadcast_port))
         except OSError as e:
             print(f"[p2p] could not bind broadcast port {self.broadcast_port}: {e}", flush=True)
-            self._running = False
-            return
-
-        # TCP listener for sync payloads.
-        self._tcp_server = await asyncio.start_server(
-            self._handle_sync_client, host="0.0.0.0", port=self.sync_port
-        )
 
         self._tasks = [
             loop.create_task(self._beacon_loop()),
@@ -260,11 +297,19 @@ class P2PDaemon:
                 print(f"[p2p] udp read error: {e}", flush=True)
 
     async def _handle_udp(self, data: bytes, addr):
+        if len(data) > P2P_MAX_BEACON_SIZE:
+            print(f"[p2p] oversized beacon from {addr[0]}", flush=True)
+            return
         frame = P2PFrame.from_bytes(data)
         if frame is None:
             return
+        if not self._is_allowed(frame.origin_id):
+            print(f"[p2p] blocked origin {frame.origin_id[:16]}...", flush=True)
+            return
+        if self._rate_limited(frame.origin_id):
+            return
         if not self._verify(frame):
-            print(f"[p2p] bad HMAC from {addr[0]}", flush=True)
+            print(f"[p2p] bad proof from {addr[0]}", flush=True)
             return
         if frame.origin_id == self.origin_id:
             return
@@ -322,8 +367,11 @@ class P2PDaemon:
             data = await reader.readline()
             if not data:
                 return
+            if len(data) > P2P_MAX_SYNC_SIZE:
+                print("[p2p] oversized sync payload", flush=True)
+                return
             frame = P2PFrame.from_bytes(data)
-            if frame is None or not self._verify(frame):
+            if frame is None or not self._is_allowed(frame.origin_id) or not self._verify(frame):
                 return
             if frame.frame_type not in ("sync", "adapter") or not self._timestamp_fresh(frame.timestamp_ms) or not self._nonce_fresh(frame.nonce_b64):
                 return
