@@ -5310,6 +5310,20 @@ async def main():
     server.executor = executor
     server.loop = loop
 
+    # Without a signal handler, launchctl's SIGTERM (every restart/update/
+    # daemon-supervisor-triggered restart) kills the process at the OS level
+    # with zero Python involvement: no `finally` blocks run (the MCP
+    # subprocess below leaked until the *next* startup's _kill_stale_mcp_servers()
+    # swept it up), and no library's own atexit/__del__ cleanup runs either --
+    # which is why every restart logged a "resource_tracker: leaked semaphore
+    # objects" warning from whichever dependency holds one open. Catching
+    # SIGTERM/SIGINT and cancelling the serve_forever() task below lets
+    # asyncio.run() return normally and the interpreter shut down the normal
+    # way, so both of those get cleaned up immediately instead of leaking.
+    stop_event = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop_event.set)
+
     srv = await asyncio.start_unix_server(server.handle_client, path=socket_path)
     os.chmod(socket_path, 0o666)
     try:
@@ -5366,7 +5380,14 @@ async def main():
     try:
         asyncio.create_task(server.hibernation_watcher())
         async with srv:
-            await srv.serve_forever()
+            serve_task = asyncio.create_task(srv.serve_forever())
+            await stop_event.wait()
+            print("[main] received shutdown signal; stopping gracefully", flush=True)
+            serve_task.cancel()
+            try:
+                await serve_task
+            except asyncio.CancelledError:
+                pass
     finally:
         if mcp_process is not None:
             try:
