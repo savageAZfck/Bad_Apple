@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -245,12 +244,11 @@ def _validate_command(command: list[Any]) -> str | None:
                 exe_name = arg
             if _is_dangerous_executable(exe_name, command):
                 return f"executable is not allowed: {exe_name}"
-        else:
-            if _is_path_arg(arg):
-                if not _is_safe_path_arg(arg):
-                    return f"path argument is not allowed: {arg!r}"
-            elif _has_shell_metacharacters(arg):
-                return f"command argument contains disallowed characters: {arg!r}"
+        elif _is_path_arg(arg):
+            if not _is_safe_path_arg(arg):
+                return f"path argument is not allowed: {arg!r}"
+        elif _has_shell_metacharacters(arg):
+            return f"command argument contains disallowed characters: {arg!r}"
     return None
 
 
@@ -749,7 +747,7 @@ _MARKETPLACE = MCPMarketplace()
 
 
 def add_mcp_server(name: str, command: str, env: dict[str, str] | None = None) -> str:
-    """command is a shell-style string; split with shell semantics."""
+    """Command is a shell-style string; split with shell semantics."""
     if not _is_safe_name(name):
         return "MCP server name must be alphanumeric, hyphens or underscores."
     try:

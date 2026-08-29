@@ -6,6 +6,7 @@ MLX server. `run_shortcut` calls the local `shortcuts` CLI directly.
 """
 
 import json
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +14,22 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Keep in sync with badapple_tools.SHELL_ALLOWED_COMMANDS / SHELL_DANGEROUS_CHARS.
+# Duplicated here (rather than imported) to avoid a circular import --
+# badapple_tools already imports this module to dispatch schedule_task.
+# schedule_task requires human approval before a task is even queued (see
+# policy.yaml), but the approved command still runs unattended, later, with
+# no one present to notice something unexpected -- so its deferred execution
+# must not be *more* permissive than run_shell's immediate, approved
+# execution. Without this, schedule_task would be a complete bypass of
+# run_shell's shell-metacharacter and command-allowlist hardening.
+_SHELL_ALLOWED_COMMANDS = {
+    "ls", "cat", "head", "tail", "find", "grep", "wc", "file",
+    "pwd", "mdfind", "ps", "df", "du", "echo", "whoami", "id",
+    "git", "swift", "cargo", "rustc", "python3", "python",
+}
+_SHELL_DANGEROUS_CHARS = set(";|&$`\"'\n\r<>{}[]*?")
 
 
 def _schedule_file() -> Path:
@@ -105,13 +122,44 @@ def add_task(when: str, command: str, repeat: str = "") -> str:
         return f"Error scheduling task: {e}"
 
 
+def _validated_argv(command: str) -> list[str] | None:
+    """Tokenize `command` and check it against the same hardening run_shell
+    uses. Returns the argv list if allowed, or None if rejected.
+    """
+    if any(c in command for c in _SHELL_DANGEROUS_CHARS):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    base = tokens[0]
+    name = Path(base).name if base.startswith("/") else base
+    if name not in _SHELL_ALLOWED_COMMANDS:
+        return None
+    return tokens
+
+
 def _run_command(command: str) -> str:
     try:
         args = json.loads(command) if command.startswith("[") else command
         if isinstance(args, list):
-            result = subprocess.run(args, capture_output=True, text=True, timeout=60, check=False)
+            tokens = args
+            if not tokens:
+                return "Task error: empty command"
+            base = tokens[0]
+            name = Path(base).name if isinstance(base, str) and base.startswith("/") else base
+            if name not in _SHELL_ALLOWED_COMMANDS:
+                return f"Task error: '{name}' is not in the allowed command list"
         else:
-            result = subprocess.run(args, shell=True, capture_output=True, text=True, timeout=60, check=False)
+            tokens = _validated_argv(args)
+            if tokens is None:
+                return "Task error: command contains dangerous characters, is empty, or is not in the allowed command list"
+        # Never shell=True: scheduled commands run as an argv list, exactly
+        # like run_shell, so no shell metacharacter in an already-validated
+        # command string can be reinterpreted at execution time.
+        result = subprocess.run(tokens, capture_output=True, text=True, timeout=60, check=False)
         return (result.stdout or "") + (result.stderr or "")
     except (subprocess.SubprocessError, OSError, ValueError, json.JSONDecodeError, TypeError, AttributeError) as e:
         return f"Task error: {e}"

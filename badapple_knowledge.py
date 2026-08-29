@@ -105,10 +105,7 @@ class BadAppleKnowledge:
     SKIP_DIRS = {".git", ".svn", ".venv", ".env", "venv", "env", "node_modules", "target", "build", "dist", "__pycache__", ".pytest_cache"}
 
     def _should_skip_path(self, f: Path) -> bool:
-        for part in f.parts:
-            if part in self.SKIP_DIRS:
-                return True
-        return False
+        return any(part in self.SKIP_DIRS for part in f.parts)
 
     def index_paths(self, paths: list[Path], extensions: set | None = None) -> int:
         """Index the given files or directories. Returns number of chunks."""

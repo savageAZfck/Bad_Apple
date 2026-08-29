@@ -23,7 +23,6 @@ sys.path.insert(0, str(repo_root))
 import badapple_model_registry  # noqa: E402
 import badapple_p2p_actor  # noqa: E402
 
-
 SECRET = b"p2p transfer test secret"
 REAL_MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
@@ -40,7 +39,7 @@ def _find_real_model() -> Path | None:
     snap_dirs = [d for d in snapshots.iterdir() if d.is_dir()]
     if not snap_dirs:
         return None
-    return sorted(snap_dirs, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+    return max(snap_dirs, key=lambda p: p.stat().st_mtime)
 
 
 def _make_tiny_model(tmp: Path) -> tuple[Path, str]:

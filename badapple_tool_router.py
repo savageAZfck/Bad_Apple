@@ -347,11 +347,11 @@ class ToolRouter:
 
         if tool_name == "list_directory":
             p = _path_arg()
-            return {"path": p if p else "."}
+            return {"path": p or "."}
 
         if tool_name == "read_file":
             p = _path_arg()
-            return {"path": p if p else ""}
+            return {"path": p or ""}
 
         if tool_name == "write_file":
             m = re.search(r"(?:file|named?|called)\s+['\"]?([\w\-./]+)['\"]?", low)
@@ -374,7 +374,7 @@ class ToolRouter:
             m = re.search(r'["\']([^"\']+)["\']', prompt)
             query = m.group(1) if m else ""
             p = _path_arg()
-            return {"query": query, "path": p if p else "."}
+            return {"query": query, "path": p or "."}
 
         if tool_name == "search_local_files":
             m = re.search(r'["\']([^"\']+)["\']', prompt)
@@ -382,7 +382,7 @@ class ToolRouter:
 
         if tool_name == "index_documents":
             p = _path_arg()
-            return {"path": p if p else "."}
+            return {"path": p or "."}
 
         if tool_name == "git_commit":
             m = re.search(r'["\']([^"\']+)["\']', prompt)
@@ -398,7 +398,7 @@ class ToolRouter:
 
         if tool_name in ("describe_image", "extract_text_from_image"):
             p = _path_arg()
-            return {"path": p if p else ""}
+            return {"path": p or ""}
 
         if tool_name == "today_events":
             m = re.search(r"\b(\d+)\s*days?\b", low)

@@ -25,7 +25,7 @@ class TTSHandlerFuzzTests(unittest.TestCase):
         self.assertIn("too long", resp["error"])
 
     def test_reject_invalid_json(self) -> None:
-        for raw in (b"not json", b"{\"text\":", b"{}", b"\xff\xfe"):
+        for raw in (b"not json", b'{"text":', b"{}", b"\xff\xfe"):
             resp = _handle_request(raw)
             self.assertFalse(resp["ok"])
 

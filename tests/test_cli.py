@@ -29,14 +29,14 @@ class CliTests(unittest.TestCase):
         return result.returncode, result.stdout, result.stderr
 
     def test_help(self) -> None:
-        """badapple --help prints the usage banner."""
+        """Badapple --help prints the usage banner."""
         rc, out, _ = self._run("--help")
         self.assertEqual(rc, 0)
         self.assertIn("badapple", out)
         self.assertIn("--doctor", out)
 
     def test_doctor(self) -> None:
-        """badapple --doctor prints a support diagnostic report."""
+        """Badapple --doctor prints a support diagnostic report."""
         rc, out, _ = self._run("--doctor")
         self.assertEqual(rc, 0)
         self.assertIn("=== Bad Apple Doctor ===", out)

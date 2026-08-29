@@ -134,7 +134,6 @@ class SecurityPropertyTests(unittest.TestCase):
 
     def test_path_traversal_in_commands(self) -> None:
         """Command/path arguments outside the user home are rejected."""
-
         # Outside home.
         self.assertFalse(badapple_mcp_marketplace._is_safe_path_arg("/etc/passwd"))
         self.assertFalse(badapple_mcp_marketplace._is_safe_path_arg("~/../.bashrc"))

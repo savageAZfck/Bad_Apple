@@ -229,7 +229,7 @@ def check_no_secrets_in_logs(data_dir: Path) -> int:
         data_dir,
         Path("/var/log/bad_apple_mlx_server.log"),
         Path("/var/log/bad_apple_tts_server.log"),
-        Path("/tmp/badapple_voice_debug.log"),
+        Path("/tmp/badapple_voice_debug.log"),  # noqa: S108 - read-only audit scan, see badapple_dashboard_data._voice_activity for the hardened reader
     ]
 
     failures = 0

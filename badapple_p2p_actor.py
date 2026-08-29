@@ -18,7 +18,6 @@ import badapple_actor
 import badapple_lora
 import badapple_p2p
 
-
 WHITELIST = frozenset({
     "start",
     "stop",

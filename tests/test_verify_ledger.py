@@ -114,7 +114,8 @@ class VerifyChainTests(unittest.TestCase):
 
 class VerifyCheckpointTests(unittest.TestCase):
     """Exercise the signature-verification logic with a software test keypair,
-    independent of whether real Secure Enclave hardware is available."""
+    independent of whether real Secure Enclave hardware is available.
+    """
 
     def _make_signed_checkpoint(self, tmp: Path, tip_hash: str, entry_count: int):
         private_key = ec.generate_private_key(ec.SECP256R1())

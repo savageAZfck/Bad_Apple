@@ -281,13 +281,12 @@ def _tokenize_structural(text: str, partial_word: str = "", trailing_gap: bool =
         if c.isalnum():
             buff += c.lower()
             in_gap = False
-        else:
-            if not in_gap:
-                if buff:
-                    tokens.append(buff)
-                    buff = ""
-                tokens.append(" ")
-                in_gap = True
+        elif not in_gap:
+            if buff:
+                tokens.append(buff)
+                buff = ""
+            tokens.append(" ")
+            in_gap = True
     if buff:
         tokens.append(buff)
     return tokens, buff, in_gap
@@ -828,7 +827,7 @@ class Workspace:
         if maybe_path:
             return Path(maybe_path).expanduser()
         p = self.path
-        return p if p else Path.home()
+        return p or Path.home()
 
 
 # =============================================================================

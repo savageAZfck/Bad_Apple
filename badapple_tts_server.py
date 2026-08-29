@@ -37,7 +37,10 @@ from piper.config import SynthesisConfig
 from piper.voice import PiperVoice
 
 DEFAULT_VOICE = os.environ.get("BADAPPLE_TTS_VOICE", "en_US-amy-medium")
-DEFAULT_SOCKET = os.environ.get("BADAPPLE_TTS_SOCKET", "/tmp/badapple_tts.sock")
+# /var/run/badapple/ is equally world-writable on this system (matches
+# aqua_helper.sock there), so relocating wouldn't change the exposure; main()
+# below unlinks any stale socket before bind() to avoid reusing a planted one.
+DEFAULT_SOCKET = os.environ.get("BADAPPLE_TTS_SOCKET", "/tmp/badapple_tts.sock")  # noqa: S108
 
 # Hardening constants
 MAX_TEXT_LENGTH = 2_000
@@ -103,8 +106,12 @@ def _ensure_voice(name: str):
     print(f"  {onnx_url}", file=sys.stderr)
     try:
         import urllib.request
-        urllib.request.urlretrieve(onnx_url, str(onnx))
-        urllib.request.urlretrieve(config_url, str(config))
+        # _download_url() always builds a hardcoded https://huggingface.co/...
+        # URL; `name` was already validated by _validate_voice_name() to be
+        # alphanumeric/underscore/hyphen only, so it cannot inject a `file:`
+        # or other scheme here.
+        urllib.request.urlretrieve(onnx_url, str(onnx))  # noqa: S310
+        urllib.request.urlretrieve(config_url, str(config))  # noqa: S310
     except Exception as e:
         raise RuntimeError(
             f"could not download voice {name}: {e}\n"

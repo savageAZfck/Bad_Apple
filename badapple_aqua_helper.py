@@ -185,7 +185,7 @@ def _ui_info() -> dict[str, Any]:
         if data.get("error"):
             return {"ok": False, "error": data["error"]}
         return {"ok": True, **data}
-    script = '''
+    script = """
     tell application "System Events"
         set p to first application process whose frontmost is true
         set appName to name of p
@@ -208,7 +208,7 @@ def _ui_info() -> dict[str, Any]:
         end repeat
         return appName & "|" & winName & "|" & (elements as string)
     end tell
-    '''
+    """
     result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "ui_info failed"}
@@ -239,7 +239,7 @@ def _ui_click(target: str, role: str = "") -> dict[str, Any]:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI click failed"}
         return data
     escaped_target = target.replace('"', '\\"')
-    script = f'''
+    script = f"""
     tell application "System Events"
         set p to first application process whose frontmost is true
         set w to front window of p
@@ -253,7 +253,7 @@ def _ui_click(target: str, role: str = "") -> dict[str, Any]:
         end repeat
         return "not found"
     end tell
-    '''
+    """
     result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "ui_click failed"}
@@ -280,7 +280,7 @@ def _ui_type(target: str, text: str) -> dict[str, Any]:
         return data
     escaped_target = target.replace('"', '\\"')
     escaped_text = text.replace('"', '\\"').replace("\n", "\\n")
-    script = f'''
+    script = f"""
     tell application "System Events"
         set p to first application process whose frontmost is true
         set w to front window of p
@@ -294,7 +294,7 @@ def _ui_type(target: str, text: str) -> dict[str, Any]:
         end repeat
         return "not found"
     end tell
-    '''
+    """
     result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "ui_type failed"}

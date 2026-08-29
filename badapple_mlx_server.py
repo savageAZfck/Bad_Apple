@@ -36,25 +36,24 @@ from mlx_lm.sample_utils import make_sampler
 
 import badapple_agent_tasks
 import badapple_ambient
-import badapple_breakers_actor
-import badapple_health_actor
 import badapple_ambient_memory
 import badapple_audit_actor
+import badapple_breakers_actor
 import badapple_cache_actor
 import badapple_dashboard
-import badapple_mcp_actor
-import badapple_persona_actor
-import badapple_p2p_actor
-import badapple_resources_actor
-import badapple_workspace_actor
-import badapple_ocular
 import badapple_fact_extractor
 import badapple_fast_model
+import badapple_health_actor
 import badapple_identity
+import badapple_mcp_actor
 import badapple_metrics
 import badapple_model_actor
 import badapple_model_registry
+import badapple_ocular
 import badapple_p2p
+import badapple_p2p_actor
+import badapple_persona_actor
+import badapple_resources_actor
 import badapple_scheduler
 import badapple_slicks
 import badapple_speculate
@@ -63,6 +62,7 @@ import badapple_tier
 import badapple_tool_router
 import badapple_vision
 import badapple_vram_governor
+import badapple_workspace_actor
 import badapple_workspace_watcher
 from badapple_extras import (
     ApprovalGate,
@@ -77,16 +77,11 @@ from badapple_plugins import PluginRegistry
 from badapple_runtime import (
     RuntimeControl,
 )
-from badapple_vault import GenerationStore
 from badapple_tools import (
-    run_tool,
-    _resolve_tool_path,  # noqa: F401
-    _run_as_user,  # noqa: F401
-    _run_shell,  # noqa: F401
-    _console_user,  # noqa: F401
     get_session_seed,
-    set_session_seed,  # noqa: F401
+    run_tool,
 )
+from badapple_vault import GenerationStore
 
 try:
     from dflash_mlx.generate import (
@@ -150,7 +145,8 @@ ROAST_TRIGGERS = ("who are you", "how are you", "what do you think", "siri", "al
 def load_prompt() -> str:
     """Load the system prompt from the on-disk prompt file, falling back to the
     embedded default. Writing prompts to a file lets the daemon hot-reload the
-    persona without restarting and reloading the 9B model."""
+    persona without restarting and reloading the 9B model.
+    """
     prompt_path = os.environ.get("BADAPPLE_PROMPT_FILE") or str(DEFAULT_PROMPT_FILE)
     path = Path(prompt_path).expanduser()
     if path.is_file():
@@ -192,7 +188,8 @@ DEFAULT_SYSTEM_PROMPT = load_prompt()
 
 def _maybe_purge_metal_cache():
     """Purge Metal caches only when memory pressure is elevated, so DFlash
-    can keep its temporary pools hot between turns."""
+    can keep its temporary pools hot between turns.
+    """
     cache_gb = mx.get_cache_memory() / (1024 ** 3)
     active_gb = mx.get_active_memory() / (1024 ** 3)
     if cache_gb > 1.5 or active_gb > 8.0:
@@ -211,12 +208,12 @@ PLANNER_SYSTEM_PROMPT = (
     "or\n"
     "SAY:<what the assistant should tell the user after the previous tool results>\n"
     "Available tools:\n"
-    "- list_directory: {\"path\": \"...\"}\n"
-    "- read_file: {\"path\": \"...\", \"limit\": 5000}\n"
-    "- search_content: {\"query\": \"...\", \"path\": \"...\", \"max_results\": 20}\n"
-    "- run_shell: {\"command\": \"...\"}\n"
-    "- write_file: {\"filename\": \"...\", \"content\": \"...\", \"append\": false}\n"
-    "- run_applescript: {\"script\": \"...\"}\n"
+    '- list_directory: {"path": "..."}\n'
+    '- read_file: {"path": "...", "limit": 5000}\n'
+    '- search_content: {"query": "...", "path": "...", "max_results": 20}\n'
+    '- run_shell: {"command": "..."}\n'
+    '- write_file: {"filename": "...", "content": "...", "append": false}\n'
+    '- run_applescript: {"script": "..."}\n'
     "- get_current_time: {}\n"
     "Do not explain. Do not use natural language outside the step lines. "
     "The last step should usually be SAY: to summarize results."
@@ -997,7 +994,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "schedule_task",
-            "description": "Schedule a local shell command or Bad Apple query to run later. `when` is seconds from now or an ISO timestamp. `repeat` is optional seconds for recurring tasks.",
+            "description": "Schedule a local shell command or Bad Apple query to run later. Commands are restricted to the same read-only allowlist as run_shell (ls, cat, head, tail, find, grep, wc, file, pwd, mdfind, ps, df, du, echo, whoami, id, git, swift, cargo, rustc, python3, python), no redirection/pipes/multiple commands. `when` is seconds from now or an ISO timestamp. `repeat` is optional seconds for recurring tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2587,7 +2584,8 @@ class MLXServer:
             if not weights_path.is_file() or not meta_path.is_file():
                 return False
             import json
-            from mlx_lm.models.cache import ArraysCache, RotatingKVCache, KVCache
+
+            from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
             _cache_types = {"ArraysCache": ArraysCache, "RotatingKVCache": RotatingKVCache, "KVCache": KVCache}
             meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
             # Validate the persisted cache matches the current model architecture.
@@ -3382,8 +3380,8 @@ class MLXServer:
             "You are an autonomous agent inside Bad Apple. "
             "You have a goal and a focused set of tools. "
             "Think step by step. For each step, output a single JSON object with one of these shapes:\n"
-            "1. To take an action: {\"thought\": \"...\", \"tool\": \"tool_name\", \"args\": {...}}\n"
-            "2. To finish the task: {\"thought\": \"...\", \"finish\": \"final answer to the user\"}\n\n"
+            '1. To take an action: {"thought": "...", "tool": "tool_name", "args": {...}}\n'
+            '2. To finish the task: {"thought": "...", "finish": "final answer to the user"}\n\n'
             "Important: 'finish' is NOT a tool. When the task is done, emit the finish JSON and do not call any tool.\n"
             "Available tools: " + tool_names + "\n\n"
             + tool_docs + "\n\n"
@@ -3468,7 +3466,7 @@ class MLXServer:
             task_id, "failed", error=f"Reached step limit ({max_steps})."
         )
         return (
-            f"Agent task {task_id} for \"{goal}\" reached the step limit "
+            f'Agent task {task_id} for "{goal}" reached the step limit '
             f"({max_steps}).\n\nProgress:\n{json.dumps(progress, indent=2, default=str)}"
         )
 
@@ -5293,7 +5291,7 @@ async def main():
     # Support legacy env override; otherwise load from the prompt file and keep
     # the model in memory while the persona can be hot-reloaded.
     legacy = os.environ.get("BADAPPLE_SYSTEM_PROMPT")
-    system_prompt = legacy if legacy else load_prompt()
+    system_prompt = legacy or load_prompt()
 
     socket_path = os.environ.get("BADAPPLE_SOCKET_PATH", DEFAULT_SOCKET_PATH)
     fast_socket_path = socket_path.replace(".sock", "_fast.sock")

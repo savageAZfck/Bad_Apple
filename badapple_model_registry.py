@@ -115,7 +115,7 @@ class ModelRegistry:
         snap_dirs = [d for d in snapshots.iterdir() if d.is_dir()]
         if not snap_dirs:
             return None
-        snap_dir = sorted(snap_dirs, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+        snap_dir = max(snap_dirs, key=lambda p: p.stat().st_mtime)
         config_path = snap_dir / "config.json"
         if not config_path.is_file():
             return None

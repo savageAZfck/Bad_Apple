@@ -17,10 +17,8 @@ import re
 import threading
 import time
 
-
 import badapple_identity
 import badapple_keychain
-
 
 SLICKS_VERSION = 1
 SLICKS_VERSION_2 = 2
@@ -176,9 +174,9 @@ def _sign_with_identity(message: bytes) -> str:
 def _verify_with_pubkey(message: bytes, signature_b64: str, public_key: bytes) -> bool:
     """Verify a base64 DER ECDSA signature over SHA-256(message)."""
     try:
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives import hashes
         from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
 
         pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), public_key)
         sig = base64.b64decode(signature_b64)

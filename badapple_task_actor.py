@@ -9,7 +9,6 @@ from typing import Any
 import badapple_actor
 import badapple_agent_tasks
 
-
 WHITELIST = frozenset({
     "create",
     "get",

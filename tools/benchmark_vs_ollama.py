@@ -97,7 +97,9 @@ def run_ollama(prompt: str, model: str, max_tokens: int) -> RunResult:
     peak_mem = _ollama_rss_gb(pid) if pid else 0.0
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        # OLLAMA_URL is the hardcoded local http://localhost:11434 constant
+        # above, not user input; no scheme injection is possible here.
+        with urllib.request.urlopen(req, timeout=180) as resp:  # noqa: S310
             body = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
         return RunResult("ollama", model, prompt, 0, 0, 0, 0, peak_mem, time.time() - t0, error=str(e))

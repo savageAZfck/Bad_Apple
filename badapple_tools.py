@@ -14,7 +14,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from badapple_knowledge import BadAppleKnowledge
 import badapple_ambient
 import badapple_aqua_helper
 import badapple_dashboard
@@ -36,6 +35,7 @@ import badapple_undo
 import badapple_vision
 import badapple_working_memory
 import badapple_xcode
+from badapple_knowledge import BadAppleKnowledge
 
 # Pinned random seed for reproducible sessions. Set at startup via BADAPPLE_SEED
 # or changed at runtime with the set_session_seed tool. 0 means random.

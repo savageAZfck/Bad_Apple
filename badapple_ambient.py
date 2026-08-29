@@ -92,7 +92,7 @@ def _snapshot():
             "screen_path": str(screen) if screen else None,
         })
         _CONTEXT_FILE.write_text(json.dumps(context, indent=2), encoding="utf-8")
-        for cb in list(_callbacks):
+        for cb in _callbacks:
             try:
                 cb(context)
             except Exception as e:  # noqa: BLE001

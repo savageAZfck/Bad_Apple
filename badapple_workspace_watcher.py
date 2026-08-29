@@ -25,8 +25,8 @@ DEBOUNCE = float(os.environ.get("BADAPPLE_WORKSPACE_DEBOUNCE", "0.5"))
 
 
 try:
-    from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
     HAS_WATCHDOG = True
 except Exception:  # noqa: BLE001 - optional dependency
     HAS_WATCHDOG = False
@@ -130,10 +130,7 @@ class WorkspaceWatcher:
             self._worker.join(timeout=2)
 
     def _should_skip(self, p: Path) -> bool:
-        for part in p.parts:
-            if part in SKIP_DIRS:
-                return True
-        return False
+        return any(part in SKIP_DIRS for part in p.parts)
 
     def _should_index(self, p: Path) -> bool:
         if p.suffix.lower() not in INDEX_EXTENSIONS:

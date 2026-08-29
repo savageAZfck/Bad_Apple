@@ -173,9 +173,14 @@ class TieringRouter:
 
     @staticmethod
     def _safe_eval(expr: str) -> float:
-        # Restricted eval for arithmetic only.
+        # Restricted eval for arithmetic only. `expr` has already passed
+        # SAFE_MATH_RE (digits/whitespace/+-*/(). only, no letters at all),
+        # so it cannot contain a name, attribute, or subscript access -- the
+        # co_names check and empty __builtins__/globals/locals below are
+        # defense in depth, not the only thing standing between this and
+        # arbitrary code execution.
         code = compile(expr, "<math>", "eval")
         for name in code.co_names:
-            if name not in ("__builtins__",):
+            if name != "__builtins__":
                 raise ValueError(f"disallowed name in math expression: {name}")
-        return eval(code, {"__builtins__": {}}, {})
+        return eval(code, {"__builtins__": {}}, {})  # noqa: S307 - see comment above

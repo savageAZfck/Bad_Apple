@@ -30,7 +30,7 @@ def _run_applescript(script: str, timeout: int = 30) -> str:
 
 def today_events() -> str:
     """Return today's events from the default Calendar app."""
-    script = '''
+    script = """
 tell application "Calendar"
     set now to current date
     set startOfDay to now - (time of now)
@@ -48,13 +48,13 @@ tell application "Calendar"
     end if
     return out
 end tell
-'''
+"""
     return _run_applescript(script)
 
 
 def upcoming_events(days: int = 7, limit: int = 20) -> str:
     """Return upcoming calendar events for the next N days."""
-    script = f'''
+    script = f"""
 tell application "Calendar"
     set now to current date
     set startOfDay to now - (time of now)
@@ -75,7 +75,7 @@ tell application "Calendar"
     end if
     return out
 end tell
-'''
+"""
     return _run_applescript(script)
 
 
@@ -86,7 +86,7 @@ def list_reminders(list_name: str = "", completed: bool = False, limit: int = 20
         list_ref = f'list "{list_name}"'
     else:
         list_ref = "default list"
-    script = f'''
+    script = f"""
 tell application "Reminders"
     set out to ""
     set countRem to 0
@@ -106,13 +106,13 @@ tell application "Reminders"
     end if
     return out
 end tell
-'''
+"""
     return _run_applescript(script)
 
 
 def unread_emails(limit: int = 10) -> str:
     """Return sender/subject lines of unread Mail messages."""
-    script = f'''
+    script = f"""
 tell application "Mail"
     set unreadMessages to (every message of inbox whose read status is false)
     if (count of unreadMessages) is 0 then
@@ -127,13 +127,13 @@ tell application "Mail"
     end repeat
     return out
 end tell
-'''
+"""
     return _run_applescript(script)
 
 
 def search_mail(query: str, limit: int = 10) -> str:
     """Search local Mail by subject or sender."""
-    script = f'''
+    script = f"""
 tell application "Mail"
     set results to (every message of inbox whose subject contains "{query}" or sender contains "{query}")
     if (count of results) is 0 then
@@ -148,7 +148,7 @@ tell application "Mail"
     end repeat
     return out
 end tell
-'''
+"""
     return _run_applescript(script)
 
 
@@ -156,12 +156,12 @@ def add_reminder(name: str, list_name: str = "", due: str = "") -> str:
     """Add a reminder to the local Reminders app."""
     list_ref = f'list "{list_name}"' if list_name else "default list"
     due_attr = f' with due date (date "{due}")' if due else ""
-    script = f'''
+    script = f"""
 tell application "Reminders"
     tell {list_ref}
         make new reminder with properties {{name:"{name}"}}{due_attr}
     end tell
     return "Reminder added."
 end tell
-'''
+"""
     return _run_applescript(script)

@@ -47,7 +47,7 @@ class ModelRegistryTests(unittest.TestCase):
             snapshot.mkdir(parents=True)
             (snapshot / "config.json").write_text('{"architectures": ["Qwen2ForCausalLM"]}')
             (snapshot / "tokenizer.json").write_text('"{}"')
-            (snapshot / "tokenizer_config.json").write_text('{}')
+            (snapshot / "tokenizer_config.json").write_text("{}")
             (snapshot / "model.safetensors").write_text("fake")
 
             orig = _set_hub_root(fake_hub)

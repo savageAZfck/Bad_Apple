@@ -14,7 +14,6 @@ from typing import Any
 import badapple_actor
 import badapple_model_manager
 
-
 # Methods that may block for a long time and therefore need longer ask timeouts.
 LONG_METHODS = {"wait_for_download", "record_provenance"}
 

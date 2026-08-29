@@ -37,7 +37,7 @@ class TierPropertyTests(unittest.TestCase):
             "what is open('/etc/passwd').read()",
             "what is (1).__class__",
         ):
-            tier, payload = self.router.select_tier(prompt)
+            tier, _payload = self.router.select_tier(prompt)
             # These should fall through because the math regex does not match identifiers.
             self.assertNotEqual(tier, "fast", f"{prompt!r} must not be fast-tiered")
 
@@ -48,7 +48,7 @@ class TierPropertyTests(unittest.TestCase):
             self.assertIn("text", payload)
 
     def test_greetings_are_fast(self) -> None:
-        tier, payload = self.router.select_tier("hello")
+        tier, _payload = self.router.select_tier("hello")
         self.assertEqual(tier, "fast")
 
     def test_vision_queries_route_to_vision(self) -> None:

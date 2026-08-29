@@ -44,7 +44,7 @@ def get_secret(service: str = DEFAULT_SERVICE, account: str = DEFAULT_ACCOUNT) -
     cmd = ["security", "find-generic-password", "-s", service, "-a", account, "-w"]
     if keychain:
         cmd.extend(["-k", keychain])
-    rc, out, err = _run(cmd, timeout=10)
+    rc, out, _err = _run(cmd, timeout=10)
     if rc != 0:
         # No existing item.
         return None

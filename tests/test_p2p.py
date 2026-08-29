@@ -112,6 +112,30 @@ class TestP2PSync(unittest.IsolatedAsyncioTestCase):
         # Handlers should silently drop oversized or invalid frames; no crash.
         await self.d1._handle_udp(b"x" * (badapple_p2p.P2P_MAX_BEACON_SIZE + 1), ("127.0.0.1", 12345))
 
+    async def test_udp_rejects_non_local_source(self):
+        await self.d1.start()
+        # A real beacon-shaped frame from a non-private/loopback/link-local
+        # source must be rejected before any parsing or crypto work, even
+        # though the socket is bound to 0.0.0.0 for LAN reachability.
+        frame = self.d1._build_frame("beacon", b"{}")
+        await self.d1._handle_udp(frame.to_bytes(), ("8.8.8.8", 9999))
+        # No peer should have been registered from this source.
+        self.assertEqual(self.d1.peers, {})
+
+
+class TestIsLocalPeerAddress(unittest.TestCase):
+    def test_accepts_loopback_private_and_link_local(self):
+        for ip in ("127.0.0.1", "10.0.0.5", "172.16.4.4", "192.168.1.50", "169.254.1.2", "::1"):
+            self.assertTrue(badapple_p2p._is_local_peer_address(ip), ip)
+
+    def test_rejects_public_addresses(self):
+        for ip in ("8.8.8.8", "1.1.1.1", "93.184.216.34", "2001:4860:4860::8888"):
+            self.assertFalse(badapple_p2p._is_local_peer_address(ip), ip)
+
+    def test_rejects_malformed_input(self):
+        self.assertFalse(badapple_p2p._is_local_peer_address("not-an-ip"))
+        self.assertFalse(badapple_p2p._is_local_peer_address(""))
+
 
 class TestP2PModelManifest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

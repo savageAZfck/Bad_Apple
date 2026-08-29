@@ -26,9 +26,11 @@ class DashboardTests(unittest.TestCase):
             self.web._server.server_close()
 
     def _get(self, path: str, timeout: int = 5) -> tuple[int, str]:
+        # self.base is a hardcoded http://127.0.0.1:<ephemeral port> pointing
+        # at the test's own in-process server; there is no external input.
         url = f"{self.base}{path}"
-        req = urllib.request.Request(url, method="GET", headers={"Connection": "close"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        req = urllib.request.Request(url, method="GET", headers={"Connection": "close"})  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             body = resp.read().decode("utf-8")
         return resp.status, body
 

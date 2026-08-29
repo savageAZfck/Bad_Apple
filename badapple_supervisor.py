@@ -41,7 +41,7 @@ def _services() -> dict[str, dict[str, Any]]:
     return {
         "gatekeeper": {"domain": "system/com.badapple.gatekeeper", "socket": "/var/run/badapple/substrate.sock"},
         "mlx": {"domain": "system/com.badapple.mlx", "socket": "/var/run/badapple/substrate_mlx.sock"},
-        "tts": {"domain": f"gui/{uid}/com.badapple.tts", "socket": "/tmp/badapple_tts.sock"},
+        "tts": {"domain": f"gui/{uid}/com.badapple.tts", "socket": "/tmp/badapple_tts.sock"},  # noqa: S108 - see badapple_tts_server.DEFAULT_SOCKET
     }
 
 
@@ -84,6 +84,16 @@ def _socket_ready(path: str) -> bool:
     except OSError:
         return False
     finally:
+        # An orderly half-close (SHUT_WR) before close() gives the server's
+        # accept()/read() a clean EOF to observe instead of racing an abrupt
+        # close. On macOS, closing a freshly-connected AF_UNIX socket without
+        # this can occasionally surface to the server as EINVAL rather than a
+        # normal end-of-stream read, which otherwise shows up as a spurious
+        # "client error" in the gatekeeper/MLX logs on every health check.
+        try:
+            client.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
         client.close()
 
 

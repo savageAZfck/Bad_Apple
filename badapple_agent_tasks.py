@@ -14,11 +14,10 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
 from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-
 
 SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 

@@ -8,7 +8,6 @@ from typing import Any
 import badapple_actor
 import badapple_mcp_marketplace
 
-
 WHITELIST = frozenset({
     "list_servers",
     "add_server",

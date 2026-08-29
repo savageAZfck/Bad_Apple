@@ -14,6 +14,7 @@ import base64
 import datetime
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import shutil
@@ -44,6 +45,25 @@ BADAPPLE_CHUNK_SIZE = 256 * 1024
 FRAME_MODEL_REQUEST = "model_request"
 FRAME_MODEL_CHUNK = "model_chunk"
 FRAME_MODEL_DONE = "model_done"
+
+
+def _is_local_peer_address(ip: str) -> bool:
+    """Return True if `ip` is on a private, link-local, or loopback network.
+
+    The P2P mesh's own threat model (see module docstring) is "only ever
+    binds to local interfaces" -- but `host="0.0.0.0"` on the TCP listener
+    and a UDP broadcast socket both actually accept traffic from *any*
+    reachable address, not just the local network. HMAC/AES-GCM framing
+    already stops an attacker without the shared SLICKS secret from
+    forging a valid frame, but this check makes the code's behavior match
+    its documented claim and rejects non-local traffic before spending any
+    CPU on parsing or cryptography.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_link_local or addr.is_loopback
 
 
 def _derive_keys(secret: bytes) -> tuple:
@@ -222,9 +242,15 @@ class P2PDaemon:
 
         # UDP broadcast listener for peer discovery.
         # TCP listener for sync payloads — start even if UDP discovery fails.
+        # Binding to all interfaces (rather than a single known local IP) is
+        # required so this works regardless of which interface the user's
+        # LAN is actually on (Wi-Fi, Ethernet, etc.) -- the source-address
+        # checks in _handle_udp/_handle_sync_client (_is_local_peer_address)
+        # are what actually enforce "local interfaces only", not the bind
+        # address itself.
         self._tcp_server = await asyncio.start_server(
             self._handle_sync_client,
-            host="0.0.0.0",
+            host="0.0.0.0",  # noqa: S104 - see _is_local_peer_address for the real enforcement
             port=self.sync_port,
             limit=P2P_MAX_SYNC_SIZE,
         )
@@ -238,7 +264,7 @@ class P2PDaemon:
             pass
         self._udp_sock.setblocking(False)
         try:
-            self._udp_sock.bind(("0.0.0.0", self.broadcast_port))
+            self._udp_sock.bind(("0.0.0.0", self.broadcast_port))  # noqa: S104 - see _is_local_peer_address
         except OSError as e:
             print(f"[p2p] could not bind broadcast port {self.broadcast_port}: {e}", flush=True)
 
@@ -313,6 +339,9 @@ class P2PDaemon:
                 print(f"[p2p] udp read error: {e}", flush=True)
 
     async def _handle_udp(self, data: bytes, addr):
+        if not _is_local_peer_address(addr[0]):
+            print(f"[p2p] rejected non-local UDP source {addr[0]}", flush=True)
+            return
         if len(data) > P2P_MAX_BEACON_SIZE:
             print(f"[p2p] oversized beacon from {addr[0]}", flush=True)
             return
@@ -379,6 +408,11 @@ class P2PDaemon:
                 del self.peers[k]
 
     async def _handle_sync_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        peer_addr = writer.get_extra_info("peername")
+        if peer_addr and not _is_local_peer_address(peer_addr[0]):
+            print(f"[p2p] rejected non-local TCP connection from {peer_addr[0]}", flush=True)
+            writer.close()
+            return
         try:
             while True:
                 result = await self._read_frame(reader)
@@ -403,14 +437,14 @@ class P2PDaemon:
                                     self.memory._save()
                         remote_models = packet.get("models")
                         if remote_models and isinstance(remote_models, list):
-                            peername = writer.get_extra_info('peername')
+                            peername = writer.get_extra_info("peername")
                             peer_host = peername[0] if peername and len(peername) > 0 else ""
                             peer_id = f"{frame.origin_id}@{peer_host}" if peer_host else frame.origin_id
                             self._remote_models[peer_id] = remote_models
                         writer.write(b'{"ok":true}\n')
                         await writer.drain()
                         break
-                    elif frame.frame_type == "pull_request":
+                    if frame.frame_type == "pull_request":
                         packet = json.loads(plaintext.decode())
                         model_id = packet.get("model_id", "")
                         if not self.model_registry or not model_id:
@@ -436,7 +470,7 @@ class P2PDaemon:
                         writer.write(resp_frame.to_bytes())
                         await writer.drain()
                         break
-                    elif frame.frame_type == "adapter":
+                    if frame.frame_type == "adapter":
                         packet = json.loads(plaintext.decode())
                         adapter_name = packet.get("name", " unnamed")
                         adapters_dir = Path(packet.get("adapters_dir", str(self.data_dir / "lora_adapters")))
@@ -456,11 +490,10 @@ class P2PDaemon:
                             writer.write(json.dumps({"ok": False, "error": str(e)}).encode() + b"\n")
                             await writer.drain()
                         break
-                    elif frame.frame_type == FRAME_MODEL_REQUEST:
+                    if frame.frame_type == FRAME_MODEL_REQUEST:
                         await self._handle_model_request(frame, plaintext, reader, writer)
                         break
-                    else:
-                        break
+                    break
                 except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError, LookupError) as e:
                     print(f"[p2p] sync handler error: {e}", flush=True)
                     break
@@ -965,7 +998,7 @@ class P2PDaemon:
 
             manifest = packet.get("manifest")
             if manifest and isinstance(manifest, dict):
-                peername = writer.get_extra_info('peername')
+                peername = writer.get_extra_info("peername")
                 peer_host = peername[0] if peername and len(peername) > 0 else ""
                 remote_peer_id = f"{resp.origin_id}@{peer_host}" if peer_host else resp.origin_id
                 self._remote_models.setdefault(remote_peer_id, []).append(manifest)
@@ -1112,7 +1145,7 @@ class P2PDaemon:
             return f"Bad Apple could not find an adapter called '{adapter_name}'."
 
         try:
-            base = shutil.make_archive(str(adapter_path), 'zip', str(adapter_path))
+            base = shutil.make_archive(str(adapter_path), "zip", str(adapter_path))
             with open(base, "rb") as f:
                 zip_bytes = f.read()
             Path(base).unlink(missing_ok=True)

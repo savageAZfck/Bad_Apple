@@ -34,16 +34,15 @@ import badapple_ambient
 import badapple_mcp_marketplace
 import badapple_ocular
 from badapple_dashboard_data import (
-    _run,  # noqa: F401
-    _battery,
-    _thermal,
     _badapple_proc,
+    _battery,
     _latest_log_perf,
-    _tail_lines,
-    _tail_ledger,
-    _voice_activity,
-    _query_int,
     _load_mcp_servers,
+    _query_int,
+    _tail_ledger,
+    _tail_lines,
+    _thermal,
+    _voice_activity,
 )
 
 # The MLXServer instance is set here by badapple_mlx_server.py at startup so
@@ -113,7 +112,7 @@ def _capabilities_list() -> list[str]:
                     text = m.group(1).strip()
                     if text:
                         items.append(text)
-            return items if items else _DEFAULT_CAPABILITIES
+            return items or _DEFAULT_CAPABILITIES
         except Exception:
             pass
     return _DEFAULT_CAPABILITIES
@@ -1150,7 +1149,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._post_body = {}
 
-        if not _check_csrf_token({k: v for k, v in self.headers.items()}, self._post_body):
+        if not _check_csrf_token(dict(self.headers.items()), self._post_body):
             self._send_json({"error": "invalid or missing CSRF token"}, 403)
             return
 
@@ -1403,6 +1402,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Allow concurrent dashboard requests and daemon-thread workers."""
+
     allow_reuse_address = True
     daemon_threads = True
 

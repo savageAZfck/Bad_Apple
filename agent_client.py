@@ -13,7 +13,6 @@ This is a reference / test client, not the production `badapple` CLI.
 import base64
 import json
 import os
-import random
 import socket
 import sys
 import time
@@ -38,7 +37,10 @@ def load_secret() -> bytes:
 
 
 def random_nonce() -> str:
-    return "".join(f"{random.randrange(16):x}" for _ in range(64))
+    # This nonce feeds the SLICKS challenge-response handshake, so it must be
+    # unpredictable -- os.urandom (matching badapple_mlx_server.py's own
+    # random_nonce()) rather than the non-cryptographic `random` module.
+    return os.urandom(32).hex()
 
 
 def send_frame(sock, obj: dict):

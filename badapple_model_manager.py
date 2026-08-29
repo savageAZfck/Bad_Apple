@@ -12,14 +12,13 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
 
 import badapple_model_provenance
-
 
 
 @dataclass
@@ -649,11 +648,11 @@ class ModelManager:
         return status.get("name") or status.get("id") or model_id
 
     def _memory_reason(self, available_gb: float, pick: str) -> str:
-        if pick.startswith("fast_") or pick in ("fast_0.5b",):
+        if pick.startswith("fast_") or pick == "fast_0.5b":
             return f"Only {available_gb:.1f} GB of memory is free, so a tiny model is the safest choice."
-        if pick in ("main_70b",):
+        if pick == "main_70b":
             return f"You have plenty of free memory ({available_gb:.1f} GB), so the largest available model is recommended."
-        if pick in ("main_32b",):
+        if pick == "main_32b":
             return f"You have a lot of free memory ({available_gb:.1f} GB), so a large model is recommended."
         return f"You have {available_gb:.1f} GB of free memory, so the default 9B model is a good fit."
 

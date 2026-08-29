@@ -24,7 +24,6 @@ from typing import Any
 
 import badapple_identity
 
-
 DEFAULT_SOCKET_PATH = Path("/var/run/badapple/identity.sock")
 SIGN_COOLDOWN_S = 0.25
 
@@ -162,9 +161,9 @@ class IdentityAgent:
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"invalid base64: {e}"}
         try:
-            from cryptography.hazmat.primitives.asymmetric import ec
-            from cryptography.hazmat.primitives import hashes
             from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import ec
 
             pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), public_key)
             pub.verify(signature, message, ec.ECDSA(hashes.SHA256()))

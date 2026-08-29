@@ -155,7 +155,11 @@ def _voice_activity(n: int = 20) -> list[dict[str, Any]]:
     spoken_re = re.compile(r"spoken: (.*)")
     error_re = re.compile(r"consume error: (.*)")
     try:
-        with open("/tmp/badapple_voice_debug.log", encoding="utf-8", errors="ignore") as f:
+        # /tmp is world-writable; open with O_NOFOLLOW so a pre-planted
+        # symlink at this path (e.g. to a file the dashboard shouldn't be
+        # able to surface) is refused rather than followed and displayed.
+        fd = os.open("/tmp/badapple_voice_debug.log", os.O_RDONLY | os.O_NOFOLLOW)  # noqa: S108
+        with os.fdopen(fd, encoding="utf-8", errors="ignore") as f:
             for line in deque(f, maxlen=5000):
                 if "consume:" in line:
                     m = consume_re.search(line)

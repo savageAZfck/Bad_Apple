@@ -8,7 +8,6 @@ from typing import Any
 import badapple_actor
 import badapple_runtime
 
-
 WHITELIST = frozenset({
     "register",
     "snapshot",

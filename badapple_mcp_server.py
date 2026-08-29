@@ -354,7 +354,8 @@ def _get_prompt(name: str) -> dict[str, Any]:
 
 def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     """Process one JSON-RPC/MCP request and return a response, or ``None`` for
-    notifications that do not require a response."""
+    notifications that do not require a response.
+    """
     request_id = request.get("id")
     method = request.get("method")
     if not isinstance(method, str):

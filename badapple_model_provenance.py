@@ -16,7 +16,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_HASH_SIZE_CAP = 10 * 1024 * 1024 * 1024  # 10 GB total per model
 
 

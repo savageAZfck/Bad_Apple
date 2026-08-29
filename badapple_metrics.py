@@ -7,13 +7,12 @@ memory and is not sent to the cloud.
 
 from __future__ import annotations
 
-import time
 import threading
+import time
 from collections import deque
 from typing import Any
 
 import badapple_actor
-
 
 MAX_ENTRIES = 1_000
 
