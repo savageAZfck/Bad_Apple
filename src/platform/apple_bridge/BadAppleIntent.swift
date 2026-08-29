@@ -247,8 +247,12 @@ private enum BadAppleSlicks {
 
 /// Authenticated client for the local SLICKS Unix-domain socket.
 ///
-/// The menu-bar voice host and AppIntent share this implementation so nonce
-/// generation, proofs, frame limits, and ordering checks cannot drift.
+/// The menu-bar voice host and AppIntent share this implementation.
+///
+/// The in-process client now delegates to the bundled `badapple` helper binary.
+/// That binary handles SLICKS v2 (Secure Enclave) negotiation and falls back to
+/// v1 (HMAC) when the identity agent is unavailable, so Swift code does not need
+/// to duplicate the handshake or ECDSA logic.
 public struct BadAppleDaemonClient: Sendable {
     public static let shared = BadAppleDaemonClient()
 
@@ -288,79 +292,81 @@ public struct BadAppleDaemonClient: Sendable {
         guard (1...4_096).contains(maxNewTokens) else {
             throw BadAppleIntentError("Bad Apple token limits must be between 1 and 4096")
         }
-        print("[BadAppleClient] start secret")
-        let secret = try BadAppleSlicks.secret()
-        print("[BadAppleClient] got secret")
-        let clientNonce = try BadAppleSlicks.nonce()
-        let timestampMs = UInt64(Date().timeIntervalSince1970 * 1_000)
-        print("[BadAppleClient] create transport")
-        let transport = try BadAppleLineTransport(socketPath: BadAppleSlicks.socketPath())
-        print("[BadAppleClient] write hello")
-        try transport.write(
-            BadAppleHello(timestampMs: timestampMs, clientNonce: clientNonce)
-        )
-
-        print("[BadAppleClient] read challenge")
-        let challenge = try transport.read()
-        print("[BadAppleClient] got challenge \(challenge.type)")
-        guard challenge.type == "challenge",
-              challenge.version == badAppleSlicksVersion,
-              let serverNonce = challenge.serverNonce,
-              BadAppleSlicks.nonceIsValid(serverNonce),
-              let serverProof = challenge.proof else {
-            throw BadAppleIntentError(challenge.message ?? "Bad Apple returned an invalid SLICKS challenge")
+        guard let binaryURL = Self.badAppleBinaryURL() else {
+            throw BadAppleIntentError("The badapple helper binary was not found")
         }
-        let material = "BADAPPLE-SLICKS/\(badAppleSlicksVersion)|server|\(timestampMs)|\(clientNonce)|\(serverNonce)"
-        guard BadAppleSlicks.verify(proof: serverProof, secret: secret, material: material) else {
-            throw BadAppleIntentError("Bad Apple failed SLICKS server authentication")
-        }
-        print("[BadAppleClient] server proof ok")
 
-        let clientProof = BadAppleSlicks.clientProof(
-            secret: secret,
-            timestampMs: timestampMs,
-            clientNonce: clientNonce,
-            serverNonce: serverNonce,
-            prompt: prompt,
-            maxNewTokens: maxNewTokens
-        )
-        print("[BadAppleClient] write execute")
-        try transport.write(
-            BadAppleExecute(
-                timestampMs: timestampMs,
-                clientNonce: clientNonce,
-                serverNonce: serverNonce,
-                prompt: prompt,
-                maxNewTokens: maxNewTokens,
-                proof: clientProof
+        let process = Process()
+        process.executableURL = binaryURL
+        process.arguments = ["--max-tokens", String(maxNewTokens), "--json", prompt]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["BADAPPLE_SOCKET_PATH"] =
+            environment["BADAPPLE_SOCKET_PATH"] ?? "/var/run/badapple/substrate.sock"
+        environment["BADAPPLE_SLICKS_KEY_PATH"] =
+            environment["BADAPPLE_SLICKS_KEY_PATH"] ?? "/var/lib/bad_apple/slicks.key"
+        process.environment = environment
+
+        try process.run()
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0, data.isEmpty {
+            throw BadAppleIntentError(
+                "Bad Apple helper exited with code \(process.terminationStatus)"
             )
-        )
-        print("[BadAppleClient] wrote execute")
+        }
 
-        var accepted = false
-        var streamed = ""
-        while true {
-            print("[BadAppleClient] read frame")
-            let frame = try transport.read()
-            print("[BadAppleClient] frame type: \(frame.type)")
-            switch frame.type {
-            case "accepted":
-                accepted = true
-            case "token" where accepted:
-                let delta = frame.text ?? ""
-                streamed += delta
-                if !delta.isEmpty {
+        return try Self.parseJSONStream(data, onToken: onToken)
+    }
+
+    private static func parseJSONStream(_ data: Data, onToken: (String) -> Void) throws -> String {
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw BadAppleIntentError("Bad Apple helper produced invalid UTF-8")
+        }
+        var full = ""
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard !line.isEmpty, let jsonData = line.data(using: .utf8) else { continue }
+            let object = try JSONSerialization.jsonObject(with: jsonData)
+            guard let dict = object as? [String: Any],
+                  let type = dict["type"] as? String else { continue }
+            switch type {
+            case "token":
+                if let delta = dict["text"] as? String {
                     onToken(delta)
+                    full += delta
                 }
-            case "done" where accepted:
-                print("[BadAppleClient] done")
-                return frame.text ?? streamed
+            case "done":
+                if let doneText = dict["text"] as? String {
+                    full = doneText
+                }
+                return full
             case "error":
-                throw BadAppleIntentError(frame.message ?? "Bad Apple rejected the request")
+                throw BadAppleIntentError(
+                    (dict["message"] as? String) ?? "Bad Apple rejected the request"
+                )
             default:
-                throw BadAppleIntentError("Bad Apple returned an out-of-order IPC frame")
+                break
             }
         }
+        return full
+    }
+
+    private static func badAppleBinaryURL() -> URL? {
+        let candidates: [URL] = [
+            Bundle.main.bundleURL
+                .appendingPathComponent("Contents")
+                .appendingPathComponent("Helpers")
+                .appendingPathComponent("badapple"),
+            URL(fileURLWithPath: "/usr/local/bin/badapple"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("target/release/badapple"),
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 }
 
