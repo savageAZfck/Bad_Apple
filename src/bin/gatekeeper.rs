@@ -533,6 +533,10 @@ fn forward_to_mlx(
                 write_frame(writer, &ServerFrame::Done { text, metrics })?;
                 return Ok(());
             }
+            ServerFrame::Response { result } if accepted => {
+                write_frame(writer, &ServerFrame::Response { result })?;
+                return Ok(());
+            }
             ServerFrame::Error { message } => {
                 write_frame(writer, &ServerFrame::Error { message })?;
                 return Ok(());
@@ -601,6 +605,10 @@ fn forward_v2_to_mlx(
             ServerFrame::Done { text, metrics } if accepted => {
                 let text = post_process_response(&text, cage);
                 write_frame(client_writer, &ServerFrame::Done { text, metrics })?;
+                return Ok(());
+            }
+            ServerFrame::Response { result } if accepted => {
+                write_frame(client_writer, &ServerFrame::Response { result })?;
                 return Ok(());
             }
             ServerFrame::Error { message } => {

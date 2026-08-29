@@ -74,6 +74,10 @@ pub enum ServerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metrics: Option<Metrics>,
     },
+    Response {
+        #[serde(default)]
+        result: Value,
+    },
     Error {
         message: String,
     },
@@ -503,6 +507,27 @@ where
     query_with_metrics(prompt, max_new_tokens, on_token).map(|(text, _)| text)
 }
 
+pub fn call_agent(method: &str, params: Option<Value>, max_new_tokens: usize) -> Result<Value> {
+    let mut req = serde_json::Map::new();
+    req.insert("id".to_string(), Value::String("cli-1".to_string()));
+    req.insert("method".to_string(), Value::String(method.to_string()));
+    if let Some(p) = params {
+        req.insert("params".to_string(), p);
+    }
+    let prompt = format!(
+        "__BADAPPLE_AGENT__ {}",
+        serde_json::to_string(&Value::Object(req))?
+    );
+    let (text, _) = query_with_metrics(&prompt, max_new_tokens, |_token| {})?;
+    match serde_json::from_str(&text) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            // Non-JSON or raw text fallback.
+            Ok(Value::String(text))
+        }
+    }
+}
+
 pub fn query_with_metrics<F>(
     prompt: &str,
     max_new_tokens: usize,
@@ -584,6 +609,10 @@ where
             ServerFrame::Accepted => accepted = true,
             ServerFrame::Token { text } if accepted => on_token(&text),
             ServerFrame::Done { text, metrics } if accepted => return Ok((text, metrics)),
+            ServerFrame::Response { result } if accepted => {
+                let text = serde_json::to_string(&result)?;
+                return Ok((text, None));
+            }
             ServerFrame::Error { message } => bail!("Bad Apple request failed: {message}"),
             _ => bail!("Bad Apple returned an out-of-order IPC frame"),
         }

@@ -38,6 +38,8 @@ class ModelManifest:
     local_path: str
     recorded_at: float
     files: dict[str, FileEntry] = field(default_factory=dict)
+    signature: str | None = None
+    public_key: str | None = None
 
 
 def _sha256_file(path: Path, total_cap: int = DEFAULT_HASH_SIZE_CAP) -> str:
@@ -67,9 +69,9 @@ class ModelProvenance:
         self._manifest_dir.mkdir(parents=True, exist_ok=True)
 
     def _manifest_path(self, model_id: str) -> Path:
-        # Reject path traversal in the model_id itself.
-        safe = Path(model_id).name
-        if safe != model_id or not safe:
+        # Reject path traversal; allow repo-style IDs with a slash by encoding it.
+        safe = model_id.replace("/", "--").replace("..", "")
+        if not safe or safe.startswith("/") or "/" in safe:
             raise ValueError(f"invalid model_id for manifest: {model_id!r}")
         return self._manifest_dir / f"{safe}.json"
 

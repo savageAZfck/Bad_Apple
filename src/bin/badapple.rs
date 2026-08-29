@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
-use bad_apple::bad_apple_ipc::query_with_metrics;
+use bad_apple::bad_apple_ipc::{call_agent, query_with_metrics};
+use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -66,8 +67,12 @@ fn main() -> Result<()> {
         return run_doctor();
     }
 
+    if prompt_parts.first().map(|s| s.as_str()) == Some("model") {
+        return run_model_subcommand(&prompt_parts[1..]);
+    }
+
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]");
     } else {
         prompt_parts.join(" ")
     };
@@ -581,6 +586,78 @@ fn run_doctor() -> Result<()> {
     }
 
     println!("{}", report);
+    Ok(())
+}
+
+fn run_model_subcommand(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("usage: badapple model <list|scan|info|use|verify|add|remove|recommend> [args]");
+    }
+    let sub = args[0].as_str();
+    let mut params = serde_json::Map::new();
+    match sub {
+        "list" => {
+            let result = call_agent("list_models", None, 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "scan" => {
+            let result = call_agent("scan_models", None, 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "info" => {
+            if args.len() < 2 {
+                bail!("usage: badapple model info <model-id>");
+            }
+            params.insert("model_id".to_string(), Value::String(args[1].clone()));
+            let result = call_agent("model_info", Some(Value::Object(params)), 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "use" => {
+            if args.len() < 2 {
+                bail!("usage: badapple model use <model-id>");
+            }
+            params.insert("model_ref".to_string(), Value::String(args[1].clone()));
+            let result = call_agent("switch_main_model", Some(Value::Object(params)), 512)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "verify" => {
+            if args.len() >= 2 {
+                params.insert("model_id".to_string(), Value::String(args[1].clone()));
+            }
+            let result = call_agent("verify_models", Some(Value::Object(params)), 512)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "add" => {
+            if args.len() < 2 {
+                bail!("usage: badapple model add <path> [model-id]");
+            }
+            params.insert("path".to_string(), Value::String(args[1].clone()));
+            if args.len() >= 3 {
+                params.insert("model_id".to_string(), Value::String(args[2].clone()));
+            }
+            let result = call_agent("add_model", Some(Value::Object(params)), 512)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "remove" => {
+            if args.len() < 2 {
+                bail!("usage: badapple model remove <model-id>");
+            }
+            params.insert("model_id".to_string(), Value::String(args[1].clone()));
+            let result = call_agent("remove_model", Some(Value::Object(params)), 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "recommend" => {
+            let query = if args.len() > 1 {
+                params.insert("query".to_string(), Value::String(args[1..].join(" ")));
+                Some(Value::Object(params))
+            } else {
+                None
+            };
+            let result = call_agent("recommend_model", query, 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        _ => bail!("unknown model subcommand: {sub}"),
+    }
     Ok(())
 }
 

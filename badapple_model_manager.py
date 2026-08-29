@@ -32,6 +32,7 @@ class ModelProfile:
     size_gb: float
     kind: str  # "text", "vision", "image", "draft"
     loaded_in: str = ""  # "mlx_server", "vision_host", "mflux"
+    local_path: str = ""
 
 
 @dataclass

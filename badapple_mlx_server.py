@@ -3436,6 +3436,9 @@ class MLXServer:
         """
         if not self._validate_model_ref(model_ref):
             return f"Invalid model reference: {model_ref}"
+        current = self.model_registry.current()
+        if self.model is not None and current and (current == model_ref or current.lower().endswith(model_ref.lower().split("/")[-1])):
+            return f"{model_ref} is already the active model."
         admission = self.admit_model(model_ref, auto_unload=True)
         if not admission["ok"]:
             return f"Model refused: {admission['message']}"
@@ -3942,6 +3945,47 @@ class MLXServer:
 
         if method == "model_status":
             await _respond(req_id, self.model_manager.status(params.get("model_id")))
+            return
+
+        if method == "list_models":
+            await _respond(req_id, {"text": self.model_registry.list_models(), "models": self.model_registry._state.get("models", [])})
+            return
+
+        if method == "scan_models":
+            await _respond(req_id, {"text": self.model_registry.scan(), "models": self.model_registry._state.get("models", [])})
+            return
+
+        if method == "model_info":
+            model_id = str(params.get("model_id", ""))
+            if not model_id:
+                await _respond(req_id, None, "model_id is required")
+                return
+            await _respond(req_id, {"text": self.model_registry.info(model_id)})
+            return
+
+        if method == "verify_models":
+            model_id = params.get("model_id")
+            result = self.model_registry.verify(model_id)
+            await _respond(req_id, result)
+            return
+
+        if method == "add_model":
+            path = str(params.get("path", ""))
+            model_id = str(params.get("model_id", ""))
+            if not path:
+                await _respond(req_id, None, "path is required")
+                return
+            result = self.model_registry.add_model(path, model_id)
+            await _respond(req_id, result)
+            return
+
+        if method == "remove_model":
+            model_id = str(params.get("model_id", ""))
+            if not model_id:
+                await _respond(req_id, None, "model_id is required")
+                return
+            result = self.model_registry.remove_model(model_id)
+            await _respond(req_id, result)
             return
 
         if method == "download_model":

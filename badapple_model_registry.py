@@ -6,10 +6,14 @@ runtime (well, daemon-session) switching between them.  No cloud after the
 initial cache; all metadata is read from local `config.json` / `tokenizer.json`.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any
+
+import badapple_model_provenance
+import badapple_slicks
 
 HUB_ROOT = Path.home() / ".cache" / "huggingface" / "hub"
 REGISTRY_FILE = "model_registry.json"
@@ -72,6 +76,7 @@ class ModelRegistry:
         }
         self._load()
         self._maybe_rescan()
+        self.provenance = badapple_model_provenance.ModelProvenance(data_dir)
 
     def _load(self) -> None:
         if self.registry_path.is_file():
@@ -221,3 +226,141 @@ class ModelRegistry:
             )
         lines.append("\nUse `use model <id>` after downloading with huggingface-cli or mlx_lm.load.")
         return "\n".join(lines)
+
+    def verify(self, model_id: str | None = None) -> dict[str, Any]:
+        """Verify one or all models against their stored provenance manifests."""
+        if model_id:
+            return self._verify_one(str(model_id))
+        results = {}
+        for m in self._state.get("models", []):
+            results[m["id"]] = self._verify_one(m["id"])
+        ok = all(r.get("status") == "verified" for r in results.values())
+        return {"status": "verified" if ok else "mismatch", "models": results}
+
+    def _verify_one(self, model_id: str) -> dict[str, Any]:
+        model_id_lower = model_id.lower()
+        match = next((m for m in self._state.get("models", []) if m["id"].lower() == model_id_lower), None)
+        if not match:
+            return {"status": "unknown", "error": f"model {model_id!r} not in registry"}
+        return self.provenance.verify(match["id"], match["path"])
+
+    def add_model(self, path: str, model_id: str | None = None) -> dict[str, Any]:
+        """Import a local model directory into the registry and record provenance.
+
+        The model directory must contain a config.json and at least one weight file.
+        If model_id is not provided, a stable id is derived from the directory name.
+        """
+        root = Path(path).expanduser().resolve()
+        if not root.is_dir():
+            return {"status": "error", "error": f"not a directory: {path}"}
+        config_path = root / "config.json"
+        if not config_path.is_file():
+            # HF cache snapshot layout: models--<org>--<name>/snapshots/<ref>/
+            for candidate in [root / "snapshots", root]:
+                if not candidate.is_dir():
+                    continue
+                for child in candidate.iterdir():
+                    if child.is_dir() and (child / "config.json").is_file():
+                        root = child
+                        config_path = child / "config.json"
+                        break
+                if config_path.is_file():
+                    break
+            if not config_path.is_file():
+                return {"status": "error", "error": "no config.json found in model directory"}
+
+        try:
+            with config_path.open("r", encoding="utf-8") as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
+            return {"status": "error", "error": f"cannot read config.json: {e}"}
+
+        size_bytes = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+        size_gb = round(size_bytes / (1024 ** 3), 2)
+        quant = self._detect_quantization(root)
+
+        # Determine the model id. For HF cache directories, try to recover the repo id.
+        if model_id:
+            derived_id = model_id
+        else:
+            # Walk up to find a HF hub repo dir (models--org--name).
+            repo_dir = None
+            for parent in [root, *root.parents]:
+                if parent.name.startswith("models--"):
+                    repo_dir = parent
+                    break
+            if repo_dir is not None:
+                derived_id = _repo_id_from_dirname(repo_dir.name)
+            else:
+                derived_id = _repo_id_from_dirname(root.name)
+            if derived_id == root.name or (repo_dir is not None and derived_id == repo_dir.name):
+                # Fallback to a safe id based on the parent dir name and a short hash.
+                parent = root.parent.name
+                digest = hashlib.sha256(str(root).encode()).hexdigest()[:8]
+                derived_id = f"{parent}-{digest}"
+
+        info = {
+            "id": derived_id,
+            "path": str(root),
+            "size_gb": size_gb,
+            "quantization": quant,
+            "context_length": config.get("max_position_embeddings") or config.get("max_seq_len") or "unknown",
+            "architecture": config.get("architectures", ["unknown"])[0],
+            "vocab_size": config.get("vocab_size", "unknown"),
+            "provenance": "pending",
+        }
+
+        # Record or update provenance.
+        try:
+            record = self.provenance.record(derived_id, derived_id, str(root))
+            if record.get("status") == "recorded":
+                info["provenance"] = "recorded"
+            else:
+                return {"status": "error", "error": f"provenance recording failed: {record}"}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "error": f"provenance recording error: {e}"}
+
+        # Sign the provenance manifest with the Secure Enclave if available.
+        try:
+            manifest_path = self.provenance._manifest_path(derived_id)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_json = json.dumps(manifest, sort_keys=True, ensure_ascii=True).encode("utf-8")
+            signature = badapple_slicks.v2_sign_message(manifest_json)
+            if signature:
+                manifest["signature"] = signature
+                manifest["public_key"] = badapple_slicks.v2_public_key_b64()
+                manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+                info["signature"] = "se-v2"
+        except Exception as e:  # noqa: BLE001
+            # SE signing is best-effort; the model can still be used without it.
+            info["signature_error"] = str(e)
+
+        # Add or replace the entry in the registry.
+        models = self._state.get("models", [])
+        models = [m for m in models if m["id"].lower() != derived_id.lower()]
+        models.append(info)
+        self._state["models"] = models
+        self._save()
+        return {"status": "added", "model": info}
+
+    def remove_model(self, model_id: str) -> dict[str, Any]:
+        """Remove a model from the registry and delete its provenance manifest.
+
+        The model weights themselves are not deleted to avoid accidental data loss.
+        """
+        model_id_lower = model_id.lower()
+        models = [m for m in self._state.get("models", []) if m["id"].lower() != model_id_lower]
+        removed = len(self._state.get("models", [])) - len(models)
+        if not removed:
+            return {"status": "error", "error": f"model {model_id!r} not in registry"}
+        self._state["models"] = models
+        try:
+            manifest_path = self.provenance._manifest_path(model_id)
+            if manifest_path.is_file():
+                manifest_path.unlink()
+        except OSError:
+            pass
+        if self._state.get("current", "").lower() == model_id_lower:
+            self._state["current"] = ""
+        self._save()
+        return {"status": "removed", "model_id": model_id}
