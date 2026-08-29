@@ -2249,7 +2249,7 @@ class MLXServer:
         self.workspace_watcher.start()
 
         # P2P sync daemon runs on its own asyncio thread inside an actor.
-        self._p2p_actor = badapple_p2p_actor.P2PActor(secret, self.data_dir, memory=self.memory, workspace=_workspace_obj)
+        self._p2p_actor = badapple_p2p_actor.P2PActor(secret, self.data_dir, memory=self.memory, workspace=_workspace_obj, model_registry=self.model_registry)
         self._p2p_actor.start()
         self.p2p = badapple_p2p_actor.P2PActorProxy(self._p2p_actor)
         badapple_p2p.set_p2p_daemon(self.p2p)
@@ -4314,8 +4314,39 @@ class MLXServer:
             if daemon is None:
                 await _respond(req_id, None, "P2P daemon is not running")
                 return
-            result = await daemon.sync_memory()
+            try:
+                result = await asyncio.to_thread(daemon.sync_memory)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                await _respond(req_id, None, f"P2P sync failed: {e}")
+                return
             await _respond(req_id, {"sync_status": result})
+            return
+        if method == "p2p_models":
+            if self.p2p is None:
+                await _respond(req_id, None, "P2P is not available")
+                return
+            try:
+                result = await asyncio.to_thread(self.p2p.remote_models)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                await _respond(req_id, None, f"P2P models failed: {e}")
+                return
+            await _respond(req_id, result)
+            return
+        if method == "p2p_pull_model":
+            if self.p2p is None:
+                await _respond(req_id, None, "P2P is not available")
+                return
+            peer_id = str(params.get("peer_id", ""))
+            model_id = str(params.get("model_id", ""))
+            if not peer_id or not model_id:
+                await _respond(req_id, None, "peer_id and model_id are required")
+                return
+            try:
+                result = await asyncio.to_thread(self.p2p.pull_model_manifest, peer_id, model_id)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                await _respond(req_id, None, f"P2P pull failed: {e}")
+                return
+            await _respond(req_id, result)
             return
 
         await _respond(req_id, None, f"unknown method '{method}'")

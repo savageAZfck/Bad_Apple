@@ -57,6 +57,13 @@ your Bad Apple repository checkout:
 
 Replace /path/to/bad_apple with the path to your checkout if you moved it.
 
+New in this build:
+- Self-hosting model registry: manage local models with `badapple model <list|scan|info|use|verify|add|remove|recommend>`.
+- P2P edge mesh: discover peers and share signed model manifests with
+  `badapple p2p <peers|sync|models|pull>`.
+- Swift menu-bar Troubleshooting menu (Restart Daemon, Open Log, Copy MCP Socket).
+- All local IPC is authenticated with SLICKS v2 (Secure Enclave) with HMAC fallback.
+
 To update later, use Bad Apple > Check for Updates in the menu bar, or run:
 
     sudo /Applications/Bad\ Apple.app/Contents/Resources/update_bad_apple.sh

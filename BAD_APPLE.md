@@ -142,7 +142,8 @@ The current build covers the following roadmap phases:
 - **Phase 12 — Dream / offline consolidation** ✅: `consolidate_memory` runs a memory-graph deduplication and re-embedding pass.
 - **Phase 13 — Policy language for the cage** ✅: `Policy` in `badapple_extras.py` declares which tools are allowed, require approval, and how arguments are validated; loaded from `policy.yaml`.
 - **Phase 14 — Adversarial output classifier** ✅: `StreamingFirewall` blocks PII, secrets, and custom blocklist patterns in generated output with a streaming Aho-Corasick automaton.
-- **Phase 15 — Self-hosting model registry** 🔄: the active model is controlled by `BADAPPLE_MAIN_MODEL`; a pluggable local registry is the next remaining step.
+- **Phase 15 — Self-hosting model registry** ✅: `badapple model <list|scan|info|use|verify|add|remove|recommend>` manages the local cache, records SHA-256 provenance, and signs manifests with the Secure Enclave.
+- **Phase 16 — P2P model manifest gossip** ✅: the link-local mesh shares signed model manifests between peers. `badapple p2p <peers|sync|models|pull>` discovers neighbors, syncs memory, and pulls a model's provenance from a peer.
 
 ### Menu bar app
 
@@ -200,6 +201,22 @@ badapple --persona wicket "Who are you?"
 badapple --speak "Tell me a joke."                        # stream to TTS queue
 badapple --benchmark                                       # or: badapple --benchmark "prompt"
 badapple --json "Explain recursion."                       # token stream as JSON
+
+# Self-hosting model registry (SE-signed provenance)
+badapple model list
+badapple model scan
+badapple model info caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit
+badapple model use caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit
+badapple model verify
+badapple model add /path/to/local/model
+badapple model remove <id>
+badapple model recommend
+
+# Encrypted link-local P2P edge mesh
+badapple p2p peers
+badapple p2p sync
+badapple p2p models
+badapple p2p pull <peer_id> <model_id>
 ```
 
 New flags:

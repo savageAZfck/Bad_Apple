@@ -72,6 +72,7 @@ When asked, it should say:
 > 8. Speak responses through the local TTS server and integrate with macOS Shortcuts and Siri.
 > 9. Show a local web dashboard / control center at http://127.0.0.1:8787.
 > 10. Sync with other Bad Apple peers over an encrypted, Secure Enclave–signed P2P mesh — off by default.
+> 11. Self-hosting model registry with `badapple model` CLI: list, verify, add, remove, and switch local models; manifests are signed by the Secure Enclave.
 > 11. Run as a supervised actor OS: every subsystem is isolated, restartable, and observable.
 > Everything stays on your Mac.
 
@@ -126,10 +127,14 @@ When asked, it should say:
 ### 6. Mesh and networking
 1. P2P encrypted LAN sync (off by default)
 2. Peer discovery and sync beacons
+3. P2P model manifest gossip: discover models on nearby Bad Apple nodes
+4. `badapple p2p <peers|sync|models|pull>` CLI
 
 ### 7. Model and memory management
-1. Model manager with cache status
-2. One-click model pre-download with memory check
+1. Self-hosting model registry: `badapple model <list|scan|info|use|verify|add|remove|recommend>`
+2. SHA-256 provenance manifests signed with the Secure Enclave
+3. Model manager with cache status
+4. One-click model pre-download with memory check
 3. Runtime model switching and recommendations
 4. VRAM governor and memory pressure handling
 5. `/api/models` dashboard page

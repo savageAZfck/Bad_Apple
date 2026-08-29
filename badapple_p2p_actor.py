@@ -33,6 +33,10 @@ WHITELIST = frozenset({
     "send_adapter_sync",
     "list_adapters",
     "list_local_adapters",
+    "p2p_models",
+    "p2p_pull_model",
+    "remote_models",
+    "pull_model_manifest",
 })
 
 
@@ -47,6 +51,7 @@ class P2PActor(badapple_actor.Actor):
         workspace: Any | None = None,
         broadcast_port: int | None = None,
         sync_port: int | None = None,
+        model_registry: Any | None = None,
     ) -> None:
         super().__init__("p2p")
         self._daemon = badapple_p2p.P2PDaemon(
@@ -54,6 +59,7 @@ class P2PActor(badapple_actor.Actor):
             data_dir,
             memory=memory,
             workspace=workspace,
+            model_registry=model_registry,
             broadcast_port=broadcast_port or badapple_p2p.P2P_BROADCAST_PORT,
             sync_port=sync_port or badapple_p2p.P2P_SYNC_PORT,
         )
@@ -142,6 +148,15 @@ class P2PActor(badapple_actor.Actor):
             if method in ("list_adapters", "list_local_adapters"):
                 adapters_dir = args[0] if args else kwargs.get("adapters_dir", badapple_lora.LORA_ADAPTERS_DIR)
                 return self._daemon.list_local_adapters(Path(adapters_dir))
+            if method in ("p2p_models", "remote_models"):
+                return self._daemon.remote_models()
+            if method in ("p2p_pull_model", "pull_model_manifest"):
+                peer_id = args[0] if args else kwargs.get("peer_id", "")
+                model_id = args[1] if len(args) > 1 else kwargs.get("model_id", "")
+                return self._schedule(
+                    self._daemon.pull_model_manifest(str(peer_id), str(model_id)),
+                    timeout=60.0,
+                )
             target = getattr(self._daemon, method, None)
             if target is None:
                 return {"error": f"method {method!r} not found"}

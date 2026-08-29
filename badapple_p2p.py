@@ -118,6 +118,7 @@ class P2PDaemon:
         broadcast_port: int = P2P_BROADCAST_PORT,
         sync_port: int = P2P_SYNC_PORT,
         workspace: Any | None = None,
+        model_registry: Any | None = None,
     ):
         self.enc_key, self.mac_key = _derive_keys(secret)
         self._v2_identity = badapple_slicks.v2_available()
@@ -128,6 +129,7 @@ class P2PDaemon:
         self.data_dir = data_dir
         self.memory = memory
         self.workspace = workspace
+        self.model_registry = model_registry
         self.broadcast_port = broadcast_port
         self.sync_port = sync_port
         self.peers: dict[str, Peer] = {}
@@ -141,6 +143,8 @@ class P2PDaemon:
         # Optional allowlist/blocklist of origin public-key fingerprints or IDs.
         self._allowlist: set[str] = self._load_id_set(data_dir / "p2p_allowlist.txt")
         self._blocklist: set[str] = self._load_id_set(data_dir / "p2p_blocklist.txt")
+        # Model manifests received from remote peers (peer_id -> [manifests]).
+        self._remote_models: dict[str, list[dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Peer identity lists
@@ -373,7 +377,7 @@ class P2PDaemon:
             frame = P2PFrame.from_bytes(data)
             if frame is None or not self._is_allowed(frame.origin_id) or not self._verify(frame):
                 return
-            if frame.frame_type not in ("sync", "adapter") or not self._timestamp_fresh(frame.timestamp_ms) or not self._nonce_fresh(frame.nonce_b64):
+            if frame.frame_type not in ("sync", "adapter", "pull_request") or not self._timestamp_fresh(frame.timestamp_ms) or not self._nonce_fresh(frame.nonce_b64):
                 return
             plaintext = self._decrypt(frame.nonce_b64, frame.payload_b64)
             if plaintext is None:
@@ -393,7 +397,38 @@ class P2PDaemon:
                         if not local_ts or remote_ts > local_ts:
                             self.memory._state["project_context"] = remote_ctx
                             self.memory._save()
+                remote_models = packet.get("models")
+                if remote_models and isinstance(remote_models, list):
+                    peername = writer.get_extra_info('peername')
+                    peer_host = peername[0] if peername and len(peername) > 0 else ""
+                    peer_id = f"{frame.origin_id}@{peer_host}" if peer_host else frame.origin_id
+                    self._remote_models[peer_id] = remote_models
                 writer.write(b'{"ok":true}\n')
+                await writer.drain()
+            elif frame.frame_type == "pull_request":
+                packet = json.loads(plaintext.decode())
+                model_id = packet.get("model_id", "")
+                if not self.model_registry or not model_id:
+                    await self._send_pull_error(writer, "no model registry or model_id")
+                    return
+                match = self._find_registry_model(model_id)
+                if match is None:
+                    await self._send_pull_error(writer, f"model {model_id!r} not found")
+                    return
+                manifest = self._provenance_manifest(model_id, match)
+                response = {"model": match, "manifest": manifest if manifest is not None else {}}
+                response_plaintext = json.dumps(response).encode()
+                nonce_b64, payload_b64 = self._encrypt(response_plaintext)
+                resp_frame = P2PFrame(
+                    frame_type="pull_manifest",
+                    origin_id=self.origin_id,
+                    timestamp_ms=int(time.time() * 1000),
+                    nonce_b64=nonce_b64,
+                    payload_b64=payload_b64,
+                    proof="",
+                )
+                resp_frame.proof = self._proof(resp_frame)
+                writer.write(resp_frame.to_bytes())
                 await writer.drain()
             elif frame.frame_type == "adapter":
                 packet = json.loads(plaintext.decode())
@@ -426,6 +461,19 @@ class P2PDaemon:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _local_models_for_sync(self) -> list[dict[str, Any]] | None:
+        """Return a minimal, P2P-safe slice of the local model registry."""
+        if self.model_registry is None:
+            return None
+        if hasattr(self.model_registry, "get_manifests_for_p2p") and callable(self.model_registry.get_manifests_for_p2p):
+            models = self.model_registry.get_manifests_for_p2p()
+        else:
+            models = getattr(self.model_registry, "_state", {}).get("models", [])
+        if not models:
+            return []
+        fields = ("id", "size_gb", "quantization", "architecture", "provenance", "signature")
+        return [{k: m[k] for k in fields if k in m} for m in models]
+
     async def sync_memory(self) -> str:
         if not self.memory:
             return "P2P sync unavailable: no memory store."
@@ -441,14 +489,18 @@ class P2PDaemon:
             workspace = str(getattr(self.workspace, "path", ""))
             workspace_summary = getattr(self.workspace, "summary", lambda: "")() or ""
         project_context = self.memory._state.get("project_context", {}) if self.memory else {}
-        plaintext = json.dumps({
+        payload: dict[str, Any] = {
             "origin_id": self.origin_id,
             "ts": int(time.time() * 1000),
             "facts": facts,
             "workspace": workspace,
             "workspace_summary": workspace_summary,
             "project_context": project_context,
-        }).encode()
+        }
+        local_models = self._local_models_for_sync()
+        if local_models is not None:
+            payload["models"] = local_models
+        plaintext = json.dumps(payload).encode()
         nonce_b64, payload_b64 = self._encrypt(plaintext)
         frame = P2PFrame(
             frame_type="sync",
@@ -486,6 +538,122 @@ class P2PDaemon:
             for p in self.peers.values()
         ]
         return "Discovered peers:\n" + "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Model manifest gossip
+    # ------------------------------------------------------------------
+    def _find_registry_model(self, model_id: str) -> dict[str, Any] | None:
+        """Look up a model in the optional local model registry."""
+        if self.model_registry is None:
+            return None
+        if hasattr(self.model_registry, "get_manifests_for_p2p") and callable(self.model_registry.get_manifests_for_p2p):
+            models = self.model_registry.get_manifests_for_p2p()
+        else:
+            models = getattr(self.model_registry, "_state", {}).get("models", [])
+        return next((m for m in models if m.get("id") == model_id), None)
+
+    def _provenance_manifest(self, model_id: str, model: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Return the provenance manifest JSON for a model, if available."""
+        if model is not None and isinstance(model, dict) and "manifest" in model:
+            return model["manifest"]
+        if self.model_registry is None:
+            return None
+        provenance = getattr(self.model_registry, "provenance", None)
+        if provenance is None:
+            return None
+        try:
+            path = provenance._manifest_path(model_id)
+            if path.is_file():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - manifest lookup best-effort
+            return None
+
+    def _resolve_peer(self, peer_id: str) -> Peer | None:
+        """Resolve a peer by id, origin_id, or host:port."""
+        for key, p in self.peers.items():
+            if (key == peer_id
+                or p.origin_id == peer_id
+                or f"{p.origin_id}@{p.host}" == peer_id
+                or f"{p.host}:{p.port}" == peer_id):
+                return p
+        return None
+
+    async def _send_pull_error(self, writer: asyncio.StreamWriter, message: str) -> None:
+        """Respond to a pull_request with an encrypted error frame."""
+        plaintext = json.dumps({"error": message}).encode()
+        nonce_b64, payload_b64 = self._encrypt(plaintext)
+        frame = P2PFrame(
+            frame_type="error",
+            origin_id=self.origin_id,
+            timestamp_ms=int(time.time() * 1000),
+            nonce_b64=nonce_b64,
+            payload_b64=payload_b64,
+            proof="",
+        )
+        frame.proof = self._proof(frame)
+        writer.write(frame.to_bytes())
+        await writer.drain()
+
+    def remote_models(self) -> dict[str, list[dict[str, Any]]]:
+        """Return model manifests received from remote peers."""
+        return self._remote_models
+
+    async def pull_model_manifest(self, peer_id: str, model_id: str) -> dict[str, Any]:
+        """Request a model's provenance manifest from a peer."""
+        peer = self._resolve_peer(peer_id)
+        if peer is None:
+            return {"error": f"peer {peer_id!r} not found"}
+
+        plaintext = json.dumps({"model_id": model_id}).encode()
+        nonce_b64, payload_b64 = self._encrypt(plaintext)
+        frame = P2PFrame(
+            frame_type="pull_request",
+            origin_id=self.origin_id,
+            timestamp_ms=int(time.time() * 1000),
+            nonce_b64=nonce_b64,
+            payload_b64=payload_b64,
+            proof="",
+        )
+        frame.proof = self._proof(frame)
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(peer.host, peer.port),
+                timeout=5,
+            )
+            writer.write(frame.to_bytes())
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), timeout=10)
+            writer.close()
+            await writer.wait_closed()
+
+            if not line:
+                return {"error": "no response from peer"}
+            resp = P2PFrame.from_bytes(line)
+            if resp is None:
+                return {"error": "invalid response frame"}
+            if not self._is_allowed(resp.origin_id) or not self._verify(resp):
+                return {"error": "response verification failed"}
+            if not self._timestamp_fresh(resp.timestamp_ms) or not self._nonce_fresh(resp.nonce_b64):
+                return {"error": "stale or replayed response"}
+            resp_plaintext = self._decrypt(resp.nonce_b64, resp.payload_b64)
+            if resp_plaintext is None:
+                return {"error": "could not decrypt response"}
+            packet = json.loads(resp_plaintext.decode())
+            if resp.frame_type == "error":
+                return {"error": packet.get("error", "peer returned an error")}
+            if resp.frame_type != "pull_manifest":
+                return {"error": f"unexpected response type: {resp.frame_type}"}
+
+            manifest = packet.get("manifest")
+            if manifest and isinstance(manifest, dict):
+                peername = writer.get_extra_info('peername')
+                peer_host = peername[0] if peername and len(peername) > 0 else ""
+                remote_peer_id = f"{resp.origin_id}@{peer_host}" if peer_host else resp.origin_id
+                self._remote_models.setdefault(remote_peer_id, []).append(manifest)
+            return packet
+        except Exception as e:  # noqa: BLE001 - catch-all wrapper
+            return {"error": f"pull failed: {e}"}
 
     def send_adapter_sync(self, peer_origin_id: str, adapter_name: str, adapters_dir: Path) -> str:
         """Sync a LoRA adapter directory to a peer over the existing P2P TCP sync port."""
