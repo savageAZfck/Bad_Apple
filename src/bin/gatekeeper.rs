@@ -5,7 +5,7 @@ use bad_apple::automation_cage::{
 use bad_apple::bad_apple_ipc::{
     client_proof, load_slicks_secret, now_unix_ms, random_nonce, read_frame, server_proof,
     socket_path, validate_request, verify_client_proof, verify_server_proof, ClientFrame,
-    ServerFrame, MAX_FRAME_BYTES, SLICKS_VERSION,
+    ServerFrame, MAX_FRAME_BYTES, SLICKS_VERSION, SLICKS_VERSION_2,
 };
 use bad_apple::tensor_brain::{text_to_grounded_embedding, CandleBrain};
 use bad_apple::wasm_cage::WasmCage;
@@ -475,6 +475,7 @@ fn forward_to_mlx(
         version: SLICKS_VERSION,
         timestamp_ms,
         client_nonce: client_nonce.clone(),
+        client_pubkey: None,
     };
     write_frame(&mut mlx_stream, &hello)?;
 
@@ -485,6 +486,7 @@ fn forward_to_mlx(
             version,
             server_nonce,
             proof,
+            server_pubkey: _,
         } if version == SLICKS_VERSION => (server_nonce, proof),
         ServerFrame::Error { message } => bail!("MLX backend rejected handshake: {message}"),
         _ => bail!("MLX backend returned an invalid SLICKS challenge"),
@@ -510,6 +512,7 @@ fn forward_to_mlx(
         prompt: prompt.to_string(),
         max_new_tokens,
         proof,
+        client_pubkey: None,
     };
     write_frame(&mut mlx_stream, &execute)?;
 
@@ -539,6 +542,76 @@ fn forward_to_mlx(
     }
 }
 
+/// Transparent v2 proxy: the gatekeeper does not hold a Secure Enclave key, so it
+/// forwards the end-to-end handshake between the client and the MLX daemon. It still
+/// applies automation-cage / wasm post-processing to the final response.
+fn forward_v2_to_mlx(
+    client_writer: &mut UnixStream,
+    client_reader: &mut BufReader<UnixStream>,
+    hello: ClientFrame,
+    cage: &AutomationCage,
+) -> Result<()> {
+    let mlx_path = std::env::var_os("BADAPPLE_MLX_SOCKET_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(MLX_SOCKET_PATH));
+    let mut mlx_stream =
+        UnixStream::connect(&mlx_path).context("unable to connect to MLX daemon for v2 proxy")?;
+    mlx_stream.set_read_timeout(Some(Duration::from_secs(900)))?;
+    mlx_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+
+    let mut mlx_reader = BufReader::new(mlx_stream.try_clone()?);
+
+    // Client Hello -> MLX
+    write_frame(&mut mlx_stream, &hello)?;
+
+    // MLX Challenge -> Client
+    let challenge: ServerFrame = read_frame(&mut mlx_reader)?;
+    match challenge {
+        ServerFrame::Challenge { .. } | ServerFrame::Error { .. } => {
+            write_frame(client_writer, &challenge)?
+        }
+        _ => bail!("MLX daemon returned an invalid v2 challenge"),
+    }
+
+    // Client Execute -> MLX
+    let execute: ClientFrame = read_frame(client_reader)?;
+    if !matches!(execute, ClientFrame::Execute { version, .. } if version == SLICKS_VERSION_2) {
+        write_frame(
+            client_writer,
+            &ServerFrame::Error {
+                message: "invalid v2 execute frame".to_string(),
+            },
+        )?;
+        bail!("client sent an invalid v2 execute frame");
+    }
+    write_frame(&mut mlx_stream, &execute)?;
+
+    // Stream MLX frames back to the client, post-processing Done text.
+    let mut accepted = false;
+    loop {
+        let frame: ServerFrame = read_frame(&mut mlx_reader)?;
+        match frame {
+            ServerFrame::Accepted => {
+                accepted = true;
+                write_frame(client_writer, &ServerFrame::Accepted)?;
+            }
+            ServerFrame::Token { text } if accepted => {
+                write_frame(client_writer, &ServerFrame::Token { text })?;
+            }
+            ServerFrame::Done { text, metrics } if accepted => {
+                let text = post_process_response(&text, cage);
+                write_frame(client_writer, &ServerFrame::Done { text, metrics })?;
+                return Ok(());
+            }
+            ServerFrame::Error { message } => {
+                write_frame(client_writer, &ServerFrame::Error { message })?;
+                return Ok(());
+            }
+            _ => bail!("MLX daemon returned an out-of-order v2 frame"),
+        }
+    }
+}
+
 fn write_frame<W: Write, T: serde::Serialize>(writer: &mut W, value: &T) -> Result<()> {
     let mut frame = serde_json::to_vec(value)?;
     if frame.len() > MAX_FRAME_BYTES {
@@ -564,12 +637,15 @@ fn handle_client(
 
     // 1) Hello
     let hello: ClientFrame = read_frame(&mut reader)?;
-    let (client_ts, client_nonce) = match &hello {
+    let (client_ts, client_nonce, client_version) = match &hello {
         ClientFrame::Hello {
             version,
             timestamp_ms,
             client_nonce,
-        } if *version == SLICKS_VERSION => (timestamp_ms, client_nonce.clone()),
+            client_pubkey: _,
+        } if *version == SLICKS_VERSION || *version == SLICKS_VERSION_2 => {
+            (*timestamp_ms, client_nonce.clone(), *version)
+        }
         _ => {
             write_frame(
                 &mut stream,
@@ -581,7 +657,7 @@ fn handle_client(
         }
     };
 
-    if !bad_apple::bad_apple_ipc::timestamp_is_fresh(*client_ts) {
+    if !bad_apple::bad_apple_ipc::timestamp_is_fresh(client_ts) {
         write_frame(
             &mut stream,
             &ServerFrame::Error {
@@ -591,16 +667,22 @@ fn handle_client(
         bail!("stale hello timestamp");
     }
 
+    // v2 is end-to-end proxied; the gatekeeper does not hold a Secure Enclave key.
+    if client_version == SLICKS_VERSION_2 {
+        return forward_v2_to_mlx(&mut stream, &mut reader, hello, cage);
+    }
+
     // 2) Challenge
     let _timestamp_ms = now_unix_ms()?;
     let server_nonce = random_nonce();
-    let proof = server_proof(&secret, *client_ts, &client_nonce, &server_nonce);
+    let proof = server_proof(&secret, client_ts, &client_nonce, &server_nonce);
     write_frame(
         &mut stream,
         &ServerFrame::Challenge {
             version: SLICKS_VERSION,
             server_nonce: server_nonce.clone(),
             proof,
+            server_pubkey: None,
         },
     )?;
 
@@ -615,6 +697,7 @@ fn handle_client(
             prompt,
             max_new_tokens,
             proof,
+            client_pubkey: _,
         } if version == SLICKS_VERSION
             && exec_client_nonce == client_nonce
             && exec_server_nonce == server_nonce =>

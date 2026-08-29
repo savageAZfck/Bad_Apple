@@ -1,7 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use hmac::{Hmac, KeyInit, Mac};
 use rand::{rngs::OsRng, RngCore};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,7 +13,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const SLICKS_VERSION: u8 = 1;
+pub const SLICKS_VERSION_2: u8 = 2;
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/badapple/substrate.sock";
+pub const DEFAULT_MLX_SOCKET_PATH: &str = "/var/run/badapple/substrate_mlx.sock";
+pub const DEFAULT_IDENTITY_AGENT_SOCKET: &str = "/var/run/badapple/identity.sock";
 pub const DEFAULT_KEY_PATH: &str = "/var/lib/bad_apple/slicks.key";
 pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
 pub const MAX_NEW_TOKENS: usize = 4096;
@@ -25,6 +30,8 @@ pub enum ClientFrame {
         version: u8,
         timestamp_ms: u64,
         client_nonce: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_pubkey: Option<String>,
     },
     Execute {
         version: u8,
@@ -34,6 +41,8 @@ pub enum ClientFrame {
         prompt: String,
         max_new_tokens: usize,
         proof: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_pubkey: Option<String>,
     },
 }
 
@@ -53,6 +62,8 @@ pub enum ServerFrame {
         version: u8,
         server_nonce: String,
         proof: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_pubkey: Option<String>,
     },
     Accepted,
     Token {
@@ -72,6 +83,18 @@ pub fn socket_path() -> PathBuf {
     std::env::var_os("BADAPPLE_SOCKET_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH))
+}
+
+pub fn mlx_socket_path() -> PathBuf {
+    std::env::var_os("BADAPPLE_MLX_SOCKET_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MLX_SOCKET_PATH))
+}
+
+pub fn identity_agent_socket_path() -> PathBuf {
+    std::env::var_os("BADAPPLE_IDENTITY_AGENT_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_IDENTITY_AGENT_SOCKET))
 }
 
 pub fn key_path() -> PathBuf {
@@ -207,6 +230,272 @@ pub fn validate_request(prompt: &str, max_new_tokens: usize) -> Result<()> {
     Ok(())
 }
 
+fn v2_server_material(timestamp_ms: u64, client_nonce: &str, server_nonce: &str) -> String {
+    format!(
+        "BADAPPLE-SLICKS/{SLICKS_VERSION_2}|server|{timestamp_ms}|{client_nonce}|{server_nonce}"
+    )
+}
+
+fn v2_client_material(
+    timestamp_ms: u64,
+    client_nonce: &str,
+    server_nonce: &str,
+    prompt: &str,
+    max_new_tokens: usize,
+) -> String {
+    let prompt_hash = Sha256::digest(prompt.as_bytes());
+    format!(
+        "BADAPPLE-SLICKS/{SLICKS_VERSION_2}|client|{timestamp_ms}|{client_nonce}|{server_nonce}|{max_new_tokens}|{}",
+        hex_encode(&prompt_hash)
+    )
+}
+
+/// Client to the long-lived identity agent that owns the Secure Enclave context.
+pub struct IdentityAgentClient {
+    socket_path: PathBuf,
+}
+
+impl IdentityAgentClient {
+    pub fn new() -> Self {
+        Self {
+            socket_path: identity_agent_socket_path(),
+        }
+    }
+
+    pub fn from_path<P: Into<PathBuf>>(path: P) -> Self {
+        Self {
+            socket_path: path.into(),
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.socket_path.exists()
+    }
+
+    fn call(&self, request: Value) -> Result<Value> {
+        if !self.is_available() {
+            bail!("identity agent socket not found");
+        }
+        let stream = UnixStream::connect(&self.socket_path)
+            .context("unable to connect to identity agent")?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        let mut writer = stream.try_clone()?;
+        let mut reader = BufReader::new(stream);
+        let mut frame = serde_json::to_vec(&request)?;
+        frame.push(b'\n');
+        writer.write_all(&frame)?;
+        writer.flush()?;
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            bail!("identity agent closed the connection");
+        }
+        serde_json::from_str(&line).context("invalid identity agent response")
+    }
+
+    pub fn public_key(&self) -> Result<String> {
+        let resp = self.call(serde_json::json!({"command": "public_key"}))?;
+        if !resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            bail!(
+                "identity agent public_key failed: {}",
+                resp.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            );
+        }
+        resp.get("public_key")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .context("identity agent did not return a public key")
+    }
+
+    pub fn sign(&self, message_b64: &str) -> Result<String> {
+        let resp = self.call(serde_json::json!({
+            "command": "sign",
+            "message_b64": message_b64,
+        }))?;
+        if !resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            bail!(
+                "identity agent sign failed: {}",
+                resp.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            );
+        }
+        resp.get("signature")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .context("identity agent did not return a signature")
+    }
+
+    pub fn verify(&self, message_b64: &str, signature: &str, public_key: &str) -> Result<bool> {
+        let resp = self.call(serde_json::json!({
+            "command": "verify",
+            "message_b64": message_b64,
+            "signature": signature,
+            "public_key": public_key,
+        }))?;
+        if !resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            bail!(
+                "identity agent verify failed: {}",
+                resp.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            );
+        }
+        Ok(resp.get("valid").and_then(|v| v.as_bool()).unwrap_or(false))
+    }
+
+    pub fn status(&self) -> Result<Value> {
+        self.call(serde_json::json!({"command": "status"}))
+    }
+}
+
+pub fn v2_client_proof(
+    agent: &IdentityAgentClient,
+    timestamp_ms: u64,
+    client_nonce: &str,
+    server_nonce: &str,
+    prompt: &str,
+    max_new_tokens: usize,
+) -> Result<String> {
+    let material = v2_client_material(
+        timestamp_ms,
+        client_nonce,
+        server_nonce,
+        prompt,
+        max_new_tokens,
+    );
+    let material_b64 = general_purpose::STANDARD.encode(material.as_bytes());
+    agent.sign(&material_b64)
+}
+
+pub fn v2_verify_server_proof(
+    agent: &IdentityAgentClient,
+    timestamp_ms: u64,
+    client_nonce: &str,
+    server_nonce: &str,
+    proof: &str,
+    server_pubkey: &str,
+) -> Result<bool> {
+    let material = v2_server_material(timestamp_ms, client_nonce, server_nonce);
+    let material_b64 = general_purpose::STANDARD.encode(material.as_bytes());
+    agent.verify(&material_b64, proof, server_pubkey)
+}
+
+enum SlicksMode {
+    V1(Vec<u8>),
+    V2 {
+        agent: IdentityAgentClient,
+        client_pubkey: String,
+    },
+}
+
+fn resolve_slicks_mode() -> Result<SlicksMode> {
+    let agent = IdentityAgentClient::new();
+    let agent_pubkey = if agent.is_available() {
+        agent.public_key().ok()
+    } else {
+        None
+    };
+
+    match std::env::var("BADAPPLE_SLICKS2").as_deref() {
+        Ok("0" | "false" | "no") => {
+            return Ok(SlicksMode::V1(load_slicks_secret()?));
+        }
+        Ok("1" | "true" | "yes") | Ok(_) => {
+            let client_pubkey =
+                agent_pubkey.context("BADAPPLE_SLICKS2=1 requires a running identity agent")?;
+            return Ok(SlicksMode::V2 {
+                agent,
+                client_pubkey,
+            });
+        }
+        Err(_) => {
+            // Auto: prefer v2 when the identity agent is present, otherwise v1.
+            if let Some(client_pubkey) = agent_pubkey {
+                return Ok(SlicksMode::V2 {
+                    agent,
+                    client_pubkey,
+                });
+            }
+            return Ok(SlicksMode::V1(load_slicks_secret()?));
+        }
+    }
+}
+
+fn build_hello(mode: &SlicksMode, timestamp_ms: u64, client_nonce: String) -> Result<ClientFrame> {
+    match mode {
+        SlicksMode::V1(_) => Ok(ClientFrame::Hello {
+            version: SLICKS_VERSION,
+            timestamp_ms,
+            client_nonce,
+            client_pubkey: None,
+        }),
+        SlicksMode::V2 { client_pubkey, .. } => Ok(ClientFrame::Hello {
+            version: SLICKS_VERSION_2,
+            timestamp_ms,
+            client_nonce,
+            client_pubkey: Some(client_pubkey.clone()),
+        }),
+    }
+}
+
+fn build_execute(
+    mode: &SlicksMode,
+    timestamp_ms: u64,
+    client_nonce: String,
+    server_nonce: String,
+    prompt: String,
+    max_new_tokens: usize,
+) -> Result<ClientFrame> {
+    match mode {
+        SlicksMode::V1(secret) => {
+            let proof = client_proof(
+                secret,
+                timestamp_ms,
+                &client_nonce,
+                &server_nonce,
+                &prompt,
+                max_new_tokens,
+            );
+            Ok(ClientFrame::Execute {
+                version: SLICKS_VERSION,
+                timestamp_ms,
+                client_nonce,
+                server_nonce,
+                prompt,
+                max_new_tokens,
+                proof,
+                client_pubkey: None,
+            })
+        }
+        SlicksMode::V2 {
+            agent,
+            client_pubkey,
+        } => {
+            let proof = v2_client_proof(
+                agent,
+                timestamp_ms,
+                &client_nonce,
+                &server_nonce,
+                &prompt,
+                max_new_tokens,
+            )?;
+            Ok(ClientFrame::Execute {
+                version: SLICKS_VERSION_2,
+                timestamp_ms,
+                client_nonce,
+                server_nonce,
+                prompt,
+                max_new_tokens,
+                proof,
+                client_pubkey: Some(client_pubkey.clone()),
+            })
+        }
+    }
+}
+
 pub fn stream_query<F>(prompt: &str, max_new_tokens: usize, on_token: F) -> Result<String>
 where
     F: FnMut(&str),
@@ -223,7 +512,7 @@ where
     F: FnMut(&str),
 {
     validate_request(prompt, max_new_tokens)?;
-    let secret = load_slicks_secret()?;
+    let mode = resolve_slicks_mode()?;
     let timestamp_ms = now_unix_ms()?;
     let client_nonce = random_nonce();
     let mut stream =
@@ -232,49 +521,62 @@ where
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
 
-    write_frame(
-        &mut stream,
-        &ClientFrame::Hello {
-            version: SLICKS_VERSION,
-            timestamp_ms,
-            client_nonce: client_nonce.clone(),
-        },
-    )?;
+    let hello = build_hello(&mode, timestamp_ms, client_nonce.clone())?;
+    write_frame(&mut stream, &hello)?;
 
     let challenge: ServerFrame = read_frame(&mut reader)?;
-    let (server_nonce, proof) = match challenge {
-        ServerFrame::Challenge {
-            version,
-            server_nonce,
-            proof,
-        } if version == SLICKS_VERSION && nonce_is_valid(&server_nonce) => (server_nonce, proof),
-        ServerFrame::Error { message } => bail!("Bad Apple rejected the handshake: {message}"),
+    let server_nonce = match (challenge, &mode) {
+        (
+            ServerFrame::Challenge {
+                version,
+                server_nonce,
+                proof,
+                server_pubkey: _,
+            },
+            SlicksMode::V1(secret),
+        ) if version == SLICKS_VERSION && nonce_is_valid(&server_nonce) => {
+            if !verify_server_proof(secret, timestamp_ms, &client_nonce, &server_nonce, &proof) {
+                bail!("Bad Apple daemon failed SLICKS server authentication");
+            }
+            server_nonce
+        }
+        (
+            ServerFrame::Challenge {
+                version,
+                server_nonce,
+                proof,
+                server_pubkey,
+            },
+            SlicksMode::V2 { agent, .. },
+        ) if version == SLICKS_VERSION_2 && nonce_is_valid(&server_nonce) => {
+            let server_pubkey = server_pubkey
+                .as_ref()
+                .context("SLICKS v2 challenge missing server public key")?;
+            if !v2_verify_server_proof(
+                agent,
+                timestamp_ms,
+                &client_nonce,
+                &server_nonce,
+                &proof,
+                server_pubkey,
+            )? {
+                bail!("Bad Apple daemon failed SLICKS v2 server authentication");
+            }
+            server_nonce
+        }
+        (ServerFrame::Error { message }, _) => bail!("Bad Apple rejected the handshake: {message}"),
         _ => bail!("Bad Apple returned an invalid SLICKS challenge"),
     };
-    if !verify_server_proof(&secret, timestamp_ms, &client_nonce, &server_nonce, &proof) {
-        bail!("Bad Apple daemon failed SLICKS server authentication");
-    }
 
-    let proof = client_proof(
-        &secret,
+    let execute = build_execute(
+        &mode,
         timestamp_ms,
-        &client_nonce,
-        &server_nonce,
-        prompt,
+        client_nonce,
+        server_nonce,
+        prompt.to_string(),
         max_new_tokens,
-    );
-    write_frame(
-        &mut stream,
-        &ClientFrame::Execute {
-            version: SLICKS_VERSION,
-            timestamp_ms,
-            client_nonce,
-            server_nonce,
-            prompt: prompt.to_string(),
-            max_new_tokens,
-            proof,
-        },
     )?;
+    write_frame(&mut stream, &execute)?;
 
     let mut accepted = false;
     loop {

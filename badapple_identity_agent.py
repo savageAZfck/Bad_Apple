@@ -120,6 +120,8 @@ class IdentityAgent:
             self._send(conn, self._public_key())
         elif command == "sign":
             self._send(conn, self._sign(request))
+        elif command == "verify":
+            self._send(conn, self._verify(request))
         elif command == "status":
             self._send(conn, self._status())
         elif command == "biometric_gate":
@@ -148,6 +150,29 @@ class IdentityAgent:
                 return {"ok": True, "signature": signature}
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": str(e)}
+
+    def _verify(self, request: dict[str, Any]) -> dict[str, Any]:
+        message_b64 = request.get("message_b64", "")
+        signature_b64 = request.get("signature", "")
+        public_key_b64 = request.get("public_key", "")
+        try:
+            message = base64.b64decode(message_b64)
+            signature = base64.b64decode(signature_b64)
+            public_key = base64.b64decode(public_key_b64)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"invalid base64: {e}"}
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.exceptions import InvalidSignature
+
+            pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), public_key)
+            pub.verify(signature, message, ec.ECDSA(hashes.SHA256()))
+            return {"ok": True, "valid": True}
+        except InvalidSignature:
+            return {"ok": True, "valid": False}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
 
     def _status(self) -> dict[str, Any]:
         try:

@@ -502,7 +502,9 @@ fn run_doctor() -> Result<()> {
     // Sockets
     let _ = writeln!(report, "\n[sockets]");
     for sock in [
+        "/var/run/badapple/substrate.sock",
         "/var/run/badapple/substrate_mlx.sock",
+        "/var/run/badapple/identity.sock",
         "/var/run/badapple/mcp.sock",
         "/var/run/badapple/aqua_helper.sock",
         "/tmp/badapple_tts.sock",
@@ -512,7 +514,11 @@ fn run_doctor() -> Result<()> {
             report,
             "{}: {}",
             sock,
-            if p.is_file() { "present" } else { "missing" }
+            if std::fs::metadata(&p).is_ok() {
+                "present"
+            } else {
+                "missing"
+            }
         );
     }
 
