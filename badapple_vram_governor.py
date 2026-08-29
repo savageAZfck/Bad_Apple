@@ -39,6 +39,24 @@ def can_fit_model(memory_gb: float, headroom: float = 0.15) -> tuple[bool, float
     return available >= needed, available
 
 
+def can_fit_model_message(memory_gb: float, headroom: float = 0.15) -> tuple[bool, float, str]:
+    """Return (ok, available_gb, message) with a human-friendly memory explanation."""
+    ok, available = can_fit_model(memory_gb, headroom)
+    needed = memory_gb * (1.0 + headroom)
+    if ok:
+        message = (
+            f"This Mac has enough free memory to load the model safely "
+            f"({available:.2f} GB available, {needed:.2f} GB needed)."
+        )
+    else:
+        message = (
+            f"This Mac does not have enough free memory to load the model safely. "
+            f"{needed:.2f} GB is needed; only {available:.2f} GB is available. "
+            f"Try closing other apps, unloading optional models, or choosing a smaller model."
+        )
+    return ok, available, message
+
+
 def memory_pressure() -> str:
     """Return 'low', 'normal', or 'critical' based on physical memory pressure."""
     try:

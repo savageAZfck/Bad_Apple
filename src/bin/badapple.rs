@@ -76,7 +76,7 @@ fn main() -> Result<()> {
     }
 
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|models|pull <peer_id> <model_id>>");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
     } else {
         prompt_parts.join(" ")
     };
@@ -667,7 +667,7 @@ fn run_model_subcommand(args: &[String]) -> Result<()> {
 
 fn run_p2p_subcommand(args: &[String]) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: badapple p2p <peers|sync|models|pull <peer_id> <model_id>>");
+        bail!("usage: badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
     }
     let sub = args[0].as_str();
     let mut params = serde_json::Map::new();
@@ -694,6 +694,33 @@ fn run_p2p_subcommand(args: &[String]) -> Result<()> {
             let result = call_agent("p2p_pull_model", Some(Value::Object(params)), MAX_TOKENS)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        "send" => {
+            if args.len() < 3 {
+                bail!("usage: badapple p2p send <peer_id> <model_id>");
+            }
+            params.insert("peer_id".to_string(), Value::String(args[1].clone()));
+            params.insert("model_id".to_string(), Value::String(args[2].clone()));
+            let result = call_agent("p2p_send_model", Some(Value::Object(params)), MAX_TOKENS)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "receive" => {
+            if args.len() >= 3 {
+                params.insert("peer_id".to_string(), Value::String(args[1].clone()));
+                params.insert("model_id".to_string(), Value::String(args[2].clone()));
+            } else if args.len() == 2 {
+                bail!("usage: badapple p2p receive [peer_id model_id]");
+            }
+            let result = call_agent(
+                "p2p_receive_model",
+                if params.is_empty() {
+                    None
+                } else {
+                    Some(Value::Object(params))
+                },
+                MAX_TOKENS,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         _ => bail!("unknown p2p subcommand: {sub}"),
     }
     Ok(())
@@ -702,7 +729,7 @@ fn run_p2p_subcommand(args: &[String]) -> Result<()> {
 fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
-         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>>\n\n\
+         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n\n\
          Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)"
     );

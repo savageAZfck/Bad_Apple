@@ -98,10 +98,10 @@ class ModelProvenanceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prov.record("../etc/passwd", "repo/m", "/tmp")
 
-    def test_model_id_with_slash_is_rejected(self) -> None:
+    def test_model_id_with_slash_is_encoded(self) -> None:
         prov = ModelProvenance(Path(self.tmpdir))
-        with self.assertRaises(ValueError):
-            prov._manifest_path("a/b")
+        path = prov._manifest_path("a/b")
+        self.assertEqual(path.name, "a--b.json")
 
     def test_manifest_round_trip(self) -> None:
         prov = ModelProvenance(Path(self.tmpdir))

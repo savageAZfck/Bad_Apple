@@ -37,6 +37,10 @@ WHITELIST = frozenset({
     "p2p_pull_model",
     "remote_models",
     "pull_model_manifest",
+    "p2p_send_model",
+    "p2p_receive_model",
+    "send_model",
+    "receive_model",
 })
 
 
@@ -157,6 +161,20 @@ class P2PActor(badapple_actor.Actor):
                     self._daemon.pull_model_manifest(str(peer_id), str(model_id)),
                     timeout=60.0,
                 )
+            if method in ("p2p_send_model", "send_model"):
+                peer_id = args[0] if args else kwargs.get("peer_id", "")
+                model_id = args[1] if len(args) > 1 else kwargs.get("model_id", "")
+                return self._schedule(
+                    self._daemon.send_model(str(peer_id), str(model_id)),
+                    timeout=600.0,
+                )
+            if method in ("p2p_receive_model", "receive_model"):
+                peer_id = args[0] if args else kwargs.get("peer_id", "")
+                model_id = args[1] if len(args) > 1 else kwargs.get("model_id", "")
+                return self._schedule(
+                    self._daemon.receive_model(str(peer_id), str(model_id)),
+                    timeout=600.0,
+                )
             target = getattr(self._daemon, method, None)
             if target is None:
                 return {"error": f"method {method!r} not found"}
@@ -177,8 +195,10 @@ class P2PActorProxy:
         if name not in WHITELIST and not name.startswith("_"):
             raise AttributeError(f"P2PActorProxy has no attribute {name!r}")
 
+        timeout = 600.0 if name in ("send_model", "receive_model", "p2p_send_model", "p2p_receive_model") else 60.0
+
         def _call(*args: Any, **kwargs: Any) -> Any:
             payload = {"method": name, "args": list(args), "kwargs": kwargs}
-            return self._actor.ask(payload, timeout=60.0)
+            return self._actor.ask(payload, timeout=timeout)
 
         return _call

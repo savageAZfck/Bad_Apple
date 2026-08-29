@@ -3369,21 +3369,26 @@ class MLXServer:
     def admit_model(self, model_ref: str, auto_unload: bool = True) -> dict[str, Any]:
         """Check whether the Mac can fit the requested model; optionally free RAM."""
         memory_gb = self._memory_for_model(model_ref)
-        ok, available_gb = badapple_vram_governor.can_fit_model(memory_gb)
+        ok, available_gb, message = badapple_vram_governor.can_fit_model_message(memory_gb)
         if ok:
-            return {"ok": True, "needed_gb": round(memory_gb, 2), "available_gb": round(available_gb, 2)}
+            return {
+                "ok": True,
+                "needed_gb": round(memory_gb, 2),
+                "available_gb": round(available_gb, 2),
+                "message": message,
+            }
         if auto_unload:
             self.unload_model("all")
-            ok, available_gb = badapple_vram_governor.can_fit_model(memory_gb)
+            ok, available_gb, message = badapple_vram_governor.can_fit_model_message(memory_gb)
         if not ok:
             return {
                 "ok": False,
                 "needed_gb": round(memory_gb, 2),
                 "available_gb": round(available_gb, 2),
                 "pressure": badapple_vram_governor.memory_pressure(),
-                "message": f"Not enough memory for {model_ref} ({round(memory_gb, 2)} GB needed).",
+                "message": message,
             }
-        return {"ok": True, "needed_gb": round(memory_gb, 2), "available_gb": round(available_gb, 2), "unloaded_optional": True}
+        return {"ok": True, "needed_gb": round(memory_gb, 2), "available_gb": round(available_gb, 2), "unloaded_optional": True, "message": message}
 
     def _set_airgap(self, enabled: bool) -> None:
         """Enable or disable air-gap mode: offline weights, blocked network MCP."""
@@ -3435,13 +3440,18 @@ class MLXServer:
         full model weights in memory at once.  Returns a status string.
         """
         if not self._validate_model_ref(model_ref):
-            return f"Invalid model reference: {model_ref}"
+            return f"Bad Apple could not find {model_ref}. Run `badapple model scan` to look for it."
         current = self.model_registry.current()
         if self.model is not None and current and (current == model_ref or current.lower().endswith(model_ref.lower().split("/")[-1])):
             return f"{model_ref} is already the active model."
         admission = self.admit_model(model_ref, auto_unload=True)
         if not admission["ok"]:
-            return f"Model refused: {admission['message']}"
+            needed = admission.get("needed_gb", 0.0)
+            available = admission.get("available_gb", 0.0)
+            return (
+                f"{model_ref} needs {needed:.2f} GB of free memory, but your Mac only has "
+                f"{available:.2f} GB free. Close other apps or pick a smaller model."
+            )
 
         import gc
 
@@ -3465,7 +3475,7 @@ class MLXServer:
             self.model, self.tokenizer = load(model_ref)
             print("[model_registry] model loaded.", flush=True)
         except Exception as e:  # noqa: BLE001 - catch-all wrapper
-            return f"Error loading {model_ref}: {e}"
+            return f"Bad Apple could not load {model_ref}: {e}. Make sure the model is downloaded and try `badapple model scan`."
 
         self.model_registry.set_current(model_ref)
         self.mlx_device = mx.default_device()
@@ -3473,7 +3483,7 @@ class MLXServer:
         for profile in self.model_manager.list_profiles():
             if profile.repo_id == model_ref or profile.local_path == model_ref or (profile.id and model_ref.endswith(profile.repo_id.rsplit("/", 1)[-1])):
                 self.model_manager.mark_loaded(profile.id)
-        return f"Loaded {model_ref}. Current model updated."
+        return f"{model_ref} is ready."
 
     def recommend_model(self, query: str = "") -> dict[str, Any]:
         """Recommend a model for the current memory budget or a specific query."""
@@ -3492,14 +3502,14 @@ class MLXServer:
     def switch_main_model(self, model_ref: str) -> str:
         """Download if missing and load a new main LLM."""
         if not self._validate_model_ref(model_ref):
-            return f"Invalid model reference: {model_ref}"
+            return f"Bad Apple does not recognize {model_ref}. Run `badapple model scan` to find it."
         # Try to resolve to a repo_id from a model id.
         for profile in self.model_manager.list_profiles():
             if profile.id == model_ref or profile.repo_id == model_ref:
                 if not self.model_manager.allow_downloads:
                     state = self.model_manager.ensure_cached(profile.id, download=False)
                     if state.get("status") not in ("cached", "loaded"):
-                        return f"Model {model_ref} is not cached. Enable downloads or pre-download it."
+                        return f"{model_ref} is not on this Mac. Download it first or enable online downloads."
                 else:
                     self.model_manager.ensure_cached(profile.id, download=True)
                     self.model_manager.wait_for_download(profile.id, timeout=600)
@@ -4305,14 +4315,14 @@ class MLXServer:
         if method == "p2p_peers":
             daemon = badapple_p2p.get_p2p_daemon()
             if daemon is None:
-                await _respond(req_id, None, "P2P daemon is not running")
+                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
                 return
             await _respond(req_id, {"peers_summary": daemon.get_peers()})
             return
         if method == "p2p_sync":
             daemon = badapple_p2p.get_p2p_daemon()
             if daemon is None:
-                await _respond(req_id, None, "P2P daemon is not running")
+                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
                 return
             try:
                 result = await asyncio.to_thread(daemon.sync_memory)
@@ -4323,7 +4333,7 @@ class MLXServer:
             return
         if method == "p2p_models":
             if self.p2p is None:
-                await _respond(req_id, None, "P2P is not available")
+                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
                 return
             try:
                 result = await asyncio.to_thread(self.p2p.remote_models)
@@ -4334,17 +4344,46 @@ class MLXServer:
             return
         if method == "p2p_pull_model":
             if self.p2p is None:
-                await _respond(req_id, None, "P2P is not available")
+                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
                 return
             peer_id = str(params.get("peer_id", ""))
             model_id = str(params.get("model_id", ""))
             if not peer_id or not model_id:
-                await _respond(req_id, None, "peer_id and model_id are required")
+                await _respond(req_id, None, "Both a peer and a model name are needed to pull a model.")
                 return
             try:
                 result = await asyncio.to_thread(self.p2p.pull_model_manifest, peer_id, model_id)
             except Exception as e:  # noqa: BLE001 - catch-all wrapper
                 await _respond(req_id, None, f"P2P pull failed: {e}")
+                return
+            await _respond(req_id, result)
+            return
+        if method == "p2p_send_model":
+            if self.p2p is None:
+                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
+                return
+            peer_id = str(params.get("peer_id", ""))
+            model_id = str(params.get("model_id", ""))
+            if not peer_id or not model_id:
+                await _respond(req_id, None, "Both a peer and a model name are needed to send a model.")
+                return
+            try:
+                result = await asyncio.to_thread(self.p2p.send_model, peer_id, model_id)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                await _respond(req_id, None, f"P2P send failed: {e}")
+                return
+            await _respond(req_id, {"send_status": result})
+            return
+        if method == "p2p_receive_model":
+            if self.p2p is None:
+                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
+                return
+            peer_id = str(params.get("peer_id", ""))
+            model_id = str(params.get("model_id", ""))
+            try:
+                result = await asyncio.to_thread(self.p2p.receive_model, peer_id, model_id)
+            except Exception as e:  # noqa: BLE001 - catch-all wrapper
+                await _respond(req_id, None, f"P2P receive failed: {e}")
                 return
             await _respond(req_id, result)
             return

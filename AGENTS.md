@@ -335,9 +335,13 @@ In `badapple_mlx_server.py`:
 - `badapple_vram_governor.py` tracks physical and MLX memory pressure and refuses to load a model that will not fit. `admit_model` and `switch_main_model` run in the MLX executor; the dashboard `/models` page can switch, pre-load, and query recommendations.
 - Natural-language tool router in `badapple_tool_router.py` routes common requests directly to tools without waiting for the 9B.
 - Web chat UI at `http://127.0.0.1:8787/chat`; REST endpoint `POST /api/chat`.
-- P2P model manifest gossip in `badapple_p2p.py` with Rust CLI:
+- P2P model manifest gossip and chunked file transfer in `badapple_p2p.py` with Rust CLI:
   - `badapple p2p peers`, `badapple p2p sync`, `badapple p2p models`, `badapple p2p pull <peer_id> <model_id>`
+  - `badapple p2p send <peer_id> <model_id>`, `badapple p2p receive [peer_id] [model_id]`
 - P2P is off by default. Enable with `agent_client.py p2p on` or the dashboard; turn off for `cert_suite.py`.
+- Consumer install: double-click `Install Bad Apple` from the release zip, or run `src/platform/apple_desktop/install_badapple.sh`.
+- First-run onboarding and plain-English Status window in `BadAppleMenuBar.swift`.
+- Plain-English user-facing messages in `badapple_vram_governor.py`, `badapple_model_registry.py`, and `badapple_mlx_server.py`.
 
 ## Latest features (new)
 

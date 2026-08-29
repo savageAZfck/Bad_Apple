@@ -2624,6 +2624,173 @@ private final class BadAppleVoiceOnboarding {
     }
 }
 
+// MARK: - First-run onboarding
+
+/// First-run onboarding panel that explains Bad Apple, asks the user to finish
+/// platform setup, and points them to the help page.
+private final class BadAppleFirstRunOnboarding {
+    private var window: NSWindow?
+    var onInstall: (() -> Void)?
+    var onOpenChat: (() -> Void)?
+    var onOpenDashboard: (() -> Void)?
+    var onDismiss: (() -> Void)?
+
+    var isPlatformInstalled: Bool {
+        UserDefaults.standard.bool(forKey: "BadApplePlatformInstalled")
+            || (FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.mlx.plist")
+                && FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.gatekeeper.plist")
+                && FileManager.default.fileExists(atPath: "/var/run/badapple/substrate.sock"))
+    }
+
+    func showIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: "BadAppleFirstRunOnboarded") else { return }
+
+        if isPlatformInstalled {
+            showWelcomeBack()
+        } else {
+            showWelcome()
+        }
+    }
+
+    private func makeWindow(title: String, body: String, buttons: [(title: String, action: Selector, key: Bool)]) {
+        let size = NSSize(width: 520, height: 420)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        let w = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        w.backgroundColor = .clear
+        w.isReleasedWhenClosed = false
+        w.isOpaque = false
+        w.hasShadow = true
+        w.level = .statusBar
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+        visual.layer?.cornerRadius = 20
+        visual.layer?.borderWidth = 0.5
+        visual.layer?.borderColor = NSColor.systemGray.withAlphaComponent(0.3).cgColor
+
+        let logo = NSTextField(labelWithString: "🍎")
+        logo.font = .systemFont(ofSize: 48)
+        logo.alignment = .center
+        logo.textColor = .labelColor
+        logo.frame = NSRect(x: (size.width - 80) / 2, y: 300, width: 80, height: 56)
+
+        let titleField = NSTextField(labelWithString: title)
+        titleField.font = .systemFont(ofSize: 22, weight: .semibold)
+        titleField.alignment = .center
+        titleField.textColor = .labelColor
+        titleField.frame = NSRect(x: 0, y: 260, width: size.width, height: 32)
+
+        let bodyField = NSTextField(wrappingLabelWithString: body)
+        bodyField.font = .systemFont(ofSize: 14)
+        bodyField.textColor = .secondaryLabelColor
+        bodyField.alignment = .center
+        bodyField.frame = NSRect(x: 36, y: 100, width: size.width - 72, height: 140)
+
+        visual.addSubview(logo)
+        visual.addSubview(titleField)
+        visual.addSubview(bodyField)
+
+        let buttonWidth: CGFloat = 130
+        let buttonHeight: CGFloat = 32
+        let totalWidth = CGFloat(buttons.count) * buttonWidth + CGFloat(buttons.count - 1) * 16
+        var x = (size.width - totalWidth) / 2
+        for button in buttons {
+            let b = NSButton(title: button.title, target: self, action: button.action)
+            b.bezelStyle = .rounded
+            b.frame = NSRect(x: x, y: 30, width: buttonWidth, height: buttonHeight)
+            if button.key {
+                b.keyEquivalent = "\r"
+            }
+            visual.addSubview(b)
+            x += buttonWidth + 16
+        }
+
+        w.contentView = visual
+        window = w
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    private func showWelcome() {
+        let body = """
+        Bad Apple is a private AI that runs entirely on your Mac. It does not send your prompts to the cloud.
+
+        To finish setup, Bad Apple needs to install a small background helper. Your Mac will ask for your password.
+
+        You can chat from the menu bar, type in Terminal, or use your voice.
+        """
+        makeWindow(
+            title: "Welcome to Bad Apple",
+            body: body,
+            buttons: [
+                (title: "Install Now", action: #selector(installNow(_:)), key: true),
+                (title: "Later", action: #selector(dismiss(_:)), key: false),
+                (title: "Learn More", action: #selector(learnMore(_:)), key: false),
+            ]
+        )
+    }
+
+    private func showWelcomeBack() {
+        let body = """
+        Bad Apple is installed and ready. Everything runs on your Mac, so your prompts stay private.
+
+        You can start a chat, open the dashboard, or just type from the menu bar.
+        """
+        makeWindow(
+            title: "Welcome back",
+            body: body,
+            buttons: [
+                (title: "Open Chat", action: #selector(openChat(_:)), key: false),
+                (title: "Open Dashboard", action: #selector(openDashboard(_:)), key: false),
+                (title: "Done", action: #selector(dismiss(_:)), key: true),
+            ]
+        )
+    }
+
+    @objc private func dismiss(_ sender: NSButton) {
+        UserDefaults.standard.set(true, forKey: "BadAppleFirstRunOnboarded")
+        window?.orderOut(nil)
+        onDismiss?()
+    }
+
+    @objc private func installNow(_ sender: NSButton) {
+        UserDefaults.standard.set(true, forKey: "BadAppleFirstRunOnboarded")
+        window?.orderOut(nil)
+        onInstall?()
+    }
+
+    @objc private func openChat(_ sender: NSButton) {
+        UserDefaults.standard.set(true, forKey: "BadAppleFirstRunOnboarded")
+        window?.orderOut(nil)
+        onOpenChat?()
+    }
+
+    @objc private func openDashboard(_ sender: NSButton) {
+        UserDefaults.standard.set(true, forKey: "BadAppleFirstRunOnboarded")
+        window?.orderOut(nil)
+        onOpenDashboard?()
+    }
+
+    @objc private func learnMore(_ sender: NSButton) {
+        if let url = URL(string: "https://github.com/savageAZfck/Bad_Apple#readme") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
 // MARK: - Voice help window
 
 /// Cheat sheet of useful voice commands. Opened from Voice > Voice Help…
@@ -2976,6 +3143,117 @@ private final class BadAppleImagePlaygroundWindow: NSWindow, NSTextFieldDelegate
                 }
             }
         }
+    }
+}
+
+// MARK: - Status window
+
+private final class BadAppleStatusWindow: NSWindow {
+    private let textView = NSTextView()
+    private var timer: Timer?
+
+    struct Snapshot {
+        let headline: String
+        let brain: String
+        let memory: String
+        let p2p: String
+        let mcp: String
+        let lastProblem: String
+    }
+
+    init() {
+        let size = NSSize(width: 420, height: 320)
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 700) - size.width / 2,
+            y: (screen?.visibleFrame.midY ?? 500) - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        super.init(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        title = "Bad Apple Status"
+        isReleasedWhenClosed = false
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+
+        let scroll = NSScrollView(frame: NSRect(x: 20, y: 20, width: size.width - 40, height: size.height - 40))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        scroll.borderType = .noBorder
+        scroll.autoresizingMask = [.width, .height]
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textColor = .labelColor
+        textView.font = .systemFont(ofSize: 13)
+        textView.autoresizingMask = [.width]
+        scroll.documentView = textView
+        visual.addSubview(scroll)
+        contentView = visual
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        startTimer()
+    }
+
+    override func orderOut(_ sender: Any?) {
+        super.orderOut(sender)
+        timer?.invalidate()
+        timer = nil
+    }
+
+    var onRefresh: (() -> Snapshot)?
+
+    private func startTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    @objc private func refresh() {
+        guard let snapshot = onRefresh?() else { return }
+        update(snapshot: snapshot)
+    }
+
+    func update(snapshot: Snapshot) {
+        let text = NSMutableAttributedString()
+
+        let headlineAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 18, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let labelAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let valueAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+
+        text.append(NSAttributedString(string: snapshot.headline, attributes: headlineAttributes))
+        text.append(NSAttributedString(string: "\n\n"))
+
+        let rows = [
+            ("AI brain:", snapshot.brain),
+            ("Memory:", snapshot.memory),
+            ("P2P:", snapshot.p2p),
+            ("MCP:", snapshot.mcp),
+            ("Last problem:", snapshot.lastProblem),
+        ]
+        for (label, value) in rows {
+            text.append(NSAttributedString(string: "\(label) ", attributes: labelAttributes))
+            text.append(NSAttributedString(string: value, attributes: valueAttributes))
+            text.append(NSAttributedString(string: "\n"))
+        }
+
+        textView.textStorage?.setAttributedString(text)
     }
 }
 
@@ -3521,6 +3799,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
     private let voiceHUD = BadAppleVoiceHUD()
     private let voiceOnboarding = BadAppleVoiceOnboarding()
+    private let firstRunOnboarding = BadAppleFirstRunOnboarding()
     private let voiceHelp = BadAppleVoiceHelpWindow()
     private let voiceLog = BadAppleVoiceLogWindow()
     private lazy var voiceShortcut = BadAppleGlobalShortcut(name: "voice", keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(cmdKey | shiftKey), id: 1) { [weak self] in
@@ -3534,6 +3813,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private let briefingWindow = BadAppleBriefingWindow()
     private let screenActionsWindow = BadAppleScreenActionsWindow()
     private let imagePlayground = BadAppleImagePlaygroundWindow()
+    private let statusWindow = BadAppleStatusWindow()
     private lazy var voiceSettings: BadAppleVoiceSettingsWindow = {
         BadAppleVoiceSettingsWindow(voiceHost: voiceHost, voiceHUD: voiceHUD)
     }()
@@ -3747,6 +4027,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             voiceHost.setEnabled(false)
         }
 
+        firstRunOnboarding.onInstall = { [weak self] in
+            self?.runFirstRunInstaller()
+        }
+        firstRunOnboarding.onOpenChat = { [weak self] in
+            self?.askPalette.show()
+        }
+        firstRunOnboarding.onOpenDashboard = { [weak self] in
+            self?.openDashboard()
+        }
+        firstRunOnboarding.onDismiss = { [weak self] in
+            self?.rebuildMenu()
+        }
+        if !UserDefaults.standard.bool(forKey: "BadAppleFirstRunOnboarded") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.firstRunOnboarding.showIfNeeded()
+            }
+        }
+
         memoryGovernor.autoPurge = autoPurgeEnabled
         memoryGovernor.onUpdate = { [weak self] used, total, pressure in
             guard let self = self else { return }
@@ -3772,6 +4070,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             UserDefaults.standard.set(enabled, forKey: "BadAppleVoiceEnabled")
             self.voiceHost.setEnabled(enabled)
             self.rebuildMenu()
+        }
+
+        statusWindow.onRefresh = { [weak self] in
+            guard let self = self else {
+                return BadAppleStatusWindow.Snapshot(
+                    headline: "Bad Apple is checking...",
+                    brain: "not loaded",
+                    memory: "calibrating...",
+                    p2p: "off",
+                    mcp: "off",
+                    lastProblem: ""
+                )
+            }
+            return self.makeStatusSnapshot()
         }
 
         NSApp.servicesProvider = self
@@ -3805,6 +4117,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         guard voiceEnabled else { return }
         badAppleVoiceLog("Mac woke; resuming voice")
         voiceHost.setEnabled(true)
+    }
+
+    private func findBadAppleRepoRoot() -> String? {
+        if let envRoot = ProcessInfo.processInfo.environment["BADAPPLE_ROOT"],
+           FileManager.default.fileExists(atPath: "\(envRoot)/src/platform/apple_bridge/install_badapple_platform.sh") {
+            return envRoot
+        }
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let badAppleDir = home.appendingPathComponent(".bad_apple")
+        if let versions = try? FileManager.default.contentsOfDirectory(at: badAppleDir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
+            for versionDir in versions.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
+                let root = versionDir.appendingPathComponent("bad_apple").path
+                if FileManager.default.fileExists(atPath: "\(root)/src/platform/apple_bridge/install_badapple_platform.sh") {
+                    return root
+                }
+            }
+        }
+
+        // If the app bundle sits next to a source checkout, use that.
+        let bundleParent = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
+        let candidate = (bundleParent as NSString).deletingLastPathComponent
+        if FileManager.default.fileExists(atPath: "\(candidate)/src/platform/apple_bridge/install_badapple_platform.sh") {
+            return candidate
+        }
+
+        return nil
+    }
+
+    private func runFirstRunInstaller() {
+        guard let script = Bundle.main.path(forResource: "install_badapple", ofType: "sh"),
+              !script.isEmpty else {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Installer not found"
+            alert.informativeText = "The Bad Apple installer is missing from the app bundle. Please run the Install Bad Apple command from the Bad Apple source folder."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
+
+        let repoRoot = findBadAppleRepoRoot()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = ["-c", "\"\(script)\""]
+            var environment = ProcessInfo.processInfo.environment
+            if let repoRoot = repoRoot {
+                environment["BADAPPLE_ROOT"] = repoRoot
+            }
+            process.environment = environment
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                DispatchQueue.main.async {
+                    if process.terminationStatus == 0 {
+                        UserDefaults.standard.set(true, forKey: "BadAppleFirstRunOnboarded")
+                        UserDefaults.standard.set(true, forKey: "BadApplePlatformInstalled")
+                        self?.refreshTelemetry()
+                    } else {
+                        self?.lastError = "The Bad Apple installer exited with code \(process.terminationStatus)."
+                        self?.rebuildMenu()
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.lastError = "Could not run the Bad Apple installer: \(error.localizedDescription)"
+                    self?.rebuildMenu()
+                }
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -3970,6 +4354,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         if let url = URL(string: "http://127.0.0.1:8787") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @objc private func showStatus() {
+        statusWindow.update(snapshot: makeStatusSnapshot())
+        statusWindow.makeKeyAndOrderFront(nil)
+    }
+
+    private func makeStatusSnapshot() -> BadAppleStatusWindow.Snapshot {
+        let runtime = runtimeState
+        let reachable = lastRuntimeReachable
+        let mode = (lastRuntimeStatus["mode"] as? String ?? runtime["mode"] as? String ?? "UNKNOWN").uppercased()
+        let mainLoaded = lastRuntimeStatus["main_model_loaded"] as? Bool ?? runtime["main_model_loaded"] as? Bool ?? false
+        let killed = lastRuntimeStatus["killed"] as? Bool ?? runtime["killed"] as? Bool ?? false
+        let safeReason = lastRuntimeStatus["safe_mode_reason"] as? String ?? runtime["safe_mode_reason"] as? String
+
+        let headline: String
+        if !reachable {
+            headline = "Bad Apple needs to be installed or restarted"
+        } else if killed || mode == "SAFE_MODE" || safeReason != nil {
+            headline = "Bad Apple is paused"
+        } else if mainLoaded && mode == "READY" {
+            headline = "Bad Apple is ready"
+        } else if mode == "STARTING" || !mainLoaded {
+            headline = "Bad Apple is loading the model..."
+        } else {
+            headline = "Bad Apple is waking up..."
+        }
+
+        let brain: String
+        let active = activeModels.isEmpty ? ["none"] : activeModels
+        brain = active.joined(separator: ", ")
+
+        let freeGB = max(0, memoryTotalGB - memoryUsedGB)
+        let memory = memoryTotalGB > 0
+            ? String(format: "%.1f GB free of %.1f GB", freeGB, memoryTotalGB)
+            : "calibrating..."
+
+        let p2pEnabled = runtime["p2p_enabled"] as? Bool ?? false
+        let peers = (runtime["p2p_peers"] as? [String] ?? []).count
+        let p2p = p2pEnabled ? (peers == 0 ? "P2P: on, no peers nearby" : "P2P: \(peers) peer\(peers == 1 ? "" : "s") nearby") : "off"
+
+        let mcpSocket = (lastRuntimeStatus["mcp_socket"] as? String ?? runtime["mcp_socket"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        let mcp = mcpSocket.isEmpty ? "off" : "ready"
+
+        let lastProblem: String
+        if let error = lastError, !error.isEmpty {
+            lastProblem = error
+        } else if !reachable {
+            lastProblem = "The background helper is not running. If you have not installed it yet, choose Install Now from the first-run welcome, or open Status for help."
+        } else {
+            lastProblem = "None"
+        }
+
+        return BadAppleStatusWindow.Snapshot(
+            headline: headline,
+            brain: brain,
+            memory: memory,
+            p2p: p2p,
+            mcp: mcp,
+            lastProblem: lastProblem
+        )
     }
 
     @objc private func viewWorkingMemory() {
@@ -4512,13 +4957,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         rebuildMenu()
     }
 
+    private func friendlyStatusHeadline() -> String {
+        if !lastRuntimeReachable {
+            return "Bad Apple needs to be installed or restarted"
+        }
+        let mode = (lastRuntimeStatus["mode"] as? String ?? runtimeState["mode"] as? String ?? "UNKNOWN").uppercased()
+        let killed = lastRuntimeStatus["killed"] as? Bool ?? runtimeState["killed"] as? Bool ?? false
+        let safeReason = lastRuntimeStatus["safe_mode_reason"] as? String ?? runtimeState["safe_mode_reason"] as? String
+        let mainLoaded = lastRuntimeStatus["main_model_loaded"] as? Bool ?? runtimeState["main_model_loaded"] as? Bool ?? false
+        if killed || mode == "SAFE_MODE" || safeReason != nil {
+            return "Bad Apple is paused"
+        }
+        if mainLoaded && mode == "READY" {
+            return "Bad Apple is ready"
+        }
+        if mode == "STARTING" || !mainLoaded {
+            return "Bad Apple is loading..."
+        }
+        return "Bad Apple is \(mode)"
+    }
+
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
         let dotColor: NSColor
         if !lastRuntimeReachable {
             dotColor = .systemRed
         } else {
-            let mode = lastRuntimeStatus["mode"] as? String ?? runtimeState["mode"] as? String ?? "UNKNOWN"
+            let mode = (lastRuntimeStatus["mode"] as? String ?? runtimeState["mode"] as? String ?? "UNKNOWN").uppercased()
             let killed = lastRuntimeStatus["killed"] as? Bool ?? runtimeState["killed"] as? Bool ?? false
             let safeReason = lastRuntimeStatus["safe_mode_reason"] as? String ?? runtimeState["safe_mode_reason"] as? String
             if killed || mode == "SAFE_MODE" || safeReason != nil {
@@ -4540,8 +5005,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             .baselineOffset: -2
         ]))
         button.attributedTitle = title
-        let statusText = lastRuntimeReachable ? (lastRuntimeStatus["mode"] as? String ?? "unknown") : "offline"
-        button.toolTip = "Bad Apple daemon status: \(statusText)"
+        button.toolTip = friendlyStatusHeadline()
     }
 
     func rebuildMenu() {
@@ -4650,8 +5114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             restartDaemonItem.toolTip = "Unload and reload the Bad Apple launchd daemon."
             menu.addItem(restartDaemonItem)
         }
+        let statusItemMenu = NSMenuItem(title: "Status...", action: #selector(showStatus), keyEquivalent: "")
+        statusItemMenu.toolTip = "Show a plain-English summary of Bad Apple’s status."
+        menu.addItem(statusItemMenu)
         let systemHealthItem = NSMenuItem(title: "System Health...", action: #selector(showSystemHealth), keyEquivalent: "")
-        systemHealthItem.toolTip = "Show the full runtime status JSON."
+        systemHealthItem.toolTip = "Show the full runtime status JSON for advanced troubleshooting."
         menu.addItem(systemHealthItem)
         let controlCenterItem = NSMenuItem(title: "Control Center", action: #selector(showControlCenter), keyEquivalent: "")
         controlCenterItem.toolTip = "Open the native glass control center window."

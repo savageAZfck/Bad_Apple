@@ -1,8 +1,10 @@
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
+import badapple_model_registry
 import badapple_p2p
 
 
@@ -178,6 +180,89 @@ class TestP2PModelManifest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("manifest", result)
         self.assertEqual(result["model"]["id"], "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
         self.assertEqual(result["manifest"].get("repo_id"), "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+
+
+class TestP2PModelTransfer(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.secret = b"p2p model transfer test secret"
+
+        # Build a tiny synthetic model in node A's data directory.
+        self.model_id = "test-org/TinyModel-4bit"
+        self.model_dir = self.tmp / "tiny_model"
+        self.model_dir.mkdir(parents=True)
+        (self.model_dir / "config.json").write_text(
+            json.dumps({
+                "architectures": ["TinyForCausalLM"],
+                "max_position_embeddings": 128,
+                "vocab_size": 100,
+            }),
+            encoding="utf-8",
+        )
+        (self.model_dir / "weights-4bit.safetensors").write_bytes(b"fake 4-bit weights" * 512)
+        (self.model_dir / "tokenizer.json").write_text(
+            json.dumps({"version": "1.0"}),
+            encoding="utf-8",
+        )
+
+        self.d1_data = self.tmp / "d1"
+        self.d2_data = self.tmp / "d2"
+        self.registry_a = badapple_model_registry.ModelRegistry(self.d1_data)
+        self.registry_b = badapple_model_registry.ModelRegistry(self.d2_data)
+        add_result = self.registry_a.add_model(str(self.model_dir), self.model_id)
+        if add_result.get("status") != "added":
+            raise RuntimeError(f"Could not set up source model: {add_result}")
+
+        self.m1 = _MockMemory([{"text": "transfer-fact"}])
+        self.m2 = _MockMemory([{"text": "other-fact"}])
+        self.d1 = badapple_p2p.P2PDaemon(
+            self.secret,
+            self.d1_data,
+            memory=self.m1,
+            model_registry=self.registry_a,
+            broadcast_port=19990,
+            sync_port=20010,
+        )
+        self.d2 = badapple_p2p.P2PDaemon(
+            self.secret,
+            self.d2_data,
+            memory=self.m2,
+            model_registry=self.registry_b,
+            broadcast_port=19991,
+            sync_port=20011,
+        )
+
+    async def asyncTearDown(self):
+        await self.d1.stop()
+        await self.d2.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_p2p_send_model(self):
+        await self.d1.start()
+        await self.d2.start()
+
+        # Manually peer d1 at d2's sync port.
+        self.d1.add_peer("127.0.0.1", 20011)
+
+        result = await self.d1.send_model("127.0.0.1:20011", self.model_id)
+        self.assertIn("Sent model", result)
+
+        # Node B should have the model in its registry.
+        models = self.registry_b._state.get("models", [])
+        self.assertTrue(any(m.get("id") == self.model_id for m in models))
+
+        # Verify the transferred files.
+        verify = self.registry_b.verify(self.model_id)
+        self.assertEqual(verify.get("status"), "verified")
+
+        # Compare the source and received manifests.
+        src_manifest = self.registry_a.provenance._manifest_path(self.model_id).read_text(encoding="utf-8")
+        dst_manifest = self.registry_b.provenance._manifest_path(self.model_id).read_text(encoding="utf-8")
+        src = json.loads(src_manifest)
+        dst = json.loads(dst_manifest)
+        self.assertEqual(src["files"].keys(), dst["files"].keys())
+        for rel in src["files"]:
+            self.assertEqual(src["files"][rel]["sha256"], dst["files"][rel]["sha256"])
 
 
 if __name__ == "__main__":

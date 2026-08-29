@@ -632,16 +632,35 @@ class ModelManager:
         profile = self._profiles.get(model_id)
         return profile.size_gb * 1.4 if profile else 0.0
 
+    def _name_for(self, model_id: str) -> str:
+        status = self._status_for(model_id)
+        if status.get("error"):
+            return model_id
+        return status.get("name") or status.get("id") or model_id
+
+    def _memory_reason(self, available_gb: float, pick: str) -> str:
+        if pick.startswith("fast_") or pick in ("fast_0.5b",):
+            return f"Only {available_gb:.1f} GB of memory is free, so a tiny model is the safest choice."
+        if pick in ("main_70b",):
+            return f"You have plenty of free memory ({available_gb:.1f} GB), so the largest available model is recommended."
+        if pick in ("main_32b",):
+            return f"You have a lot of free memory ({available_gb:.1f} GB), so a large model is recommended."
+        return f"You have {available_gb:.1f} GB of free memory, so the default 9B model is a good fit."
+
     def recommend_for_memory(self) -> dict[str, Any]:
         """Recommend the best model that currently fits in RAM."""
         import badapple_vram_governor as vg
 
         available_gb = vg._available_gb()
         pick = vg.recommend_for_memory(available_gb)
+        name = self._name_for(pick)
+        reason = self._memory_reason(available_gb, pick)
         return {
             "available_gb": round(available_gb, 2),
             "recommended_id": pick,
             "recommended": self._status_for(pick),
+            "message": f"Bad Apple recommends {name}.",
+            "reason": reason,
         }
 
     def recommend_for_query(self, query: str) -> dict[str, Any]:
@@ -650,10 +669,29 @@ class ModelManager:
 
         available_gb = vg._available_gb()
         pick = vg.recommend_model_for_query(query, available_gb)
+        name = self._name_for(pick)
+        low = query.lower()
+        wants_small = any(k in low for k in (
+            "hi", "hello", "time", "weather", "joke", "quick", "short", "simple",
+            "what is", "who is", "how are", "thanks", "ping",
+        ))
+        wants_big = any(k in low for k in (
+            "reason", "deep", "complex", "analyze", "compare", "code review",
+            "architecture", "design", "philosophy", "math proof", "debug",
+        ))
+        if wants_small:
+            reason = "This is a short or simple question, so a fast, tiny model is enough."
+        elif wants_big:
+            reason = self._memory_reason(available_gb, pick)
+            reason = "This looks like a reasoning or coding question, so a larger model is recommended if it fits. " + reason
+        else:
+            reason = self._memory_reason(available_gb, pick)
         return {
             "available_gb": round(available_gb, 2),
             "recommended_id": pick,
             "recommended": self._status_for(pick),
+            "message": f"Bad Apple recommends {name}.",
+            "reason": reason,
         }
 
     def preload_priority(self) -> list[str]:

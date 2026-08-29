@@ -70,9 +70,9 @@ class ModelProvenance:
 
     def _manifest_path(self, model_id: str) -> Path:
         # Reject path traversal; allow repo-style IDs with a slash by encoding it.
-        safe = model_id.replace("/", "--").replace("..", "")
-        if not safe or safe.startswith("/") or "/" in safe:
+        if not model_id or model_id.startswith("/") or ".." in model_id:
             raise ValueError(f"invalid model_id for manifest: {model_id!r}")
+        safe = model_id.replace("/", "--")
         return self._manifest_dir / f"{safe}.json"
 
     def _list_files(self, local_path: Path) -> list[Path]:

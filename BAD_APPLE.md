@@ -143,12 +143,13 @@ The current build covers the following roadmap phases:
 - **Phase 13 — Policy language for the cage** ✅: `Policy` in `badapple_extras.py` declares which tools are allowed, require approval, and how arguments are validated; loaded from `policy.yaml`.
 - **Phase 14 — Adversarial output classifier** ✅: `StreamingFirewall` blocks PII, secrets, and custom blocklist patterns in generated output with a streaming Aho-Corasick automaton.
 - **Phase 15 — Self-hosting model registry** ✅: `badapple model <list|scan|info|use|verify|add|remove|recommend>` manages the local cache, records SHA-256 provenance, and signs manifests with the Secure Enclave.
-- **Phase 16 — P2P model manifest gossip** ✅: the link-local mesh shares signed model manifests between peers. `badapple p2p <peers|sync|models|pull>` discovers neighbors, syncs memory, and pulls a model's provenance from a peer.
+- **Phase 16 — P2P model manifest gossip + file transfer** ✅: the link-local mesh shares signed model manifests and streams the actual model weight files between peers. `badapple p2p <peers|sync|models|pull|send|receive>` discovers neighbors, syncs memory, pulls a manifest, and sends/receives the full model over encrypted local TCP.
 
 ### Menu bar app
 
-`Bad Apple.app` lives in the macOS status bar. Right-click the apple icon for:
+`Bad Apple.app` lives in the macOS status bar. The first time it runs, a plain-English onboarding panel walks you through installing the small background helper. After that, right-click the apple icon for:
 
+- **Status...** — plain-English snapshot of brain, memory, P2P, and MCP
 - **New Chat** — clears conversation history
 - **Chat History** — opens the transcript window
 - **Voice Listening** — toggle always-on voice wake
@@ -217,6 +218,8 @@ badapple p2p peers
 badapple p2p sync
 badapple p2p models
 badapple p2p pull <peer_id> <model_id>
+badapple p2p send <peer_id> <model_id>
+badapple p2p receive [peer_id] [model_id]
 ```
 
 New flags:
@@ -282,7 +285,12 @@ New flags:
 ## How to use
 
 ```bash
-# Build
+# Consumer install (one-click)
+# 1. Unzip the release.
+# 2. Drag "Bad Apple.app" to /Applications.
+# 3. Double-click "Install Bad Apple" in the zip folder and enter your Mac password.
+
+# Build from source
 cargo build --release
 
 # Text query

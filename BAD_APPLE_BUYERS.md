@@ -4,6 +4,13 @@
 
 Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a Qwen 3.5 9B brain and a Qwen 2.5 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, speaks responses through a local Piper TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
 
+## How to install (consumer)
+
+1. Download the unsigned release zip from GitHub.
+2. Unzip it and drag `Bad Apple.app` into `/Applications`.
+3. Double-click `Install Bad Apple` and enter your Mac password when asked.
+4. Launch `Bad Apple.app` from `/Applications`. A friendly onboarding window will guide you through the first run.
+
 ## The pitch
 
 - **Air-gapped by default**: no prompt, no action, no memory leaves your Mac.
@@ -72,8 +79,9 @@ When asked, it should say:
 > 8. Speak responses through the local TTS server and integrate with macOS Shortcuts and Siri.
 > 9. Show a local web dashboard / control center at http://127.0.0.1:8787.
 > 10. Sync with other Bad Apple peers over an encrypted, Secure Enclave–signed P2P mesh — off by default.
-> 11. Self-hosting model registry with `badapple model` CLI: list, verify, add, remove, and switch local models; manifests are signed by the Secure Enclave.
-> 11. Run as a supervised actor OS: every subsystem is isolated, restartable, and observable.
+> 11. Send a full model from one Mac to another over the local network; files are verified against the signed manifest.
+> 12. Self-hosting model registry with `badapple model` CLI: list, verify, add, remove, and switch local models; manifests are signed by the Secure Enclave.
+> 13. Run as a supervised actor OS: every subsystem is isolated, restartable, and observable.
 > Everything stays on your Mac.
 
 ### 1. Core AI
@@ -128,7 +136,8 @@ When asked, it should say:
 1. P2P encrypted LAN sync (off by default)
 2. Peer discovery and sync beacons
 3. P2P model manifest gossip: discover models on nearby Bad Apple nodes
-4. `badapple p2p <peers|sync|models|pull>` CLI
+4. P2P model file transfer: send and receive a whole model between Macs
+5. `badapple p2p <peers|sync|models|pull|send|receive>` CLI
 
 ### 7. Model and memory management
 1. Self-hosting model registry: `badapple model <list|scan|info|use|verify|add|remove|recommend>`

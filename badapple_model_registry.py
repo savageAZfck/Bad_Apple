@@ -172,20 +172,20 @@ class ModelRegistry:
         if current and not matching:
             # The current model doesn't appear in the cache scan; keep it but note it.
             self._state["current"] = current
-        return f"Found {len(models)} local model(s). Current: {current or 'none'}."
+        return f"Found {len(models)} local model(s). The current brain is {current or 'none'}."
 
     def list_models(self) -> str:
         models = self._state.get("models", [])
         current = self._state.get("current", "").lower()
-        lines = ["Local model cache:", ""]
+        lines = ["Models Bad Apple knows about:", ""]
         for m in models:
-            marker = " *" if m["id"].lower() == current or m["path"].lower() == current else ""
+            marker = " (active)" if m["id"].lower() == current or m["path"].lower() == current else ""
             lines.append(
                 f"{m['id']}{marker} — {m['size_gb']} GB, {m['quantization']}, "
-                f"ctx {m['context_length']}, arch {m['architecture']}"
+                f"context {m['context_length']}, architecture {m['architecture']}"
             )
         if not models:
-            lines.append("No models found in ~/.cache/huggingface/hub.")
+            lines.append("No models found. Run `badapple model scan` to look for cached models.")
         return "\n".join(lines)
 
     def current(self) -> str:
@@ -207,24 +207,27 @@ class ModelRegistry:
         self._save()
         return True
 
+    def _model_not_found(self, model_id: str) -> str:
+        return f"Bad Apple does not know about a model called '{model_id}'. Use `badapple model scan` to find it."
+
     def info(self, model_id: str) -> str:
         model_id_lower = model_id.lower()
         for m in self._state.get("models", []):
             if m["id"].lower() == model_id_lower or m["path"].lower() == model_id_lower:
                 return json.dumps(m, indent=2, default=str)
-        return f"Model {model_id} not found in local cache."
+        return self._model_not_found(model_id)
 
     def recommend(self) -> str:
         """List recommended models and whether they are cached."""
         local = {m["id"].lower() for m in self._state.get("models", [])}
-        lines = ["Recommended models:", ""]
+        lines = ["Recommended models for this Mac:", ""]
         for m in RECOMMENDED_MODELS:
-            cached = " (cached)" if m["id"].lower() in local else ""
+            cached = " (already on this Mac)" if m["id"].lower() in local else ""
             lines.append(
-                f"{m['id']}{cached} — {m['name']}, ~{m['size_gb']} GB, "
-                f"needs ~{m['memory_gb']} GB RAM\n    {m['notes']}"
+                f"{m['id']}{cached} — {m['name']}, about {m['size_gb']} GB, "
+                f"needs about {m['memory_gb']} GB of memory\n    {m['notes']}"
             )
-        lines.append("\nUse `use model <id>` after downloading with huggingface-cli or mlx_lm.load.")
+        lines.append("\nTo start using one, run `badapple model use <id>` after it has been downloaded.")
         return "\n".join(lines)
 
     def verify(self, model_id: str | None = None) -> dict[str, Any]:
@@ -241,8 +244,11 @@ class ModelRegistry:
         model_id_lower = model_id.lower()
         match = next((m for m in self._state.get("models", []) if m["id"].lower() == model_id_lower), None)
         if not match:
-            return {"status": "unknown", "error": f"model {model_id!r} not in registry"}
-        return self.provenance.verify(match["id"], match["path"])
+            return {"status": "unknown", "error": self._model_not_found(model_id)}
+        result = self.provenance.verify(match["id"], match["path"])
+        if result.get("status") == "mismatch":
+            result["error"] = f"The files for '{model_id}' do not match the signed record. The model may need to be re-added."
+        return result
 
     def add_model(self, path: str, model_id: str | None = None) -> dict[str, Any]:
         """Import a local model directory into the registry and record provenance.
@@ -252,7 +258,7 @@ class ModelRegistry:
         """
         root = Path(path).expanduser().resolve()
         if not root.is_dir():
-            return {"status": "error", "error": f"not a directory: {path}"}
+            return {"status": "error", "error": f"Bad Apple could not open {path}. It does not look like a model folder."}
         config_path = root / "config.json"
         if not config_path.is_file():
             # HF cache snapshot layout: models--<org>--<name>/snapshots/<ref>/
@@ -267,13 +273,13 @@ class ModelRegistry:
                 if config_path.is_file():
                     break
             if not config_path.is_file():
-                return {"status": "error", "error": "no config.json found in model directory"}
+                return {"status": "error", "error": "Bad Apple could not find a config.json in that model folder."}
 
         try:
             with config_path.open("r", encoding="utf-8") as f:
                 config = json.load(f)
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
-            return {"status": "error", "error": f"cannot read config.json: {e}"}
+            return {"status": "error", "error": f"Bad Apple could not read the model's config.json: {e}"}
 
         size_bytes = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
         size_gb = round(size_bytes / (1024 ** 3), 2)
@@ -316,9 +322,9 @@ class ModelRegistry:
             if record.get("status") == "recorded":
                 info["provenance"] = "recorded"
             else:
-                return {"status": "error", "error": f"provenance recording failed: {record}"}
+                return {"status": "error", "error": f"Bad Apple could not record the model's provenance: {record}"}
         except Exception as e:  # noqa: BLE001
-            return {"status": "error", "error": f"provenance recording error: {e}"}
+            return {"status": "error", "error": f"Bad Apple could not record the model's provenance: {e}"}
 
         # Sign the provenance manifest with the Secure Enclave if available.
         try:
@@ -341,7 +347,7 @@ class ModelRegistry:
         models.append(info)
         self._state["models"] = models
         self._save()
-        return {"status": "added", "model": info}
+        return {"status": "added", "message": f"Added '{derived_id}' to Bad Apple's model list.", "model": info}
 
     def remove_model(self, model_id: str) -> dict[str, Any]:
         """Remove a model from the registry and delete its provenance manifest.
@@ -352,7 +358,7 @@ class ModelRegistry:
         models = [m for m in self._state.get("models", []) if m["id"].lower() != model_id_lower]
         removed = len(self._state.get("models", [])) - len(models)
         if not removed:
-            return {"status": "error", "error": f"model {model_id!r} not in registry"}
+            return {"status": "error", "error": self._model_not_found(model_id)}
         self._state["models"] = models
         try:
             manifest_path = self.provenance._manifest_path(model_id)
@@ -363,4 +369,4 @@ class ModelRegistry:
         if self._state.get("current", "").lower() == model_id_lower:
             self._state["current"] = ""
         self._save()
-        return {"status": "removed", "model_id": model_id}
+        return {"status": "removed", "message": f"Removed '{model_id}' from Bad Apple's model list. The model files were not deleted.", "model_id": model_id}
