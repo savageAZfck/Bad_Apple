@@ -491,6 +491,13 @@ fn run_doctor() -> Result<()> {
 
     // launchd jobs
     let _ = writeln!(report, "\n[launchd]");
+    let uid = Command::new("id")
+        .args(["-u"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     for label in [
         "com.badapple.mlx",
         "com.badapple.gatekeeper",
@@ -498,14 +505,25 @@ fn run_doctor() -> Result<()> {
         "com.badapple.tts",
         "com.badapple.menubar",
     ] {
-        if let Ok(out) = Command::new("launchctl").args(["list", label]).output() {
-            let _ = writeln!(
-                report,
-                "{}: {}",
-                label,
-                String::from_utf8_lossy(&out.stdout).trim()
-            );
+        let mut status = "not found".to_string();
+        let mut domains = vec![format!("system/{}", label)];
+        if !uid.is_empty() {
+            domains.push(format!("gui/{}/{}", uid, label));
         }
+        for domain in domains {
+            if let Ok(out) = Command::new("launchctl").args(["print", &domain]).output() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if text.contains(&format!("{} = {{", label)) {
+                    if let Some(st) = text.lines().find_map(|l| l.trim().strip_prefix("state = ")) {
+                        status = st.trim().to_string();
+                    } else if text.contains("active count =") {
+                        status = "active".to_string();
+                    }
+                    break;
+                }
+            }
+        }
+        let _ = writeln!(report, "{}: {}", label, status);
     }
 
     // Sockets
