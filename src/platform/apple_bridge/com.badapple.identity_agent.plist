@@ -12,10 +12,7 @@
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>ProcessType</key>
@@ -38,8 +35,8 @@
         <string>1</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>/var/log/bad_apple_identity_agent.log</string>
+    <string>/tmp/bad_apple_identity_agent.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/bad_apple_identity_agent.log</string>
+    <string>/tmp/bad_apple_identity_agent.log</string>
 </dict>
 </plist>
