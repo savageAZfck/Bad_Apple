@@ -27,6 +27,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+import badapple_slicks
+
 P2P_VERSION = 1
 P2P_BROADCAST_PORT = int(os.environ.get("BADAPPLE_P2P_UDP_PORT", "9999"))
 P2P_SYNC_PORT = int(os.environ.get("BADAPPLE_P2P_TCP_PORT", "10000"))
@@ -115,7 +117,11 @@ class P2PDaemon:
         workspace: Any | None = None,
     ):
         self.enc_key, self.mac_key = _derive_keys(secret)
-        self.origin_id = _origin_id(secret)
+        self._v2_identity = badapple_slicks.v2_available()
+        if self._v2_identity:
+            self.origin_id = badapple_slicks.v2_public_key_b64() or _origin_id(secret)
+        else:
+            self.origin_id = _origin_id(secret)
         self.data_dir = data_dir
         self.memory = memory
         self.workspace = workspace
@@ -132,10 +138,16 @@ class P2PDaemon:
     # Crypto
     # ------------------------------------------------------------------
     def _proof(self, frame: P2PFrame) -> str:
+        if self._v2_identity:
+            return badapple_slicks.v2_sign_message(frame.canonical()) or ""
         mac = hmac.new(self.mac_key, frame.canonical(), hashlib.sha256)
         return mac.hexdigest()
 
     def _verify(self, frame: P2PFrame) -> bool:
+        if badapple_slicks.v2_public_key_b64() and len(frame.proof) > 64:
+            return badapple_slicks.v2_verify_message(
+                frame.canonical(), frame.proof, frame.origin_id
+            )
         return hmac.compare_digest(self._proof(frame), frame.proof)
 
     def _encrypt(self, plaintext: bytes) -> tuple:

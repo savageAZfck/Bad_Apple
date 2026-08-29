@@ -219,6 +219,28 @@ def v2_verify_server_proof(timestamp_ms: int, client_nonce: str, server_nonce: s
     return _verify_with_pubkey(server_material_v2(timestamp_ms, client_nonce, server_nonce), proof, pk)
 
 
+def v2_sign_message(message: bytes) -> str | None:
+    """Sign an arbitrary message with the Secure Enclave identity.
+
+    Returns a base64 DER ECDSA signature, or None if no identity is available.
+    """
+    if v2_public_key() is None:
+        return None
+    return _sign_with_identity(message)
+
+
+def v2_verify_message(message: bytes, signature_b64: str, public_key_b64: str) -> bool:
+    """Verify an arbitrary Secure Enclave signature over a message.
+
+    The public key is expected as a base64-encoded P-256 uncompressed point.
+    """
+    try:
+        public_key = base64.b64decode(public_key_b64)
+    except Exception:  # noqa: BLE001
+        return False
+    return _verify_with_pubkey(message, signature_b64, public_key)
+
+
 # =============================================================================
 # Unified dispatch
 # =============================================================================
