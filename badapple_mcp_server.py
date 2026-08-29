@@ -16,8 +16,10 @@ Air-gap properties:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import re
 import socketserver
 import sys
 import threading
@@ -34,6 +36,25 @@ PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "Bad Apple MCP"
 SERVER_VERSION = "0.1.0"
 DEFAULT_SOCKET_PATH = "/var/run/badapple/mcp.sock"
+
+# Security limits
+MAX_REQUEST_BYTES = 64 * 1024
+MAX_TOOL_NAME_LEN = 256
+MAX_PROMPT_NAME_LEN = 256
+MAX_URI_LEN = 1024
+MAX_ARGUMENTS_DEPTH = 8
+CALL_AGENT_TIMEOUT = 120.0
+
+# Tool calls can be expensive or destructive. By default the MCP server blocks the
+# small set of tools that can mutate the system outside the daemon's approval gate.
+_DANGEROUS_TOOLS = {
+    "run_shell",
+    "run_applescript",
+    "write_file",
+    "delete_file",
+    "index_documents",
+    "run_shortcut",
+}
 
 # Methods that are exposed directly by the Bad Apple LAP daemon.
 _DIRECT_AGENT_METHODS = {
@@ -56,6 +77,36 @@ def _result(request_id: Any, result: Any) -> dict[str, Any]:
 
 def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="mcp-agent-caller"
+)
+
+
+def _is_safe_value(value: Any, depth: int = 0) -> bool:
+    if depth > MAX_ARGUMENTS_DEPTH:
+        return False
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_safe_value(v, depth + 1) for v in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(k, str) and _is_safe_value(v, depth + 1)
+            for k, v in value.items()
+        )
+    return False
+
+
+def _is_safe_tool_name(name: str) -> bool:
+    return isinstance(name, str) and 0 < len(name) <= MAX_TOOL_NAME_LEN and re.match(
+        r"^[A-Za-z0-9_:-]+$", name
+    ) is not None
+
+
+def _is_dangerous_allowed() -> bool:
+    return os.environ.get("BADAPPLE_MCP_ALLOW_DANGEROUS", "0") == "1"
 
 
 def _mcp_text_content(obj: Any, is_error: bool = False) -> dict[str, Any]:
@@ -175,16 +226,34 @@ def _tools() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _call_agent_or_report(method: str, params: dict[str, Any] | None) -> dict[str, Any]:
-    """Call ``agent_client.call_agent`` and normalize errors."""
+    """Call ``agent_client.call_agent`` and normalize errors, with a timeout."""
     try:
-        return call_agent(method, params)
+        future = _executor.submit(call_agent, method, params)
+        return future.result(timeout=CALL_AGENT_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        return {"type": "error", "error": f"agent_client call to {method} timed out after {CALL_AGENT_TIMEOUT}s"}
     except Exception as exc:  # noqa: BLE001 - catch-all wrapper
         return {"type": "error", "error": f"agent_client error: {exc}"}
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if not _is_safe_tool_name(name):
+        return _mcp_text_content(
+            f"Invalid or unsupported tool name: {name!r}",
+            is_error=True,
+        )
     if not isinstance(arguments, dict):
         arguments = {}
+    if not _is_safe_value(arguments):
+        return _mcp_text_content(
+            "Tool arguments contain unsafe types or nested too deeply",
+            is_error=True,
+        )
+    if name in _DANGEROUS_TOOLS and not _is_dangerous_allowed():
+        return _mcp_text_content(
+            f"Tool {name!r} is disabled over MCP. Set BADAPPLE_MCP_ALLOW_DANGEROUS=1 to allow.",
+            is_error=True,
+        )
 
     # Map the requested conceptual tool names onto the LAP protocol.
     if name == "get_ambient_context":
@@ -288,7 +357,11 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     notifications that do not require a response."""
     request_id = request.get("id")
     method = request.get("method")
+    if not isinstance(method, str):
+        return _error(request_id, -32600, "method must be a string")
     params = request.get("params") or {}
+    if not isinstance(params, dict):
+        return _error(request_id, -32602, "params must be an object")
 
     if method == "initialize":
         return _result(
@@ -311,9 +384,11 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "tools/call":
         name = params.get("name", "")
-        if not name:
-            return _error(request_id, -32602, "tool name is required")
+        if not _is_safe_tool_name(name):
+            return _error(request_id, -32602, "invalid tool name")
         arguments = params.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            return _error(request_id, -32602, "arguments must be an object")
         return _result(request_id, _call_tool(name, arguments))
 
     if method == "resources/list":
@@ -321,8 +396,8 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "resources/read":
         uri = params.get("uri", "")
-        if not uri:
-            return _error(request_id, -32602, "uri is required")
+        if not isinstance(uri, str) or not uri or len(uri) > MAX_URI_LEN:
+            return _error(request_id, -32602, "invalid uri")
         return _result(request_id, _read_resource(uri))
 
     if method == "prompts/list":
@@ -330,8 +405,8 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "prompts/get":
         name = params.get("name", "")
-        if not name:
-            return _error(request_id, -32602, "prompt name is required")
+        if not isinstance(name, str) or not name or len(name) > MAX_PROMPT_NAME_LEN:
+            return _error(request_id, -32602, "invalid prompt name")
         try:
             return _result(request_id, _get_prompt(name))
         except ValueError as exc:
@@ -354,6 +429,11 @@ class _MCPStreamRequestHandler(socketserver.StreamRequestHandler):
 
     def handle(self) -> None:
         for raw in self.rfile:
+            if len(raw) > MAX_REQUEST_BYTES:
+                response = _error(None, -32600, f"request exceeded {MAX_REQUEST_BYTES} bytes")
+                self.wfile.write(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
+                self.wfile.flush()
+                continue
             line = raw.decode("utf-8").strip()
             if not line:
                 continue
@@ -372,8 +452,11 @@ class _MCPStreamRequestHandler(socketserver.StreamRequestHandler):
 
 def _run_stdio_server() -> int:
     """Read newline-delimited JSON-RPC from stdin and write to stdout."""
-    for line in sys.stdin:
-        line = line.strip()
+    for raw in sys.stdin:
+        if len(raw) > MAX_REQUEST_BYTES:
+            _write_line(sys.stdout, _error(None, -32600, f"request exceeded {MAX_REQUEST_BYTES} bytes"))
+            continue
+        line = raw.strip()
         if not line:
             continue
         try:
