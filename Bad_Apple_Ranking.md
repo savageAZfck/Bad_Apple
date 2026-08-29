@@ -233,6 +233,129 @@ open -a "Bad Apple"
 
 ---
 
+## Competitive Ranking (August 2026)
+
+The on-device macOS AI assistant market is now crowded. Below is an honest,
+evidence-based comparison against the direct competitors, based on public
+READMEs, feature lists, and install paths as of August 2026.
+
+### The field
+
+| # | Product | Model | Signed? | Native UI | Security controls | Air-gap cert | Open source |
+|---|---|---|---|---|---|---|---|
+| 1 | **M1K3** | Apple FM + Qwen 3 4B + Gemma 4 12B | Yes (Developer ID) | SwiftUI full app | App Sandbox, on-device only | No | Apache-2.0 |
+| 2 | **Ka1zen** | Any MLX/GGUF model, speculative decoding | Yes | SwiftUI chat | On-device only | No | Proprietary (free) |
+| 3 | **MLX Studio** | MLX, multi-model, vision, image gen | Yes | SwiftUI all-in-one | On-device only | No | Proprietary (free) |
+| 4 | **macMLX** | Swift-native MLX engine, no Python | Yes | SwiftUI + CLI | On-device only | No | Open |
+| 5 | **Bad Apple** | 9B Qwen 3.5 4-bit + 0.5B fast tier | No (unsigned) | Menu bar + CLI + web dashboard | SLICKS v2 SE, audit ledger, output firewall, approvals | **Yes** | Proprietary |
+| 6 | **Macaw** | 2.7B LFM2.5 fine-tune, 97 tools | No | Menu bar + prompt bar | On-device, explicit consent | No | MIT |
+| 7 | **iClaw** | Apple Intelligence or Ollama | Yes (App Store) | SwiftUI | App Sandbox, explicit consent | No | Open |
+| 8 | **Ollama** | Any GGUF/MLX, API server | Yes | CLI + GUI | None (it's a server) | No | MIT |
+| 9 | **LM Studio** | GGUF + MLX, model browser | Yes | Electron GUI | None (it's a runner) | No | Proprietary (free) |
+| 10 | **mlx-serve (Loki)** | MLX, wake word, Telegram, schedules | Yes | Menu bar + launcher | On-device only | No | Proprietary |
+
+### Where Bad Apple wins
+
+1. **Security posture — uncontested.** No competitor has a hash-chained audit
+   ledger with Secure Enclave-signed checkpoints, a streaming output firewall
+   with real-time secret redaction, SLICKS v2 hardware-bound authentication,
+   model provenance with SE signing, or a formal air-gap certification suite.
+   This is not a marginal difference — it is a category-defining one. For
+   government, enterprise, legal, medical, or anyone who needs *provable*
+   privacy and auditability, Bad Apple is the only option in this list.
+
+2. **Human-in-the-loop approvals.** Shared with iClaw and Macaw, but Bad
+   Apple's implementation is the most mature: a declarative policy engine
+   (`policy.yaml` with 37 tool rules), per-tool approval gates, autopilot
+   mode toggle, and a kill switch / safe mode / private mode control surface.
+
+3. **P2P encrypted model transfer.** Unique — no competitor lets you sync
+   models between your own machines over a local encrypted mesh without a
+   cloud download.
+
+4. **Persona system.** Unique entertainment/branding angle. No competitor
+   has switchable, teachable personality packs. This is a legitimate
+   consumer differentiator, not just a gimmick — it makes the assistant
+   feel like a character, not a tool.
+
+5. **Rust CLI client.** Most competitors are Swift-only or Python-only. Bad
+   Apple's Rust CLI talks to a Python daemon through a Rust gatekeeper over
+   SLICKS-secured Unix sockets — a more robust, language-separated
+   architecture than a monolithic app.
+
+6. **Test coverage and code quality.** 171 tests (including red-team,
+   security regression, and path-traversal tests), `cargo audit` clean,
+   `ruff` clean, `cargo clippy` clean. Most competitors do not publish
+   their test counts or run security audits.
+
+### Where Bad Apple loses
+
+1. **Signing and notarization — the biggest gap.** M1K3, Ka1zen, MLX Studio,
+   macMLX, iClaw, and mlx-bun all ship signed/notarized apps. Bad Apple's
+   default artifact is unsigned, which means every user sees a Gatekeeper
+   warning and must run `strip_quarantine.sh`. This is the single biggest
+   consumer-readiness blocker and the reason the security score is 1.5/2
+   instead of 2.0/2.
+
+2. **Native chat UI.** M1K3, Ka1zen, MLX Studio, and macMLX all have
+   polished SwiftUI chat windows. Bad Apple's primary UI is a menu bar
+   icon + CLI + web dashboard. The web dashboard is functional but not a
+   first-class native chat experience. This matters for consumer adoption.
+
+3. **Model flexibility.** Ka1zen runs any MLX or GGUF model with
+   speculative decoding, vision, and image generation in one app. LM Studio
+   and Ollama let you swap models in one command. Bad Apple is built around
+   a single 9B Qwen 3.5 model with an optional 0.5B fast tier. The model
+   is pinned, not user-selectable.
+
+4. **Model size / hardware floor.** Bad Apple's 9B model needs ~6 GB of
+   unified memory, making 16 GB the practical floor. Macaw runs on a 1.5 GB
+   model, iClaw uses Apple's built-in Foundation Models (zero download), and
+   mlx-bun starts with a sub-GB model. Bad Apple is heavier.
+
+5. **Call transcription.** M1K3 and LokalBot both offer encrypted on-device
+   call transcription. Bad Apple does not.
+
+6. **Development velocity.** M1K3 has 1,286 commits; Bad Apple has 302.
+   M1K3 is a more actively developed project with a TestFlight beta
+   distribution channel. Bad Apple is more mature in its security
+   engineering but narrower in feature surface.
+
+7. **No Python-free path.** macMLX ships a ~50 MB pure-Swift app with no
+   Python dependency. Bad Apple requires a Python venv with `mlx-lm`,
+   `piper-tts`, `cryptography`, and other packages. This is a real
+   installation friction point.
+
+### Honest overall placement
+
+**Bad Apple ranks #5 out of 10 in the direct competition**, but this
+average hides a bimodal distribution:
+
+- **For security-first / air-gapped / auditable use cases (government,
+  enterprise, legal, medical, journalists):** Bad Apple is **#1**. No
+  competitor has an audit ledger, SE-signed checkpoints, an air-gap cert
+  suite, a streaming output firewall, or hardware-bound authentication.
+  This is not a feature checklist — it is a category Bad Apple invented.
+
+- **For general consumer / "I want a nice local ChatGPT replacement":**
+  Bad Apple is **#6-7**. M1K3, Ka1zen, MLX Studio, macMLX, and iClaw all
+  offer a more polished, signed, native-chat experience with lower
+  friction. Bad Apple's menu-bar-plus-CLI UX and unsigned artifact make
+  it a harder sell to a non-technical user.
+
+- **For developers who want a local model server / API:** Bad Apple is
+  **not competitive**. Ollama and LM Studio are the standard here, with
+  100K+ stars and tens of thousands of integrations. Bad Apple is an
+  assistant, not a model server.
+
+The path to #1 overall is clear: **ship a signed/notarized DMG as the
+default artifact, and build a native SwiftUI chat window.** Those two
+changes would close the consumer gap without sacrificing the security
+lead. The security architecture is already best-in-class — it just needs
+a consumer-grade front door.
+
+---
+
 ## License
 
 LicenseRef-Proprietary. See `LICENSE.txt`.
