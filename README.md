@@ -1,18 +1,22 @@
 # Bad Apple
 
-> **A baremetal AI OS layer for Apple Silicon — runs directly on the Neural Engine, Secure Enclave, and Metal GPU. Provably air-gapped. Audited. Fuzzed.**
+> **A baremetal AI OS layer for Apple Silicon — runs directly on the Neural Engine, Secure Enclave, and Metal GPU. Provably air-gapped. Audited. Fuzzed. Now with native Swift MLX inference.**
 
 Bad Apple is not an app. It's not a model wrapper. It's a system-level AI runtime that manages hardware, security, and IPC for on-device AI workloads on macOS. It runs as three launchd daemons with root privileges, authenticates every interaction with a custom protocol backed by the Secure Enclave, and can prove — with a 12-test certification suite — that zero network listeners are active.
 
 ## What It Does
 
-- **Runs a 9B Qwen 3.5 model directly on the Apple Neural Engine** via a multi-shard FFI bridge with KV cache scatter and placement measurement
+- **Runs a 9B Qwen 3.5 model via native Swift MLX inference** — the menu bar app loads the model directly via mlx-swift-lm, no Python subprocess, no daemon overhead. Falls back to the Python daemon when the Swift engine isn't loaded.
 - **Provable air-gap privacy** — a toggle that turns off all network access, verified by a 12-test certification suite. Not a trust claim. A proof.
-- **Hash-chained audit ledger** with Secure Enclave-signed checkpoints — every query, tool call, and response is logged and tamper-evident
+- **Hash-chained audit ledger** with SHA-256 chaining — every query, tool call, and response is logged and tamper-evident (now in Swift via CryptoKit)
 - **Fail-closed filesystem cage** using openat-based fd operations with O_NOFOLLOW — structurally eliminates TOCTOU race conditions
 - **WASM sandbox** with fuel metering, StoreLimits, and output caps for untrusted tool synthesis
-- **Streaming output firewall** with Aho-Corasick secret redaction in real time
-- **Dual-process cognitive governor** — a 576-D Candle transformer routes simple queries to a 0.5B fast tier and complex queries to the 9B main model
+- **Streaming output firewall** with real-time secret redaction (now in Swift)
+- **Semantic cache** with cosine similarity lookup — repeated questions return instantly (now in Swift)
+- **RAG context builder** — retrieves from memory graph and workspace documents (now in Swift)
+- **Tool router + policy engine** — 6 tools with path jailing and approval gates (now in Swift)
+- **Persona system** with hot-reload, custom banter, and roast bank (now in Swift)
+- **Fast tier** — simple queries get fewer tokens for faster response
 - **10,000-dimensional hyperdimensional computing substrate** (vector symbolic architecture) for script profiling
 - **Memory-mapped connectome** with 2048-D embeddings, zero-copy persistence
 - **P2P encrypted mesh sync** (AES-256-GCM, link-local, off by default)
@@ -142,13 +146,14 @@ target/release/badapple --roast "Tell me about cloud AI"
 
 | Metric | Value |
 |---|---|
-| Lines of code | ~68,500 (Rust 18,864, Python 22,197, Swift 11,623, Shell 2,315) |
-| Build time | 35 days, solo |
+| Lines of code | ~72,000 (Rust 18,864, Python 22,197, Swift 15,480, Shell 2,315) |
+| Swift logic modules | BadAppleEngine, BadAppleMLX, BadAppleSecurity, BadAppleTools, BadAppleConversation, BadAppleRAG |
+| Build time | 35 days + Swift migration |
 | Security audits | 2 passes, 69 bugs found and fixed |
 | Fuzzer iterations | 127 million, zero crashes |
 | Tests | 78 Rust + 46 Python + 32 install + 4 fuzz targets |
 | Model | 9B Qwen 3.5 4-bit (pinned to commit hash) |
-| Inference | MLX + ANE bridge + Metal UMA |
+| Native inference | mlx-swift-lm (streaming, speculative decoding, KV cache) |
 | Security | SLICKS v1+v2, openat cage, WASM sandbox, audit ledger, air-gap cert |
 
 ## Documentation
