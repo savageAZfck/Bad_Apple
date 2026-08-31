@@ -76,3 +76,4 @@ state-backup-*
 /*_core.h
 *.log
 *.connectome
+src/platform/apple_desktop/MLXInference/.build/

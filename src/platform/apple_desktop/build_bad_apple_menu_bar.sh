@@ -51,6 +51,22 @@ SWIFTC=$(xcrun --find swiftc)
 TARGET="arm64-apple-macosx26.0"
 FRAMEWORK_SEARCH="${SDK_PATH}/System/Library/Frameworks"
 
+# Build the Swift MLX inference module (BadAppleMLX) as a dylib.
+MLX_INFERENCE_DIR="${REPO_ROOT}/src/platform/apple_desktop/MLXInference"
+MLX_BUILD_DIR="${MLX_INFERENCE_DIR}/.build/arm64-apple-macosx/release"
+MLX_DYLIB="${MLX_BUILD_DIR}/libBadAppleMLX.dylib"
+MLX_MODULE_PATH="${MLX_BUILD_DIR}/Modules"
+
+if [[ -f "${MLX_DYLIB}" ]]; then
+    echo "Using existing BadAppleMLX dylib: ${MLX_DYLIB}"
+else
+    echo "Building BadAppleMLX inference module..."
+    (cd "${MLX_INFERENCE_DIR}" && swift build -c release 2>&1) || {
+        echo "Warning: BadAppleMLX build failed — building menu bar without native MLX inference."
+        MLX_DYLIB=""
+    }
+fi
+
 "${SWIFTC}" \
     -parse-as-library -swift-version 5 -O \
     -target "${TARGET}" -sdk "${SDK_PATH}" \
@@ -92,18 +108,61 @@ cat > "${EMBED_PLIST}" <<'PLIST'
 PLIST
 plutil -lint "${EMBED_PLIST}"
 
+# Build the menu bar app. If the MLX dylib exists, include BadAppleEngine.swift
+# and link against it for native in-process inference.
+MLX_SOURCES=""
+MLX_FLAGS=""
+if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
+    # Include all Swift logic layer files that depend on BadAppleMLX.
+    MLX_SOURCES="${REPO_ROOT}/src/platform/apple_desktop/BadAppleEngine.swift"
+    for src in BadAppleConversation.swift BadAppleSecurity.swift BadAppleTools.swift BadAppleRAG.swift; do
+        [[ -f "${REPO_ROOT}/src/platform/apple_desktop/${src}" ]] && MLX_SOURCES="${MLX_SOURCES} ${REPO_ROOT}/src/platform/apple_desktop/${src}"
+    done
+    # Swift modules are in Modules/. C module maps are in *.build/include/
+    # and in the source checkouts (for C targets like _NumericsShims).
+    # Filter out -tool duplicates and Swift module re-exports.
+    MLX_INCLUDE_DIRS=$(
+        {
+            echo "${MLX_BUILD_DIR}/Modules"
+            find "${MLX_BUILD_DIR}" -name "module.modulemap" -exec dirname {} \; \
+                | grep -v -- "-tool" \
+                | grep -v "ArgumentParser" \
+                | grep -v "ArgumentParserToolInfo" \
+                | sort -u
+            # C module source include paths (for _NumericsShims, etc.)
+            find "${MLX_INFERENCE_DIR}/.build/checkouts" -name "module.modulemap" -exec dirname {} \; \
+                | sort -u
+        } | sort -u | tr '\n' ':'
+    )
+    MLX_FLAGS=""
+    IFS=':' read -ra MLX_DIRS <<< "${MLX_INCLUDE_DIRS}"
+    for dir in "${MLX_DIRS[@]}"; do
+        [[ -n "$dir" ]] && MLX_FLAGS="${MLX_FLAGS} -I ${dir}"
+    done
+    MLX_FLAGS="${MLX_FLAGS} -L ${MLX_BUILD_DIR} -lBadAppleMLX -Xlinker -rpath -Xlinker @executable_path/../Frameworks"
+    echo "Building with native MLX inference support."
+fi
+
 "${SWIFTC}" \
     -parse-as-library -swift-version 5 -O \
     -target "${TARGET}" -sdk "${SDK_PATH}" \
     -I "${SCRATCH_DIR}/native" -L "${BUILD_DIR}" \
+    ${MLX_FLAGS} \
     -o "${SCRATCH_DIR}/native/BadAppleMenuBar" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBarUIResponder.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleControlCenter.swift" \
+    ${MLX_SOURCES} \
     -lBadAppleBridge -ldl \
     -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "${EMBED_PLIST}"
+
+# Copy the MLX dylib into the app bundle if it was built.
+if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
+    install -m 755 "${MLX_DYLIB}" "${FRAMEWORKS_DIR}/libBadAppleMLX.dylib"
+    echo "Installed BadAppleMLX dylib into app bundle."
+fi
 
 install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${MACOS_DIR}/BadApple"
 install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${BUILD_DIR}/BadAppleMenuBar"

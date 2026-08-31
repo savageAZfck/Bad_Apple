@@ -4181,6 +4181,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         startAquaHelper()
         BadAppleMenuBarUIResponder.shared.start()
         registerSMAppService()
+        // Start loading the native Swift MLX engine in the background.
+        // When loaded, text/voice queries bypass the Python daemon entirely.
+        Task.detached(priority: .background) {
+            await BadAppleEngine.shared.loadModel()
+            await MainActor.run {
+                if BadAppleEngine.shared.isLoaded {
+                    badAppleVoiceLog("Native Swift MLX engine loaded — queries will bypass the daemon")
+                    self.rebuildMenu()
+                } else {
+                    badAppleVoiceLog("Native MLX engine not loaded — falling back to daemon")
+                }
+            }
+        }
         // Do not remove the legacy LaunchAgent while running; the app is still
         // distributed through a LaunchAgent on this install path, and bootout
         // would kill the menu bar before it can display.
@@ -4222,6 +4235,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         askPalette.onSubmit = { [weak self] prompt, append, finish in
             guard let self = self else { finish(); return }
+            if BadAppleEngine.shared.isLoaded {
+                BadAppleEngine.shared.generateStreaming(
+                    prompt: prompt,
+                    voiceMode: false,
+                    maxTokens: 300
+                ) { chunk in
+                    DispatchQueue.main.async { append(chunk) }
+                } onComplete: { _ in
+                    DispatchQueue.main.async { finish() }
+                } onError: { error in
+                    DispatchQueue.main.async {
+                        append("\n\nError: \(error)")
+                        finish()
+                    }
+                }
+                return
+            }
             Task {
                 do {
                     _ = try await self.runBadAppleCLIStreaming(
@@ -4239,6 +4269,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         chatWindow.onSubmit = { [weak self] prompt, append, finish in
             guard let self = self else { finish(); return }
+            // NATIVE ENGINE: If the Swift MLX engine is loaded, route directly
+            // through it — no subprocess, no daemon, no Python.
+            if BadAppleEngine.shared.isLoaded {
+                BadAppleEngine.shared.generateStreaming(
+                    prompt: prompt,
+                    voiceMode: false,
+                    maxTokens: 512
+                ) { chunk in
+                    DispatchQueue.main.async { append(chunk) }
+                } onComplete: { _ in
+                    DispatchQueue.main.async { finish() }
+                } onError: { error in
+                    DispatchQueue.main.async {
+                        append("Error: \(error)")
+                        finish()
+                    }
+                }
+                return
+            }
             Task {
                 do {
                     _ = try await self.runBadAppleCLIStreaming(
@@ -4259,6 +4308,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         chatWindow.onDescribeImage = { [weak self] imagePath, imageName, append, finish in
             guard let self = self else { finish(); return }
+            // NATIVE ENGINE: route through Swift if loaded.
+            if BadAppleEngine.shared.isLoaded {
+                let prompt = "Describe this image in detail: \(imagePath)"
+                BadAppleEngine.shared.generateStreaming(
+                    prompt: prompt,
+                    voiceMode: false,
+                    maxTokens: 512
+                ) { chunk in
+                    DispatchQueue.main.async { append(chunk) }
+                } onComplete: { _ in
+                    DispatchQueue.main.async { finish() }
+                } onError: { error in
+                    DispatchQueue.main.async {
+                        append("Error: \(error)")
+                        finish()
+                    }
+                }
+                return
+            }
             Task {
                 do {
                     let prompt = "Describe this image in detail: \(imagePath)"
@@ -5010,6 +5078,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         // The CLI streams token chunks as they are generated; we feed each
         // chunk to the TTS queue immediately so the first sentence starts
         // playing while the model is still finishing the rest of the response.
+
+        // NATIVE ENGINE: If the Swift MLX engine is loaded, route directly
+        // through it — no subprocess, no daemon, no Python. This cuts
+        // 200-500ms of process overhead per query.
+        if BadAppleEngine.shared.isLoaded {
+            badAppleVoiceLog("voice: using native Swift engine (no subprocess)")
+            BadAppleEngine.shared.generateStreaming(
+                prompt: effectivePrompt,
+                voiceMode: true,
+                maxTokens: 300
+            ) { chunk in
+                self.streamedTokenCount += chunk.count
+                if self.voiceStreamingTTSActive {
+                    self.voiceHost.speakStreamingChunk(chunk)
+                }
+                self.rebuildMenu()
+            } onComplete: { finalText in
+                self.isSubmittingVoicePrompt = false
+                if self.voiceStreamingTTSActive {
+                    self.voiceHost.flushStreamingTTS()
+                }
+                self.completeVoiceResponse(finalText, streamed: self.voiceStreamingTTSActive)
+                self.rebuildMenu()
+            } onError: { error in
+                self.isSubmittingVoicePrompt = false
+                self.lastError = error
+                self.voiceHost.speak("Sorry, something went wrong. \(error)")
+                self.rebuildMenu()
+            }
+            return
+        }
+
         var extraArgs: [String] = []
         if selectedPersona != "default" { extraArgs += ["--persona", selectedPersona] }
         if roastEnabled { extraArgs += ["--roast"] }
@@ -5650,12 +5750,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             menu.addItem(errorItem)
         }
 
-        let mode = NSMenuItem(title: "Brain: Qwen3.5 9B MLX + RAG", action: nil, keyEquivalent: "")
+        let engineMode = BadAppleEngine.shared.isLoaded ? "Swift (Native)" : "Daemon (Python)"
+        let mode = NSMenuItem(title: "AI Engine: Qwen 3.5 9B — \(engineMode)", action: nil, keyEquivalent: "")
         mode.isEnabled = false
         menu.addItem(mode)
         let runtime = runtimeState
         let runtimeMode = runtime["mode"] as? String ?? "UNKNOWN"
-        let runtimeItem = NSMenuItem(title: "Runtime: \(runtimeMode)", action: nil, keyEquivalent: "")
+        let runtimeItem = NSMenuItem(title: "Status: \(runtimeMode)", action: nil, keyEquivalent: "")
         runtimeItem.isEnabled = false
         menu.addItem(runtimeItem)
 
