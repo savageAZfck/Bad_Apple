@@ -32,6 +32,8 @@
         <string>__CONSOLE_HOME__:__BADAPPLE_ROOT__:__CONSOLE_HOME__/Documents:__CONSOLE_HOME__/Downloads</string>
         <key>BADAPPLE_AUTOMATION_LOG</key>
         <string>__CONSOLE_HOME__/.badapple/automation.jsonl</string>
+        <key>BADAPPLE_COGNITIVE</key>
+        <string>1</string>
         <key>HOME</key>
         <string>__CONSOLE_HOME__</string>
     </dict>

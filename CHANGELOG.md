@@ -1,0 +1,171 @@
+# Changelog
+
+All notable changes to Bad Apple are documented in this file.
+
+## [0.1.0] — 2026-08-29
+
+### Added
+
+#### Core AI Runtime
+- 9B Qwen 3.5 4-bit model on Apple Neural Engine / GPU via MLX
+- Optional speculative decoding with DFlash and MTP draft models
+- 0.5B fast tier for simple queries (math, identity, time, greetings)
+- Dual-process cognitive governor (576-D CandleBrain + 10,000-D hyperdimensional VSA)
+- Memory-mapped connectome persistence (2048-D embeddings, zero-copy)
+- Semantic cache with BAAI/bge-small-en-v1.5 embeddings
+- Streaming output with token-by-token generation
+- Persona pack system (Default, Wicket, Gen Z, Drill, Midwest)
+- Voice mode with Piper TTS and on-device speech recognition
+- Siri integration via BadAppleIntent
+- macOS Shortcuts integration via aqua helper
+
+#### Security Architecture
+- SLICKS v1 (HMAC-SHA256) and v2 (Secure Enclave ECDSA) IPC authentication
+- Fail-closed filesystem automation cage with openat-based path operations
+- WebAssembly sandbox with fuel metering, StoreLimits, and output caps
+- Hash-chained audit ledger with Secure Enclave-signed checkpoints
+- Streaming output firewall with Aho-Corasick secret redaction
+- Air-gap certification suite (12 tests, zero network listeners)
+- P2P encrypted mesh sync (AES-256-GCM, link-local, off by default)
+- Human-in-the-loop approval policy engine (37 rules in policy.yaml)
+- APFS file scavenger with tokenized chunking and Sled persistence
+- Bounded health supervisor with restart budgets and safe mode
+- Server key pinning (TOFU trust store at /var/lib/bad_apple/keys/daemon.pub)
+- Replay cache in gatekeeper (nonce deduplication within freshness window)
+
+#### System Infrastructure
+- Three launchd daemons: gatekeeper, MLX server, health supervisor
+- Rust gatekeeper proxy on SLICKS-authenticated Unix socket
+- 13-actor runtime (audit, breakers, cache, health, MCP, metrics, model, P2P, persona, resources, task, workspace)
+- Apple Neural Engine bridge via multi-shard FFI with KV cache scatter
+- Apple Intelligence Foundation Models bridge via dlopen
+- Metal UMA zero-copy memory management
+- MCP server on Unix socket (/var/run/badapple/mcp.sock)
+- Local web dashboard at http://127.0.0.1:8787
+- Model version pinning with commit hash and integrity verification
+
+#### UI / UX
+- Menu bar app with persona switching, voice, benchmarking, and diagnostics
+- Onboarding wizard (5-step: welcome, privacy, model status, permissions, first query)
+- Chat window with message bubbles, markdown rendering, code blocks, streaming cursor
+- Multi-line input with Enter to send, Shift+Enter for newline
+- Dark theme matching macOS visual effect views
+- Diagnostics command (badapple --doctor / --diagnostics)
+
+#### Tooling
+- 4 fuzzing targets (IPC frame, WASM cage, protocol frame, scavenger path)
+- Cognitive architecture A/B benchmark script
+- Clean-machine install test (32 automated checks)
+- Homebrew Cask formula for distribution
+- Unsigned DMG with Install.command and quarantine stripper
+- Updater with GitHub release comparison and rollback
+
+### Security Audit
+
+Two full security audit passes were conducted. 69 vulnerabilities were found and fixed:
+
+#### Pass 1 (30 bugs)
+- Gatekeeper WASM path bypass and symlink bypass
+- P2P predictable secret and replay attacks
+- Non-constant-time HMAC comparison
+- WASM cage memory policy bypass and string ABI issues
+- Connectome mmap race condition and corrupt header panic
+- NaN panics in tensor brain and divide-by-zero in conscience oracle
+- Aqua helper unauthenticated socket with world-writable permissions
+- Shell allowlist bypass via absolute path
+- SLICKS secret file permission gaps
+- P2P bound to 0.0.0.0 (should be 127.0.0.1)
+- World-writable /var/run/badapple directory
+- Path traversal in IPC response writing
+- dlopen hijacking via CWD and parent directories
+- dlsym null → unsafeBitCast crash
+- Pipe deadlock in process management
+- Timer on background queue (never fires)
+- MLMultiArray use-after-free in ANE inference
+- Hardcoded version in Info.plist
+- Mixed codesign --verify and --sign flags
+- eval on user input in installer
+- Hardcoded staff group in installer
+- launchctl bootstrap on incompatible machine
+- Root-context launchctl for console user app
+- AppleScript injection in Mail/Calendar/Reminders
+- CSRF timing leak in dashboard
+- Notarization workflow staples without checking status
+- Scavenger TOCTOU in file indexing
+
+#### Pass 2 (39 bugs)
+- SLICKS v2 authentication bypass (server accepts any client_pubkey from Execute frame)
+- policy.yaml ships with autopilot: true by default
+- AppleScript injection in accessibility_action (type/click/menu)
+- AppleScript injection in aqua_helper (backslash not escaped before quote)
+- Path traversal in read_file, list_directory, search_content (no path jailing)
+- MLMultiArray argmax out-of-bounds read (byte stride used as element index)
+- SLICKS secret loaded from environment variable (injection vector)
+- Non-constant-time HMAC comparison in Swift UI responder
+- WASM cage no StoreLimits (memory.grow bypasses 1 MiB policy)
+- P2P adapter zip slip (peer-supplied adapters_dir + unsanitized name)
+- CopyFile source TOCTOU (fs::copy follows symlinks after validation)
+- Scavenger follows symlinked directories (collect_files uses is_dir)
+- WebSocket frame size unbounded (no MAX_FRAME_BYTES check)
+- MAX_ENGRAM_TEXT_CHARS defined but never enforced
+- Hyperdimensional encoder O(n × 10,000) DoS (unbounded input)
+- Tensor brain no input validation (NaN/Inf and wrong-length inputs)
+- Connectome HEADER_SIZE + record_bytes unchecked overflow
+- Hypervector.values public (attacker can create wrong-length vectors)
+- Peer spec SSRF to 169.254.169.254 (cloud metadata)
+- CSRF token public with no Origin/Referer check
+- Audit ledger empty HMAC secret by default
+- Swift full environment inheritance to child processes
+- Aqua helper searched from ~/.bad_apple (user-writable)
+- Gatekeeper socket 0o666 (world-writable)
+- Gatekeeper doesn't validate client_nonce in Hello
+- WASM output vector unbounded (no total cap)
+- WASM alloc bump pointer corruption (validates after mutating)
+- Browser action allows file:// and smb:// schemes
+- Screen capture writes to user-supplied path
+- Shell allowlist includes interpreters (python3, swift, cargo, rustc, git)
+- P2P retry backoff powi sign flip (u32 to i32 cast)
+- Aqua helper no replay/nonce protection
+- /tmp debug log pre-creation with world-readable permissions
+- Non-ASCII confusables bypass reject_lexical_path
+- P2P replay after restart (nonce set lost on restart)
+- P2P v1 HMAC allows origin spoofing with v2 public key
+- Dashboard /api/control can toggle autopilot without identity check
+- Output firewall check_full stateless (misses patterns split across chunks)
+- Ledger verify doesn't validate Secure Enclave checkpoint signature
+
+### Fuzzing
+
+4 fuzzing targets were created and run for 2 hours each (127+ million total iterations) with zero crashes:
+- fuzz_ipc_frame: SLICKS frame parsing, nonce validation, timestamp freshness (423K iterations)
+- fuzz_wasm_cage: WASM compilation and execution with arbitrary bytes (638K iterations)
+- fuzz_protocol_frame: P2P signed packet parsing, HMAC verification (694K iterations)
+- fuzz_scavenger_path: Path handling, canonicalization, NUL bytes (760K iterations)
+
+### Test Coverage
+
+- 78 Rust unit tests (including 25 security regression tests)
+- 46 Python security tests
+- 32 clean-machine install checks
+- 4 fuzzing targets with corpus
+- Cognitive architecture A/B benchmark
+
+### Performance
+
+| Metric | Value |
+|---|---|
+| First-token latency | 3.5–6.5s for 450–750 token prompts |
+| Decode throughput | 13–25 tok/s, spikes to ~36 tok/s |
+| Peak memory | 5.7–6.5 GB with 9B + optional draft |
+| Voice first token | 2.8–5.7s for 430–460 token prompts |
+| Fast tier latency | <1s for simple queries |
+| Cognitive routing overhead | ~0.7s classification per query |
+
+### Known Limitations
+
+- Unsigned by philosophical choice (no Apple notarization, no cloud upload)
+- macOS / Apple Silicon only (total platform lock-in for ANE/Metal/SE access)
+- Single model (9B Qwen 3.5 pinned to commit 5ae9734)
+- No proactive reachout (reactive only, unlike Hermes/OpenAGI)
+- No cross-platform support
+- Solo project, no external contributors yet

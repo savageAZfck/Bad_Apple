@@ -79,6 +79,24 @@ if [[ -n "${APPLE_ID}" && -n "${APPLE_TEAM_ID}" && -n "${APPLE_APP_PASSWORD}" ]]
         --password "${APPLE_APP_PASSWORD}" \
         --wait > "${SUBMIT_LOG}" 2>&1
     cat "${SUBMIT_LOG}"
+    # Check notarization status before stapling.
+    if grep -qiE 'status:\s*(Invalid|Rejected)' "${SUBMIT_LOG}"; then
+        echo "ERROR: Notarization was rejected. See ${SUBMIT_LOG} for details." >&2
+        REQUEST_ID="$(grep -oE 'id: [a-f0-9-]+' "${SUBMIT_LOG}" | head -n1 | awk '{print $2}')"
+        if [[ -n "${REQUEST_ID}" ]]; then
+            xcrun notarytool log "${REQUEST_ID}" \
+                --apple-id "${APPLE_ID}" \
+                --team-id "${APPLE_TEAM_ID}" \
+                --password "${APPLE_APP_PASSWORD}" \
+                "${BUILD_DIR}/notarytool-log.json"
+            echo "Notarization log saved to ${BUILD_DIR}/notarytool-log.json"
+        fi
+        exit 1
+    fi
+    if ! grep -qiE 'status:\s*Accepted' "${SUBMIT_LOG}"; then
+        echo "ERROR: Notarization status could not be confirmed. See ${SUBMIT_LOG}." >&2
+        exit 1
+    fi
     REQUEST_ID="$(grep -oE 'id: [a-f0-9-]+' "${SUBMIT_LOG}" | head -n1 | awk '{print $2}')"
     if [[ -n "${REQUEST_ID}" ]]; then
         xcrun notarytool log "${REQUEST_ID}" \
@@ -88,7 +106,9 @@ if [[ -n "${APPLE_ID}" && -n "${APPLE_TEAM_ID}" && -n "${APPLE_APP_PASSWORD}" ]]
             "${BUILD_DIR}/notarytool-log.json"
         echo "Notarization log saved to ${BUILD_DIR}/notarytool-log.json"
     fi
-    xcrun stapler staple "${APP_DIR}"
+    echo "Stapling notary ticket to app bundle..."
+    xcrun stapler staple "${APP_DIR}" || { echo "ERROR: stapler failed" >&2; exit 1; }
+    xcrun stapler validate "${APP_DIR}" || echo "WARNING: stapler validate failed" >&2
 else
     echo "WARNING: notarization skipped; set APPLE_ID, APPLE_TEAM_ID, and APPLE_APP_PASSWORD to notarize." >&2
 fi

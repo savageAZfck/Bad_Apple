@@ -19,6 +19,9 @@
 pub fn dot_f64_f32(a: &[f64], b: &[f64]) -> f64 {
     assert_eq!(a.len(), b.len(), "dot_f64_f32: length mismatch");
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `dot_f64x2_f32x4` only reads `a` and `b` within their asserted-equal
+    // length; the NEON loads are 16-byte aligned-or-unaligned reads of `f64` slices
+    // whose length is validated by the assert above. No pointer is retained.
     unsafe {
         dot_f64x2_f32x4(a, b) as f64
     }
@@ -57,6 +60,14 @@ pub fn cosine_f64_f32(a: &[f64], b: &[f64]) -> f64 {
 }
 
 #[cfg(target_arch = "aarch64")]
+/// Fused `f64` dot product accumulated in `f32` NEON lanes.
+///
+/// # Safety
+///
+/// The caller must ensure `a` and `b` have equal length and point to valid,
+/// readable memory for that many `f64` elements. The NEON loads read four
+/// `f64` values per iteration, so the slices must remain valid for the full
+/// length even though only whole groups of four are vectorized.
 unsafe fn dot_f64x2_f32x4(a: &[f64], b: &[f64]) -> f32 {
     use core::arch::aarch64::{
         vaddq_f32, vaddvq_f32, vandq_u32, vbslq_f32, vceqq_f32, vcombine_f32, vcvt_f32_f64,

@@ -121,8 +121,9 @@ impl ConscienceOracle {
         // Apple Intelligence not available or produced an unusable answer:
         // fall back to the internal high-speed semantic cosine matcher.
         let input_emb = generate_2048_grounded_embedding(text, &[0.5, 0.5, 0.5, 9.81]);
-        let idx = self.match_by_embedding(&input_emb, token_count.min(self.tokens.len()));
-        let idx = idx.unwrap_or_else(|| self.hash_classify(text, token_count));
+        let effective_count = token_count.min(self.tokens.len());
+        let idx = self.match_by_embedding(&input_emb, effective_count);
+        let idx = idx.unwrap_or_else(|| self.hash_classify(text, effective_count.max(1)));
         self.cache.insert(key, idx);
         Some(idx)
     }
@@ -243,6 +244,9 @@ impl ConscienceOracle {
 
     /// Deterministic hash-based fallback that mirrors the local objective.
     pub fn hash_classify(&self, text: &str, token_count: usize) -> usize {
+        if token_count == 0 {
+            return 0;
+        }
         let mut hash: u64 = 0xcbf29ce484222325;
         for b in text.bytes() {
             hash = hash.wrapping_mul(0x100000001b3);

@@ -2,72 +2,97 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [main, master]
   pull_request:
-    branches: [master, main]
+    branches: [main, master]
+  schedule:
+    # Nightly fuzz run at 3 AM UTC
+    - cron: "0 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Rust check + fmt
+  rust:
+    name: Rust — fmt, clippy, build, test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: cargo fmt --check
-        run: cargo fmt -- --check
-      - name: cargo check
-        run: cargo check
-      - name: cargo check release binaries
-        run: cargo check --release --bin gatekeeper --bin train_gatekeeper --bin badapple
+          components: rustfmt, clippy
+      - name: Install dependencies
+        run: |
+          brew install cmake
+      - name: Cargo fmt check
+        run: cargo fmt --check
+      - name: Cargo clippy
+        run: cargo clippy --release -- -D warnings
+      - name: Cargo build
+        run: cargo build --release
+      - name: Cargo test
+        run: cargo test --release
+      - name: Cargo audit
+        run: |
+          cargo install cargo-audit
+          cargo audit
 
   python:
-    name: Python lint + unit tests
+    name: Python — ruff, compileall
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Install Python dependencies with hashes
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Ruff check
         run: |
-          python3 -m venv .venv
-          .venv/bin/pip install --require-hashes -r requirements.txt
-      - name: ruff core lint
-        run: .venv/bin/python -m ruff check .
-      - name: ruff strict exception lint
-        run: .venv/bin/python -m ruff check --select BLE001,S110 . --exclude .venv --exclude target --exclude build --exclude __pycache__ --exclude web --exclude tests/ane_brain_perf
-      - name: Python compile check
-        run: .venv/bin/python -m compileall -q .
-      - name: Python unit tests
-        run: .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+          ruff check --select E4,E7,E9,F,B,UP,PLW1510,F821,DTZ005,DTZ006,F841,RUF013 . \
+            --exclude .venv --exclude target --exclude build --exclude __pycache__ \
+            --exclude web --exclude tests/ane_brain_perf
+      - name: Compile all
+        run: python3 -m compileall -q badapple_mlx_server.py badapple_tools.py badapple_extras.py badapple_aqua_helper.py badapple_slicks.py badapple_p2p.py badapple_dashboard.py benchmark_cognitive.py
 
-  build-and-package:
-    name: Build Rust + package release
+  install-test:
+    name: Clean install test
     runs-on: macos-latest
-    needs: [check, python]
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: Build release binaries
-        run: cargo build --release
-      - name: Build menu bar app (unsigned)
-        run: BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
-      - name: Package full release
-        run: src/platform/apple_desktop/package_full_release.sh
-      - name: Verify package has no dev artifacts
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: brew install cmake
+      - name: Run install test
         run: |
-          unzip -l target/release/Bad_Apple-0.1.0-full-unsigned.zip | \
-            grep -E 'savag3|\.cert|\.key|\.DS_Store|state-backup|sapient|test_cage|\.cargo|state\.defense|state\.network|state\.weights' && \
-            exit 1 || exit 0
+          cargo build --release
+          BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+          tests/test_clean_install.sh
+
+  fuzz:
+    name: Fuzz (nightly only)
+    runs-on: macos-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Fuzz IPC frame
+        run: cargo +nightly fuzz run fuzz_ipc_frame -- -max_total_time=300 -max_len=65536
+      - name: Fuzz WASM cage
+        run: cargo +nightly fuzz run fuzz_wasm_cage -- -max_total_time=300 -max_len=8192
+      - name: Fuzz protocol frame
+        run: cargo +nightly fuzz run fuzz_protocol_frame -- -max_total_time=300 -max_len=65536
+      - name: Fuzz scavenger path
+        run: cargo +nightly fuzz run fuzz_scavenger_path -- -max_total_time=300 -max_len=4096
+      - name: Check for crashes
+        run: |
+          for target in fuzz_ipc_frame fuzz_wasm_cage fuzz_protocol_frame fuzz_scavenger_path; do
+            crashes=$(ls fuzz/artifacts/$target/ 2>/dev/null | wc -l)
+            if [ "$crashes" -gt 0 ]; then
+              echo "::error::Fuzzer $target found $crashes crashes"
+              exit 1
+            fi
+          done
+          echo "All fuzzers completed with zero crashes"

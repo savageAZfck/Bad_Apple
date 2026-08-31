@@ -6,14 +6,21 @@ shortcuts, AppleScript GUI, and other user-context actions that fail when called
 from the system LaunchDaemon.
 
 Listens on a Unix domain socket and speaks line-delimited JSON. No TCP, no cloud.
+
+Every request must carry a SLICKS v1 HMAC proof over the JSON body (excluding
+the ``proof`` field) to prevent unauthenticated local processes from driving
+the UI or capturing the screen.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import socketserver
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -33,6 +40,65 @@ def _remove_stale(path: str) -> None:
             p.unlink()
     except Exception:  # noqa: BLE001,S110 - cleanup
         pass
+
+
+def _load_slicks_secret() -> bytes | None:
+    """Load the SLICKS v1 shared secret for request authentication."""
+    raw = None
+    if "BADAPPLE_SLICKS_SECRET" in os.environ:
+        raw = os.environ["BADAPPLE_SLICKS_SECRET"]
+    else:
+        key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", "/var/lib/bad_apple/slicks.key")
+        try:
+            with open(key_path) as f:
+                raw = f.read()
+        except Exception:  # noqa: BLE001
+            return None
+    if raw is None:
+        return None
+    trimmed = raw.strip()
+    if all(c in "0123456789abcdefABCDEF" for c in trimmed) and len(trimmed) >= 32:
+        return bytes.fromhex(trimmed)
+    return trimmed.encode()
+
+
+# Replay protection: track seen nonces within a time window.
+_seen_nonces: set[str] = set()
+_nonce_lock = threading.Lock()
+_NONCE_MAX_SIZE = 1024
+_NONCE_MAX_AGE_S = 120
+
+
+def _verify_request_proof(body: dict[str, Any], secret: bytes) -> bool:
+    """Verify the SLICKS v1 HMAC proof on an incoming request body.
+
+    Includes timestamp freshness and nonce replay protection.
+    """
+    proof = body.get("proof")
+    if not isinstance(proof, str):
+        return False
+    # Replay protection: require a timestamp and nonce
+    timestamp_ms = body.get("timestamp_ms")
+    nonce = body.get("nonce")
+    if not isinstance(timestamp_ms, (int, float)) or not isinstance(nonce, str):
+        return False
+    # Timestamp freshness check (120-second window)
+    now_ms = int(time.time() * 1000)
+    if abs(now_ms - int(timestamp_ms)) > _NONCE_MAX_AGE_S * 1000:
+        return False
+    # Nonce replay check
+    with _nonce_lock:
+        if nonce in _seen_nonces:
+            return False
+        if len(_seen_nonces) >= _NONCE_MAX_SIZE:
+            _seen_nonces.clear()
+        _seen_nonces.add(nonce)
+    # Re-serialize the body without the proof field, with sorted keys for
+    # canonical ordering.
+    body_without_proof = {k: v for k, v in body.items() if k != "proof"}
+    material = json.dumps(body_without_proof, sort_keys=True, separators=(",", ":")).encode()
+    expected = hmac.new(secret, material, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, proof.lower())
 
 
 def _run_shortcut(name: str, input_text: str = "", timeout: int = 60) -> dict[str, Any]:
@@ -132,7 +198,7 @@ def _ui_via_menubar(action: str, **kwargs: Any) -> dict[str, Any] | None:
     request_dir = Path("/var/run/badapple")
     try:
         request_dir.mkdir(parents=True, exist_ok=True)
-        request_dir.chmod(0o777)
+        request_dir.chmod(0o700)
     except Exception:  # noqa: BLE001,S110 - cleanup
         pass
 
@@ -238,7 +304,7 @@ def _ui_click(target: str, role: str = "") -> dict[str, Any]:
         except json.JSONDecodeError:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI click failed"}
         return data
-    escaped_target = target.replace('"', '\\"')
+    escaped_target = target.replace("\\", "\\\\").replace('"', '\\"')
     script = f"""
     tell application "System Events"
         set p to first application process whose frontmost is true
@@ -278,8 +344,9 @@ def _ui_type(target: str, text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or "BadAppleUI type failed"}
         return data
-    escaped_target = target.replace('"', '\\"')
-    escaped_text = text.replace('"', '\\"').replace("\n", "\\n")
+    # Escape backslash FIRST, then double-quote, for AppleScript string safety.
+    escaped_target = target.replace("\\", "\\\\").replace('"', '\\"')
+    escaped_text = text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     script = f"""
     tell application "System Events"
         set p to first application process whose frontmost is true
@@ -349,7 +416,16 @@ class _AquaHelperHandler(socketserver.StreamRequestHandler):
                 continue
             try:
                 req = json.loads(line.decode("utf-8"))
-                resp = _handle_request(req)
+                # Authenticate every request with a SLICKS v1 HMAC proof.
+                secret = _load_slicks_secret()
+                if secret is None:
+                    resp = {"ok": False, "error": "aqua helper has no SLICKS secret configured"}
+                elif not _verify_request_proof(req, secret):
+                    resp = {"ok": False, "error": "unauthenticated: invalid or missing proof"}
+                else:
+                    # Strip the proof before dispatching.
+                    req.pop("proof", None)
+                    resp = _handle_request(req)
             except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as e:
                 resp = {"ok": False, "error": f"invalid request: {e}"}
             self.wfile.write(json.dumps(resp).encode("utf-8") + b"\n")
@@ -357,16 +433,27 @@ class _AquaHelperHandler(socketserver.StreamRequestHandler):
 
 
 def call_aqua(command: str, timeout: float = 15.0, **kwargs) -> dict[str, Any] | None:
-    """Call an Aqua helper over its Unix socket and return its JSON response."""
+    """Call an Aqua helper over its Unix socket and return its JSON response.
+
+    Signs the request with a SLICKS v1 HMAC proof so the helper can verify
+    the caller is a trusted Bad Apple component.
+    """
     path = _socket_path()
     if not Path(path).exists():
         return None
+    secret = _load_slicks_secret()
+    if secret is None:
+        return None
     try:
         import socket
+        body: dict[str, Any] = {"command": command, **kwargs}
+        material = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        proof = hmac.new(secret, material, hashlib.sha256).hexdigest()
+        body["proof"] = proof
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             s.connect(path)
-            req = json.dumps({"command": command, **kwargs}).encode("utf-8") + b"\n"
+            req = json.dumps(body).encode("utf-8") + b"\n"
             s.sendall(req)
             with s.makefile("rb") as f:
                 line = f.readline()
@@ -382,8 +469,9 @@ def start() -> None:
     _remove_stale(path)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     server = socketserver.ThreadingUnixStreamServer(path, _AquaHelperHandler)
-    os.chmod(path, 0o666)
-    print(f"[aqua_helper] listening on {path}", flush=True)
+    # Restrict to the console user only — no world access.
+    os.chmod(path, 0o600)
+    print(f"[aqua_helper] listening on {path} (0o600)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

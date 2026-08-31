@@ -20,10 +20,31 @@ pub const HD_DIM: usize = 10_000;
 /// the hot paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hypervector {
-    pub values: Vec<i8>,
+    values: Vec<i8>,
 }
 
 impl Hypervector {
+    /// Allocate a zeroed hypervector of `HD_DIM` dimensions.
+    pub fn new() -> Self {
+        Self {
+            values: vec![0; HD_DIM],
+        }
+    }
+
+    /// Construct a `Hypervector` from an existing value vector, validating that
+    /// it has exactly `HD_DIM` elements.
+    pub fn from_values(v: Vec<i8>) -> Result<Self, String> {
+        if v.len() != HD_DIM {
+            return Err(format!("Hypervector must have {HD_DIM} elements"));
+        }
+        Ok(Self { values: v })
+    }
+
+    /// Borrow the underlying bipolar values.
+    pub fn values(&self) -> &[i8] {
+        &self.values
+    }
+
     /// Allocate a new random bipolar vector.
     pub fn random<R: Rng>(rng: &mut R) -> Self {
         let mut values = Vec::with_capacity(HD_DIM);
@@ -84,6 +105,11 @@ impl Hypervector {
 
     /// Permute by a circular left shift by `k` positions.
     pub fn permute(&self, k: usize) -> Self {
+        assert_eq!(
+            self.values.len(),
+            HD_DIM,
+            "Hypervector length invariant violated"
+        );
         let k = k % HD_DIM;
         let mut values = Vec::with_capacity(HD_DIM);
         values.extend_from_slice(&self.values[k..]);
@@ -93,6 +119,11 @@ impl Hypervector {
 
     /// Inverse permutation (circular right shift by `k`).
     pub fn permute_inv(&self, k: usize) -> Self {
+        assert_eq!(
+            self.values.len(),
+            HD_DIM,
+            "Hypervector length invariant violated"
+        );
         let k = k % HD_DIM;
         let mut values = Vec::with_capacity(HD_DIM);
         let split = HD_DIM - k;
@@ -151,6 +182,10 @@ mod aarch64 {
         assert_eq!(b.len(), HD_DIM);
         assert_eq!(out.len(), HD_DIM);
         let main = main_len();
+        // SAFETY: `a`, `b`, and `out` are all asserted to be exactly `HD_DIM` elements, and
+        // `main` is `(HD_DIM/16)*16`, so every 16-element `vld1q_s8`/`vst1q_s8` access stays
+        // in bounds. The slices are contiguous `&[i8]`/`&mut [i8]` with valid, properly
+        // aligned (1-byte) pointers. The tail beyond `main` is handled by the scalar loop.
         unsafe {
             for i in (0..main).step_by(16) {
                 let va = vld1q_s8(a.as_ptr().add(i));
@@ -167,6 +202,9 @@ mod aarch64 {
     pub fn hamming_distance(a: &[i8], b: &[i8]) -> usize {
         let main = main_len();
         let mut count: usize = 0;
+        // SAFETY: `a` and `b` are `&[i8]` slices whose pointers are valid for their length.
+        // `main` is `(HD_DIM/16)*16` so each 16-element `vld1q_s8` load is in bounds; the
+        // loads are read-only and the tail is handled by the scalar loop below.
         unsafe {
             for i in (0..main).step_by(16) {
                 let va = vld1q_s8(a.as_ptr().add(i));
@@ -187,6 +225,10 @@ mod aarch64 {
 
     pub fn dot(a: &[i8], b: &[i8]) -> i32 {
         let main = main_len();
+        // SAFETY: `a` and `b` are `&[i8]` slices read only within `[0, main)` where
+        // `main = (HD_DIM/16)*16`, so each 16-element `vld1q_s8` load is in bounds. The
+        // accumulator vectors are stack locals and never alias the slices. The scalar tail
+        // loop handles the remainder beyond `main`.
         unsafe {
             let mut acc_low: int16x8_t = vdupq_n_s16(0);
             let mut acc_high: int16x8_t = vdupq_n_s16(0);
@@ -213,6 +255,11 @@ mod aarch64 {
         assert_eq!(scratch.len(), HD_DIM);
         scratch.fill(0);
         let main = main_len();
+        // SAFETY: `scratch` is asserted to be `HD_DIM` elements and is filled with zeros
+        // first. Each hypervector's `values` is `HD_DIM` `i8`s, and `main` is
+        // `(HD_DIM/16)*16`, so every `vld1q_s8`/`vst1q_s32` access is in bounds. The
+        // scratch buffer is accessed via `&mut` so no aliasing occurs, and the tail is
+        // handled by the scalar loop.
         unsafe {
             for v in vectors {
                 let src = v.values.as_ptr();
@@ -245,6 +292,10 @@ mod aarch64 {
         assert_eq!(scratch.len(), HD_DIM);
         assert_eq!(out.len(), HD_DIM);
         let main = main_len();
+        // SAFETY: `scratch` and `out` are both asserted to be `HD_DIM` elements, and
+        // `main = (HD_DIM/16)*16`, so each 16-element `vld1q_s32`/`vst1q_s8` access stays
+        // in bounds. `scratch` is read-only here and `out` is written via `&mut`, so they
+        // do not alias. The scalar tail loop handles the remainder beyond `main`.
         unsafe {
             let ones = vdupq_n_s32(1);
             for i in (0..main).step_by(16) {
@@ -294,7 +345,7 @@ impl HDCMemory {
 
     /// Allocate a fresh random hypervector and store it under `name`.
     pub fn allocate(&mut self, name: &str) -> Hypervector {
-        let mut rng = self.rng.lock().unwrap();
+        let mut rng = self.rng.lock().unwrap_or_else(|e| e.into_inner());
         let v = Hypervector::random(&mut *rng);
         self.symbols.insert(name.to_string(), v.clone());
         v
@@ -373,16 +424,32 @@ impl ScriptEncoder {
         if !self.token_memory.symbols.contains_key(&key) {
             self.token_memory.allocate(&key);
         }
-        // Safety: key was just inserted.
-        self.token_memory.symbols.get(&key).unwrap()
+        // Safety: key was just inserted above, so it is guaranteed to exist.
+        self.token_memory
+            .symbols
+            .get(&key)
+            .expect("token symbol was just allocated")
     }
 
     /// Encode the source text into a script profile.
     pub fn encode(&mut self, source: &str) -> ScriptProfile {
+        // Cap input to prevent O(n * HD_DIM) DoS.
+        const MAX_ENCODE_CHARS: usize = 8_192;
+        const MAX_ENCODE_TOKENS: usize = 256;
+        let source = if source.len() > MAX_ENCODE_CHARS {
+            &source[..MAX_ENCODE_CHARS]
+        } else {
+            source
+        };
         let ids = tokenize_text(source);
+        let ids: Vec<u64> = ids
+            .into_iter()
+            .take(MAX_ENCODE_TOKENS)
+            .map(|id| id as u64)
+            .collect();
         let mut result = Hypervector::zero();
         for (pos, &id) in ids.iter().enumerate() {
-            let tok = self.token_hv(id);
+            let tok = self.token_hv(id as u32);
             // Bind token with position to preserve order: ρ^pos × token.
             self.pos_buffer = tok.permute(pos);
             let tmp = result.bind(&self.pos_buffer);
@@ -539,5 +606,47 @@ mod tests {
         let probe = mem.get("red").unwrap().clone();
         let (name, _) = mem.nearest(&probe).unwrap();
         assert_eq!(name, "red");
+    }
+
+    // =========================================================================
+    // Security regression tests — red team findings
+    // =========================================================================
+
+    /// Verify that encoding a very long string does not panic or OOM.
+    /// The encoder caps input at MAX_ENCODE_CHARS to prevent O(n * HD_DIM) DoS.
+    #[test]
+    fn encode_caps_input_length() {
+        let mut encoder = ScriptEncoder::new();
+        // A very long string (1 million chars) should be capped internally.
+        let long = "x".repeat(1_000_000);
+        let profile = encoder.encode(&long);
+        // The source stored in the profile should be capped, not the full input.
+        assert!(
+            profile.source.len() <= 8_192,
+            "encoded source should be capped, got {} chars",
+            profile.source.len()
+        );
+    }
+
+    /// Verify that from_values rejects a vector with the wrong number of elements.
+    #[test]
+    fn hypervector_from_values_rejects_wrong_length() {
+        let too_short = vec![1_i8; HD_DIM - 1];
+        assert!(
+            Hypervector::from_values(too_short).is_err(),
+            "shorter vector must be rejected"
+        );
+
+        let too_long = vec![1_i8; HD_DIM + 1];
+        assert!(
+            Hypervector::from_values(too_long).is_err(),
+            "longer vector must be rejected"
+        );
+
+        let correct = vec![1_i8; HD_DIM];
+        assert!(
+            Hypervector::from_values(correct).is_ok(),
+            "correct-length vector must be accepted"
+        );
     }
 }

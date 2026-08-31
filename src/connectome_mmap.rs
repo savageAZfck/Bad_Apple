@@ -3,7 +3,9 @@
 //!
 //! The on-disk layout is a fixed-size binary slab:
 //!
-//!     [ConnectomeHeader] [Record 0] [Record 1] ...
+//! ```text
+//! [ConnectomeHeader] [Record 0] [Record 1] ...
+//! ```
 //!
 //! Each record is 8-byte aligned and stores `id`, `timestamp`, `embedding[2048]`
 //! and `brain_state[BRAIN_DIM]`.  Because the file is `mmap`'d directly into the
@@ -71,13 +73,22 @@ impl ConnectomeMmap {
             .truncate(false)
             .open(path)?;
 
-        let min_len = (HEADER_SIZE + capacity * RECORD_SIZE) as u64;
+        // Guard against overflow: capacity * RECORD_SIZE + HEADER_SIZE.
+        let record_bytes = capacity
+            .checked_mul(RECORD_SIZE)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "capacity overflow"))?;
+        let min_len = record_bytes.checked_add(HEADER_SIZE).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "connectome size overflow")
+        })? as u64;
 
         let meta = file.metadata()?;
         if meta.len() < min_len {
             file.set_len(min_len)?;
         }
 
+        // SAFETY: map_mut is safe because the file was just opened/truncated to at least
+        // `min_len` bytes above and we hold write access to it. The mapping is MAP_SHARED so
+        // kernel write-back handles persistence; the file length bounds the returned slice.
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
         let bytes: &mut [u8] = &mut mmap;
 
@@ -110,16 +121,26 @@ impl ConnectomeMmap {
     /// request an asynchronous kernel flush.  This is safe to call from the
     /// off-thread state-save path and avoids stalling the main loop.
     pub fn persist(&self, network: &HashMap<u64, crate::MemoryGraphNode>) -> io::Result<()> {
-        let mut guard = self.mmap.lock().unwrap();
-        let required = HEADER_SIZE + network.len() * RECORD_SIZE;
+        let mut guard = self.mmap.lock().unwrap_or_else(|e| e.into_inner());
+        let record_bytes = network
+            .len()
+            .checked_mul(RECORD_SIZE)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "network size overflow"))?;
+        let required = record_bytes.checked_add(HEADER_SIZE).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "connectome size overflow")
+        })?;
 
         // Grow the mapping if the network has outgrown the current file.
+        // Hold the lock across the resize so concurrent readers see a
+        // consistent mapping.
         if guard.len() < required {
-            drop(guard);
             self.file.set_len(required as u64)?;
+            // Remap while still holding the lock to avoid a torn view.
+            // SAFETY: the file was just grown to `required` bytes via set_len, so the mapping
+            // request is backed by a file region large enough to satisfy it. We hold the mutex
+            // so no concurrent reader observes a partially-replaced mapping.
             let new_mmap = unsafe { MmapOptions::new().map_mut(&self.file)? };
-            *self.mmap.lock().unwrap() = new_mmap;
-            guard = self.mmap.lock().unwrap();
+            *guard = new_mmap;
         }
 
         let bytes: &mut [u8] = &mut guard;
@@ -186,7 +207,7 @@ impl ConnectomeMmap {
         network: &mut HashMap<u64, crate::MemoryGraphNode>,
         spatial_axes: &[f64; 4],
     ) -> io::Result<()> {
-        let guard = self.mmap.lock().unwrap();
+        let guard = self.mmap.lock().unwrap_or_else(|e| e.into_inner());
         let bytes: &[u8] = &guard;
         if bytes.len() < HEADER_SIZE {
             return Ok(());
@@ -198,7 +219,10 @@ impl ConnectomeMmap {
             return Ok(());
         }
 
-        let count = header.count as usize;
+        // Guard against a corrupt header.count that would index past the
+        // records slab.  Only iterate over records that actually fit.
+        let max_count = records_bytes.len() / RECORD_SIZE;
+        let count = (header.count as usize).min(max_count);
 
         for i in 0..count {
             let base = i * RECORD_SIZE;
@@ -244,7 +268,7 @@ impl ConnectomeMmap {
     /// Return a single record by index, copying it out of the mmap.
     #[allow(dead_code)]
     pub fn get_record(&self, index: usize) -> Option<(u64, u64, Vec<f64>, Vec<f64>)> {
-        let guard = self.mmap.lock().unwrap();
+        let guard = self.mmap.lock().unwrap_or_else(|e| e.into_inner());
         let bytes: &[u8] = &guard;
         if bytes.len() < HEADER_SIZE {
             return None;
@@ -254,7 +278,10 @@ impl ConnectomeMmap {
         if header.magic != CONNECTOME_MAGIC || header.version != CONNECTOME_VERSION {
             return None;
         }
-        if index >= header.count as usize {
+        // Guard against a corrupt header.count that would index past the slab.
+        let max_count = records_bytes.len() / RECORD_SIZE;
+        let count = (header.count as usize).min(max_count);
+        if index >= count {
             return None;
         }
 
@@ -276,7 +303,7 @@ impl ConnectomeMmap {
     }
 
     pub fn capacity(&self) -> usize {
-        let guard = self.mmap.lock().unwrap();
+        let guard = self.mmap.lock().unwrap_or_else(|e| e.into_inner());
         guard.len().saturating_sub(HEADER_SIZE) / RECORD_SIZE
     }
 }
@@ -375,6 +402,75 @@ mod tests {
         let node = network.get(&7).unwrap();
         assert_eq!(node.embedding.len(), EMBEDDING_DIM);
         assert_eq!(node.brain_state.len(), BRAIN_DIM);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // =========================================================================
+    // Security regression tests — red team findings
+    // =========================================================================
+
+    /// Verify that opening with a capacity near usize::MAX does not overflow.
+    /// The checked_mul / checked_add guards must return an error, not panic.
+    #[test]
+    fn connectome_checked_add_overflow() {
+        let path = temp_path();
+        let _ = std::fs::remove_file(&path);
+
+        // usize::MAX * RECORD_SIZE will overflow; checked_mul must catch it.
+        let result = ConnectomeMmap::open(&path, usize::MAX);
+        assert!(result.is_err(), "expected an overflow error, got Ok");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Verify that a corrupt header count (u64::MAX) is clamped by load_into
+    /// and does not cause an out-of-bounds access or panic.
+    #[test]
+    fn connectome_corrupt_header_count_clamped() {
+        let path = temp_path();
+        let _ = std::fs::remove_file(&path);
+
+        // Create a valid connectome with one record.
+        let mut network = HashMap::new();
+        network.insert(
+            1_u64,
+            crate::MemoryGraphNode {
+                id: 1,
+                timestamp: 100,
+                experiential_text: "node 1".into(),
+                emotional_state_snapshot: "test".into(),
+                embedding: vec![0.5; EMBEDDING_DIM],
+                associated_edge_ids: vec![],
+                origin_instance: "test".into(),
+                brain_state: vec![0.1; BRAIN_DIM],
+            },
+        );
+
+        let store = ConnectomeMmap::open(&path, 8).unwrap();
+        store.persist(&network).unwrap();
+        drop(store); // Close the mmap before corrupting the file.
+
+        // Corrupt the header count field (offset 16..24) to u64::MAX.
+        let mut file_bytes = std::fs::read(&path).unwrap();
+        file_bytes[16..24].copy_from_slice(&u64::MAX.to_ne_bytes());
+        std::fs::write(&path, &file_bytes).unwrap();
+
+        // Reopen — magic/version are valid so the corrupted count is preserved.
+        let store2 = ConnectomeMmap::open(&path, 8).unwrap();
+        let mut network2 = network.clone();
+
+        // load_into must not panic; the corrupt count is clamped to the
+        // number of records that actually fit in the file.
+        let result = store2.load_into(&mut network2, &[0.9, 0.1, 0.7, 9.81]);
+        assert!(
+            result.is_ok(),
+            "load_into should not panic on corrupt count"
+        );
+
+        // The valid record should still be loaded correctly.
+        let node = network2.get(&1).unwrap();
+        assert_eq!(node.embedding.len(), EMBEDDING_DIM);
 
         let _ = std::fs::remove_file(&path);
     }

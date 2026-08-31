@@ -1,0 +1,38 @@
+[package]
+name = "bad-apple-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bad_apple = { path = ".." }
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+
+[[bin]]
+name = "fuzz_ipc_frame"
+path = "fuzz_targets/fuzz_ipc_frame.rs"
+
+[[bin]]
+name = "fuzz_wasm_cage"
+path = "fuzz_targets/fuzz_wasm_cage.rs"
+
+[[bin]]
+name = "fuzz_scavenger_path"
+path = "fuzz_targets/fuzz_scavenger_path.rs"
+
+[[bin]]
+name = "fuzz_protocol_frame"
+path = "fuzz_targets/fuzz_protocol_frame.rs"
+
+# libFuzzer requires abort-on-panic so that sanitizer coverage is not
+# disrupted by unwinding.  cargo-fuzz sets this automatically, but we
+# declare it here so a plain `cargo build` also produces a valid binary.
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = false
+codegen-units = 1

@@ -7,7 +7,8 @@ policy_version: "1.0"
 # Global autopilot: when true, the assistant runs destructive tools
 # immediately without asking. When false, tools with require_approval: true
 # go through the human-in-the-loop flow.
-autopilot: true
+# SECURITY: Default is false. Must be explicitly enabled by the user.
+autopilot: false
 
 # Defaults for tools that are not explicitly listed below.
 defaults:

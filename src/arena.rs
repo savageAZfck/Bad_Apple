@@ -40,12 +40,19 @@ impl MemoryArena {
     pub fn new(capacity: usize) -> Self {
         let cap = capacity.next_multiple_of(128).max(128);
         let layout = Layout::from_size_align(cap, 128).expect("arena layout");
+        // SAFETY: `layout` is valid (size > 0, alignment is a power of two and matches
+        // `#[repr(align(128))]`). `alloc` returns a null pointer only on allocation
+        // failure, which `handle_alloc_error` handles by aborting with the layout.
         let ptr =
             unsafe { NonNull::new(alloc(layout)).unwrap_or_else(|| handle_alloc_error(layout)) };
         Self {
             ptr,
             cap,
             offset: 0,
+            // SAFETY: `ptr` was just returned by `alloc` for a `cap`-byte, 128-aligned
+            // layout, so `slice_from_raw_parts_mut(ptr, cap)` describes the full owned
+            // allocation. Wrapping it in `Box` restores the unique-ownership invariant
+            // so the arena frees the memory exactly once on drop.
             _own: unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr.as_ptr(), cap)) },
         }
     }
@@ -79,6 +86,10 @@ impl MemoryArena {
         }
         let start = self.ptr.as_ptr().wrapping_add(self.offset);
         self.offset += aligned_len;
+        // SAFETY: `start` is within the arena's owned allocation because `self.offset +
+        // aligned_len <= self.cap` was checked above. The arena is 128-byte aligned, so the
+        // byte slice is properly aligned for `u8`. The slice does not overlap any prior
+        // allocation because `offset` only advances forward.
         Some(unsafe { std::slice::from_raw_parts_mut(start, len) })
     }
 
@@ -96,6 +107,11 @@ impl MemoryArena {
         }
         let start = self.ptr.as_ptr().wrapping_add(aligned_offset).cast::<T>();
         self.offset = aligned_offset + aligned_size;
+        // SAFETY: `start` is within the arena's owned allocation because
+        // `aligned_offset + aligned_size <= self.cap` was checked above. `aligned_offset`
+        // is rounded up to `align_of::<T>().max(16)`, so `start` is properly aligned for
+        // `T`. The `len` elements fit within `aligned_size` bytes and do not overlap any
+        // prior allocation since `offset` only advances.
         Some(unsafe { std::slice::from_raw_parts_mut(start, len) })
     }
 
@@ -105,7 +121,12 @@ impl MemoryArena {
     }
 }
 
+// SAFETY: MemoryArena owns a single contiguous allocation accessed only through &mut self
+// methods (alloc_*) which borrow the arena exclusively. There is no interior mutability, so
+// sharing the arena across threads via &MemoryArena cannot race. All mutable access requires
+// &mut self, which the borrow checker serializes.
 unsafe impl Send for MemoryArena {}
+// SAFETY: As above; &MemoryArena provides no way to mutate the allocation, so Sync is sound.
 unsafe impl Sync for MemoryArena {}
 
 #[cfg(test)]

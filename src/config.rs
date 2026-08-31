@@ -5,7 +5,7 @@
 //! pointed at by `BADAPPLE_CONFIG_FILE` is overlaid on top of those defaults.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Central runtime configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +63,20 @@ impl Config {
             .map(PathBuf::from)
             .filter(|p| p.exists());
 
+        Self::from_env_raw(config_file)
+    }
+
+    /// Load config from a specific file path, falling back to env defaults.
+    pub fn from_file(path: &Path) -> Self {
+        let config_file = if path.exists() {
+            Some(path.to_path_buf())
+        } else {
+            None
+        };
+        Self::from_env_raw(config_file)
+    }
+
+    fn from_env_raw(config_file: Option<PathBuf>) -> Self {
         let mut cfg = Self {
             telemetry_port: env_u16("BADAPPLE_TELEMETRY_PORT", 8080),
             multi_agent_port_start: env_u16("BADAPPLE_MULTI_AGENT_PORT_START", 5001),

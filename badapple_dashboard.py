@@ -119,10 +119,22 @@ def _capabilities_list() -> list[str]:
 
 
 def _check_csrf_token(headers: dict[str, str], body: dict[str, Any] | None = None) -> bool:
+    # Verify Origin/Referer to prevent cross-site requests even if the token
+    # is leaked. The dashboard only listens on 127.0.0.1, so legitimate
+    # requests always originate from localhost.
+    origin = headers.get("Origin") or headers.get("Referer") or ""
+    if origin:
+        # Allow same-origin requests (http://127.0.0.1:8787 or http://localhost:8787)
+        allowed_origins = ("http://127.0.0.1:8787", "http://localhost:8787", "http://[::1]:8787")
+        if not any(origin.startswith(a) for a in allowed_origins):
+            return False
     token = headers.get("X-CSRF-Token") or headers.get("X-Csrf-Token")
     if not token and body is not None:
         token = body.get("csrf_token")
-    return token == _get_csrf_token()
+    expected = _get_csrf_token()
+    if not isinstance(token, str) or not token:
+        return False
+    return secrets.compare_digest(token, expected)
 
 
 # New web UX assets live in the web/ directory next to this module.

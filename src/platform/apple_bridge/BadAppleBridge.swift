@@ -456,13 +456,12 @@ private final class BadAppleANECore {
     private func predictOne(_ tokens: UnsafePointer<Int32>, count: Int) -> Int32? {
         guard tokensProcessed + count <= 2048 else { return nil }
         do {
-            let array = try MLMultiArray(
-                dataPointer: UnsafeMutableRawPointer(mutating: tokens),
-                shape: [1, NSNumber(value: count)],
-                dataType: .int32,
-                strides: [NSNumber(value: count), 1],
-                deallocator: nil
-            )
+            // Copy tokens into a self-owned MLMultiArray to avoid a use-after-free
+            // if CoreML retains the array beyond the caller's buffer lifetime.
+            let array = try MLMultiArray(shape: [1, NSNumber(value: count)], dataType: .int32)
+            for i in 0..<count {
+                array[[0, NSNumber(value: i)]] = NSNumber(value: tokens[i])
+            }
             var features = [inputName: MLFeatureValue(multiArray: array)]
 
             if let positionIdsName {
@@ -1119,41 +1118,45 @@ private final class BadAppleANEShardCore {
             throw NSError(domain: "BadAppleANEShard", code: 15)
         }
         let byteOffset = tokenID * manifest.hiddenSize * MemoryLayout<Float16>.size
-        return try embeddingData.withUnsafeBytes { bytes -> Int32? in
+        // Copy the embedding row into a self-owned MLMultiArray to avoid a
+        // use-after-free if CoreML retains the array beyond the
+        // withUnsafeBytes scope (e.g. for async ANE dispatch).
+        let embedding = try MLMultiArray(
+            shape: [1, NSNumber(value: manifest.hiddenSize), 1, 1],
+            dataType: .float16
+        )
+        try embeddingData.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else {
                 throw NSError(domain: "BadAppleANEShard", code: 16)
             }
-            let embedding = try MLMultiArray(
-                dataPointer: UnsafeMutableRawPointer(mutating: base.advanced(by: byteOffset)),
-                shape: [1, NSNumber(value: manifest.hiddenSize), 1, 1],
-                dataType: .float16,
-                strides: [NSNumber(value: manifest.hiddenSize), 1, 1, 1],
-                deallocator: nil
-            )
-            updatePositionInputs()
-
-            // Execute the multi-shard layer graph on the highest-priority global
-            // dispatch queue. This is a synchronous block, so the calling thread
-            // waits and no concurrent access to MLMultiArray / MLState occurs.
-            var next: Int32?
-            try DispatchQueue.global(qos: .userInteractive).sync { [self] in
-                var hidden = embedding
-                for layer in layers {
-                    hidden = try layer.predict(
-                        hidden: hidden,
-                        ropeCos: ropeCos,
-                        ropeSin: ropeSin,
-                        attentionMask: attentionMask,
-                        writeMask: writeMask
-                    )
-                }
-                position += 1
-                if project {
-                    next = try argmax(hidden: hidden)
-                }
+            embedding.withUnsafeMutableBytes { dest, _ in
+                guard let destBase = dest.baseAddress else { return }
+                memcpy(destBase, base.advanced(by: byteOffset), manifest.hiddenSize * MemoryLayout<Float16>.size)
             }
-            return next
         }
+        updatePositionInputs()
+
+        // Execute the multi-shard layer graph on the highest-priority global
+        // dispatch queue. This is a synchronous block, so the calling thread
+        // waits and no concurrent access to MLMultiArray / MLState occurs.
+        var next: Int32?
+        try DispatchQueue.global(qos: .userInteractive).sync { [self] in
+            var hidden = embedding
+            for layer in layers {
+                hidden = try layer.predict(
+                    hidden: hidden,
+                    ropeCos: ropeCos,
+                    ropeSin: ropeSin,
+                    attentionMask: attentionMask,
+                    writeMask: writeMask
+                )
+            }
+            position += 1
+            if project {
+                next = try argmax(hidden: hidden)
+            }
+        }
+        return next
     }
 
     private func updatePositionInputs() {
@@ -1180,13 +1183,15 @@ private final class BadAppleANEShardCore {
             logits.withUnsafeMutableBytes { rawBuffer, strides in
                 guard let base = rawBuffer.baseAddress else { return }
                 let count = logits.count
-                let lastStride = strides.last ?? 1
+                // strides from withUnsafeMutableBytes are BYTE strides, not
+                // element indices. Use load(fromByteOffset:as:) to read
+                // correctly without OOB access.
+                let byteStride = strides.last ?? 2
                 if logits.dataType == .float16 {
-                    let typed = base.bindMemory(to: Float16.self, capacity: count * lastStride)
                     var localBest = -Float16.infinity
                     var localToken = -1
                     for i in 0..<count {
-                        let v = typed[i * lastStride]
+                        let v = base.load(fromByteOffset: i * byteStride, as: Float16.self)
                         if v > localBest {
                             localBest = v
                             localToken = head.vocabStart + i
@@ -1200,11 +1205,10 @@ private final class BadAppleANEShardCore {
                         }
                     }
                 } else if logits.dataType == .float32 {
-                    let typed = base.bindMemory(to: Float.self, capacity: count * lastStride)
                     var localBest = -Float.infinity
                     var localToken = -1
                     for i in 0..<count {
-                        let v = typed[i * lastStride]
+                        let v = base.load(fromByteOffset: i * byteStride, as: Float.self)
                         if v > localBest {
                             localBest = v
                             localToken = head.vocabStart + i
@@ -1495,49 +1499,53 @@ private final class BadAppleANEFixedCore {
             throw NSError(domain: "BadAppleANEFixed", code: 6)
         }
         let byteOffset = tokenID * manifest.hiddenSize * MemoryLayout<Float16>.size
-        return try embeddingData.withUnsafeBytes { bytes -> Int32? in
+        // Copy the embedding row into a self-owned MLMultiArray to avoid a
+        // use-after-free if CoreML retains the array beyond the
+        // withUnsafeBytes scope (e.g. for async ANE dispatch).
+        let embedding = try MLMultiArray(
+            shape: [1, NSNumber(value: manifest.hiddenSize), 1, 1],
+            dataType: .float16
+        )
+        try embeddingData.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else {
                 throw NSError(domain: "BadAppleANEFixed", code: 7)
             }
-            let embedding = try MLMultiArray(
-                dataPointer: UnsafeMutableRawPointer(mutating: base.advanced(by: byteOffset)),
-                shape: [1, NSNumber(value: manifest.hiddenSize), 1, 1],
-                dataType: .float16,
-                strides: [NSNumber(value: manifest.hiddenSize), 1, 1, 1],
-                deallocator: nil
-            )
-            updatePositionInputs()
-
-            var features: [String: MLFeatureValue] = [
-                "x": MLFeatureValue(multiArray: embedding),
-                "rope_cos": MLFeatureValue(multiArray: ropeCos),
-                "rope_sin": MLFeatureValue(multiArray: ropeSin),
-                "attn_mask": MLFeatureValue(multiArray: attentionMask),
-                "kv_write_mask": MLFeatureValue(multiArray: writeMask),
-            ]
-            for index in 0..<manifest.totalLayers {
-                features["k_cache_\(index)"] = MLFeatureValue(multiArray: keyCaches[index])
-                features["v_cache_\(index)"] = MLFeatureValue(multiArray: valueCaches[index])
+            embedding.withUnsafeMutableBytes { dest, _ in
+                guard let destBase = dest.baseAddress else { return }
+                memcpy(destBase, base.advanced(by: byteOffset), manifest.hiddenSize * MemoryLayout<Float16>.size)
             }
-            let provider = try MLDictionaryFeatureProvider(dictionary: features)
-            let prediction = try model.prediction(from: provider)
-            // The model emits only the new (1, nkv, 1, dh) KV entry per layer;
-            // scatter it into the resident fixed cache at the current position.
-            for index in 0..<manifest.totalLayers {
-                guard let newKey = prediction.featureValue(for: "new_k_\(index)")?.multiArrayValue,
-                      let newValue = prediction.featureValue(for: "new_v_\(index)")?.multiArrayValue else {
-                    throw NSError(domain: "BadAppleANEFixed", code: 8)
-                }
-                try scatter(entry: newKey, into: keyCaches[index])
-                try scatter(entry: newValue, into: valueCaches[index])
-            }
-            position += 1
-            guard project else { return nil }
-            guard let logits = prediction.featureValue(for: "logits")?.multiArrayValue else {
-                throw NSError(domain: "BadAppleANEFixed", code: 9)
-            }
-            return try argmax(logits: logits)
         }
+        updatePositionInputs()
+
+        var features: [String: MLFeatureValue] = [
+            "x": MLFeatureValue(multiArray: embedding),
+            "rope_cos": MLFeatureValue(multiArray: ropeCos),
+            "rope_sin": MLFeatureValue(multiArray: ropeSin),
+            "attn_mask": MLFeatureValue(multiArray: attentionMask),
+            "kv_write_mask": MLFeatureValue(multiArray: writeMask),
+        ]
+        for index in 0..<manifest.totalLayers {
+            features["k_cache_\(index)"] = MLFeatureValue(multiArray: keyCaches[index])
+            features["v_cache_\(index)"] = MLFeatureValue(multiArray: valueCaches[index])
+        }
+        let provider = try MLDictionaryFeatureProvider(dictionary: features)
+        let prediction = try model.prediction(from: provider)
+        // The model emits only the new (1, nkv, 1, dh) KV entry per layer;
+        // scatter it into the resident fixed cache at the current position.
+        for index in 0..<manifest.totalLayers {
+            guard let newKey = prediction.featureValue(for: "new_k_\(index)")?.multiArrayValue,
+                  let newValue = prediction.featureValue(for: "new_v_\(index)")?.multiArrayValue else {
+                throw NSError(domain: "BadAppleANEFixed", code: 8)
+            }
+            try scatter(entry: newKey, into: keyCaches[index])
+            try scatter(entry: newValue, into: valueCaches[index])
+        }
+        position += 1
+        guard project else { return nil }
+        guard let logits = prediction.featureValue(for: "logits")?.multiArrayValue else {
+            throw NSError(domain: "BadAppleANEFixed", code: 9)
+        }
+        return try argmax(logits: logits)
     }
 
     private func updatePositionInputs() {
@@ -1591,12 +1599,12 @@ private final class BadAppleANEFixedCore {
         logits.withUnsafeMutableBytes { rawBuffer, strides in
             guard let base = rawBuffer.baseAddress else { return }
             let count = logits.count
-            let lastStride = strides.last ?? 1
+            // strides are BYTE strides, not element indices.
+            let byteStride = strides.last ?? 2
             if logits.dataType == .float16 {
-                let typed = base.bindMemory(to: Float16.self, capacity: count * lastStride)
                 var localBest = -Float16.infinity
                 for i in 0..<count {
-                    let v = typed[i * lastStride]
+                    let v = base.load(fromByteOffset: i * byteStride, as: Float16.self)
                     if v > localBest {
                         localBest = v
                         bestToken = i
@@ -1604,9 +1612,8 @@ private final class BadAppleANEFixedCore {
                 }
                 bestValue = Float(localBest)
             } else if logits.dataType == .float32 {
-                let typed = base.bindMemory(to: Float.self, capacity: count * lastStride)
                 for i in 0..<count {
-                    let v = typed[i * lastStride]
+                    let v = base.load(fromByteOffset: i * byteStride, as: Float.self)
                     if v > bestValue {
                         bestValue = v
                         bestToken = i

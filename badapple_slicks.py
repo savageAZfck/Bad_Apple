@@ -54,16 +54,29 @@ def load_slicks_secret() -> bytes:
         except Exception as e:  # noqa: BLE001 - catch-all wrapper
             print(f"[slicks] keychain load failed: {e}; falling back to key file", flush=True)
             key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
-            with open(key_path) as f:
-                raw = f.read()
+            raw = _read_secret_file(key_path)
     else:
         key_path = os.environ.get("BADAPPLE_SLICKS_KEY_PATH", DEFAULT_KEY_PATH)
-        with open(key_path) as f:
-            raw = f.read()
+        raw = _read_secret_file(key_path)
     trimmed = raw.strip()
     if all(c in "0123456789abcdefABCDEF" for c in trimmed) and len(trimmed) >= 32:
         return bytes.fromhex(trimmed)
     return trimmed.encode()
+
+
+def _read_secret_file(key_path: str) -> str:
+    """Read the SLICKS secret from a file, enforcing strict permissions."""
+    import stat
+    st = os.stat(key_path)
+    mode = stat.S_IMODE(st.st_mode)
+    # Reject world- or group-readable key files.
+    if mode & (stat.S_IRGRP | stat.S_IROTH):
+        raise PermissionError(
+            f"SLICKS key file {key_path} is group/world readable (mode {oct(mode)}); "
+            f"refusing to load. Fix with: chmod 600 {key_path}"
+        )
+    with open(key_path) as f:
+        return f.read()
 
 
 def _sign(secret: bytes, material: bytes) -> str:

@@ -175,6 +175,9 @@ impl EmbeddingTable {
     fn open(path: &Path, hidden_size: usize, vocab_size: usize) -> Result<Self> {
         let file = fs::File::open(path)
             .with_context(|| format!("unable to open embedding table: {}", path.display()))?;
+        // SAFETY: Mmap::map is safe because `file` was just opened successfully and maps it
+        // read-only. The returned mapping is bounds-checked against the file length and is
+        // only read (never mutated), so the read-only shared mapping is sound.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         let expected = vocab_size * hidden_size * 2;
         let actual = mmap.len();
@@ -320,6 +323,12 @@ impl Scavenger {
             .filter(|dir| dir.is_dir())
             .cloned()
             .collect();
+        // Canonical watch roots used to reject events whose path escapes the
+        // watched tree (e.g. via a symlink inserted after the watcher started).
+        let canonical_roots: Vec<PathBuf> = watch_dirs
+            .iter()
+            .filter_map(|d| fs::canonicalize(d).ok())
+            .collect();
 
         // Debounce map: path -> last seen mtime.
         let mut pending: HashMap<PathBuf, u64> = HashMap::new();
@@ -357,6 +366,9 @@ impl Scavenger {
             for path in &event.paths {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) if is_tracked_file(path) => {
+                        if !path_under_roots(path, &canonical_roots) {
+                            continue;
+                        }
                         if let Ok(meta) = fs::metadata(path) {
                             let mtime = meta
                                 .modified()
@@ -367,6 +379,9 @@ impl Scavenger {
                         }
                     }
                     EventKind::Remove(_) if is_tracked_file(path) => {
+                        if !path_under_roots(path, &canonical_roots) {
+                            continue;
+                        }
                         pending.remove(path);
                         let self_ref = self.clone();
                         let path = path.clone();
@@ -390,6 +405,9 @@ impl Scavenger {
                 for path in &event.paths {
                     match event.kind {
                         EventKind::Create(_) | EventKind::Modify(_) if is_tracked_file(path) => {
+                            if !path_under_roots(path, &canonical_roots) {
+                                continue;
+                            }
                             if let Ok(meta) = fs::metadata(path) {
                                 let mtime = meta
                                     .modified()
@@ -400,6 +418,9 @@ impl Scavenger {
                             }
                         }
                         EventKind::Remove(_) if is_tracked_file(path) => {
+                            if !path_under_roots(path, &canonical_roots) {
+                                continue;
+                            }
                             pending.remove(path);
                             let self_ref = self.clone();
                             let path = path.clone();
@@ -541,20 +562,51 @@ impl Scavenger {
         let path_key = path_key(path);
         let meta_key = meta_key(&path_key);
 
-        // Eagerly slurp the file into memory and drop the descriptor before
-        // any tokenization, embedding, or database work crosses a scheduling
-        // boundary.
+        // Eagerly read the file but cap at CHUNK_BYTE_LIMIT + 1 byte so we
+        // never slurp a multi-GB file into memory.  Open with O_NOFOLLOW to
+        // atomically reject symlinks at the leaf, eliminating the TOCTOU race
+        // between a separate lstat check and the subsequent open().
         let text = {
-            let mut text = fs::read_to_string(path)
-                .with_context(|| format!("scavenger unable to read {}", path.display()))?;
-            if text.len() > CHUNK_BYTE_LIMIT {
-                let mut byte_len = CHUNK_BYTE_LIMIT;
-                while !text.is_char_boundary(byte_len) && byte_len > 0 {
-                    byte_len -= 1;
-                }
-                text.truncate(byte_len);
+            use std::io::Read;
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)
+                .with_context(|| {
+                    format!(
+                        "scavenger unable to open (or symlink rejected) {}",
+                        path.display()
+                    )
+                })?;
+            // fstat on the fd to confirm a regular file (defends against
+            // FIFOs, devices, etc. that O_NOFOLLOW alone doesn't catch).
+            let meta = file
+                .metadata()
+                .with_context(|| format!("scavenger unable to fstat {}", path.display()))?;
+            if !meta.file_type().is_file() {
+                return Ok(());
             }
-            text
+            let mut reader = std::io::BufReader::new(file);
+            let mut buf = vec![0u8; CHUNK_BYTE_LIMIT + 1];
+            let mut filled = 0;
+            while filled < buf.len() {
+                let n = reader
+                    .read(&mut buf[filled..])
+                    .with_context(|| format!("scavenger unable to read {}", path.display()))?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            buf.truncate(filled.min(CHUNK_BYTE_LIMIT));
+            // Ensure we end on a UTF-8 char boundary.
+            let mut byte_len = buf.len();
+            while byte_len > 0 && std::str::from_utf8(&buf[..byte_len]).is_err() {
+                byte_len -= 1;
+            }
+            buf.truncate(byte_len);
+            String::from_utf8_lossy(&buf).into_owned()
         };
         let current_hash = content_hash_bytes(text.as_bytes());
 
@@ -705,6 +757,9 @@ fn set_background_qos() {
     // Mark this background watcher thread as Quality-of-Service "background".
     // This tells the kernel to schedule it on efficiency cores and to avoid
     // waking performance cores, matching the low-overhead posture.
+    // SAFETY: `pthread_set_qos_class_self_np` only affects the calling thread's scheduling
+    // class. `QOS_CLASS_BACKGROUND` with a relative priority of 0 is a valid combination,
+    // and the return value is ignored (best-effort). No shared state is touched.
     unsafe {
         let _ = libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
     }
@@ -712,6 +767,16 @@ fn set_background_qos() {
 
 #[cfg(not(target_os = "macos"))]
 fn set_background_qos() {}
+
+/// Verify that a (canonicalized) event path still falls under one of the
+/// canonical watch roots.  This prevents a symlink created after the watcher
+/// started from injecting paths outside the watched tree into the pending map.
+fn path_under_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(canonical) = fs::canonicalize(path) else {
+        return false;
+    };
+    roots.iter().any(|root| canonical.starts_with(root))
+}
 
 fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
     if depth == 0 {
@@ -723,7 +788,18 @@ fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
             if is_ignored_path(&path) {
                 continue;
             }
-            if path.is_dir() {
+            // Before recursing, check that this is a real directory, not a
+            // symlink.  Using `symlink_metadata` avoids following a symlinked
+            // directory that could escape the watched tree.
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.file_type().is_symlink() {
+                // Reject symlinks outright: they could point outside the tree.
+                continue;
+            }
+            if meta.file_type().is_dir() {
                 collect_files(&path, depth - 1, out);
             } else if is_tracked_file(&path) {
                 if let Ok(meta) = fs::metadata(&path) {
@@ -744,7 +820,7 @@ fn is_ignored_path(path: &Path) -> bool {
         if let Some(name) = component.as_os_str().to_str() {
             SKIP_DIR_NAMES
                 .iter()
-                .any(|skip| name.eq_ignore_ascii_case(skip) || name.starts_with(skip))
+                .any(|skip| name.eq_ignore_ascii_case(skip))
         } else {
             false
         }
@@ -752,7 +828,15 @@ fn is_ignored_path(path: &Path) -> bool {
 }
 
 fn is_tracked_file(path: &Path) -> bool {
-    if !path.is_file() || is_ignored_path(path) {
+    // Use symlink_metadata to reject symlinks: a symlink with a tracked
+    // extension could point at an arbitrary file outside the watched tree.
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return false;
+    }
+    if is_ignored_path(path) {
         return false;
     }
     if let Some(ext) = path.extension() {

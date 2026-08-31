@@ -59,7 +59,8 @@ def set_session_seed(seed: int | None) -> None:
 SHELL_ALLOWED_COMMANDS = {
     "ls", "cat", "head", "tail", "find", "grep", "wc", "file",
     "pwd", "mdfind", "ps", "df", "du", "echo", "whoami", "id",
-    "git", "swift", "cargo", "rustc", "python3", "python",
+    # NOTE: Interpreters/compilers (python3, swift, cargo, rustc, git) were
+    # removed because they can execute arbitrary attacker-supplied code.
 }
 SHELL_DANGEROUS_CHARS = set(";|&$`\"'\n\r<>{}[]*?")
 
@@ -77,13 +78,28 @@ def _run_shell(command: str) -> str:
     if not tokens:
         return "Error: empty command"
     base = tokens[0]
-    # Allow commands either by name or by absolute path to an allowed tool.
+    # Resolve the command to a known-safe executable.  If the user passed a
+    # bare name, look it up on PATH.  If they passed an absolute path, verify
+    # it resolves to the same file as `shutil.which(name)` for an allowlisted
+    # name — this prevents an attacker from planting a malicious binary named
+    # after an allowed command (e.g. /tmp/ls).
+    import shutil
     if base.startswith("/"):
         name = os.path.basename(base)
+        if name not in SHELL_ALLOWED_COMMANDS:
+            return f"Error: '{name}' is not in the allowed command list"
+        resolved = shutil.which(name)
+        if resolved is None or os.path.realpath(base) != os.path.realpath(resolved):
+            return f"Error: '{base}' does not resolve to the trusted '{name}' on PATH"
+        tokens[0] = resolved
     else:
         name = base
-    if name not in SHELL_ALLOWED_COMMANDS:
-        return f"Error: '{name}' is not in the allowed command list"
+        if name not in SHELL_ALLOWED_COMMANDS:
+            return f"Error: '{name}' is not in the allowed command list"
+        resolved = shutil.which(name)
+        if resolved is None:
+            return f"Error: '{name}' not found on PATH"
+        tokens[0] = resolved
     try:
         result = subprocess.run(
             tokens,
@@ -107,6 +123,50 @@ def _resolve_tool_path(args: dict, key: str, workspace: Any | None = None) -> Pa
     if workspace is not None:
         return workspace.resolve_path(None)
     return Path("~").expanduser()
+
+
+# Safe roots that tools are allowed to read/list/search without a workspace.
+# These are user-owned directories that don't contain secrets.
+_SAFE_READ_ROOTS: list[Path] | None = None
+
+
+def _safe_read_roots() -> list[Path]:
+    """Return the list of root paths that tools are allowed to access."""
+    global _SAFE_READ_ROOTS
+    if _SAFE_READ_ROOTS is None:
+        home = Path("~").expanduser()
+        _SAFE_READ_ROOTS = [
+            home,
+            Path("/tmp"),
+            Path("/var/tmp"),
+        ]
+    return _SAFE_READ_ROOTS
+
+
+def _jail_path(path: Path, workspace: Any | None = None) -> Path:
+    """Resolve symlinks and verify the path is under an allowed root.
+
+    Raises ValueError if the resolved path escapes all allowed roots.
+    """
+    resolved = path.resolve() if path.exists() else path.parent.resolve() / path.name
+    # Check workspace first if set
+    if workspace is not None:
+        ws_path = workspace.resolve_path(None)
+        try:
+            ws_resolved = ws_path.resolve()
+            if str(resolved).startswith(str(ws_resolved)):
+                return resolved
+        except (OSError, ValueError):
+            pass
+    # Check safe read roots
+    for root in _safe_read_roots():
+        try:
+            root_resolved = root.resolve()
+            if str(resolved).startswith(str(root_resolved)):
+                return resolved
+        except (OSError, ValueError):
+            continue
+    raise ValueError(f"path {resolved} is outside allowed roots")
 
 
 def _console_user() -> str | None:
@@ -167,6 +227,12 @@ def _browser_action(args: dict) -> str:
             url = args.get("url", "")
             if not url:
                 return "Error: navigate requires a url"
+            # Reject dangerous URL schemes that could access local files or
+            # probe internal services.
+            url_lower = url.lower()
+            blocked_schemes = ("file://", "smb://", "dict://", "ftp://", "ssh://", "vnc://")
+            if any(url_lower.startswith(s) for s in blocked_schemes):
+                return "Error: URL scheme blocked for security"
             escaped_url = url.replace("\\", "\\\\").replace('"', '\\"')
             script = f'tell application "Safari" to open location "{escaped_url}"'
             result = _run_as_user(["osascript", "-e", script], timeout=10)
@@ -249,12 +315,20 @@ def run_tool(
             return datetime.datetime.now(tz=datetime.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
         if name == "list_directory":
             p = _resolve_tool_path(args, "path", workspace)
+            try:
+                p = _jail_path(p, workspace)
+            except ValueError as e:
+                return f"Error: {e}"
             if not p.is_dir():
                 return f"Error: {p} is not a directory"
             items = sorted(p.iterdir())[:50]
             return "\n".join(str(i.name) for i in items)
         if name == "read_file":
             p = _resolve_tool_path(args, "path", workspace)
+            try:
+                p = _jail_path(p, workspace)
+            except ValueError as e:
+                return f"Error: {e}"
             if not p.is_file():
                 return f"Error: {p} is not a file"
             try:
@@ -289,6 +363,10 @@ def run_tool(
         if name == "search_content":
             query = args.get("query", "")
             p = _resolve_tool_path(args, "path", workspace)
+            try:
+                p = _jail_path(p, workspace)
+            except ValueError as e:
+                return f"Error: {e}"
             if not p.is_dir():
                 return f"Error: {p} is not a directory"
             max_results = int(args.get("max_results") or 20)
@@ -376,15 +454,23 @@ def run_tool(
             action = args.get("action", "")
             target = args.get("target", "")
             value = args.get("value", "")
+            # Escape all user-controlled strings for AppleScript safety.
+            from badapple_macos_apps import _esc_applescript
+            esc_target = _esc_applescript(target)
+            esc_value = _esc_applescript(value)
             if action == "type":
-                script = f'tell application "{target}" to activate\ntell application "System Events" to keystroke "{value}"'
+                script = f'tell application "{esc_target}" to activate\ntell application "System Events" to keystroke "{esc_value}"'
             elif action == "key":
-                script = f'tell application "System Events" to key code {value}'
+                # key code is numeric, validate it
+                if not value.strip().isdigit():
+                    return "Error: key code must be a number"
+                script = f'tell application "System Events" to key code {value.strip()}'
             elif action == "menu":
                 parts = value.split(">")
-                script = f'tell application "{target}" to activate\ntell application "System Events" to tell process "{target}" to click menu item "{parts[-1]}" of menu "{parts[0]}" of menu bar 1'
+                esc_parts = [_esc_applescript(p) for p in parts]
+                script = f'tell application "{esc_target}" to activate\ntell application "System Events" to tell process "{esc_target}" to click menu item "{esc_parts[-1]}" of menu "{esc_parts[0]}" of menu bar 1'
             elif action == "click":
-                script = f'tell application "{target}" to activate\ntell application "System Events" to tell process "{target}" to click UI element "{value}"'
+                script = f'tell application "{esc_target}" to activate\ntell application "System Events" to tell process "{esc_target}" to click UI element "{esc_value}"'
             else:
                 return f"Error: unknown accessibility action '{action}'"
             result = _run_as_user(["osascript", "-e", script], timeout=15)
@@ -567,8 +653,10 @@ def run_tool(
                 input_text=args.get("input"),
             )
         if name == "screen_capture":
-            p = args.get("path") or str(Path(tempfile.gettempdir()) / "badapple_screen.png")
-            return str(badapple_vision.capture_screen(Path(p).expanduser()))
+            # Always write to a safe temp path — ignore user-supplied path
+            # to prevent arbitrary file overwrite via symlinks.
+            p = Path(tempfile.gettempdir()) / "badapple_screen.png"
+            return str(badapple_vision.capture_screen(p))
         if name == "capture_and_extract_screen":
             p = Path(tempfile.gettempdir()) / "badapple_screen.png"
             badapple_vision.capture_screen(p)

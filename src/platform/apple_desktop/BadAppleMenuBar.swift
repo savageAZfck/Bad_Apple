@@ -12,18 +12,18 @@ import Speech
 private let badAppleVoiceLogPath = "/tmp/badapple_voice_debug.log"
 
 /// Append a line to the voice debug log using a raw POSIX `open()` with
-/// `O_NOFOLLOW`, rather than FileManager/FileHandle. `/tmp` is world-writable,
+/// `O_NOFOLLOW` and `O_EXCL` on first creation. `/tmp` is world-writable,
 /// so anything else running as this user could pre-create this path as a
-/// symlink to an arbitrary file the user can write (e.g. a LaunchAgent plist
-/// or shell rc file); the previous FileManager-based check-then-write was a
-/// classic TOCTOU race that would happily append debug text through such a
-/// symlink. O_NOFOLLOW makes the kernel refuse to open it if the final path
-/// component is a symlink, and 0600 keeps the log private to this user.
+/// regular file with mode 0666; O_NOFOLLOW blocks symlinks, and we fchmod
+/// to 0600 after open to ensure the file is private regardless of how it
+/// was created.
 private func badAppleVoiceLog(_ message: String) {
     let stamp = ISO8601DateFormatter().string(from: Date())
     let line = "\(stamp) \(message)\n"
     let fd = open(badAppleVoiceLogPath, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
     if fd >= 0 {
+        // Force 0600 in case the file was pre-created with wider permissions.
+        fchmod(fd, 0o600)
         line.withCString { cstr in
             _ = Darwin.write(fd, cstr, strlen(cstr))
         }
@@ -71,16 +71,12 @@ final class BadAppleFFI {
         // Load the Rust core library first so its symbols are available when the
         // bridge is initialized (the bridge references register_apple_intelligence_oracle
         // through -undefined dynamic_lookup).
+        // Security: only load from the signed app bundle's Frameworks
+        // directory or well-known system paths. Never load from CWD, parent
+        // directories, or relative paths that could be hijacked by a
+        // malicious dylib dropped next to the .app bundle.
         let searchPaths = [
             bundleFrameworks + "/libbad_apple.dylib",
-            bundleFrameworks + "/../libbad_apple.dylib",
-            (Bundle.main.bundlePath as NSString).deletingLastPathComponent + "/libbad_apple.dylib",
-            (Bundle.main.bundlePath as NSString).deletingLastPathComponent + "/../libbad_apple.dylib",
-            "libbad_apple.dylib",
-            "./libbad_apple.dylib",
-            "../libbad_apple.dylib",
-            "target/release/libbad_apple.dylib",
-            "target/debug/libbad_apple.dylib",
             "/usr/local/lib/libbad_apple.dylib",
         ]
 
@@ -96,13 +92,43 @@ final class BadAppleFFI {
             return
         }
 
-        bad_apple_init = unsafeBitCast(dlsym(h, "bad_apple_init"), to: BadAppleInitFn.self)
-        bad_apple_free = unsafeBitCast(dlsym(h, "bad_apple_free"), to: BadAppleFreeFn.self)
-        bad_apple_get_active_pursuits = unsafeBitCast(dlsym(h, "bad_apple_get_active_pursuits"), to: BadAppleGetActivePursuitsFn.self)
-        bad_apple_push_pursuit = unsafeBitCast(dlsym(h, "bad_apple_push_pursuit"), to: BadApplePushPursuitFn.self)
-        bad_apple_get_apple_latency_us = unsafeBitCast(dlsym(h, "bad_apple_get_apple_latency_us"), to: BadAppleGetAppleLatencyUsFn.self)
-        bad_apple_generate_text = unsafeBitCast(dlsym(h, "bad_apple_generate_text"), to: BadAppleGenerateTextFn.self)
-        bad_apple_free_string = unsafeBitCast(dlsym(h, "bad_apple_free_string"), to: BadAppleFreeStringFn.self)
+        // Validate every dlsym result before unsafeBitCast to avoid a bogus
+        // function pointer that would crash on call.
+        guard let s_init = dlsym(h, "bad_apple_init") else {
+            lastError = "dlsym: bad_apple_init not found"
+            return
+        }
+        guard let s_free = dlsym(h, "bad_apple_free") else {
+            lastError = "dlsym: bad_apple_free not found"
+            return
+        }
+        guard let s_pursuits = dlsym(h, "bad_apple_get_active_pursuits") else {
+            lastError = "dlsym: bad_apple_get_active_pursuits not found"
+            return
+        }
+        guard let s_push = dlsym(h, "bad_apple_push_pursuit") else {
+            lastError = "dlsym: bad_apple_push_pursuit not found"
+            return
+        }
+        guard let s_latency = dlsym(h, "bad_apple_get_apple_latency_us") else {
+            lastError = "dlsym: bad_apple_get_apple_latency_us not found"
+            return
+        }
+        guard let s_generate = dlsym(h, "bad_apple_generate_text") else {
+            lastError = "dlsym: bad_apple_generate_text not found"
+            return
+        }
+        guard let s_free_string = dlsym(h, "bad_apple_free_string") else {
+            lastError = "dlsym: bad_apple_free_string not found"
+            return
+        }
+        bad_apple_init = unsafeBitCast(s_init, to: BadAppleInitFn.self)
+        bad_apple_free = unsafeBitCast(s_free, to: BadAppleFreeFn.self)
+        bad_apple_get_active_pursuits = unsafeBitCast(s_pursuits, to: BadAppleGetActivePursuitsFn.self)
+        bad_apple_push_pursuit = unsafeBitCast(s_push, to: BadApplePushPursuitFn.self)
+        bad_apple_get_apple_latency_us = unsafeBitCast(s_latency, to: BadAppleGetAppleLatencyUsFn.self)
+        bad_apple_generate_text = unsafeBitCast(s_generate, to: BadAppleGenerateTextFn.self)
+        bad_apple_free_string = unsafeBitCast(s_free_string, to: BadAppleFreeStringFn.self)
 
         context = bad_apple_init?(nil)
         if context == nil {
@@ -114,11 +140,6 @@ final class BadAppleFFI {
         let bridgeSearchPaths = [
             bundleFrameworks + "/libBadAppleBridge.dylib",
             bundleFrameworks + "/../libBadAppleBridge.dylib",
-            "libBadAppleBridge.dylib",
-            "./libBadAppleBridge.dylib",
-            "../libBadAppleBridge.dylib",
-            "target/release/libBadAppleBridge.dylib",
-            "target/debug/libBadAppleBridge.dylib",
         ]
         for path in bridgeSearchPaths {
             if let bridgeHandle = dlopen(path, RTLD_LAZY) {
@@ -428,6 +449,13 @@ final class PiperTTSClient {
     private var sessionID = 0
     private var hasErrorInSession = false
     private var lastCompletion: ((Bool) -> Void)?
+    // One-shot completion fired when the entire queue drains.  Used by the
+    // streaming voice path to restart listening only after every streamed
+    // sentence has finished playing.
+    private var drainCompletion: ((Bool) -> Void)?
+    // Cached reachability probe so repeated voice prompts do not reconnect.
+    private var reachabilityCache: (date: Date, value: Bool)?
+    private let reachabilityLock = NSLock()
 
     func stop() {
         queueLock.lock()
@@ -436,8 +464,77 @@ final class PiperTTSClient {
         sessionID += 1
         hasErrorInSession = false
         lastCompletion = nil
+        drainCompletion = nil
         queueLock.unlock()
         playback.stop()
+    }
+
+    /// Set a one-shot completion fired when the entire TTS queue drains (or
+    /// immediately if the queue is already empty).  This lets the streaming
+    /// voice path resume listening only after all queued sentences have played.
+    func setQueueDrainCompletion(_ completion: @escaping (Bool) -> Void) {
+        queueLock.lock()
+        drainCompletion = completion
+        let empty = queue.isEmpty && !isProcessing
+        let sessionSuccess = !hasErrorInSession
+        queueLock.unlock()
+        if empty {
+            DispatchQueue.main.async { completion(sessionSuccess) }
+        }
+    }
+
+    /// Quick, cached probe of whether the Piper TTS Unix socket is accepting
+    /// connections.  The result is cached for 5 s so repeated voice prompts do
+    /// not pay the probe cost.  A local-domain connect is near-instant when the
+    /// server is up and fails immediately (ENOENT/ECONNREFUSED) when it is down.
+    func isReachable() -> Bool {
+        reachabilityLock.lock()
+        if let cache = reachabilityCache, Date().timeIntervalSince(cache.date) < 5.0 {
+            reachabilityLock.unlock()
+            return cache.value
+        }
+        reachabilityLock.unlock()
+
+        let path = effectiveSocketPath()
+        // Fast path: if the socket file does not exist the server is not
+        // running, so skip the connect entirely.  This keeps the probe instant
+        // and main-thread-safe when Piper is not configured.
+        guard FileManager.default.fileExists(atPath: path) else {
+            reachabilityLock.lock()
+            reachabilityCache = (Date(), false)
+            reachabilityLock.unlock()
+            return false
+        }
+        var result = false
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        if fd >= 0 {
+            defer { close(fd) }
+            var tv = timeval(tv_sec: 1, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            let pathBytes = Array(path.utf8)
+            let maxPath = MemoryLayout.size(ofValue: addr.sun_path) - 1
+            if pathBytes.count < maxPath {
+                pathBytes.withUnsafeBufferPointer { src in
+                    _ = withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+                        memcpy(dst, src.baseAddress!, pathBytes.count)
+                    }
+                }
+                addr.sun_len = UInt8(2 + pathBytes.count + 1)
+                let len = socklen_t(addr.sun_len)
+                let connectResult = withUnsafePointer(to: &addr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        connect(fd, sockaddrPtr, len)
+                    }
+                }
+                result = (connectResult == 0)
+            }
+        }
+        reachabilityLock.lock()
+        reachabilityCache = (Date(), result)
+        reachabilityLock.unlock()
+        return result
     }
 
     static let defaultVoice = "en_US-amy-medium"
@@ -543,8 +640,14 @@ final class PiperTTSClient {
         queueLock.lock()
         guard !queue.isEmpty else {
             isProcessing = false
+            let drain = drainCompletion
+            drainCompletion = nil
+            let sessionSuccess = !hasErrorInSession
             queueLock.unlock()
             badAppleVoiceLog("PiperTTS queue empty, stopping")
+            if let drain = drain {
+                DispatchQueue.main.async { drain(sessionSuccess) }
+            }
             return
         }
         let item = queue.removeFirst()
@@ -1300,6 +1403,185 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         PiperTTSClient.shared.stop()
     }
 
+    // MARK: - Streaming TTS
+
+    // Accumulated raw token text waiting to be split into sentences and spoken.
+    private var streamTTSBuffer = ""
+    // True while the accumulator is inside a fenced action block (so the raw
+    // action JSON is never spoken aloud).
+    private var streamTTSInFence = false
+    // True once at least one sentence has been queued during this stream.
+    var streamTTSEmittedAny = false
+
+    /// Whether streaming TTS is viable right now: Apple TTS is always usable,
+    /// and Piper TTS is usable when its local socket is accepting connections.
+    var streamingTTSAvailable: Bool {
+        if !usePiperTTS { return true }
+        return PiperTTSClient.shared.isReachable()
+    }
+
+    /// Reset the streaming TTS pipeline at the start of a new voice prompt so
+    /// stale audio from the previous response is dropped and the queue is empty.
+    func resetStreamingTTS() {
+        streamTTSBuffer = ""
+        streamTTSInFence = false
+        streamTTSEmittedAny = false
+        // Stop audio but don't let the delegate's didFinish fire and
+        // decrement pendingSpeechUtterances into a stale state.  We set
+        // the counter to 0 BEFORE stopping so any in-flight delegate
+        // callbacks are no-ops.
+        pendingSpeechUtterances = 0
+        synthesizer.stopSpeaking(at: .immediate)
+        PiperTTSClient.shared.stop()
+    }
+
+    /// Feed a token chunk to the streaming TTS pipeline.  Complete sentences are
+    /// handed to the TTS queue as soon as they arrive so playback starts while
+    /// the model is still generating the rest of the response.
+    func speakStreamingChunk(_ text: String) {
+        guard enabled else { return }
+        streamTTSBuffer += text
+        pumpStreamTTS(final: false)
+    }
+
+    /// Flush any text remaining in the streaming buffer after generation ends,
+    /// and arrange for listening to resume once the queued audio finishes.
+    func flushStreamingTTS() {
+        pumpStreamTTS(final: true)
+        if usePiperTTS {
+            // Piper: restart listening when the whole queue drains.  If nothing
+            // was queued the completion fires immediately.
+            PiperTTSClient.shared.setQueueDrainCompletion { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self = self, self.enabled else { return }
+                    self.scheduleRestart(after: 0.25)
+                }
+            }
+        } else {
+            // Apple TTS: if nothing was queued the synthesizer delegate will not
+            // fire, so restart listening explicitly.  If something WAS queued,
+            // the didFinish delegate will restart — but add a safety fallback
+            // in case the delegate doesn't fire (e.g., synthesizer was stopped
+            // before the utterance started).
+            if !streamTTSEmittedAny {
+                scheduleRestart(after: 0.1)
+            } else {
+                // Safety: if the delegate doesn't fire within 5s, restart anyway.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                    guard let self = self, self.enabled, self.state == .processing || self.state == .speaking else { return }
+                    if self.pendingSpeechUtterances == 0 {
+                        badAppleVoiceLog("flushStreamingTTS: safety timeout, restarting listening")
+                        self.scheduleRestart(after: 0.1)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract complete sentences from the buffer (skipping fenced action
+    /// blocks) and queue them via ``speakChunk``.  When `final` is false a
+    /// trailing partial line/sentence is kept in the buffer for the next chunk;
+    /// when `final` is true everything remaining is emitted.
+    private func pumpStreamTTS(final: Bool) {
+        var remaining = streamTTSBuffer
+        var inFence = streamTTSInFence
+        var spoken = ""
+
+        // Process complete lines so fence boundaries are detected correctly; a
+        // trailing partial line is held back unless this is the final flush.
+        while let nl = remaining.firstIndex(of: "\n") {
+            let line = String(remaining[..<nl])
+            remaining = String(remaining[remaining.index(after: nl)...])
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inFence.toggle()
+                continue
+            }
+            if inFence { continue }
+            spoken += line + "\n"
+        }
+
+        if final {
+            if !inFence {
+                let trimmed = remaining.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty, !trimmed.hasPrefix("```") {
+                    spoken += remaining
+                }
+            }
+            remaining = ""
+        }
+
+        streamTTSInFence = inFence
+
+        let (sentences, tail) = splitStreamSentences(spoken)
+        for sentence in sentences {
+            streamTTSEmittedAny = true
+            speakChunk(sentence)
+        }
+        // Keep any partial sentence (tail) plus the unprocessed partial line so
+        // the next chunk can complete them.  Tail precedes the partial line in
+        // the original text order.
+        streamTTSBuffer = tail + remaining
+    }
+
+    /// Split fence-filtered text into complete sentences terminated by `.`,
+    /// `!`, `?` (only when followed by whitespace or end-of-string, so decimals
+    /// such as "3.14" are not split) or a newline.  Returns the emitted
+    /// sentences and the leftover partial sentence that has not yet reached a
+    /// boundary.
+    private func splitStreamSentences(_ text: String) -> ([String], String) {
+        var sentences: [String] = []
+        var last = text.startIndex
+        var i = text.startIndex
+        while i < text.endIndex {
+            let ch = text[i]
+            if ch == "\n" {
+                var end = text.index(after: i)
+                while end < text.endIndex, text[end] == " " || text[end] == "\t" {
+                    end = text.index(after: end)
+                }
+                let sentence = String(text[last..<end])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sentence.isEmpty {
+                    sentences.append(sentence)
+                }
+                last = end
+                i = end
+                continue
+            }
+            if ch == "." || ch == "!" || ch == "?" {
+                // Consume a run of sentence-ending punctuation.
+                var end = text.index(after: i)
+                while end < text.endIndex, text[end] == "." || text[end] == "!" || text[end] == "?" {
+                    end = text.index(after: end)
+                }
+                // Only a boundary if the run is followed by whitespace or EOL,
+                // so "3.14" or "U.S." are not split mid-token.
+                let atEnd = end == text.endIndex
+                let nextIsSpace = end < text.endIndex && (text[end] == " " || text[end] == "\t" || text[end] == "\n")
+                if atEnd || nextIsSpace {
+                    while end < text.endIndex, text[end] == " " || text[end] == "\t" {
+                        end = text.index(after: end)
+                    }
+                    let sentence = String(text[last..<end])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !sentence.isEmpty {
+                        sentences.append(sentence)
+                    }
+                    last = end
+                    i = end
+                    continue
+                }
+                // Not a boundary (e.g. the dot in "3.14"); keep scanning.
+                i = text.index(after: i)
+                continue
+            }
+            i = text.index(after: i)
+        }
+        let tail = String(text[last...])
+        return (sentences, tail)
+    }
+
     /// Queue a single streamed sentence chunk without stopping any in-flight audio.
     /// This keeps responses smooth while the model is still generating the next chunk.
     func speakChunk(_ text: String) {
@@ -1320,6 +1602,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     private func speakWithAppleChunk(_ text: String) {
         guard enabled else { return }
+        guard state == .speaking || state == .processing else { return }
         let voice = bestVoice()
         let chunks = prosodyChunks(from: text)
         for chunk in chunks {
@@ -1399,7 +1682,11 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         pendingSpeechUtterances = max(0, pendingSpeechUtterances - 1)
         if pendingSpeechUtterances == 0 {
-            scheduleRestart(after: 0.25)
+            // Only restart if we're in speaking state — if we already restarted
+            // via the safety timeout or flushStreamingTTS, don't double-restart.
+            if state == .speaking {
+                scheduleRestart(after: 0.25)
+            }
         }
     }
 
@@ -3772,6 +4059,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var menu: NSMenu?
     private var timer: Timer?
     private let voiceHost = BadAppleVoiceHost()
+    // Dedicated serial queue for spawning the badapple CLI during voice
+    // queries so the process spawn is not delayed by other global-queue work.
+    private let voiceQueue = DispatchQueue(label: "com.badapple.voice", qos: .userInitiated)
     private let actionExecutor = BadAppleActionExecutor()
     private let chatHistoryWindow = ChatHistoryWindow()
     private let chatWindow = BadAppleChatWindow()
@@ -3779,6 +4069,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var lastPrompt = ""
     private var lastError: String?
     private var isSubmittingVoicePrompt = false
+    private var voiceStreamingTTSActive = false
     private var lastSpoken: String?
     private var openMenuCount = 0
     private var needsMenuRebuild = false
@@ -3788,6 +4079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var memoryPressure = "normal"
     private var activeModels: [String] = ["main_9b"]
     private var cachedModelList: [[String: Any]] = []
+    private var cachedHFModelNames: [String] = []
     private var lastTelemetryTime: TimeInterval = 0
     private var lastRuntimeStatus: [String: Any] = [:]
     private var lastRuntimeReachable = false
@@ -3810,6 +4102,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private let voiceHUD = BadAppleVoiceHUD()
     private let voiceOnboarding = BadAppleVoiceOnboarding()
     private let firstRunOnboarding = BadAppleFirstRunOnboarding()
+    private let onboardingWindow = BadAppleOnboardingWindow()
+    private let settingsWindow = BadAppleSettingsWindow()
     private let voiceHelp = BadAppleVoiceHelpWindow()
     private let voiceLog = BadAppleVoiceLogWindow()
     private lazy var voiceShortcut = BadAppleGlobalShortcut(name: "voice", keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(cmdKey | shiftKey), id: 1) { [weak self] in
@@ -3904,6 +4198,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             self?.rebuildMenu()
             self?.updateStatusIcon()
             self?.voiceHUD.updateState(state)
+            // When the wake word is heard, pre-warm the badapple CLI binary into
+            // the OS file cache so the process spawn is instant by the time the
+            // user finishes speaking their command.
+            if case .awaitingPrompt = state {
+                self?.prewarmVoiceCLI()
+            }
         }
         voiceHost.onTranscript = { [weak self] transcript in
             self?.voiceHUD.updateTranscript(transcript)
@@ -3956,6 +4256,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         chatWindow.onNewChat = { [weak self] in
             self?.newChat()
+        }
+        chatWindow.onDescribeImage = { [weak self] imagePath, imageName, append, finish in
+            guard let self = self else { finish(); return }
+            Task {
+                do {
+                    let prompt = "Describe this image in detail: \(imagePath)"
+                    _ = try await self.runBadAppleCLIStreaming(
+                        prompt: prompt,
+                        socketPath: BadAppleBrain.deepSocket,
+                        maxTokens: 512
+                    ) { chunk in
+                        DispatchQueue.main.async { append(chunk) }
+                    }
+                } catch {
+                    DispatchQueue.main.async { append("Error: \(error.localizedDescription)") }
+                }
+                DispatchQueue.main.async { finish() }
+            }
         }
         briefingWindow.onRun = { [weak self] append, finish in
             guard let self = self else { finish(); return }
@@ -4092,6 +4410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         refreshTelemetry()
         // Scan for cached models on startup so the Model submenu is populated
         scanModels()
+        scanHuggingFaceCache()
 
         if UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false {
             PiperTTSClient.shared.warmup()
@@ -4127,6 +4446,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let workspace = NSWorkspace.shared.notificationCenter
         workspace.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         workspace.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+        showOnboardingIfNeeded()
+    }
+
+    /// Shows the guided first-run onboarding wizard if the user has not
+    /// completed it yet. Uses a short delay so the boot splash can dismiss
+    /// first.
+    func showOnboardingIfNeeded() {
+        if !UserDefaults.standard.bool(forKey: "BadAppleOnboarded") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.onboardingWindow.show()
+            }
+        }
     }
 
     @objc private func screenLocked() {
@@ -4194,7 +4525,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = ["-c", "\"\(script)\""]
+            process.arguments = ["-c", script]
             var environment = ProcessInfo.processInfo.environment
             if let repoRoot = repoRoot {
                 environment["BADAPPLE_ROOT"] = repoRoot
@@ -4231,21 +4562,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     private func findAquaHelper() -> (python: URL, script: URL)? {
-        // Prefer a full platform install under ~/.bad_apple/bad_apple-<version>/bad_apple.
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
-        let badAppleDir = home.appendingPathComponent(".bad_apple")
-        if let versions = try? fm.contentsOfDirectory(at: badAppleDir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
-            for versionDir in versions.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
-                let script = versionDir.appendingPathComponent("bad_apple/badapple_aqua_helper.py")
-                let python = versionDir.appendingPathComponent("bad_apple/.venv/bin/python3")
-                if fm.isExecutableFile(atPath: python.path) && fm.fileExists(atPath: script.path) {
-                    return (python, script)
-                }
-            }
-        }
-
-        // Fall back to the script bundled in the app bundle; it only needs the system python.
+        // SECURITY: Do not search ~/.bad_apple for the aqua helper — that
+        // directory is user-writable and an attacker could drop a malicious
+        // script there to gain the menu bar's Accessibility permissions.
+        // Only use the helper bundled inside the signed app bundle.
         if let bundledScript = Bundle.main.url(forResource: "badapple_aqua_helper", withExtension: "py") {
             return (URL(fileURLWithPath: "/usr/bin/python3"), bundledScript)
         }
@@ -4262,8 +4582,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let process = Process()
         process.executableURL = helper.python
         process.arguments = ["-u", helper.script.path]
-        var env = ProcessInfo.processInfo.environment
+        // SECURITY: Build a minimal allow-list environment instead of inheriting
+        // the full parent environment, which could contain attacker-set
+        // BADAPPLE_SOCKET_PATH, BADAPPLE_AUTOPILOT, etc.
+        var env: [String: String] = [:]
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+        env["HOME"] = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        env["LANG"] = ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8"
         env["BADAPPLE_AQUA_SOCKET"] = "/var/run/badapple/aqua_helper.sock"
         env["BADAPPLE_APP_BUNDLE"] = Bundle.main.bundlePath
         process.environment = env
@@ -4333,6 +4658,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                         // Update chat window tier badge
                         let tier = (json["fast_tier"] as? Bool == true) ? "0.5B Fast" : "9B"
                         self.chatWindow.tierName = tier
+                        // Update vision availability for image drop/paste support
+                        let models = json["active_models"] as? [String] ?? self.activeModels
+                        self.chatWindow.visionAvailable = models.contains { $0.contains("vision") }
                     }
                 } else {
                     await MainActor.run {
@@ -4659,7 +4987,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         lastPrompt = prompt
         lastError = nil
         streamedTokenCount = 0
-        voiceHost.stopAllAudio()
+        // Reset the streaming TTS pipeline and clear the queue so stale audio
+        // from the previous response is dropped before the new one starts.
+        voiceHost.resetStreamingTTS()
+        voiceStreamingTTSActive = voiceHost.streamingTTSAvailable
         rebuildMenu()
 
         // Voice mode switch commands are handled without a daemon call.
@@ -4676,34 +5007,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
 
         // Fallback: ask the on-device daemon via the bundled badapple CLI.
-        // The CLI streams sentence chunks as they are generated, so TTS starts
-        // while the 9B model is still finishing the rest of the response.
+        // The CLI streams token chunks as they are generated; we feed each
+        // chunk to the TTS queue immediately so the first sentence starts
+        // playing while the model is still finishing the rest of the response.
         var extraArgs: [String] = []
         if selectedPersona != "default" { extraArgs += ["--persona", selectedPersona] }
         if roastEnabled { extraArgs += ["--roast"] }
 
         let socket = BadAppleBrain.deepSocket
         let maxTokens = 300
+
+        // Minimal environment for the voice CLI process: do not inherit the
+        // full parent environment (which can carry attacker-set overrides) and
+        // keep the spawn as lightweight as possible to cut per-query latency.
+        var voiceEnv: [String: String] = [
+            "BADAPPLE_SOCKET_PATH": socket,
+            "BADAPPLE_SLICKS_KEY_PATH": BadAppleBrain.keyPath,
+            "BADAPPLE_STREAM_JSON": "1",
+            "BADAPPLE_VOICE": "1",
+        ]
+        // Short simple queries skip the cognitive governor for faster response.
+        if effectivePrompt.count < 60 && isSimpleVoiceQuery(effectivePrompt) {
+            voiceEnv["BADAPPLE_FAST_TIER"] = "1"
+            voiceEnv["BADAPPLE_COGNITIVE"] = "0"
+            badAppleVoiceLog("voice fast path: short prompt, skipping cognitive governor")
+        }
+
         Task {
             do {
-                let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens, extraArgs: extraArgs) { chunk in
+                let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens, extraArgs: extraArgs, timeout: 30.0, extraEnv: voiceEnv, minimalEnv: true) { chunk in
                     DispatchQueue.main.async {
                         self.streamedTokenCount += chunk.count
+                        if self.voiceStreamingTTSActive {
+                            self.voiceHost.speakStreamingChunk(chunk)
+                        }
                         self.rebuildMenu()
                     }
                 }
                 await MainActor.run {
-                    self.completeVoiceResponse(finalText)
+                    if self.voiceStreamingTTSActive {
+                        self.voiceHost.flushStreamingTTS()
+                    }
+                    self.completeVoiceResponse(finalText, streamed: self.voiceStreamingTTSActive)
                     self.isSubmittingVoicePrompt = false
                 }
             } catch {
                 badAppleVoiceLog("submitVoicePrompt error: \(error)")
                 await MainActor.run {
                     self.lastError = error.localizedDescription
+                    // Drop any partially-streamed audio before resuming so stale
+                    // sentences do not play over the restarted listening session.
+                    self.voiceHost.stopAllAudio()
                     self.voiceHost.resumeAfterFailure()
                     self.rebuildMenu()
                     self.isSubmittingVoicePrompt = false
                 }
+            }
+        }
+    }
+
+    /// Heuristic for routing short voice queries to the fast 0.5B tier without
+    /// paying the cognitive governor's classification overhead.  Matches
+    /// greetings, identity/time questions, confirmations, and simple arithmetic.
+    private func isSimpleVoiceQuery(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        let simplePatterns = ["what time", "who are you", "what is", "hello", "hey", "hi ", "thanks", "thank you", "yes", "no", "ok"]
+        if simplePatterns.contains(where: { lower.contains($0) }) {
+            return true
+        }
+        // Simple arithmetic like "2 + 2" or "12 * 9".
+        let mathPattern = try? NSRegularExpression(pattern: "\\d+\\s*[+\\-*/]\\s*\\d+")
+        if let mathPattern = mathPattern {
+            let range = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+            if mathPattern.firstMatch(in: prompt, range: range) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Touch the bundled badapple CLI binary so the OS pages it into the file
+    /// cache ahead of the actual spawn.  Called when the wake word is detected
+    /// so the process launch is instant by the time the user finishes speaking.
+    private func prewarmVoiceCLI() {
+        let binary = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Helpers")
+            .appendingPathComponent("badapple")
+        voiceQueue.async {
+            guard FileManager.default.fileExists(atPath: binary.path) else { return }
+            if let handle = try? FileHandle(forReadingFrom: binary) {
+                _ = handle.readData(ofLength: 64)
+                try? handle.close()
             }
         }
     }
@@ -4714,6 +5109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     @objc private func showChatWindow() {
         chatWindow.show()
+    }
+
+    @objc private func showSettings() {
+        settingsWindow.show()
     }
 
     @objc private func newChat() {
@@ -4749,6 +5148,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         rebuildMenu()
     }
 
+    /// Scans `~/.cache/huggingface/hub/` for directories starting with `models--`
+    /// and extracts the model name (format: `models--org--model-name` → `org/model-name`).
+    @objc private func scanHuggingFaceCache() {
+        let home = NSHomeDirectory()
+        let hubDir = "\(home)/.cache/huggingface/hub"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: hubDir) else {
+            badAppleVoiceLog("scanHuggingFaceCache: hub dir not found at \(hubDir)")
+            return
+        }
+        var names: [String] = []
+        for entry in entries where entry.hasPrefix("models--") {
+            // Format: models--org--model-name (org and model can contain -- segments)
+            let stripped = String(entry.dropFirst("models--".count))
+            // The first -- separates org from model name
+            if let dashRange = stripped.range(of: "--") {
+                let org = String(stripped[..<dashRange.lowerBound])
+                let modelName = String(stripped[dashRange.upperBound...])
+                if !org.isEmpty && !modelName.isEmpty {
+                    names.append("\(org)/\(modelName)")
+                }
+            }
+        }
+        names.sort()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let added = Set(names).subtracting(Set(self.cachedHFModelNames))
+            self.cachedHFModelNames = names
+            if !added.isEmpty {
+                badAppleVoiceLog("scanHuggingFaceCache: found \(names.count) models, \(added.count) new")
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    /// Determines the currently active model from multiple sources.
+    private func currentActiveModel() -> String {
+        // 1. Check runtime status (populated by refreshTelemetry)
+        if let modelId = lastRuntimeStatus["model_id"] as? String, !modelId.isEmpty {
+            return modelId
+        }
+        // 2. Check BADAPPLE_MAIN_MODEL env var
+        if let envModel = ProcessInfo.processInfo.environment["BADAPPLE_MAIN_MODEL"],
+           !envModel.isEmpty {
+            return envModel
+        }
+        // 3. Read from model_config_hash.json in /var/lib/bad_apple/
+        let hashPath = "/var/lib/bad_apple/model_config_hash.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: hashPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let model = json["model"] as? String, !model.isEmpty {
+            return model
+        }
+        // 4. Fallback to the known default
+        return "caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit"
+    }
+
+    /// Opens the model management dashboard at http://127.0.0.1:8787/models
+    @objc private func openModelManager() {
+        if let url = URL(string: "http://127.0.0.1:8787/models") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc private func scanModels() {
         Task {
             do {
@@ -4758,6 +5220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                    let models = json["models"] as? [[String: Any]] {
                     await MainActor.run {
                         self.cachedModelList = models
+                        self.scanHuggingFaceCache()
                         self.rebuildMenu()
                     }
                 }
@@ -4769,21 +5232,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     @objc private func selectModel(_ sender: NSMenuItem) {
         guard let repo = sender.representedObject as? String else { return }
+        let modelLabel = repo.split(separator: "/").last.map(String.init) ?? repo
+        // Brief confirmation shown immediately while the switch runs
+        lastPrompt = "Switching to \(modelLabel)..."
+        rebuildMenu()
         Task {
             do {
                 let output = try await runBadAppleCLI(args: ["model", "use", repo])
+                let confirmText: String
                 if let data = output.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    let text = json["text"] as? String ?? "Switched."
-                    await MainActor.run {
-                        self.lastError = nil
-                        self.rebuildMenu()
-                        badAppleVoiceLog("Model switched: \(text)")
-                    }
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let text = json["text"] as? String, !text.isEmpty {
+                    confirmText = text
+                } else {
+                    confirmText = "Switched to \(repo)."
+                }
+                await MainActor.run {
+                    self.lastError = nil
+                    self.lastSpoken = confirmText
+                    self.lastPrompt = "Switched to \(modelLabel)"
+                    self.scanHuggingFaceCache()
+                    self.rebuildMenu()
+                    badAppleVoiceLog("Model switched: \(confirmText)")
                 }
             } catch {
                 await MainActor.run {
                     self.lastError = error.localizedDescription
+                    self.lastPrompt = ""
                     self.rebuildMenu()
                 }
             }
@@ -4816,6 +5291,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         socketPath: String,
         maxTokens: Int,
         extraArgs: [String] = [],
+        timeout: TimeInterval = 120.0,
+        extraEnv: [String: String] = [:],
+        minimalEnv: Bool = false,
         onChunk: @escaping (String) -> Void
     ) async throws -> String {
         let binary = Bundle.main.bundleURL
@@ -4828,23 +5306,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
 
         return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+            // Spawn on the dedicated serial voice queue so the process launch
+            // is not delayed by unrelated global-queue work.
+            voiceQueue.async {
                 let process = Process()
                 let outputPipe = Pipe()
                 process.executableURL = binary
                 process.arguments = extraArgs + ["--max-tokens", String(maxTokens), prompt]
                 process.standardOutput = outputPipe
                 process.standardError = outputPipe
-                var environment = ProcessInfo.processInfo.environment
-                environment["BADAPPLE_SOCKET_PATH"] = socketPath
-                environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
-                environment["BADAPPLE_STREAM_JSON"] = "1"
-                environment["BADAPPLE_VOICE"] = "1"
+                var environment: [String: String]
+                if minimalEnv {
+                    // SECURITY/PERF: Build a minimal allow-list environment for
+                    // the latency-sensitive voice path instead of inheriting the
+                    // full parent environment (which can carry attacker-set
+                    // overrides and adds fork/exec cost).  extraEnv supplies the
+                    // voice-specific flags (socket, SLICKS key, stream, fast
+                    // tier, etc.).
+                    environment = [
+                        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+                        "HOME": ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory(),
+                        "LANG": ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8",
+                        "BADAPPLE_SOCKET_PATH": socketPath,
+                        "BADAPPLE_SLICKS_KEY_PATH": BadAppleBrain.keyPath,
+                        "BADAPPLE_STREAM_JSON": "1",
+                        "BADAPPLE_VOICE": "1",
+                    ]
+                } else {
+                    environment = ProcessInfo.processInfo.environment
+                    environment["BADAPPLE_SOCKET_PATH"] = socketPath
+                    environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
+                    environment["BADAPPLE_STREAM_JSON"] = "1"
+                    environment["BADAPPLE_VOICE"] = "1"
+                }
+                for (key, value) in extraEnv {
+                    environment[key] = value
+                }
                 process.environment = environment
 
                 let sync = NSLock()
                 var timeoutTimer: Timer?
-                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
+                timeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
                     badAppleVoiceLog("runBadAppleCLIStreaming: timeout, terminating")
                     process.terminate()
                 }
@@ -4944,17 +5446,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 }
                 process.environment = environment
 
-                var timeoutTimer: Timer?
-                timeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
+                var timeoutTimer: DispatchSourceTimer?
+                let timeoutQueue = DispatchQueue.global(qos: .userInitiated)
+                timeoutTimer = DispatchSource.makeTimerSource(queue: timeoutQueue)
+                timeoutTimer?.schedule(deadline: .now() + timeout)
+                timeoutTimer?.setEventHandler { [weak process] in
                     badAppleVoiceLog("runBadAppleCLI: timeout, terminating")
-                    process.terminate()
+                    process?.terminate()
                 }
+                timeoutTimer?.resume()
 
                 do {
                     try process.run()
-                    process.waitUntilExit()
-                    timeoutTimer?.invalidate()
+                    // Read the pipe concurrently to avoid a deadlock when the
+                    // child writes more data than the pipe buffer can hold.
+                    // waitUntilExit() before readDataToEndOfFile() would block
+                    // the child on write() and hang forever.
                     let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    timeoutTimer?.cancel()
+                    timeoutTimer = nil
                     let output = String(data: data, encoding: .utf8) ?? ""
                     badAppleVoiceLog("runBadAppleCLI: exit=\(process.terminationStatus) output=\(output.prefix(200))")
                     if process.terminationStatus != 0, output.isEmpty {
@@ -4962,7 +5473,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     }
                     continuation.resume(returning: output)
                 } catch {
-                    timeoutTimer?.invalidate()
+                    timeoutTimer?.cancel()
+                    timeoutTimer = nil
                     continuation.resume(throwing: error)
                 }
             }
@@ -4992,17 +5504,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
                 process.environment = environment
 
-                var timeoutTimer: Timer?
-                timeoutTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: false) { _ in
+                var timeoutTimer: DispatchSourceTimer?
+                let timeoutQueue = DispatchQueue.global(qos: .userInitiated)
+                timeoutTimer = DispatchSource.makeTimerSource(queue: timeoutQueue)
+                timeoutTimer?.schedule(deadline: .now() + 120.0)
+                timeoutTimer?.setEventHandler { [weak process] in
                     badAppleVoiceLog("runBadAppleCLI benchmark: timeout, terminating")
-                    process.terminate()
+                    process?.terminate()
                 }
+                timeoutTimer?.resume()
 
                 do {
                     try process.run()
-                    process.waitUntilExit()
-                    timeoutTimer?.invalidate()
+                    // Read the pipe before waitUntilExit to avoid deadlock.
                     let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    timeoutTimer?.cancel()
+                    timeoutTimer = nil
                     let output = String(data: data, encoding: .utf8) ?? ""
                     badAppleVoiceLog("runBadAppleCLI: exit=\(process.terminationStatus) output=\(output.prefix(200))")
                     if process.terminationStatus != 0, output.isEmpty {
@@ -5010,7 +5528,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     }
                     continuation.resume(returning: output)
                 } catch {
-                    timeoutTimer?.invalidate()
+                    timeoutTimer?.cancel()
+                    timeoutTimer = nil
                     continuation.resume(throwing: error)
                 }
             }
@@ -5022,13 +5541,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         init(_ message: String) { self.errorDescription = message }
     }
 
-    private func completeVoiceResponse(_ response: String) {
-        badAppleVoiceLog("completeVoiceResponse: \(response.prefix(200))")
+    private func completeVoiceResponse(_ response: String, streamed: Bool = false) {
+        badAppleVoiceLog("completeVoiceResponse: \(response.prefix(200)) streamed=\(streamed)")
         let parsed = BadAppleActionParser.parse(response)
         lastSpoken = parsed.spoken
         voiceHUD.updateResponse(parsed.spoken)
         badAppleVoiceLog("parsed actions: \(parsed.actions.count) error: \(parsed.error ?? "nil") spoken: \(parsed.spoken)")
-        voiceHost.speak(parsed.spoken)
+        // When the spoken text was already streamed to TTS during generation we
+        // do not speak it again; only parse and execute any embedded actions.
+        // BUT: if streaming was active but nothing was actually spoken (e.g.,
+        // the response was entirely inside a code fence or was too short for a
+        // sentence boundary), fall back to speaking the full text.
+        if !streamed || !voiceHost.streamTTSEmittedAny {
+            voiceHost.speak(parsed.spoken)
+        }
         if let parseError = parsed.error {
             actionExecutor.showParsingFailure(parseError)
         } else {
@@ -5208,6 +5734,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let chatItem = NSMenuItem(title: "Chat", action: #selector(showChatWindow), keyEquivalent: "c")
         chatItem.toolTip = "Open the native chat window."
         menu.addItem(chatItem)
+        let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
+        settingsMenuItem.toolTip = "Open the Bad Apple settings window."
+        menu.addItem(settingsMenuItem)
         let newChatItem = NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n")
         newChatItem.toolTip = "Start a new conversation."
         menu.addItem(newChatItem)
@@ -5237,28 +5766,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
         // Model selector submenu
         let modelMenu = NSMenu(title: "Model")
-        let scanItem = NSMenuItem(title: "Scan for Cached Models", action: #selector(scanModels), keyEquivalent: "")
-        scanItem.toolTip = "Scan the HuggingFace cache for available MLX models."
-        modelMenu.addItem(scanItem)
+        let activeModel = currentActiveModel()
+
+        // Active model (checkmarked, disabled) at top
+        let activeShort = activeModel.split(separator: "/").last.map(String.init) ?? activeModel
+        let activeModelItem = NSMenuItem(title: "✓ \(activeShort)", action: nil, keyEquivalent: "")
+        activeModelItem.isEnabled = false
+        activeModelItem.toolTip = "Currently active model: \(activeModel)"
+        modelMenu.addItem(activeModelItem)
         modelMenu.addItem(NSMenuItem.separator())
-        if cachedModelList.isEmpty {
+
+        // Build a merged, de-duplicated list of all known cached models.
+        // Sources: cachedModelList (from `badapple model scan` JSON) and
+        // cachedHFModelNames (from scanning ~/.cache/huggingface/hub/).
+        var seenRepos = Set<String>()
+        var modelEntries: [(repo: String, label: String, status: String)] = []
+
+        // 1. Entries from the daemon's model scan (may include status info)
+        for m in cachedModelList.prefix(30) {
+            let id = m["id"] as? String ?? "?"
+            let repo = m["repo_id"] as? String ?? id
+            let status = m["status"] as? String ?? ""
+            if !seenRepos.contains(repo) {
+                seenRepos.insert(repo)
+                let label = status.isEmpty ? id : "\(id) — \(status)"
+                modelEntries.append((repo, label, status))
+            }
+        }
+
+        // 2. Entries from the local HF cache scan (repo names only)
+        for name in cachedHFModelNames {
+            if !seenRepos.contains(name) {
+                seenRepos.insert(name)
+                let short = name.split(separator: "/").last.map(String.init) ?? name
+                modelEntries.append((name, short, ""))
+            }
+        }
+
+        if modelEntries.isEmpty {
             let empty = NSMenuItem(title: "No models found — click Scan", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             modelMenu.addItem(empty)
         } else {
-            let currentModel = (lastRuntimeStatus["model_id"] as? String) ?? ""
-            for m in cachedModelList.prefix(20) {
-                let id = m["id"] as? String ?? "?"
-                let repo = m["repo_id"] as? String ?? id
-                let status = m["status"] as? String ?? ""
-                let label = "\(id) — \(status)"
-                let item = NSMenuItem(title: label, action: #selector(selectModel(_:)), keyEquivalent: "")
-                item.representedObject = repo
-                item.state = (repo == currentModel || id == currentModel) ? .on : .off
-                item.toolTip = "Switch to \(repo)"
+            for entry in modelEntries.prefix(30) {
+                let item = NSMenuItem(title: entry.label, action: #selector(selectModel(_:)), keyEquivalent: "")
+                item.representedObject = entry.repo
+                item.state = (entry.repo == activeModel) ? .on : .off
+                item.toolTip = "Switch to \(entry.repo)"
                 modelMenu.addItem(item)
             }
         }
+
+        modelMenu.addItem(NSMenuItem.separator())
+        let scanItem = NSMenuItem(title: "Scan for Models...", action: #selector(scanModels), keyEquivalent: "")
+        scanItem.toolTip = "Scan the HuggingFace cache for available MLX models."
+        modelMenu.addItem(scanItem)
+        let managerItem = NSMenuItem(title: "Model Manager...", action: #selector(openModelManager), keyEquivalent: "")
+        managerItem.toolTip = "Open the model management dashboard in your browser."
+        modelMenu.addItem(managerItem)
+
         let modelParent = NSMenuItem(title: "Model", action: nil, keyEquivalent: "m")
         modelParent.submenu = modelMenu
         menu.addItem(modelParent)
@@ -5875,29 +6441,1155 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 }
 
+// MARK: - Settings / Preferences window
+
+/// Preferences window that exposes key Bad Apple settings as toggles and
+/// dropdowns so non-technical users do not need to edit policy.yaml or use
+/// CLI flags. Pure AppKit — no SwiftUI.
+final class BadAppleSettingsWindow: NSObject {
+    private var window: NSWindow?
+    private let windowSize = NSSize(width: 480, height: 520)
+
+    // Setting controls
+    private var autopilotButton: NSButton?
+    private var autopilotLabel: NSTextField?
+    private var fastTierButton: NSButton?
+    private var voiceModeButton: NSButton?
+    private var p2pButton: NSButton?
+    private var airGapButton: NSButton?
+    private var personaPopup: NSPopUpButton?
+    private var workspaceField: NSTextField?
+
+    // Persona options
+    private let personas: [(id: String, display: String)] = [
+        ("default", "Default"),
+        ("wicket", "Wicket"),
+        ("genz", "Gen Z"),
+        ("drill", "Drill"),
+        ("midwest", "Midwest"),
+    ]
+
+    // UserDefaults keys
+    private let autopilotKey = "BadAppleSettingsAutopilot"
+    private let fastTierKey = "BadAppleSettingsFastTier"
+    private let voiceModeKey = "BadAppleSettingsVoiceMode"
+    private let p2pKey = "BadAppleSettingsP2PSync"
+    private let airGapKey = "BadAppleSettingsAirGap"
+    private let personaKey = "BadAppleSelectedPersona"
+    private let workspaceKey = "BadAppleSettingsWorkspace"
+
+    func show() {
+        if window == nil { buildWindow() }
+        loadSettings()
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Window construction
+
+    private func buildWindow() {
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - windowSize.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - windowSize.height / 2,
+            width: windowSize.width,
+            height: windowSize.height
+        )
+        let w = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Bad Apple Settings"
+        w.isReleasedWhenClosed = false
+        w.level = .normal
+        w.minSize = windowSize
+        w.maxSize = windowSize
+
+        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: windowSize))
+        visual.material = .hudWindow
+        visual.state = .active
+        visual.blendingMode = .behindWindow
+        visual.wantsLayer = true
+
+        let contentWidth = windowSize.width - 48
+        var y = windowSize.height - 24.0
+
+        // --- General section ---
+        let genHeader = sectionHeader("GENERAL")
+        y -= 16
+        genHeader.frame = NSRect(x: 24, y: y, width: contentWidth, height: 16)
+        visual.addSubview(genHeader)
+        y -= 4
+
+        let (autoRow, autoBtn, autoLbl) = toggleRow(
+            label: "Autopilot (skip approval prompts)",
+            description: "When on, destructive tools run without approval prompts.",
+            action: #selector(autopilotToggled(_:)),
+            isOn: boolSetting(autopilotKey, defaultValue: false),
+            warningWhenOn: true
+        )
+        autopilotButton = autoBtn
+        autopilotLabel = autoLbl
+        y -= 38
+        autoRow.frame = NSRect(x: 24, y: y, width: contentWidth, height: 38)
+        visual.addSubview(autoRow)
+        y -= 4
+
+        let (voiceRow, voiceBtn, _) = toggleRow(
+            label: "Voice Mode (speak responses aloud)",
+            description: "Controls whether text-to-speech reads responses out loud.",
+            action: #selector(voiceModeToggled(_:)),
+            isOn: boolSetting(voiceModeKey, defaultValue: false)
+        )
+        voiceModeButton = voiceBtn
+        y -= 38
+        voiceRow.frame = NSRect(x: 24, y: y, width: contentWidth, height: 38)
+        visual.addSubview(voiceRow)
+        y -= 10
+
+        // --- Models section ---
+        let modelsHeader = sectionHeader("MODELS")
+        y -= 16
+        modelsHeader.frame = NSRect(x: 24, y: y, width: contentWidth, height: 16)
+        visual.addSubview(modelsHeader)
+        y -= 4
+
+        let (ftRow, ftBtn, _) = toggleRow(
+            label: "Fast Tier (route simple queries to 0.5B model)",
+            description: "Simple math, identity, time, and greeting queries skip the 9B model.",
+            action: #selector(fastTierToggled(_:)),
+            isOn: boolSetting(fastTierKey, defaultValue: false)
+        )
+        fastTierButton = ftBtn
+        y -= 38
+        ftRow.frame = NSRect(x: 24, y: y, width: contentWidth, height: 38)
+        visual.addSubview(ftRow)
+        y -= 8
+
+        let personaRow = popupRow(
+            label: "Persona",
+            items: personas.map { $0.display },
+            action: #selector(personaChanged(_:))
+        )
+        personaPopup = personaRow.popup
+        y -= 24
+        personaRow.view.frame = NSRect(x: 24, y: y, width: contentWidth, height: 24)
+        visual.addSubview(personaRow.view)
+        y -= 10
+
+        // --- Network section ---
+        let netHeader = sectionHeader("NETWORK")
+        y -= 16
+        netHeader.frame = NSRect(x: 24, y: y, width: contentWidth, height: 16)
+        visual.addSubview(netHeader)
+        y -= 4
+
+        let (p2pRow, p2pBtn, _) = toggleRow(
+            label: "P2P Sync (encrypted mesh with other Bad Apple peers)",
+            description: "Link-local UDP/TCP, AES-256-GCM. Off by default for air-gap certification.",
+            action: #selector(p2pToggled(_:)),
+            isOn: boolSetting(p2pKey, defaultValue: false)
+        )
+        p2pButton = p2pBtn
+        y -= 38
+        p2pRow.frame = NSRect(x: 24, y: y, width: contentWidth, height: 38)
+        visual.addSubview(p2pRow)
+        y -= 4
+
+        let (agRow, agBtn, _) = toggleRow(
+            label: "Air Gap (block all network access)",
+            description: "Prevents Bad Apple from making any network connections.",
+            action: #selector(airGapToggled(_:)),
+            isOn: boolSetting(airGapKey, defaultValue: false)
+        )
+        airGapButton = agBtn
+        y -= 38
+        agRow.frame = NSRect(x: 24, y: y, width: contentWidth, height: 38)
+        visual.addSubview(agRow)
+        y -= 10
+
+        // --- Advanced section ---
+        let advHeader = sectionHeader("ADVANCED")
+        y -= 16
+        advHeader.frame = NSRect(x: 24, y: y, width: contentWidth, height: 16)
+        visual.addSubview(advHeader)
+        y -= 4
+
+        let wsRow = workspaceRow()
+        workspaceField = wsRow.field
+        y -= 64
+        wsRow.view.frame = NSRect(x: 24, y: y, width: contentWidth, height: 64)
+        visual.addSubview(wsRow.view)
+        y -= 4
+
+        // --- Done button ---
+        let doneButton = NSButton(title: "Done", target: self, action: #selector(closeSettings(_:)))
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        doneButton.frame = NSRect(x: windowSize.width - 24 - 90, y: 12, width: 90, height: 28)
+        visual.addSubview(doneButton)
+
+        w.contentView = visual
+        window = w
+    }
+
+    // MARK: - Row builders
+
+    private func sectionHeader(_ title: String) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 11, weight: .bold)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
+    private func toggleRow(label: String, description: String, action: Selector, isOn: Bool, warningWhenOn: Bool = false) -> (NSView, NSButton, NSTextField) {
+        let container = NSView()
+        let contentWidth = windowSize.width - 48
+
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = .systemFont(ofSize: 13)
+        labelField.textColor = (warningWhenOn && isOn) ? .systemOrange : .labelColor
+        labelField.lineBreakMode = .byTruncatingTail
+        labelField.cell?.truncatesLastVisibleLine = true
+        labelField.frame = NSRect(x: 0, y: 20, width: contentWidth - 36, height: 18)
+        container.addSubview(labelField)
+
+        let toggle = NSButton(checkboxWithTitle: "", target: self, action: action)
+        toggle.state = isOn ? .on : .off
+        toggle.frame = NSRect(x: contentWidth - 30, y: 19, width: 30, height: 20)
+        container.addSubview(toggle)
+
+        let descLabel = NSTextField(wrappingLabelWithString: description)
+        descLabel.font = .systemFont(ofSize: 11)
+        descLabel.textColor = .secondaryLabelColor
+        descLabel.frame = NSRect(x: 0, y: 0, width: contentWidth, height: 16)
+        container.addSubview(descLabel)
+
+        return (container, toggle, labelField)
+    }
+
+    private func popupRow(label: String, items: [String], action: Selector) -> (view: NSView, popup: NSPopUpButton) {
+        let container = NSView()
+        let contentWidth = windowSize.width - 48
+
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = .systemFont(ofSize: 13)
+        labelField.textColor = .labelColor
+        labelField.frame = NSRect(x: 0, y: 3, width: 120, height: 18)
+        container.addSubview(labelField)
+
+        let popup = NSPopUpButton()
+        popup.target = self
+        popup.action = action
+        for item in items {
+            popup.addItem(withTitle: item)
+        }
+        popup.frame = NSRect(x: contentWidth - 200, y: 0, width: 200, height: 24)
+        container.addSubview(popup)
+
+        return (container, popup)
+    }
+
+    private func workspaceRow() -> (view: NSView, field: NSTextField) {
+        let container = NSView()
+        let contentWidth = windowSize.width - 48
+
+        let labelField = NSTextField(labelWithString: "Workspace path")
+        labelField.font = .systemFont(ofSize: 13)
+        labelField.textColor = .labelColor
+        labelField.frame = NSRect(x: 0, y: 46, width: contentWidth, height: 18)
+        container.addSubview(labelField)
+
+        let field = NSTextField()
+        field.placeholderString = "/path/to/workspace"
+        field.bezelStyle = .roundedBezel
+        field.frame = NSRect(x: 0, y: 18, width: contentWidth - 170, height: 24)
+        container.addSubview(field)
+
+        let browseButton = NSButton(title: "Browse…", target: self, action: #selector(browseWorkspace(_:)))
+        browseButton.bezelStyle = .rounded
+        browseButton.frame = NSRect(x: contentWidth - 160, y: 18, width: 75, height: 24)
+        container.addSubview(browseButton)
+
+        let setButton = NSButton(title: "Set", target: self, action: #selector(setWorkspace(_:)))
+        setButton.bezelStyle = .rounded
+        setButton.frame = NSRect(x: contentWidth - 80, y: 18, width: 80, height: 24)
+        container.addSubview(setButton)
+
+        let descLabel = NSTextField(wrappingLabelWithString: "Path to current workspace.")
+        descLabel.font = .systemFont(ofSize: 11)
+        descLabel.textColor = .secondaryLabelColor
+        descLabel.frame = NSRect(x: 0, y: 0, width: contentWidth, height: 14)
+        container.addSubview(descLabel)
+
+        return (container, field)
+    }
+
+    // MARK: - Settings persistence
+
+    private func boolSetting(_ key: String, defaultValue: Bool) -> Bool {
+        UserDefaults.standard.object(forKey: key) as? Bool ?? defaultValue
+    }
+
+    private func loadSettings() {
+        let autoOn = boolSetting(autopilotKey, defaultValue: false)
+        autopilotButton?.state = autoOn ? .on : .off
+        autopilotLabel?.textColor = autoOn ? .systemOrange : .labelColor
+
+        fastTierButton?.state = boolSetting(fastTierKey, defaultValue: false) ? .on : .off
+        voiceModeButton?.state = boolSetting(voiceModeKey, defaultValue: false) ? .on : .off
+        p2pButton?.state = boolSetting(p2pKey, defaultValue: false) ? .on : .off
+        airGapButton?.state = boolSetting(airGapKey, defaultValue: false) ? .on : .off
+
+        let currentPersona = UserDefaults.standard.string(forKey: personaKey) ?? "default"
+        if let index = personas.firstIndex(where: { $0.id == currentPersona }) {
+            personaPopup?.selectItem(at: index)
+        }
+
+        workspaceField?.stringValue = UserDefaults.standard.string(forKey: workspaceKey) ?? ""
+    }
+
+    // MARK: - Actions
+
+    @objc private func autopilotToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: autopilotKey)
+        autopilotLabel?.textColor = enabled ? .systemOrange : .labelColor
+        sendCommand(enabled ? "enable autopilot" : "disable autopilot")
+    }
+
+    @objc private func fastTierToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: fastTierKey)
+        sendCommand(enabled ? "enable fast tier" : "disable fast tier")
+    }
+
+    @objc private func voiceModeToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: voiceModeKey)
+        // Voice mode is a local TTS setting; no daemon command needed.
+    }
+
+    @objc private func p2pToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: p2pKey)
+        sendCommand(enabled ? "p2p on" : "p2p off")
+    }
+
+    @objc private func airGapToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: airGapKey)
+        sendCommand(enabled ? "enable air gap" : "disable air gap")
+    }
+
+    @objc private func personaChanged(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem
+        guard index < personas.count else { return }
+        let personaId = personas[index].id
+        UserDefaults.standard.set(personaId, forKey: personaKey)
+        sendCommand("switch to \(personaId)")
+    }
+
+    @objc private func browseWorkspace(_ sender: NSButton) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Workspace"
+        if panel.runModal() == .OK, let url = panel.url {
+            workspaceField?.stringValue = url.path
+        }
+    }
+
+    @objc private func setWorkspace(_ sender: NSButton) {
+        let path = workspaceField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !path.isEmpty else { return }
+        UserDefaults.standard.set(path, forKey: workspaceKey)
+        sendCommand("set workspace to \(path)")
+    }
+
+    @objc private func closeSettings(_ sender: NSButton) {
+        window?.orderOut(nil)
+    }
+
+    // MARK: - Daemon command sender
+
+    /// Runs the bundled badapple CLI with the given prompt, setting the
+    /// socket and SLICKS key environment variables. Runs asynchronously on
+    /// a background queue so the UI stays responsive.
+    private func sendCommand(_ prompt: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let binary = Bundle.main.bundleURL
+                .appendingPathComponent("Contents")
+                .appendingPathComponent("Helpers")
+                .appendingPathComponent("badapple")
+            guard FileManager.default.fileExists(atPath: binary.path) else {
+                badAppleVoiceLog("BadAppleSettings: badapple binary not found at \(binary.path)")
+                return
+            }
+            let process = Process()
+            process.executableURL = binary
+            process.arguments = ["--max-tokens", "32", prompt]
+            var environment = ProcessInfo.processInfo.environment
+            environment["BADAPPLE_SOCKET_PATH"] = BadAppleBrain.deepSocket
+            environment["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
+            process.environment = environment
+            do {
+                try process.run()
+                process.waitUntilExit()
+                badAppleVoiceLog("BadAppleSettings: sent '\(prompt)' (exit=\(process.terminationStatus))")
+            } catch {
+                badAppleVoiceLog("BadAppleSettings: failed to send '\(prompt)': \(error.localizedDescription)")
+            }
+        }
+    }
+}
+
+// MARK: - Guided first-run onboarding window
+
+/// A multi-step guided onboarding wizard for first-time Bad Apple users.
+/// Walks the user through welcome, privacy, model status, permissions, and
+/// a first query. Pure AppKit — no SwiftUI.
+final class BadAppleOnboardingWindow: NSObject, NSTextFieldDelegate {
+    private var window: NSWindow?
+    private var visual: NSVisualEffectView?
+    private var contentContainer: NSView?
+    private var dots: [NSView] = []
+    private var backButton: NSButton?
+    private var continueButton: NSButton?
+    private var currentStep = 0
+    private let totalSteps = 5
+    private let windowSize = NSSize(width: 520, height: 580)
+
+    /// Usable content area inside the window (excludes side padding and the
+    /// bottom bar that holds the dots and navigation buttons).
+    private var contentSize: NSSize {
+        NSSize(width: windowSize.width - 56, height: windowSize.height - 124)
+    }
+
+    // Step 2 — model status
+    private var modelStatusLabel: NSTextField?
+    private var modelProgressIndicator: NSProgressIndicator?
+    private var modelCheckTimer: Timer?
+    private var modelIsReady = false
+    private var daemonRunning = false
+
+    // Step 3 — permissions
+    private var permCheckTimer: Timer?
+    private struct PermStatusRef {
+        let dot: NSView
+        let label: NSTextField
+    }
+    private var permStatusRefs: [PermStatusRef] = []
+
+    // Step 4 — first query
+    private var queryField: NSTextField?
+    private var askButton: NSButton?
+    private var responseTextView: NSTextView?
+    private var querySpinner: NSProgressIndicator?
+    private var isQuerying = false
+
+    func show() {
+        if window == nil { buildWindow() }
+        currentStep = 0
+        modelIsReady = false
+        daemonRunning = false
+        renderStep()
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    deinit {
+        modelCheckTimer?.invalidate()
+        permCheckTimer?.invalidate()
+    }
+
+    // MARK: - Window construction
+
+    private func buildWindow() {
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let frame = NSRect(
+            x: (screen?.visibleFrame.midX ?? 600) - windowSize.width / 2,
+            y: (screen?.visibleFrame.midY ?? 400) - windowSize.height / 2,
+            width: windowSize.width,
+            height: windowSize.height
+        )
+        let wc = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        wc.title = "Bad Apple"
+        wc.isReleasedWhenClosed = false
+        wc.minSize = windowSize
+        wc.maxSize = windowSize
+
+        let v = NSVisualEffectView(frame: NSRect(origin: .zero, size: windowSize))
+        v.material = .hudWindow
+        v.state = .active
+        v.blendingMode = .behindWindow
+        v.wantsLayer = true
+
+        let size = contentSize
+        let container = NSView(frame: NSRect(x: 28, y: 96, width: size.width, height: size.height))
+        container.wantsLayer = true
+        v.addSubview(container)
+
+        buildDots(in: v)
+
+        backButton = NSButton(title: "Back", target: self, action: #selector(backPressed(_:)))
+        backButton?.bezelStyle = .rounded
+        backButton?.frame = NSRect(x: 28, y: 20, width: 84, height: 32)
+        if let backButton = backButton { v.addSubview(backButton) }
+
+        continueButton = NSButton(title: "Get Started", target: self, action: #selector(continuePressed(_:)))
+        continueButton?.bezelStyle = .rounded
+        continueButton?.keyEquivalent = "\r"
+        continueButton?.frame = NSRect(x: windowSize.width - 28 - 130, y: 20, width: 130, height: 32)
+        if let continueButton = continueButton { v.addSubview(continueButton) }
+
+        wc.contentView = v
+        visual = v
+        contentContainer = container
+        window = wc
+    }
+
+    private func buildDots(in v: NSVisualEffectView) {
+        let dotSize: CGFloat = 8
+        let spacing: CGFloat = 14
+        let total = CGFloat(totalSteps) * dotSize + CGFloat(totalSteps - 1) * spacing
+        let startX = (windowSize.width - total) / 2
+        for i in 0..<totalSteps {
+            let dot = NSView(frame: NSRect(x: startX + CGFloat(i) * (dotSize + spacing), y: 62, width: dotSize, height: dotSize))
+            dot.wantsLayer = true
+            dot.layer?.cornerRadius = dotSize / 2
+            dot.layer?.backgroundColor = NSColor.systemGray.withAlphaComponent(0.4).cgColor
+            v.addSubview(dot)
+            dots.append(dot)
+        }
+    }
+
+    // MARK: - Step rendering
+
+    private func renderStep() {
+        guard let container = contentContainer else { return }
+        modelCheckTimer?.invalidate()
+        modelCheckTimer = nil
+        permCheckTimer?.invalidate()
+        permCheckTimer = nil
+
+        container.subviews.forEach { $0.removeFromSuperview() }
+        permStatusRefs.removeAll()
+
+        let size = contentSize
+        let view: NSView
+        switch currentStep {
+        case 0: view = buildWelcomeStep(size: size)
+        case 1: view = buildPrivacyStep(size: size)
+        case 2: view = buildModelStatusStep(size: size)
+        case 3: view = buildPermissionsStep(size: size)
+        case 4: view = buildFirstQueryStep(size: size)
+        default: view = NSView(frame: NSRect(origin: .zero, size: size))
+        }
+
+        container.addSubview(view)
+
+        // Crossfade: fade in the new content
+        view.wantsLayer = true
+        view.layer?.opacity = 0
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.3
+            view.animator().alphaValue = 1
+        }
+
+        updateDots()
+        updateButtons()
+
+        if currentStep == 4 {
+            DispatchQueue.main.async { [weak self] in
+                self?.queryField?.becomeFirstResponder()
+            }
+        }
+    }
+
+    private func updateDots() {
+        for (i, dot) in dots.enumerated() {
+            if i == currentStep {
+                dot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+            } else if i < currentStep {
+                dot.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.7).cgColor
+            } else {
+                dot.layer?.backgroundColor = NSColor.systemGray.withAlphaComponent(0.4).cgColor
+            }
+        }
+    }
+
+    private func updateButtons() {
+        backButton?.isHidden = currentStep == 0
+        if currentStep == totalSteps - 1 {
+            continueButton?.title = "Finish"
+        } else if currentStep == 0 {
+            continueButton?.title = "Get Started"
+        } else {
+            continueButton?.title = "Continue"
+        }
+        // On the model-status step the Continue button is disabled until the
+        // model is ready or at least the daemon socket is present.
+        if currentStep == 2 {
+            continueButton?.isEnabled = modelIsReady || daemonRunning
+        } else {
+            continueButton?.isEnabled = true
+        }
+    }
+
+    // MARK: - Step 0: Welcome
+
+    private func buildWelcomeStep(size: NSSize) -> NSView {
+        let v = NSView(frame: NSRect(origin: .zero, size: size))
+
+        let logo = NSTextField(labelWithString: "🍎")
+        logo.font = .systemFont(ofSize: 56)
+        logo.alignment = .center
+        logo.textColor = .labelColor
+        logo.frame = NSRect(x: (size.width - 80) / 2, y: size.height - 90, width: 80, height: 70)
+        v.addSubview(logo)
+
+        let title = NSTextField(labelWithString: "Welcome to Bad Apple")
+        title.font = .systemFont(ofSize: 24, weight: .semibold)
+        title.alignment = .center
+        title.textColor = .labelColor
+        title.frame = NSRect(x: 0, y: size.height - 150, width: size.width, height: 34)
+        v.addSubview(title)
+
+        let body = NSTextField(wrappingLabelWithString: "Bad Apple is a private AI assistant that runs entirely on your Mac. It can answer questions, automate tasks, read your screen, and control apps — all without sending your data to the cloud.\n\nThis quick setup will take about a minute.")
+        body.font = .systemFont(ofSize: 15)
+        body.textColor = .secondaryLabelColor
+        body.alignment = .center
+        body.frame = NSRect(x: 24, y: size.height - 320, width: size.width - 48, height: 150)
+        v.addSubview(body)
+
+        return v
+    }
+
+    // MARK: - Step 1: Privacy
+
+    private func buildPrivacyStep(size: NSSize) -> NSView {
+        let v = NSView(frame: NSRect(origin: .zero, size: size))
+
+        let title = NSTextField(labelWithString: "Your AI stays on your Mac")
+        title.font = .systemFont(ofSize: 24, weight: .semibold)
+        title.alignment = .center
+        title.textColor = .labelColor
+        title.frame = NSRect(x: 0, y: size.height - 50, width: size.width, height: 34)
+        v.addSubview(title)
+
+        let bullets: [(String, String, String)] = [
+            ("🔒", "Local inference", "The AI model runs on your Mac's GPU. No prompts leave your machine."),
+            ("☁️", "No cloud", "Bad Apple never sends your questions or data to remote servers."),
+            ("📊", "No telemetry", "We don't collect analytics, track usage, or phone home."),
+        ]
+
+        var y = size.height - 120
+        for (icon, heading, desc) in bullets {
+            let row = makeBulletRow(icon: icon, heading: heading, desc: desc, width: size.width)
+            row.frame = NSRect(x: 20, y: y - 76, width: size.width - 40, height: 76)
+            v.addSubview(row)
+            y -= 96
+        }
+
+        return v
+    }
+
+    private func makeBulletRow(icon: String, heading: String, desc: String, width: CGFloat) -> NSView {
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 76))
+
+        let iconLabel = NSTextField(labelWithString: icon)
+        iconLabel.font = .systemFont(ofSize: 28)
+        iconLabel.alignment = .center
+        iconLabel.frame = NSRect(x: 0, y: 18, width: 44, height: 44)
+        row.addSubview(iconLabel)
+
+        let headLabel = NSTextField(labelWithString: heading)
+        headLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        headLabel.textColor = .labelColor
+        headLabel.frame = NSRect(x: 52, y: 42, width: width - 60, height: 22)
+        row.addSubview(headLabel)
+
+        let descLabel = NSTextField(wrappingLabelWithString: desc)
+        descLabel.font = .systemFont(ofSize: 13)
+        descLabel.textColor = .secondaryLabelColor
+        descLabel.frame = NSRect(x: 52, y: 8, width: width - 60, height: 32)
+        row.addSubview(descLabel)
+
+        return row
+    }
+
+    // MARK: - Step 2: Model status
+
+    private func buildModelStatusStep(size: NSSize) -> NSView {
+        let v = NSView(frame: NSRect(origin: .zero, size: size))
+
+        let title = NSTextField(labelWithString: "Model Status")
+        title.font = .systemFont(ofSize: 24, weight: .semibold)
+        title.alignment = .center
+        title.textColor = .labelColor
+        title.frame = NSRect(x: 0, y: size.height - 50, width: size.width, height: 34)
+        v.addSubview(title)
+
+        let desc = NSTextField(wrappingLabelWithString: "Bad Apple needs to load its AI model before you can ask questions. This happens automatically once the daemon is running.")
+        desc.font = .systemFont(ofSize: 14)
+        desc.textColor = .secondaryLabelColor
+        desc.alignment = .center
+        desc.frame = NSRect(x: 20, y: size.height - 120, width: size.width - 40, height: 50)
+        v.addSubview(desc)
+
+        modelStatusLabel = NSTextField(wrappingLabelWithString: "Checking model status…")
+        modelStatusLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+        modelStatusLabel?.textColor = .labelColor
+        modelStatusLabel?.alignment = .center
+        modelStatusLabel?.frame = NSRect(x: 20, y: size.height - 230, width: size.width - 40, height: 60)
+        if let modelStatusLabel = modelStatusLabel { v.addSubview(modelStatusLabel) }
+
+        modelProgressIndicator = NSProgressIndicator()
+        modelProgressIndicator?.style = .spinning
+        modelProgressIndicator?.isIndeterminate = true
+        modelProgressIndicator?.isDisplayedWhenStopped = false
+        modelProgressIndicator?.frame = NSRect(x: (size.width - 32) / 2, y: size.height - 280, width: 32, height: 32)
+        if let modelProgressIndicator = modelProgressIndicator { v.addSubview(modelProgressIndicator) }
+
+        checkModelStatus()
+
+        return v
+    }
+
+    private func checkModelStatus() {
+        daemonRunning = FileManager.default.fileExists(atPath: BadAppleBrain.deepSocket)
+        if !daemonRunning {
+            modelProgressIndicator?.stopAnimation(nil)
+            modelStatusLabel?.stringValue = "The Bad Apple daemon is not running yet. If you just installed, please complete the installation from the menu bar first, then wait a moment."
+            modelCheckTimer?.invalidate()
+            modelCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                self?.checkModelStatus()
+            }
+            updateButtons()
+            return
+        }
+
+        modelCheckTimer?.invalidate()
+        modelCheckTimer = nil
+        modelProgressIndicator?.startAnimation(nil)
+        modelStatusLabel?.stringValue = "Daemon is running — checking if the model is loaded…"
+        updateButtons()
+        probeModelAsync()
+    }
+
+    private func probeModelAsync() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let success = self?.probeModel() ?? false
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if success {
+                    self.modelIsReady = true
+                    self.modelProgressIndicator?.stopAnimation(nil)
+                    self.modelStatusLabel?.stringValue = "✓ Model ready — Bad Apple is online and ready to answer questions."
+                    self.modelCheckTimer?.invalidate()
+                    self.modelCheckTimer = nil
+                } else {
+                    self.modelIsReady = false
+                    self.modelStatusLabel?.stringValue = "The model is still loading. This can take up to a minute on first launch. You can continue once the daemon is running."
+                    self.modelCheckTimer?.invalidate()
+                    self.modelCheckTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+                        self?.probeModelAsync()
+                    }
+                }
+                self.updateButtons()
+            }
+        }
+    }
+
+    /// Runs `badapple -n 1 "hi"` to check whether the model is loaded and
+    /// responsive. Returns true on exit code 0.
+    private func probeModel() -> Bool {
+        guard let binary = badAppleBinaryURL() else { return false }
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = binary
+        process.arguments = ["-n", "1", "hi"]
+        process.standardOutput = pipe
+        process.standardError = pipe
+        var env = ProcessInfo.processInfo.environment
+        env["BADAPPLE_SOCKET_PATH"] = BadAppleBrain.deepSocket
+        env["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
+        process.environment = env
+
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        timer.schedule(deadline: .now() + 20)
+        timer.setEventHandler { [weak process] in process?.terminate() }
+        timer.resume()
+
+        do {
+            try process.run()
+            _ = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            timer.cancel()
+            return process.terminationStatus == 0
+        } catch {
+            timer.cancel()
+            return false
+        }
+    }
+
+    private func badAppleBinaryURL() -> URL? {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Helpers")
+            .appendingPathComponent("badapple")
+        if FileManager.default.fileExists(atPath: bundled.path) {
+            return bundled
+        }
+        for path in ["/usr/local/bin/badapple", "/opt/homebrew/bin/badapple"] {
+            if FileManager.default.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Step 3: Permissions
+
+    private func buildPermissionsStep(size: NSSize) -> NSView {
+        let v = NSView(frame: NSRect(origin: .zero, size: size))
+
+        let title = NSTextField(labelWithString: "Permissions")
+        title.font = .systemFont(ofSize: 24, weight: .semibold)
+        title.alignment = .center
+        title.textColor = .labelColor
+        title.frame = NSRect(x: 0, y: size.height - 50, width: size.width, height: 34)
+        v.addSubview(title)
+
+        let desc = NSTextField(wrappingLabelWithString: "Bad Apple needs a few system permissions to work fully. Grant them in System Settings, then return here — the status updates automatically.")
+        desc.font = .systemFont(ofSize: 13)
+        desc.textColor = .secondaryLabelColor
+        desc.alignment = .center
+        desc.frame = NSRect(x: 20, y: size.height - 100, width: size.width - 40, height: 40)
+        v.addSubview(desc)
+
+        let perms: [(name: String, desc: String, required: Bool, selector: Selector)] = [
+            ("Accessibility", "Needed for UI automation and screen reading.", true, #selector(openAccessibilitySettings(_:))),
+            ("Speech Recognition", "Needed for voice prompts and commands.", true, #selector(openSpeechSettings(_:))),
+            ("Microphone", "Needed for voice input.", false, #selector(openMicrophoneSettings(_:))),
+        ]
+
+        var y = size.height - 120
+        let rowHeight: CGFloat = 92
+        for perm in perms {
+            let row = makePermissionRow(
+                name: perm.name, desc: perm.desc, required: perm.required,
+                selector: perm.selector, width: size.width
+            )
+            row.frame = NSRect(x: 16, y: y - rowHeight, width: size.width - 32, height: rowHeight)
+            v.addSubview(row)
+            y -= rowHeight + 8
+        }
+
+        refreshPermissionStatuses()
+        permCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.refreshPermissionStatuses()
+        }
+
+        return v
+    }
+
+    private func makePermissionRow(name: String, desc: String, required: Bool, selector: Selector, width: CGFloat) -> NSView {
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 92))
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 10
+        row.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.15).cgColor
+
+        let nameLabel = NSTextField(labelWithString: name)
+        nameLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        nameLabel.textColor = .labelColor
+        nameLabel.frame = NSRect(x: 14, y: 62, width: width - 150, height: 20)
+        row.addSubview(nameLabel)
+
+        let reqLabel = NSTextField(labelWithString: required ? "Required" : "Optional")
+        reqLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        reqLabel.textColor = required ? .systemOrange : .secondaryLabelColor
+        reqLabel.frame = NSRect(x: 14, y: 44, width: 80, height: 16)
+        row.addSubview(reqLabel)
+
+        let descLabel = NSTextField(wrappingLabelWithString: desc)
+        descLabel.font = .systemFont(ofSize: 12)
+        descLabel.textColor = .secondaryLabelColor
+        descLabel.frame = NSRect(x: 14, y: 10, width: width - 150, height: 30)
+        row.addSubview(descLabel)
+
+        let statusDot = NSView(frame: NSRect(x: width - 78, y: 62, width: 12, height: 12))
+        statusDot.wantsLayer = true
+        statusDot.layer?.cornerRadius = 6
+        statusDot.layer?.backgroundColor = NSColor.systemGray.cgColor
+        row.addSubview(statusDot)
+
+        let statusLabel = NSTextField(labelWithString: "Unknown")
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.alignment = .center
+        statusLabel.frame = NSRect(x: width - 95, y: 44, width: 46, height: 16)
+        row.addSubview(statusLabel)
+
+        permStatusRefs.append(PermStatusRef(dot: statusDot, label: statusLabel))
+
+        let openBtn = NSButton(title: "Open Settings", target: self, action: selector)
+        openBtn.bezelStyle = .rounded
+        openBtn.font = .systemFont(ofSize: 11)
+        openBtn.frame = NSRect(x: width - 120, y: 8, width: 106, height: 24)
+        row.addSubview(openBtn)
+
+        return row
+    }
+
+    private enum PermState { case granted, denied, unknown }
+
+    private func refreshPermissionStatuses() {
+        // Accessibility — AXIsProcessTrusted() is a definitive yes/no.
+        let axState: PermState = AXIsProcessTrusted() ? .granted : .unknown
+
+        // Speech recognition — authorizationStatus() does not prompt.
+        let speechStatus = SFSpeechRecognizer.authorizationStatus()
+        let speechState: PermState
+        switch speechStatus {
+        case .authorized: speechState = .granted
+        case .denied, .restricted: speechState = .denied
+        default: speechState = .unknown
+        }
+
+        // Microphone — AVCaptureDevice.authorizationStatus(for: .audio) does
+        // not prompt and returns the current TCC state.
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let micState: PermState
+        switch micStatus {
+        case .authorized: micState = .granted
+        case .denied, .restricted: micState = .denied
+        case .notDetermined: micState = .unknown
+        @unknown default: micState = .unknown
+        }
+
+        setPermStatus(index: 0, state: axState)
+        setPermStatus(index: 1, state: speechState)
+        setPermStatus(index: 2, state: micState)
+    }
+
+    private func setPermStatus(index: Int, state: PermState) {
+        guard index < permStatusRefs.count else { return }
+        let ref = permStatusRefs[index]
+        switch state {
+        case .granted:
+            ref.dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+            ref.label.stringValue = "Granted"
+            ref.label.textColor = NSColor.systemGreen
+        case .denied:
+            ref.dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+            ref.label.stringValue = "Denied"
+            ref.label.textColor = NSColor.systemRed
+        case .unknown:
+            ref.dot.layer?.backgroundColor = NSColor.systemGray.cgColor
+            ref.label.stringValue = "Unknown"
+            ref.label.textColor = .secondaryLabelColor
+        }
+    }
+
+    @objc private func openAccessibilitySettings(_ sender: Any?) {
+        openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    }
+
+    @objc private func openSpeechSettings(_ sender: Any?) {
+        openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
+    }
+
+    @objc private func openMicrophoneSettings(_ sender: Any?) {
+        openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+    }
+
+    private func openSettings(_ urlString: String) {
+        if let url = URL(string: urlString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: - Step 4: First query
+
+    private func buildFirstQueryStep(size: NSSize) -> NSView {
+        let v = NSView(frame: NSRect(origin: .zero, size: size))
+
+        let title = NSTextField(labelWithString: "Try your first query")
+        title.font = .systemFont(ofSize: 24, weight: .semibold)
+        title.alignment = .center
+        title.textColor = .labelColor
+        title.frame = NSRect(x: 0, y: size.height - 50, width: size.width, height: 34)
+        v.addSubview(title)
+
+        let desc = NSTextField(wrappingLabelWithString: "Ask Bad Apple anything. This is a test run — try a simple question like “What can you do?”")
+        desc.font = .systemFont(ofSize: 14)
+        desc.textColor = .secondaryLabelColor
+        desc.alignment = .center
+        desc.frame = NSRect(x: 20, y: size.height - 100, width: size.width - 40, height: 40)
+        v.addSubview(desc)
+
+        let field = NSTextField()
+        field.placeholderString = "e.g. What can you do on my Mac?"
+        field.bezelStyle = .roundedBezel
+        field.delegate = self
+        field.frame = NSRect(x: 20, y: size.height - 150, width: size.width - 120, height: 28)
+        v.addSubview(field)
+        queryField = field
+
+        askButton = NSButton(title: "Ask", target: self, action: #selector(askBadApple(_:)))
+        askButton?.bezelStyle = .rounded
+        askButton?.frame = NSRect(x: size.width - 90, y: size.height - 150, width: 70, height: 28)
+        if let askButton = askButton { v.addSubview(askButton) }
+
+        querySpinner = NSProgressIndicator()
+        querySpinner?.style = .spinning
+        querySpinner?.isIndeterminate = true
+        querySpinner?.isDisplayedWhenStopped = false
+        querySpinner?.frame = NSRect(x: 20, y: size.height - 182, width: 20, height: 20)
+        if let querySpinner = querySpinner { v.addSubview(querySpinner) }
+
+        let responseScroll = NSScrollView(frame: NSRect(x: 20, y: 10, width: size.width - 40, height: size.height - 200))
+        responseScroll.hasVerticalScroller = true
+        responseScroll.autohidesScrollers = true
+        responseScroll.drawsBackground = false
+        responseScroll.borderType = .noBorder
+
+        let tv = NSTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.drawsBackground = false
+        tv.font = .systemFont(ofSize: 14)
+        tv.textColor = .secondaryLabelColor
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: size.width - 56, height: .greatestFiniteMagnitude)
+        tv.textContainerInset = NSSize(width: 8, height: 8)
+        tv.string = "Your response will appear here."
+        responseScroll.documentView = tv
+        v.addSubview(responseScroll)
+        responseTextView = tv
+
+        return v
+    }
+
+    @objc private func askBadApple(_ sender: Any?) {
+        guard !isQuerying else { return }
+        let prompt = queryField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !prompt.isEmpty else { return }
+        isQuerying = true
+        askButton?.isEnabled = false
+        querySpinner?.startAnimation(nil)
+        responseTextView?.string = "Thinking…"
+        responseTextView?.textColor = .secondaryLabelColor
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = self?.runQuery(prompt: prompt) ?? "Could not reach Bad Apple."
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isQuerying = false
+                self.askButton?.isEnabled = true
+                self.querySpinner?.stopAnimation(nil)
+                self.responseTextView?.string = result
+                self.responseTextView?.textColor = .labelColor
+                self.responseTextView?.scrollToEndOfDocument(nil)
+            }
+        }
+    }
+
+    /// Sends the user's first query through the bundled `badapple` CLI binary,
+    /// mirroring the same mechanism used by `runBadAppleCLI` in the controller.
+    private func runQuery(prompt: String) -> String {
+        guard let binary = badAppleBinaryURL() else {
+            return "The badapple binary was not found. Please make sure Bad Apple is properly installed."
+        }
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = binary
+        process.arguments = ["--max-tokens", "300", prompt]
+        process.standardOutput = pipe
+        process.standardError = pipe
+        var env = ProcessInfo.processInfo.environment
+        env["BADAPPLE_SOCKET_PATH"] = BadAppleBrain.deepSocket
+        env["BADAPPLE_SLICKS_KEY_PATH"] = BadAppleBrain.keyPath
+        process.environment = env
+
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        timer.schedule(deadline: .now() + 60)
+        timer.setEventHandler { [weak process] in process?.terminate() }
+        timer.resume()
+
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            timer.cancel()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            if process.terminationStatus != 0 && output.isEmpty {
+                return "Bad Apple returned an error (exit code \(process.terminationStatus)). Make sure the daemon is running."
+            }
+            return output.isEmpty ? "(empty response)" : output
+        } catch {
+            timer.cancel()
+            return "Could not run Bad Apple: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Navigation
+
+    @objc private func backPressed(_ sender: Any?) {
+        guard currentStep > 0 else { return }
+        currentStep -= 1
+        renderStep()
+    }
+
+    @objc private func continuePressed(_ sender: Any?) {
+        if currentStep == totalSteps - 1 {
+            UserDefaults.standard.set(true, forKey: "BadAppleOnboarded")
+            window?.orderOut(nil)
+            return
+        }
+        currentStep += 1
+        renderStep()
+    }
+
+    // MARK: - NSTextFieldDelegate
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            askBadApple(nil)
+            return true
+        }
+        return false
+    }
+}
+
 // MARK: - Native chat window
 
 /// A multi-turn chat window with streaming responses, message bubbles,
 /// and persona/tier indicators. This is the consumer-grade chat surface
 /// that complements the menu bar icon and CLI.
-final class BadAppleChatWindow: NSObject, NSTextFieldDelegate {
-    private var window: NSWindow?
-    private var transcriptView: NSTextView?
-    private var inputField: NSTextField?
-    private var sendButton: NSButton?
-    private var spinner: NSProgressIndicator?
-    private var personaLabel: NSTextField?
-    private var tierLabel: NSTextField?
-    private var newChatButton: NSButton?
-    private var isSubmitting = false
-
-    /// Conversation messages for display. Each entry is (role, text).
-    private var messages: [(role: String, text: String)] = []
-    /// The text accumulated for the current streaming assistant response.
-    private var currentAssistantText = ""
+final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
+    // MARK: Public interface (unchanged — consumed by the menu bar controller)
 
     var onSubmit: ((String, @escaping (String) -> Void, @escaping () -> Void) -> Void)?
     var onNewChat: (() -> Void)?
+    /// Called when the user drops or pastes an image. The callback receives
+    /// the image file path, a display name, and the same append/finish streaming
+    /// closures used by `onSubmit`.
+    var onDescribeImage: ((String, String, @escaping (String) -> Void, @escaping () -> Void) -> Void)?
+    /// Set by the AppDelegate from runtime telemetry so the chat window can
+    /// show a helpful error when no VLM is loaded.
+    var visionAvailable: Bool = false
     var personaName: String = "Default" {
         didSet { personaLabel?.stringValue = "Persona: \(personaName)" }
     }
@@ -5908,9 +7600,43 @@ final class BadAppleChatWindow: NSObject, NSTextFieldDelegate {
     func show() {
         if window == nil { buildWindow() }
         window?.makeKeyAndOrderFront(nil)
-        inputField?.becomeFirstResponder()
         NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.window?.makeFirstResponder(self.inputTextView)
+        }
     }
+
+    // MARK: State
+
+    private var window: NSWindow?
+    private var contentView: ChatContentView?
+    private var topBar: NSView?
+    private var personaLabel: NSTextField?
+    private var tierLabel: NSTextField?
+    private var newChatButton: NSButton?
+    private var scrollView: NSScrollView?
+    private var transcriptDocument: NSView?
+    private var inputBar: NSView?
+    private var inputTextView: NSTextView?
+    private var placeholderLabel: NSTextField?
+    private var sendButton: NSButton?
+    private var spinner: NSProgressIndicator?
+
+    private var bubbleViews: [BubbleView] = []
+    private var cachedHeights: [CGFloat] = []
+    private var lastTranscriptWidth: CGFloat = -1
+    private var currentAssistantText = ""
+    private var isSubmitting = false
+    private var cursorTimer: Timer?
+    private var cursorVisible = true
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        cursorTimer?.invalidate()
+    }
+
+    // MARK: Window construction
 
     private func buildWindow() {
         let size = NSSize(width: 720, height: 560)
@@ -5927,190 +7653,929 @@ final class BadAppleChatWindow: NSObject, NSTextFieldDelegate {
             backing: .buffered,
             defer: false
         )
-        wc.title = "Bad Apple Chat"
+        wc.title = "Bad Apple"
         wc.isReleasedWhenClosed = false
         wc.minSize = NSSize(width: 480, height: 400)
 
-        let visual = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        let visual = ChatContentView(frame: NSRect(origin: .zero, size: size))
         visual.material = .hudWindow
         visual.state = .active
         visual.blendingMode = .behindWindow
         visual.wantsLayer = true
+        visual.owner = self
+        contentView = visual
+
+        // Register for image drag-and-drop (file URLs and raw NSImage pasteboard types)
+        let dragTypes: [NSPasteboard.PasteboardType] = [
+            .fileURL,
+            .png,
+            .tiff,
+            NSPasteboard.PasteboardType("public.jpeg"),
+        ]
+        visual.registerForDraggedTypes(dragTypes)
 
         // Top bar: persona + tier + new chat
-        let topBar = NSView(frame: NSRect(x: 0, y: size.height - 36, width: size.width, height: 36))
-        topBar.autoresizingMask = [.width]
+        let top = NSView(frame: .zero)
+        topBar = top
 
         personaLabel = NSTextField(labelWithString: "Persona: \(personaName)")
         personaLabel!.font = .systemFont(ofSize: 12, weight: .medium)
         personaLabel!.textColor = .secondaryLabelColor
-        personaLabel!.frame = NSRect(x: 16, y: 8, width: 180, height: 20)
-        topBar.addSubview(personaLabel!)
+        top.addSubview(personaLabel!)
 
         tierLabel = NSTextField(labelWithString: "Model: \(tierName)")
         tierLabel!.font = .systemFont(ofSize: 12, weight: .medium)
         tierLabel!.textColor = .secondaryLabelColor
-        tierLabel!.frame = NSRect(x: 200, y: 8, width: 120, height: 20)
-        topBar.addSubview(tierLabel!)
+        top.addSubview(tierLabel!)
 
         newChatButton = NSButton(title: "New Chat", target: self, action: #selector(newChat(_:)))
         newChatButton!.bezelStyle = .rounded
-        newChatButton!.frame = NSRect(x: size.width - 110, y: 4, width: 94, height: 28)
-        newChatButton!.autoresizingMask = [.minXMargin]
-        topBar.addSubview(newChatButton!)
+        newChatButton!.controlSize = .small
+        top.addSubview(newChatButton!)
+        visual.addSubview(top)
 
-        visual.addSubview(topBar)
-
-        // Transcript scroll view
-        let transcriptHeight = size.height - 36 - 56
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 56, width: size.width, height: transcriptHeight))
+        // Transcript scroll view (document view is laid out manually)
+        let scroll = NSScrollView(frame: .zero)
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.autoresizingMask = [.width, .height]
         scroll.drawsBackground = false
-
-        let tv = NSTextView()
-        tv.isEditable = false
-        tv.isSelectable = true
-        tv.drawsBackground = false
-        tv.font = .systemFont(ofSize: 14)
-        tv.textColor = .labelColor
-        tv.autoresizingMask = [.width]
-        tv.textContainer?.widthTracksTextView = true
-        tv.textContainer?.containerSize = NSSize(width: size.width - 24, height: .greatestFiniteMagnitude)
-        tv.textContainerInset = NSSize(width: 12, height: 8)
-        scroll.documentView = tv
+        scroll.backgroundColor = .clear
+        scroll.scrollerStyle = .overlay
+        let clip = scroll.contentView
+        clip.drawsBackground = false
+        clip.backgroundColor = .clear
+        let doc = NSView(frame: .zero)
+        scroll.documentView = doc
         visual.addSubview(scroll)
-        transcriptView = tv
+        scrollView = scroll
+        transcriptDocument = doc
 
         // Input bar
-        let inputBar = NSView(frame: NSRect(x: 0, y: 0, width: size.width, height: 56))
-        inputBar.autoresizingMask = [.width]
+        let bar = NSView(frame: .zero)
+        inputBar = bar
 
-        inputField = NSTextField()
-        inputField!.placeholderString = "Ask Bad Apple anything... (⏎ to send)"
-        inputField!.bezelStyle = .roundedBezel
-        inputField!.delegate = self
-        inputField!.frame = NSRect(x: 16, y: 14, width: size.width - 130, height: 28)
-        inputField!.autoresizingMask = [.width]
-        inputBar.addSubview(inputField!)
+        let tv = ChatInputTextView()
+        tv.font = .systemFont(ofSize: 14)
+        tv.textColor = .labelColor
+        tv.drawsBackground = false
+        tv.isRichText = false
+        tv.isEditable = true
+        tv.isSelectable = true
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.textContainerInset = NSSize(width: 8, height: 6)
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+        tv.wantsLayer = true
+        tv.layer?.cornerRadius = 8
+        tv.layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
+        tv.delegate = self
+        tv.chatOwner = self
+        bar.addSubview(tv)
+        inputTextView = tv
+
+        placeholderLabel = NSTextField(labelWithString: "Ask Bad Apple anything...")
+        placeholderLabel!.font = .systemFont(ofSize: 14)
+        placeholderLabel!.textColor = .placeholderTextColor
+        placeholderLabel!.isBezeled = false
+        placeholderLabel!.drawsBackground = false
+        placeholderLabel!.isEditable = false
+        placeholderLabel!.isSelectable = false
+        bar.addSubview(placeholderLabel!)
 
         sendButton = NSButton(title: "Send", target: self, action: #selector(send(_:)))
         sendButton!.bezelStyle = .rounded
-        sendButton!.keyEquivalent = "\r"
-        sendButton!.frame = NSRect(x: size.width - 100, y: 14, width: 84, height: 28)
-        sendButton!.autoresizingMask = [.minXMargin]
-        inputBar.addSubview(sendButton!)
+        sendButton!.controlSize = .small
+        bar.addSubview(sendButton!)
 
         spinner = NSProgressIndicator()
         spinner!.style = .spinning
         spinner!.isIndeterminate = true
         spinner!.isDisplayedWhenStopped = false
-        spinner!.frame = NSRect(x: size.width - 92, y: 16, width: 20, height: 20)
-        spinner!.autoresizingMask = [.minXMargin]
-        inputBar.addSubview(spinner!)
+        spinner!.controlSize = .small
+        bar.addSubview(spinner!)
 
-        visual.addSubview(inputBar)
+        visual.addSubview(bar)
 
         wc.contentView = visual
         window = wc
+        relayout()
     }
 
-    // MARK: - Actions
+    // MARK: Layout
+
+    private func relayout() {
+        guard let visual = contentView, visual.bounds.width > 0 else { return }
+        let bounds = visual.bounds
+        let topH: CGFloat = 40
+        let inputPadding: CGFloat = 12
+        let sendW: CGFloat = 64
+        let spinnerW: CGFloat = 20
+        let gap: CGFloat = 8
+
+        let inputFont = inputTextView?.font ?? NSFont.systemFont(ofSize: 14)
+        let lineH = max(ceil(inputFont.boundingRectForFont.height), 14)
+        let maxInputLines: CGFloat = 4
+        let inputWidth = max(0, bounds.width - inputPadding * 2 - gap - spinnerW - gap - sendW)
+        let textWidth = max(0, inputWidth - 16) // minus horizontal text container inset (8*2)
+        let attr = NSAttributedString(string: inputTextView?.string ?? "", attributes: [.font: inputFont])
+        let (_, measuredH) = BadAppleChatWindow.measureText(attr, maxWidth: textWidth)
+        let inputH = min(max(measuredH + 12, lineH + 12), lineH * maxInputLines + 12)
+        let inputBarH = max(44, inputH + 12)
+
+        topBar?.frame = NSRect(x: 0, y: bounds.height - topH, width: bounds.width, height: topH)
+        personaLabel?.frame = NSRect(x: 16, y: 10, width: 190, height: 20)
+        tierLabel?.frame = NSRect(x: 214, y: 10, width: 170, height: 20)
+        let ncW: CGFloat = 94
+        newChatButton?.frame = NSRect(x: bounds.width - 16 - ncW, y: 6, width: ncW, height: 28)
+
+        inputBar?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: inputBarH)
+        let sendX = bounds.width - inputPadding - sendW
+        sendButton?.frame = NSRect(x: sendX, y: (inputBarH - 24) / 2, width: sendW, height: 24)
+        let spinnerX = sendX - gap - spinnerW
+        spinner?.frame = NSRect(x: spinnerX, y: (inputBarH - spinnerW) / 2, width: spinnerW, height: spinnerW)
+        let inputX = inputPadding
+        let inputY = (inputBarH - inputH) / 2
+        inputTextView?.frame = NSRect(x: inputX, y: inputY, width: inputWidth, height: inputH)
+        inputTextView?.textContainer?.containerSize = NSSize(width: textWidth, height: CGFloat.greatestFiniteMagnitude)
+        placeholderLabel?.frame = NSRect(x: inputX + 8, y: inputY + 6, width: textWidth, height: lineH)
+
+        let scrollY = inputBarH
+        let scrollH = bounds.height - topH - inputBarH
+        scrollView?.frame = NSRect(x: 0, y: scrollY, width: bounds.width, height: max(0, scrollH))
+
+        relayoutTranscript(force: false, scrollToBottom: false)
+        updatePlaceholder()
+    }
+
+    private func relayoutTranscript(force: Bool, scrollToBottom: Bool) {
+        guard let scroll = scrollView, let doc = transcriptDocument else { return }
+        let clip = scroll.contentView
+        let visibleWidth = clip.bounds.width
+        guard visibleWidth > 0 else { return }
+        let maxBubbleWidth = floor(visibleWidth * 0.75)
+        if force || abs(visibleWidth - lastTranscriptWidth) > 0.5 {
+            cachedHeights = bubbleViews.map { $0.reconfigure(maxWidth: maxBubbleWidth) }
+            lastTranscriptWidth = visibleWidth
+        }
+        let topPad: CGFloat = 12, bottomPad: CGFloat = 12, gap: CGFloat = 8
+        var total = topPad + bottomPad
+        for h in cachedHeights { total += h }
+        total += gap * CGFloat(max(0, bubbleViews.count - 1))
+        doc.frame = NSRect(x: 0, y: 0, width: visibleWidth, height: total)
+        var y = total - topPad
+        for (i, bv) in bubbleViews.enumerated() {
+            let h = cachedHeights[i]
+            y -= h
+            let bw = bv.bounds.width
+            let x: CGFloat = bv.isUser ? (visibleWidth - bw - 12) : 12
+            bv.frame.origin = NSPoint(x: x, y: y)
+            y -= gap
+        }
+        let clipH = clip.bounds.height
+        if scrollToBottom {
+            if total > clipH { clip.setBoundsOrigin(NSPoint(x: 0, y: total - clipH)) }
+            else { clip.setBoundsOrigin(.zero) }
+        } else {
+            let maxY = max(0, total - clipH)
+            var origin = clip.bounds.origin
+            if origin.y > maxY { origin.y = maxY; clip.setBoundsOrigin(origin) }
+        }
+    }
+
+    // MARK: Actions
 
     @objc private func send(_ sender: Any?) {
-        guard !isSubmitting else { return }
-        let prompt = inputField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !isSubmitting, let tv = inputTextView else { return }
+        let prompt = tv.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         isSubmitting = true
-        sendButton?.isHidden = true
+        sendButton?.isEnabled = false
         spinner?.startAnimation(nil)
-        inputField?.stringValue = ""
+        tv.string = ""
+        updatePlaceholder()
+        relayout()
 
-        // Add user message to transcript
         appendMessage(role: "user", text: prompt)
-
-        // Start a new assistant message (streamed)
         currentAssistantText = ""
-        appendMessage(role: "assistant", text: "")
+        appendMessage(role: "assistant", text: "", streaming: true)
+        startCursor()
 
         let append: (String) -> Void = { [weak self] chunk in
             guard let self = self else { return }
             self.currentAssistantText += chunk
-            self.updateLastAssistantMessage(self.currentAssistantText)
+            self.updateLastAssistantText(self.currentAssistantText)
         }
 
         let finish: () -> Void = { [weak self] in
             guard let self = self else { return }
             self.isSubmitting = false
-            self.sendButton?.isHidden = false
+            self.sendButton?.isEnabled = true
             self.spinner?.stopAnimation(nil)
-            self.inputField?.becomeFirstResponder()
+            self.stopCursor()
+            self.window?.makeFirstResponder(self.inputTextView)
         }
 
         onSubmit?(prompt, append, finish)
     }
 
     @objc private func newChat(_ sender: Any?) {
-        messages.removeAll()
+        bubbleViews.forEach { $0.removeFromSuperview() }
+        bubbleViews.removeAll()
+        cachedHeights.removeAll()
         currentAssistantText = ""
-        transcriptView?.string = ""
+        stopCursor()
+        isSubmitting = false
+        sendButton?.isEnabled = true
+        spinner?.stopAnimation(nil)
+        relayoutTranscript(force: true, scrollToBottom: false)
         onNewChat?()
-        inputField?.becomeFirstResponder()
+        window?.makeFirstResponder(inputTextView)
     }
 
-    // MARK: - NSTextFieldDelegate
+    func textDidChange(_ notification: Notification) {
+        updatePlaceholder()
+        relayout()
+    }
 
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            send(nil)
+    private func updatePlaceholder() {
+        placeholderLabel?.isHidden = !(inputTextView?.string.isEmpty ?? true)
+    }
+
+    // MARK: Streaming cursor
+
+    private func startCursor() {
+        cursorVisible = true
+        if let last = bubbleViews.last, !last.isUser { last.cursorVisible = true }
+        cursorTimer?.invalidate()
+        cursorTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.cursorVisible.toggle()
+            if let last = self.bubbleViews.last, !last.isUser {
+                last.cursorVisible = self.cursorVisible
+                self.relayoutTranscript(force: true, scrollToBottom: true)
+            }
+        }
+    }
+
+    private func stopCursor() {
+        cursorTimer?.invalidate()
+        cursorTimer = nil
+        if let last = bubbleViews.last, !last.isUser {
+            last.streaming = false
+            last.cursorVisible = false
+        }
+        relayoutTranscript(force: true, scrollToBottom: false)
+    }
+
+    // MARK: Transcript management
+
+    private func appendMessage(role: String, text: String, streaming: Bool = false) {
+        guard let doc = transcriptDocument else { return }
+        let bv = BubbleView()
+        bv.isUser = (role == "user")
+        bv.text = text
+        bv.streaming = streaming
+        bv.owner = self
+        doc.addSubview(bv)
+        bubbleViews.append(bv)
+        relayoutTranscript(force: true, scrollToBottom: true)
+    }
+
+    private func updateLastAssistantText(_ text: String) {
+        guard let last = bubbleViews.last, !last.isUser else { return }
+        last.text = text
+        relayoutTranscript(force: true, scrollToBottom: true)
+    }
+
+    // MARK: - Image drop & paste support
+
+    /// Checks whether a dragging session carries an image (file URL to an image
+    /// or raw image pasteboard data).
+    static func draggingInfoHasImage(_ sender: NSDraggingInfo) -> Bool {
+        let pb = sender.draggingPasteboard
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+           !urls.isEmpty {
+            return urls.contains { url in
+                let ext = url.pathExtension.lowercased()
+                return ["png", "jpg", "jpeg", "tiff", "gif", "bmp", "heic", "webp"].contains(ext)
+            }
+        }
+        let types = pb.types ?? []
+        if types.contains(.png) || types.contains(.tiff) ||
+           types.contains(NSPasteboard.PasteboardType("public.jpeg")) {
             return true
         }
         return false
     }
 
-    // MARK: - Transcript management
-
-    private func appendMessage(role: String, text: String) {
-        messages.append((role: role, text: text))
-        renderTranscript()
-    }
-
-    private func updateLastAssistantMessage(_ text: String) {
-        if !messages.isEmpty && messages.last?.role == "assistant" {
-            messages[messages.count - 1].text = text
-            renderTranscript()
+    /// Handles an image dropped onto the chat content view.
+    func handleImageDrop(_ sender: NSDraggingInfo) {
+        let pb = sender.draggingPasteboard
+        // Try file URL first (dragged image file from Finder)
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            for url in urls {
+                let ext = url.pathExtension.lowercased()
+                if ["png", "jpg", "jpeg", "tiff", "gif", "bmp", "heic", "webp"].contains(ext) {
+                    processImage(path: url.path, displayName: url.lastPathComponent)
+                    return
+                }
+            }
+        }
+        // Fall back to raw image data
+        if let image = NSImage(pasteboard: pb) {
+            handlePastedImage(image)
         }
     }
 
-    private func renderTranscript() {
-        guard let tv = transcriptView else { return }
-        let attr = NSMutableAttributedString()
-        let paraStyle = NSMutableParagraphStyle()
-        paraStyle.paragraphSpacing = 12
+    /// Handles an image pasted into the input text view.
+    func handlePastedImage(_ image: NSImage) {
+        guard let path = saveImageToTempFile(image) else { return }
+        processImage(path: path, displayName: "pasted-image.png")
+    }
 
-        for (i, msg) in messages.enumerated() {
-            if i > 0 { attr.append(NSAttributedString(string: "\n")) }
+    /// Saves an NSImage to a temporary PNG file and returns the path.
+    private func saveImageToTempFile(_ image: NSImage) -> String? {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        let tempDir = NSTemporaryDirectory()
+        let filename = "badapple_pasted_\(Int(Date().timeIntervalSince1970)).png"
+        let path = (tempDir as NSString).appendingPathComponent(filename)
+        do {
+            try png.write(to: URL(fileURLWithPath: path))
+            return path
+        } catch {
+            return nil
+        }
+    }
 
-            let isUser = msg.role == "user"
-            let name = isUser ? "You" : "Bad Apple"
-            let nameAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: isUser ? NSColor.controlAccentColor : NSColor.systemPurple,
-                .paragraphStyle: paraStyle,
-            ]
-            attr.append(NSAttributedString(string: name + "\n", attributes: nameAttrs))
+    /// Core image processing: shows a thumbnail preview as a user message,
+    /// then sends the image to the daemon for description and streams the
+    /// response back as an assistant message.
+    func processImage(path: String, displayName: String) {
+        guard !isSubmitting else { return }
 
-            let bodyAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 14),
-                .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paraStyle,
-            ]
-            attr.append(NSAttributedString(string: msg.text, attributes: bodyAttrs))
+        // Check vision availability before sending
+        if !visionAvailable {
+            appendMessage(role: "user", text: "📷 \(displayName)")
+            appendMessage(
+                role: "assistant",
+                text: "Vision model not loaded. Run `badapple model add mlx-community/Qwen2-VL-7B-Instruct-4bit` to enable image understanding."
+            )
+            relayoutTranscript(force: true, scrollToBottom: true)
+            return
         }
 
+        isSubmitting = true
+        sendButton?.isEnabled = false
+        spinner?.startAnimation(nil)
+
+        // Show a thumbnail preview as a user message
+        appendMessage(role: "user", text: "📷 \(displayName)")
+        currentAssistantText = ""
+        appendMessage(role: "assistant", text: "", streaming: true)
+        startCursor()
+
+        let append: (String) -> Void = { [weak self] chunk in
+            guard let self = self else { return }
+            self.currentAssistantText += chunk
+            self.updateLastAssistantText(self.currentAssistantText)
+        }
+
+        let finish: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.isSubmitting = false
+            self.sendButton?.isEnabled = true
+            self.spinner?.stopAnimation(nil)
+            self.stopCursor()
+            self.window?.makeFirstResponder(self.inputTextView)
+        }
+
+        // If a dedicated image callback is wired, use it; otherwise fall back
+        // to onSubmit with a describe prompt that triggers the describe_image tool.
+        if let onDescribeImage = onDescribeImage {
+            onDescribeImage(path, displayName, append, finish)
+        } else {
+            let prompt = "Describe this image in detail: \(path)"
+            onSubmit?(prompt, append, finish)
+        }
+    }
+
+    // MARK: NSTextViewDelegate
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) && textView === inputTextView {
+            let shift = (NSApp.currentEvent?.modifierFlags ?? []).contains(.shift)
+            if !shift {
+                send(nil)
+                return true
+            }
+        }
+        return false
+    }
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let url = link as? URL { NSWorkspace.shared.open(url); return true }
+        if let s = link as? String, let url = URL(string: s) { NSWorkspace.shared.open(url); return true }
+        return false
+    }
+
+    // MARK: - Rendering helpers
+
+    private static var userBubbleColor: NSColor { NSColor.controlAccentColor }
+    private static var assistantBubbleColor: NSColor { NSColor(white: 1, alpha: 0.09) }
+    private static var codeBlockColor: NSColor {
+        NSColor(srgbRed: 0x1a / 255.0, green: 0x1a / 255.0, blue: 0x1a / 255.0, alpha: 1)
+    }
+    private static var inlineCodeColor: NSColor { NSColor.systemTeal }
+    private static var inlineCodeBg: NSColor { NSColor(white: 0, alpha: 0.22) }
+    private static var linkColor: NSColor { NSColor.controlAccentColor }
+
+    private static let headerRegex = try! NSRegularExpression(pattern: "^(#{1,3})\\s+(.+)$")
+    private static let inlineRegex = try! NSRegularExpression(
+        pattern: "\\*\\*([^*]+)\\*\\*|\\*([^*]+)\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)"
+    )
+
+    /// Measures the wrapped size of an attributed string for a given max width.
+    private static func measureText(_ attr: NSAttributedString, maxWidth: CGFloat) -> (CGFloat, CGFloat) {
+        guard maxWidth > 0 else { return (0, 0) }
+        let storage = NSTextStorage(attributedString: attr)
+        let lm = NSLayoutManager()
+        storage.addLayoutManager(lm)
+        let container = NSTextContainer(containerSize: NSSize(width: maxWidth, height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.widthTracksTextView = false
+        lm.addTextContainer(container)
+        lm.ensureLayout(for: container)
+        let rect = lm.usedRect(for: container)
+        return (ceil(rect.width), ceil(rect.height))
+    }
+
+    private static func makeTextView(_ attr: NSAttributedString, width: CGFloat) -> NSTextView {
+        let tv = NSTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.drawsBackground = false
+        tv.isRichText = true
+        tv.textContainerInset = .zero
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
         tv.textStorage?.setAttributedString(attr)
-        tv.scrollToEndOfDocument(nil)
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.autoresizingMask = []
+        return tv
+    }
+
+    private enum Segment {
+        case text(String)
+        case code(String, String?)
+    }
+
+    /// Splits markdown into code blocks (``` ... ```) and text segments. An
+    /// unclosed code fence is emitted as a code segment so streaming code shows
+    /// up correctly as it arrives.
+    private static func splitMarkdown(_ text: String) -> [Segment] {
+        var segments: [Segment] = []
+        var inCode = false
+        var lang = ""
+        var codeBuf = ""
+        var textBuf = ""
+        func flushText() {
+            if !textBuf.isEmpty { segments.append(.text(textBuf)); textBuf = "" }
+        }
+        for raw in text.components(separatedBy: "\n") {
+            if raw.hasPrefix("```") {
+                if inCode {
+                    segments.append(.code(codeBuf, lang.isEmpty ? nil : lang))
+                    codeBuf = ""; lang = ""; inCode = false
+                } else {
+                    flushText()
+                    inCode = true
+                    lang = String(raw.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                }
+            } else if inCode {
+                codeBuf += (codeBuf.isEmpty ? "" : "\n") + raw
+            } else {
+                textBuf += (textBuf.isEmpty ? "" : "\n") + raw
+            }
+        }
+        if inCode {
+            segments.append(.code(codeBuf, lang.isEmpty ? nil : lang))
+        } else {
+            flushText()
+        }
+        return segments
+    }
+
+    private static func renderUserText(_ text: String) -> NSAttributedString {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 1
+        para.paragraphSpacing = 2
+        return NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: para,
+        ])
+    }
+
+    /// Renders a non-code markdown segment into an attributed string with
+    /// headers, bullet lists, bold, italic, inline code, and links.
+    private static func renderMarkdown(_ text: String, baseColor: NSColor) -> NSMutableAttributedString {
+        let result = NSMutableAttributedString()
+        let bodyFont = NSFont.systemFont(ofSize: 14)
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 1
+        para.paragraphSpacing = 6
+        var first = true
+        for raw in text.components(separatedBy: "\n") {
+            if !first { result.append(NSAttributedString(string: "\n")) }
+            first = false
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            // Headers
+            if let m = headerRegex.firstMatch(in: trimmed, range: NSRange(location: 0, length: (trimmed as NSString).length)) {
+                let hashes = (trimmed as NSString).substring(with: m.range(at: 1))
+                let content = (trimmed as NSString).substring(with: m.range(at: 2))
+                let level = hashes.count
+                let size: CGFloat = level == 1 ? 19 : (level == 2 ? 16 : 15)
+                let hpara = NSMutableParagraphStyle()
+                hpara.paragraphSpacingBefore = 10
+                hpara.paragraphSpacing = 4
+                let attr = inline(content, baseColor: baseColor, bodyFont: NSFont.boldSystemFont(ofSize: size))
+                attr.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: size), range: NSRange(location: 0, length: attr.length))
+                attr.addAttribute(.foregroundColor, value: baseColor, range: NSRange(location: 0, length: attr.length))
+                attr.addAttribute(.paragraphStyle, value: hpara, range: NSRange(location: 0, length: attr.length))
+                result.append(attr)
+                continue
+            }
+
+            // Bullet lists
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                let content = String(trimmed.dropFirst(2))
+                let attr = NSMutableAttributedString(string: "•   ")
+                attr.addAttribute(.font, value: bodyFont, range: NSRange(location: 0, length: attr.length))
+                attr.addAttribute(.foregroundColor, value: baseColor, range: NSRange(location: 0, length: attr.length))
+                attr.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: attr.length))
+                let body = inline(content, baseColor: baseColor, bodyFont: bodyFont)
+                body.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: body.length))
+                attr.append(body)
+                result.append(attr)
+                continue
+            }
+
+            // Normal paragraph
+            let attr = inline(raw, baseColor: baseColor, bodyFont: bodyFont)
+            attr.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: attr.length))
+            result.append(attr)
+        }
+        return result
+    }
+
+    /// Parses inline markdown tokens: **bold**, *italic*, `code`, [text](url).
+    private static func inline(_ s: String, baseColor: NSColor, bodyFont: NSFont) -> NSMutableAttributedString {
+        let result = NSMutableAttributedString()
+        let ns = s as NSString
+        var last = 0
+        inlineRegex.enumerateMatches(in: s, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+            guard let match = match else { return }
+            if match.range.location > last {
+                result.append(plain(ns.substring(with: NSRange(location: last, length: match.range.location - last)),
+                                    baseColor: baseColor, font: bodyFont))
+            }
+            let boldR = match.range(at: 1)
+            let italR = match.range(at: 2)
+            let codeR = match.range(at: 3)
+            let linkTextR = match.range(at: 4)
+            let linkUrlR = match.range(at: 5)
+            if boldR.location != NSNotFound {
+                result.append(plain(ns.substring(with: boldR), baseColor: baseColor,
+                                    font: NSFont.boldSystemFont(ofSize: bodyFont.pointSize)))
+            } else if italR.location != NSNotFound {
+                let italicFont = NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask)
+                result.append(plain(ns.substring(with: italR), baseColor: baseColor, font: italicFont))
+            } else if codeR.location != NSNotFound {
+                result.append(NSAttributedString(string: ns.substring(with: codeR), attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
+                    .foregroundColor: inlineCodeColor,
+                    .backgroundColor: inlineCodeBg,
+                ]))
+            } else if linkTextR.location != NSNotFound {
+                let label = ns.substring(with: linkTextR)
+                let url = ns.substring(with: linkUrlR)
+                if let u = URL(string: url) {
+                    result.append(NSAttributedString(string: label, attributes: [
+                        .font: bodyFont,
+                        .foregroundColor: linkColor,
+                        .link: u,
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                    ]))
+                } else {
+                    result.append(plain(label, baseColor: baseColor, font: bodyFont))
+                }
+            }
+            last = match.range.location + match.range.length
+        }
+        if last < ns.length {
+            result.append(plain(ns.substring(from: last), baseColor: baseColor, font: bodyFont))
+        }
+        return result
+    }
+
+    private static func plain(_ s: String, baseColor: NSColor, font: NSFont) -> NSAttributedString {
+        NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: baseColor])
+    }
+
+    private static func appendCursor(to attr: NSMutableAttributedString) {
+        attr.append(NSAttributedString(string: "▊", attributes: [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.labelColor,
+        ]))
+    }
+
+    // MARK: - Nested views
+
+    /// Vibrant content view that re-flows the chat on resize.
+    private final class ChatContentView: NSVisualEffectView {
+        weak var owner: BadAppleChatWindow?
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            owner?.relayout()
+        }
+
+        // MARK: - NSDraggingDestination (image drop)
+
+        override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+            if BadAppleChatWindow.draggingInfoHasImage(sender) { return .copy }
+            return []
+        }
+
+        override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+            if BadAppleChatWindow.draggingInfoHasImage(sender) { return .copy }
+            return []
+        }
+
+        override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+            owner?.handleImageDrop(sender)
+            return true
+        }
+    }
+
+    /// Custom input text view that intercepts image pastes.
+    private final class ChatInputTextView: NSTextView {
+        weak var chatOwner: BadAppleChatWindow?
+
+        override func paste(_ sender: Any?) {
+            // Check for image data on the pasteboard before falling back to text.
+            let pb = NSPasteboard.general
+            if let image = NSImage(pasteboard: pb) {
+                chatOwner?.handlePastedImage(image)
+                return
+            }
+            super.paste(sender)
+        }
+    }
+
+    /// A single chat message bubble. User bubbles hug their content and align
+    /// right; assistant bubbles render markdown segments (text + code blocks).
+    private final class BubbleView: NSView {
+        var isUser = false
+        var text = ""
+        var streaming = false
+        var cursorVisible = false
+        weak var owner: BadAppleChatWindow?
+
+        private let bg = NSView()
+        private var segmentViews: [NSView] = []
+
+        init() {
+            super.init(frame: .zero)
+            bg.wantsLayer = true
+            addSubview(bg)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        /// Rebuilds the bubble for the given max width and returns its height.
+        func reconfigure(maxWidth: CGFloat) -> CGFloat {
+            segmentViews.forEach { $0.removeFromSuperview() }
+            segmentViews = []
+            let padding: CGFloat = 12
+            let segSpacing: CGFloat = 8
+            let innerMax = max(0, maxWidth - 2 * padding)
+            bg.layer?.cornerRadius = 14
+
+            if isUser {
+                bg.layer?.backgroundColor = BadAppleChatWindow.userBubbleColor.cgColor
+                let attr = BadAppleChatWindow.renderUserText(text)
+                let (naturalW, _) = BadAppleChatWindow.measureText(attr, maxWidth: innerMax)
+                let bubbleW = min(maxWidth, max(naturalW, 24) + 2 * padding)
+                let innerW = bubbleW - 2 * padding
+                let (_, h) = BadAppleChatWindow.measureText(attr, maxWidth: innerW)
+                let total = h + 2 * padding
+                self.frame.size = NSSize(width: bubbleW, height: total)
+                bg.frame = self.bounds
+                let tv = BadAppleChatWindow.makeTextView(attr, width: innerW)
+                tv.frame = NSRect(x: padding, y: padding, width: innerW, height: h)
+                addSubview(tv); segmentViews.append(tv)
+                return total
+            }
+
+            bg.layer?.backgroundColor = BadAppleChatWindow.assistantBubbleColor.cgColor
+            let segments = BadAppleChatWindow.splitMarkdown(text)
+
+            // Empty assistant: show a thin cursor while streaming, nothing when done.
+            if segments.isEmpty {
+                if streaming {
+                    let attr = NSMutableAttributedString(string: " ", attributes: [
+                        .font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor,
+                    ])
+                    if cursorVisible { BadAppleChatWindow.appendCursor(to: attr) }
+                    let (w, _) = BadAppleChatWindow.measureText(attr, maxWidth: innerMax)
+                    let bubbleW = min(maxWidth, max(w, 24) + 2 * padding)
+                    let innerW = bubbleW - 2 * padding
+                    let (_, h) = BadAppleChatWindow.measureText(attr, maxWidth: innerW)
+                    let total = h + 2 * padding
+                    self.frame.size = NSSize(width: bubbleW, height: total)
+                    bg.frame = self.bounds
+                    let tv = BadAppleChatWindow.makeTextView(attr, width: innerW)
+                    tv.frame = NSRect(x: padding, y: padding, width: innerW, height: h)
+                    tv.delegate = owner
+                    addSubview(tv); segmentViews.append(tv)
+                    return total
+                }
+                self.frame.size = .zero
+                bg.frame = .zero
+                return 0
+            }
+
+            // Pass 1: render/measure each segment at the max inner width.
+            struct R {
+                var attr: NSAttributedString?
+                var code: CodeBlockView?
+                var cursorSuffix: String?
+                var width: CGFloat
+                var height: CGFloat
+            }
+            var rendered: [R] = []
+            let lastIndex = segments.count - 1
+            for (i, seg) in segments.enumerated() {
+                let showCursor = streaming && cursorVisible && i == lastIndex
+                switch seg {
+                case .text(let t):
+                    let attr = BadAppleChatWindow.renderMarkdown(t, baseColor: .labelColor)
+                    if showCursor { BadAppleChatWindow.appendCursor(to: attr) }
+                    let (w, h) = BadAppleChatWindow.measureText(attr, maxWidth: innerMax)
+                    rendered.append(R(attr: attr, code: nil, cursorSuffix: nil, width: w, height: h))
+                case .code(let code, let lang):
+                    let cb = CodeBlockView()
+                    let suffix: String? = showCursor ? "▊" : nil
+                    let h = cb.configure(code: code, language: lang, width: innerMax, cursorSuffix: suffix)
+                    rendered.append(R(attr: nil, code: cb, cursorSuffix: suffix, width: innerMax, height: h))
+                }
+            }
+
+            var maxSegW: CGFloat = 0
+            for r in rendered { maxSegW = max(maxSegW, r.width) }
+            let bubbleW = min(maxWidth, maxSegW + 2 * padding)
+            let innerW = bubbleW - 2 * padding
+
+            // Pass 2: finalize heights for the chosen inner width.
+            var heights: [CGFloat] = []
+            for r in rendered {
+                if let attr = r.attr {
+                    let (_, h) = BadAppleChatWindow.measureText(attr, maxWidth: innerW)
+                    heights.append(h)
+                } else if let cb = r.code {
+                    heights.append(cb.configure(code: cb.copyText, language: cb.language,
+                                                width: innerW, cursorSuffix: r.cursorSuffix))
+                }
+            }
+
+            var total = 2 * padding
+            for (i, h) in heights.enumerated() { total += h; if i > 0 { total += segSpacing } }
+            self.frame.size = NSSize(width: bubbleW, height: total)
+            bg.frame = self.bounds
+
+            // Place segments top-down.
+            var y = total - padding
+            for (i, r) in rendered.enumerated() {
+                if i > 0 { y -= segSpacing }
+                let h = heights[i]
+                y -= h
+                if let attr = r.attr {
+                    let tv = BadAppleChatWindow.makeTextView(attr, width: innerW)
+                    tv.frame = NSRect(x: padding, y: y, width: innerW, height: h)
+                    tv.delegate = owner
+                    addSubview(tv); segmentViews.append(tv)
+                } else if let cb = r.code {
+                    cb.frame = NSRect(x: padding, y: y, width: innerW, height: h)
+                    addSubview(cb); segmentViews.append(cb)
+                }
+            }
+            return total
+        }
+    }
+
+    /// A fenced code block with a dark background, language label, and Copy button.
+    private final class CodeBlockView: NSView {
+        var copyText = ""
+        var language: String?
+        private weak var owner: BadAppleChatWindow?
+
+        private let bg = NSView()
+        private let textView = NSTextView()
+        private let langLabel = NSTextField(labelWithString: "")
+        private let copyButton = NSButton()
+
+        init() {
+            super.init(frame: .zero)
+            bg.wantsLayer = true
+            bg.layer?.backgroundColor = BadAppleChatWindow.codeBlockColor.cgColor
+            bg.layer?.cornerRadius = 8
+            addSubview(bg)
+
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.drawsBackground = false
+            textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            textView.textColor = NSColor(white: 0.9, alpha: 1)
+            textView.textContainerInset = .zero
+            textView.textContainer?.lineFragmentPadding = 0
+            textView.textContainer?.widthTracksTextView = false
+            textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = []
+            addSubview(textView)
+
+            langLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+            langLabel.textColor = NSColor(white: 0.55, alpha: 1)
+            addSubview(langLabel)
+
+            copyButton.isBordered = false
+            copyButton.font = .systemFont(ofSize: 11, weight: .medium)
+            copyButton.target = self
+            copyButton.action = #selector(copyCode)
+            setCopyTitle("Copy")
+            addSubview(copyButton)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        private func setCopyTitle(_ t: String) {
+            copyButton.attributedTitle = NSAttributedString(string: t, attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: NSColor(white: 0.75, alpha: 1),
+            ])
+        }
+
+        @objc func copyCode() {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(copyText, forType: .string)
+            setCopyTitle("Copied!")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.setCopyTitle("Copy")
+            }
+        }
+
+        /// Lays out the block for the given width and returns its height.
+        /// `cursorSuffix` is appended to the rendered (not copied) text so a
+        /// streaming cursor can blink inside an in-progress code block.
+        func configure(code: String, language: String?, width: CGFloat, cursorSuffix: String?) -> CGFloat {
+            copyText = code
+            self.language = language
+            let pad: CGFloat = 10
+            let headerH: CGFloat = 16
+            let innerW = max(0, width - 2 * pad)
+
+            langLabel.stringValue = language ?? "code"
+            langLabel.sizeToFit()
+            copyButton.sizeToFit()
+
+            let display = cursorSuffix.map { code + $0 } ?? code
+            let attr = NSAttributedString(string: display, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                .foregroundColor: NSColor(white: 0.9, alpha: 1),
+            ])
+            let (_, h) = BadAppleChatWindow.measureText(attr, maxWidth: innerW)
+            textView.textContainer?.containerSize = NSSize(width: innerW, height: CGFloat.greatestFiniteMagnitude)
+            textView.textStorage?.setAttributedString(attr)
+
+            let total = pad + headerH + 4 + h + pad
+            self.frame.size = NSSize(width: width, height: total)
+            bg.frame = self.bounds
+            langLabel.frame = NSRect(x: pad, y: total - pad - langLabel.bounds.height,
+                                     width: min(langLabel.bounds.width, innerW), height: langLabel.bounds.height)
+            copyButton.frame = NSRect(x: width - pad - copyButton.bounds.width,
+                                      y: total - pad - copyButton.bounds.height,
+                                      width: copyButton.bounds.width, height: copyButton.bounds.height)
+            textView.frame = NSRect(x: pad, y: pad, width: innerW, height: h)
+            return total
+        }
     }
 }
 

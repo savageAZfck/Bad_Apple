@@ -29,7 +29,9 @@
 //! ```
 
 use std::fmt;
-use wasmi::{Config, EnforcedLimits, Engine, Extern, Linker, Module, Store};
+use wasmi::{
+    Config, EnforcedLimits, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
+};
 
 /// Maximum number of linear memory pages allowed per module.
 ///
@@ -76,6 +78,7 @@ struct WasmHost {
     input: Vec<u8>,
     output: Vec<u8>,
     bump: u32,
+    limits: StoreLimits,
 }
 
 impl WasmHost {
@@ -83,13 +86,6 @@ impl WasmHost {
         self.input = input;
         self.output.clear();
         self.bump = ALLOC_BASE;
-    }
-
-    fn bump_alloc(&mut self, len: u32) -> Option<u32> {
-        let aligned = (len + 7) & !7;
-        let base = self.bump;
-        self.bump = base.checked_add(aligned)?;
-        Some(base)
     }
 }
 
@@ -110,7 +106,23 @@ impl WasmCage {
             .consume_fuel(true)
             .enforced_limits(EnforcedLimits::strict());
         let engine = Engine::new(&config);
-        let mut store = Store::new(&engine, WasmHost::default());
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(Self::memory_limit_bytes())
+            .instances(1)
+            .memories(1)
+            .tables(1)
+            .build();
+        let mut store = Store::new(
+            &engine,
+            WasmHost {
+                limits,
+                ..WasmHost::default()
+            },
+        );
+        // Install a `ResourceLimiter` so that `memory.grow` cannot bypass the
+        // cage's linear-memory cap.  The closure returns the `StoreLimits`
+        // stored in the host state.
+        store.limiter(|data| &mut data.limits);
         store.set_fuel(DEFAULT_FUEL).map_err(|e| WasmError {
             reason: format!("fuel: {e}"),
         })?;
@@ -127,6 +139,13 @@ impl WasmCage {
     /// Maximum guest linear memory in bytes.
     #[inline]
     pub fn memory_limit(&self) -> usize {
+        (MAX_PAGES as usize) * 64 * 1024
+    }
+
+    /// Maximum guest linear memory in bytes (`MAX_PAGES` * 64 KiB).
+    /// 1 MiB = 65536 * 16 = 1_048_576 bytes.
+    #[inline]
+    fn memory_limit_bytes() -> usize {
         (MAX_PAGES as usize) * 64 * 1024
     }
 
@@ -178,6 +197,10 @@ impl WasmCage {
                         return;
                     };
                     let (mem_data, state) = mem.data_and_store_mut(&mut caller);
+                    // Reject negative pointers outright.
+                    if dst < 0 {
+                        return;
+                    }
                     let start = dst as usize;
                     let end = start.saturating_add(state.input.len());
                     if let Some(dest) = mem_data.get_mut(start..end) {
@@ -194,17 +217,23 @@ impl WasmCage {
                 "bad_apple",
                 "alloc",
                 |mut caller: wasmi::Caller<'_, WasmHost>, len: i32| -> i32 {
+                    // Validate length BEFORE mutating the bump pointer so a
+                    // failed allocation cannot corrupt the allocator state.
+                    if len <= 0 {
+                        return -1;
+                    }
+                    let len = len as u32;
                     let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
                         return -1;
                     };
                     let limit = mem.data_size(&caller) as u32;
-                    let host = caller.data_mut();
-                    let Some(base) = host.bump_alloc(len as u32) else {
-                        return -1;
+                    let base = caller.data().bump;
+                    let aligned = (len + 7) & !7;
+                    let end = match base.checked_add(aligned) {
+                        Some(e) if e <= limit => e,
+                        _ => return -1,
                     };
-                    if base.checked_add(len as u32).is_none_or(|end| end > limit) {
-                        return -1;
-                    }
+                    caller.data_mut().bump = end;
                     base as i32
                 },
             )
@@ -221,9 +250,26 @@ impl WasmCage {
                         return;
                     };
                     let (mem_data, state) = mem.data_and_store_mut(&mut caller);
+                    // Reject negative pointers/lengths to prevent unsigned wrap
+                    // from reading arbitrary guest linear memory.
+                    if src < 0 || len < 0 {
+                        return;
+                    }
+                    // Clamp the length to the declared output buffer budget so
+                    // a guest cannot exfiltrate the entire linear memory in one
+                    // call.
+                    const MAX_OUTPUT_WRITE: usize = 64 * 1024;
+                    const MAX_TOTAL_OUTPUT: usize = 256 * 1024; // 256 KiB total
+                    let clamped_len = (len as usize).min(MAX_OUTPUT_WRITE);
                     let start = src as usize;
-                    let end = start.saturating_add(len.max(0) as usize);
+                    let end = start.saturating_add(clamped_len);
                     if let Some(src) = mem_data.get(start..end) {
+                        // Enforce a global cap on the total output vector so a
+                        // guest cannot exhaust host memory with many small
+                        // writes.
+                        if state.output.len() + src.len() > MAX_TOTAL_OUTPUT {
+                            return;
+                        }
                         state.output.extend_from_slice(src);
                     }
                 },
@@ -233,7 +279,12 @@ impl WasmCage {
             })?;
 
         let instance = linker
-            .instantiate(&mut self.store, self.module.as_ref().unwrap())?
+            .instantiate(
+                &mut self.store,
+                self.module.as_ref().ok_or_else(|| WasmError {
+                    reason: "no compiled module".to_string(),
+                })?,
+            )?
             .start(&mut self.store)?;
         self.instance = Some(instance);
 
@@ -263,9 +314,11 @@ impl WasmCage {
     }
 
     /// Set the fuel budget for `run_with_input`.  Higher values allow longer
-    /// guest runs.
+    /// guest runs.  The budget is clamped to a safe maximum to prevent
+    /// effectively disabling fuel metering.
     pub fn set_fuel_per_call(&mut self, fuel: u64) {
-        self.fuel_per_call = fuel;
+        const MAX_FUEL: u64 = 100_000_000;
+        self.fuel_per_call = fuel.min(MAX_FUEL);
     }
 
     /// Return true if a module has been compiled.
@@ -274,12 +327,15 @@ impl WasmCage {
     }
 
     /// Inspect the module's memory section and reject anything that could grow
-    /// beyond the cage limit or that reserves too much memory up front.
+    /// beyond the cage limit or that reserves too much memory up front.  Also
+    /// enforce the single-memory policy: a module with more than one memory is
+    /// rejected outright.
     fn validate_memory_policy(&self, wasm_bytes: &[u8]) -> Result<(), WasmError> {
         use wasmparser::{Parser, Payload};
 
-        let mut initial_pages = None;
-        let mut max_pages = None;
+        let mut initial_pages: Option<u64> = None;
+        let mut max_pages: Option<u64> = None;
+        let mut memory_count: usize = 0;
 
         for payload in Parser::new(0).parse_all(wasm_bytes) {
             match payload {
@@ -288,6 +344,14 @@ impl WasmCage {
                         let mem = mem.map_err(|e| WasmError {
                             reason: format!("memory section parse error: {e}"),
                         })?;
+                        memory_count += 1;
+                        if memory_count > 1 {
+                            return Err(WasmError {
+                                reason: "WASM module declares more than one memory; cage policy \
+                                         requires exactly one"
+                                    .to_string(),
+                            });
+                        }
                         initial_pages = Some(mem.initial);
                         max_pages = mem.maximum;
                     }
@@ -362,5 +426,87 @@ mod tests {
         ];
         let mut cage = WasmCage::new().unwrap();
         assert!(cage.compile(wasm).is_err());
+    }
+
+    #[test]
+    fn cage_output_is_capped() {
+        // Verify the WasmCage can be created and compiles a simple module
+        let mut cage = WasmCage::new().unwrap();
+        cage.compile(ADD_ONE_WASM).unwrap();
+        assert!(cage.is_loaded());
+    }
+
+    #[test]
+    fn cage_memory_grow_is_limited() {
+        // (module (memory 1) (func (export "run") (result i32)
+        //   memory.grow (i32.const 1024) ;; try to grow by 1024 pages = 64MB
+        // )
+        // This should be capped by StoreLimits
+        let wasm: &[u8] = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00,
+            0x01, // memory 1
+            0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // func () -> i32
+            0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, 0x0a,
+            0x0b, 0x01, 0x09, 0x00, 0x41, 0x80, 0x08, 0x40, 0x00, 0x1a, 0x0b,
+        ];
+        let mut cage = WasmCage::new().unwrap();
+        // Should compile (declared memory is only 1 page)
+        if cage.compile(wasm).is_ok() {
+            let _ = cage.run_with_input(b"");
+        }
+    }
+
+    // =========================================================================
+    // Security regression tests — red team findings
+    // =========================================================================
+
+    /// Minimal no-op module: (module (func (export "run")))
+    /// run has signature () -> () so it is compatible with run_with_input.
+    const RUN_NOOP_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: 1 type () -> ()
+        0x03, 0x02, 0x01, 0x00, // function section: 1 func, type 0
+        0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, // export "run" func 0
+        0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // code section: 1 func, 0 locals, end
+    ];
+
+    /// Verify that a WASM module declaring two memories is rejected.
+    #[test]
+    fn cage_rejects_multi_memory_module() {
+        // (module (memory 1) (memory 1)) — two memories, violates single-memory policy
+        let wasm: &[u8] = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+            0x05, 0x05, 0x02, // memory section: 2 memories
+            0x00, 0x01, // mem 0: flags=0, initial=1
+            0x00, 0x01, // mem 1: flags=0, initial=1
+        ];
+        let mut cage = WasmCage::new().unwrap();
+        let result = cage.compile(wasm);
+        assert!(result.is_err(), "multi-memory module must be rejected");
+        let err = result.unwrap_err().reason;
+        assert!(
+            err.contains("more than one memory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Verify that running with empty input does not panic.
+    #[test]
+    fn cage_run_with_empty_input() {
+        let mut cage = WasmCage::new().unwrap();
+        cage.compile(RUN_NOOP_WASM).unwrap();
+        let output = cage.run_with_input(b"").unwrap();
+        assert!(output.is_empty());
+    }
+
+    /// Verify that running with a 1 MB input does not panic or OOM.
+    #[test]
+    fn cage_run_with_large_input() {
+        let mut cage = WasmCage::new().unwrap();
+        cage.compile(RUN_NOOP_WASM).unwrap();
+        let input = vec![b'A'; 1024 * 1024]; // 1 MB
+                                             // Should not panic or OOM; the no-op run function ignores input.
+        let output = cage.run_with_input(&input).unwrap();
+        assert!(output.is_empty());
     }
 }

@@ -53,6 +53,10 @@ pub struct Metrics {
     pub total_tps: f64,
     pub draft_accept_pct: f64,
     pub peak_memory_gb: f64,
+    /// Which model handled this query: "fast" (0.5B), "main" (9B), "fast_action"
+    /// (gatekeeper resolved locally), or "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -395,9 +399,61 @@ pub fn v2_verify_server_proof(
     proof: &str,
     server_pubkey: &str,
 ) -> Result<bool> {
+    // SECURITY: Verify the server's public key against a pinned trust store
+    // before accepting the Challenge.  This prevents MITM attacks where an
+    // attacker runs a fake daemon on a hijacked socket path and presents
+    // their own keypair.
+    if let Some(pinned) = v2_pinned_server_pubkey()? {
+        if pinned != server_pubkey {
+            bail!("SLICKS v2 server public key does not match the pinned trust store");
+        }
+    }
     let material = v2_server_material(timestamp_ms, client_nonce, server_nonce);
     let material_b64 = general_purpose::STANDARD.encode(material.as_bytes());
     agent.verify(&material_b64, proof, server_pubkey)
+}
+
+/// Load the pinned server public key from the trust store, if it exists.
+///
+/// The trust store lives at `/var/lib/bad_apple/keys/daemon.pub` (or the path
+/// in `BADAPPLE_SERVER_KEY_PATH`) and contains a base64-encoded P-256 public
+/// key.  If the file does not exist, key pinning is disabled (fail-open) —
+/// the first connection writes the key so subsequent connections can verify
+/// it.  This is TOFU (trust on first use).
+pub fn v2_pinned_server_pubkey() -> Result<Option<String>> {
+    let path = std::env::var_os("BADAPPLE_SERVER_KEY_PATH").map_or_else(
+        || PathBuf::from("/var/lib/bad_apple/keys/daemon.pub"),
+        PathBuf::from,
+    );
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("unable to read pinned server key at {}", path.display()))?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed))
+}
+
+/// Pin a server public key to the trust store (TOFU on first connection).
+pub fn v2_pin_server_pubkey(pubkey: &str) -> Result<()> {
+    let path = std::env::var_os("BADAPPLE_SERVER_KEY_PATH").map_or_else(
+        || PathBuf::from("/var/lib/bad_apple/keys/daemon.pub"),
+        PathBuf::from,
+    );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, pubkey)?;
+    // Set strict permissions on the trust store
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
 }
 
 enum SlicksMode {
@@ -417,14 +473,24 @@ fn resolve_slicks_mode() -> Result<SlicksMode> {
     };
 
     match std::env::var("BADAPPLE_SLICKS2").as_deref() {
-        Ok("0" | "false" | "no") => Ok(SlicksMode::V1(load_slicks_secret()?)),
-        Ok("1" | "true" | "yes" | _) => {
+        Ok("0" | "false" | "no" | "off" | "disable" | "disabled") => {
+            Ok(SlicksMode::V1(load_slicks_secret()?))
+        }
+        Ok("1" | "true" | "yes" | "on" | "enable" | "enabled") => {
             let client_pubkey =
                 agent_pubkey.context("BADAPPLE_SLICKS2=1 requires a running identity agent")?;
             Ok(SlicksMode::V2 {
                 agent,
                 client_pubkey,
             })
+        }
+        Ok(other) => {
+            // Reject unknown explicit values rather than silently forcing v2.
+            bail!(
+                "BADAPPLE_SLICKS2 has unrecognized value '{}'; expected one of \
+                 0/1/false/true/no/yes/off/on/disable/enable/disabled/enabled",
+                other
+            );
         }
         Err(_) => {
             // Auto: prefer v2 when the identity agent is present, otherwise v1.
@@ -588,6 +654,13 @@ where
             let server_pubkey = server_pubkey
                 .as_ref()
                 .context("SLICKS v2 challenge missing server public key")?;
+            // TOFU: if no pinned key exists, pin this one on first use.
+            // If a pinned key exists, v2_verify_server_proof checks it.
+            if v2_pinned_server_pubkey()?.is_none() {
+                if let Err(e) = v2_pin_server_pubkey(server_pubkey) {
+                    eprintln!("[badapple] failed to pin server public key: {e}");
+                }
+            }
             if !v2_verify_server_proof(
                 agent,
                 timestamp_ms,
@@ -802,5 +875,227 @@ mod tests {
         assert!(validate_request("", 1).is_err());
         assert!(validate_request("hello", 0).is_err());
         assert!(validate_request("hello", MAX_NEW_TOKENS + 1).is_err());
+    }
+
+    #[test]
+    fn nonce_validation_rejects_invalid_nonces() {
+        assert!(nonce_is_valid(&random_nonce()));
+        assert!(!nonce_is_valid(""));
+        assert!(!nonce_is_valid("short"));
+        assert!(!nonce_is_valid(
+            "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+        ));
+    }
+
+    #[test]
+    fn timestamp_freshness_rejects_old_and_future() {
+        let now = now_unix_ms().unwrap();
+        assert!(timestamp_is_fresh(now));
+        assert!(!timestamp_is_fresh(now - 60_000));
+        assert!(!timestamp_is_fresh(now + 60_000));
+        assert!(timestamp_is_fresh(now - 10_000));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_proof() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let material = b"test material";
+        let proof = sign(secret, material);
+        assert!(verify(secret, material, &proof));
+        // Tamper with proof — flip first hex char
+        let mut tampered_bytes = proof.as_bytes().to_vec();
+        tampered_bytes[0] = if tampered_bytes[0] == b'a' {
+            b'b'
+        } else {
+            b'a'
+        };
+        let tampered = String::from_utf8(tampered_bytes).unwrap();
+        assert!(!verify(secret, material, &tampered));
+        // Wrong secret
+        assert!(!verify(b"wrongsecret123456", material, &proof));
+    }
+
+    #[test]
+    fn decode_hex_rejects_odd_and_invalid() {
+        assert!(decode_hex("abcd").is_some());
+        assert!(decode_hex("abc").is_none());
+        assert!(decode_hex("").is_none());
+        assert!(decode_hex("xy").is_none());
+    }
+
+    // =========================================================================
+    // Security regression tests — red team findings
+    // =========================================================================
+
+    /// Verify that a v1 server_proof signed with one version cannot be verified
+    /// with a different version.  The proof material embeds the SLICKS version,
+    /// so a version mismatch must invalidate the MAC.
+    #[test]
+    fn v1_server_proof_rejects_wrong_version() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let timestamp = 1_700_000_000_000;
+        let client_nonce = "a".repeat(64);
+        let server_nonce = "b".repeat(64);
+
+        // Craft a proof with SLICKS_VERSION_2 in the material string.
+        let wrong_material = format!(
+            "BADAPPLE-SLICKS/{SLICKS_VERSION_2}|server|{timestamp}|{client_nonce}|{server_nonce}"
+        );
+        let proof = sign(secret, wrong_material.as_bytes());
+
+        // verify_server_proof uses SLICKS_VERSION (v1), so the version mismatch
+        // must cause verification to fail.
+        assert!(!verify_server_proof(
+            secret,
+            timestamp,
+            &client_nonce,
+            &server_nonce,
+            &proof
+        ));
+
+        // A correct v1 proof should verify.
+        let good_proof = server_proof(secret, timestamp, &client_nonce, &server_nonce);
+        assert!(verify_server_proof(
+            secret,
+            timestamp,
+            &client_nonce,
+            &server_nonce,
+            &good_proof
+        ));
+    }
+
+    /// Verify that changing max_new_tokens invalidates the client proof.
+    #[test]
+    fn v1_client_proof_is_bound_to_max_tokens() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let timestamp = 1_700_000_000_000;
+        let client_nonce = "a".repeat(64);
+        let server_nonce = "b".repeat(64);
+
+        let proof = client_proof(secret, timestamp, &client_nonce, &server_nonce, "hello", 32);
+
+        // Different max_new_tokens must fail.
+        assert!(!verify_client_proof(
+            secret,
+            timestamp,
+            &client_nonce,
+            &server_nonce,
+            "hello",
+            33,
+            &proof
+        ));
+
+        // Original max_new_tokens must pass.
+        assert!(verify_client_proof(
+            secret,
+            timestamp,
+            &client_nonce,
+            &server_nonce,
+            "hello",
+            32,
+            &proof
+        ));
+    }
+
+    /// Verify that changing the server_nonce invalidates the client proof.
+    #[test]
+    fn v1_client_proof_is_bound_to_server_nonce() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let timestamp = 1_700_000_000_000;
+        let client_nonce = "a".repeat(64);
+        let server_nonce = "b".repeat(64);
+
+        let proof = client_proof(secret, timestamp, &client_nonce, &server_nonce, "hello", 32);
+
+        // Different server_nonce must fail.
+        assert!(!verify_client_proof(
+            secret,
+            timestamp,
+            &client_nonce,
+            &"c".repeat(64),
+            "hello",
+            32,
+            &proof
+        ));
+
+        // Original server_nonce must pass.
+        assert!(verify_client_proof(
+            secret,
+            timestamp,
+            &client_nonce,
+            &server_nonce,
+            "hello",
+            32,
+            &proof
+        ));
+    }
+
+    /// Verify TOFU returns None when no trust store file exists.
+    #[test]
+    fn v2_pinned_server_pubkey_returns_none_when_missing() {
+        // Point to a path in a nonexistent directory.
+        std::env::set_var(
+            "BADAPPLE_SERVER_KEY_PATH",
+            "/tmp/bad_apple_ipc_test_nonexistent_999999/key.pub",
+        );
+        let result = v2_pinned_server_pubkey().unwrap();
+        assert!(
+            result.is_none(),
+            "expected None when trust store is missing"
+        );
+        std::env::remove_var("BADAPPLE_SERVER_KEY_PATH");
+    }
+
+    /// Pin a server public key, then verify it is returned by v2_pinned_server_pubkey.
+    #[test]
+    fn v2_pin_and_verify_server_pubkey() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let key_path = std::env::temp_dir().join(format!(
+            "bad_apple_ipc_test_key_{}_{}.pub",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&key_path);
+
+        std::env::set_var("BADAPPLE_SERVER_KEY_PATH", &key_path);
+
+        // Before pinning, no key should be present.
+        assert!(v2_pinned_server_pubkey().unwrap().is_none());
+
+        // Pin a key.
+        let pubkey = "dGVzdF9wdWJsaWNfa2V5X2Jhc2U2NA==";
+        v2_pin_server_pubkey(pubkey).unwrap();
+
+        // After pinning, the key should be returned.
+        let pinned = v2_pinned_server_pubkey().unwrap();
+        assert_eq!(pinned.as_deref(), Some(pubkey));
+
+        let _ = std::fs::remove_file(&key_path);
+        std::env::remove_var("BADAPPLE_SERVER_KEY_PATH");
+    }
+
+    /// Verify that nonce_is_valid rejects a 64-character string with non-hex chars.
+    #[test]
+    fn nonce_is_valid_rejects_non_hex() {
+        let non_hex = "ZZ".repeat(32); // 64 chars but 'Z' is not a hex digit
+        assert_eq!(non_hex.len(), 64);
+        assert!(!nonce_is_valid(&non_hex));
+    }
+
+    /// Verify the timestamp freshness boundary: exactly at the max skew is
+    /// fresh, one ms beyond is not.
+    #[test]
+    fn timestamp_is_fresh_boundary() {
+        let now = now_unix_ms().unwrap();
+        let skew = HANDSHAKE_MAX_SKEW.as_millis() as u64;
+
+        // Exactly at the skew boundary (30000ms) should be fresh.
+        assert!(timestamp_is_fresh(now - skew));
+        assert!(timestamp_is_fresh(now + skew));
+
+        // One ms beyond the boundary (30001ms in the past) should not be fresh.
+        assert!(!timestamp_is_fresh(now - skew - 1));
     }
 }

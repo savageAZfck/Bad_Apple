@@ -10,6 +10,16 @@ from pathlib import Path
 CONTACTS_FILE = Path("/var/lib/bad_apple/allowed_contacts.json")
 
 
+def _esc_applescript(value: str) -> str:
+    """Escape a string for safe interpolation into an AppleScript string literal.
+
+    AppleScript string literals are delimited by double quotes.  Backslash is
+    the escape character.  Injecting a raw `"` or `\\` would let an attacker
+    break out of the literal and run arbitrary AppleScript.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _run_applescript(script: str, timeout: int = 30) -> str:
     """Run an AppleScript and return the result or error."""
     try:
@@ -83,7 +93,7 @@ def list_reminders(list_name: str = "", completed: bool = False, limit: int = 20
     """Return reminders from the local Reminders app."""
     filter_expr = "whose completed is " + ("true" if completed else "false")
     if list_name:
-        list_ref = f'list "{list_name}"'
+        list_ref = f'list "{_esc_applescript(list_name)}"'
     else:
         list_ref = "default list"
     script = f"""
@@ -133,9 +143,10 @@ end tell
 
 def search_mail(query: str, limit: int = 10) -> str:
     """Search local Mail by subject or sender."""
+    safe_query = _esc_applescript(query)
     script = f"""
 tell application "Mail"
-    set results to (every message of inbox whose subject contains "{query}" or sender contains "{query}")
+    set results to (every message of inbox whose subject contains "{safe_query}" or sender contains "{safe_query}")
     if (count of results) is 0 then
         return "No matching mail."
     end if
@@ -154,12 +165,13 @@ end tell
 
 def add_reminder(name: str, list_name: str = "", due: str = "") -> str:
     """Add a reminder to the local Reminders app."""
-    list_ref = f'list "{list_name}"' if list_name else "default list"
-    due_attr = f' with due date (date "{due}")' if due else ""
+    safe_name = _esc_applescript(name)
+    list_ref = f'list "{_esc_applescript(list_name)}"' if list_name else "default list"
+    due_attr = f' with due date (date "{_esc_applescript(due)}")' if due else ""
     script = f"""
 tell application "Reminders"
     tell {list_ref}
-        make new reminder with properties {{name:"{name}"}}{due_attr}
+        make new reminder with properties {{name:"{safe_name}"}}{due_attr}
     end tell
     return "Reminder added."
 end tell

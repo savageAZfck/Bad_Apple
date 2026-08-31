@@ -28,10 +28,8 @@ from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
-from langdetect import LangDetectException, detect
 from mlx_lm import load
 from mlx_lm.generate import stream_generate
-from mlx_lm.models.cache import make_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 
 import badapple_agent_tasks
@@ -97,6 +95,53 @@ try:
 except ImportError:
     _dflash_available = False
 
+# --- Split-module imports ---
+# Tool schemas, tool execution, and text processing live in badapple_mlx_tools.
+from badapple_mlx_tools import (
+    TOOLS,
+    _is_sentence_end,
+    _queue_get,
+    fast_execute,
+    generate_with_tools as _generate_with_tools,
+    is_multi_step,
+    polish_text,
+    postprocess_output,
+    run_approved_tool as _run_approved_tool_func,
+    tools_for_prompt,
+)
+# Conversation persistence helpers.
+from badapple_mlx_conversation import (
+    conversation_path,
+    load_conversation,
+    save_conversation,
+)
+# RAG context building and KV prompt-cache management.
+from badapple_mlx_rag import (
+    build_retrieval_context,
+    ensure_prompt_cache,
+    kv_cache_paths,
+    load_kv_cache,
+    prime_system_cache,
+    save_kv_cache,
+)
+# Agent protocol handler, multi-step tasks, and agent task management.
+from badapple_mlx_agent import (
+    _write_frame,
+    agent_done as _agent_done_func,
+    cancel_agent_task as _cancel_agent_task,
+    extract_agent_json as _extract_agent_json_func,
+    extract_agent_xml as _extract_agent_xml_func,
+    get_agent_task as _get_agent_task,
+    handle_agent_request as _handle_agent_request_func,
+    list_agent_tasks as _list_agent_tasks,
+    pause_agent_task as _pause_agent_task,
+    plan_and_execute as _plan_and_execute,
+    resume_agent_task as _resume_agent_task,
+    run_agent_task as _run_agent_task_func,
+    submit_agent_task as _submit_agent_task,
+)
+
+
 # Protocol constants from bad_apple_ipc.rs
 SLICKS_VERSION = badapple_slicks.SLICKS_VERSION
 DEFAULT_SOCKET_PATH = "/var/run/badapple/substrate.sock"
@@ -107,6 +152,15 @@ MAX_FRAME_BYTES = 1024 * 1024
 
 # Main Qwen 3.5 9B 4-bit brain. Unified for both text and voice.
 MAIN_MODEL = os.environ.get("BADAPPLE_MAIN_MODEL", "caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit").strip()
+
+# Pinned HuggingFace revision (commit hash) for the main brain.
+# Pinning to a specific commit guarantees that the semantic-cache embeddings,
+# token vectors, and ANE shard manifest stay consistent across daemon restarts.
+# If the upstream repo is updated or yanked, an unpinned "main" ref could load a
+# different snapshot and silently invalidate those artifacts. Override at runtime
+# with BADAPPLE_MODEL_REVISION; an empty/unset value falls back to the constant.
+DEFAULT_MODEL_REVISION = "5ae9734004d530171fd52f89e660c059b6e36efc"
+MODEL_REVISION = (os.environ.get("BADAPPLE_MODEL_REVISION") or DEFAULT_MODEL_REVISION).strip()
 
 # DFlash speculative draft for the 9B brain (same architecture).
 DRAFT_MODEL = os.environ.get("BADAPPLE_DRAFT_MODEL", "z-lab/Qwen3.5-9B-DFlash").strip()
@@ -137,10 +191,8 @@ ROAST_MOODS = [
     ("extra flirty but brutal", "Alexa, Google Assistant, and Cortana"),
 ]
 ROAST_TRIGGERS = ("who are you", "how are you", "what do you think", "siri", "alexa", "google", "gemini", "chatgpt", "cortana", "bixby", "cloud ai", "the cloud", "bare metal", "who is better", "vs")
-
 # Tight, low-latency voice prompt now lives in badapple_extras.py as
 # DEFAULT_VOICE_SYSTEM_PROMPT so the default persona pack can use it.
-
 
 def load_prompt() -> str:
     """Load the system prompt from the on-disk prompt file, falling back to the
@@ -185,7 +237,6 @@ def load_prompt() -> str:
 
 DEFAULT_SYSTEM_PROMPT = load_prompt()
 
-
 def _maybe_purge_metal_cache():
     """Purge Metal caches only when memory pressure is elevated, so DFlash
     can keep its temporary pools hot between turns.
@@ -198,1536 +249,6 @@ def _maybe_purge_metal_cache():
         print(f"[perf] purged Metal cache (cache={cache_gb:.2f} GB, active={active_gb:.2f} GB)", flush=True)
     else:
         gc.collect()
-
-# Planner-only system prompt used when the user asks for a multi-step task.
-# It is intentionally dry and imperative so the 8B just outputs a step list.
-PLANNER_SYSTEM_PROMPT = (
-    "You are a task planner. The user wants a multi-step local action completed. "
-    "Break the task into 1-4 short steps. For each step output exactly one line in this format:\n"
-    "TOOL:<tool_name>:<json_arguments>\n"
-    "or\n"
-    "SAY:<what the assistant should tell the user after the previous tool results>\n"
-    "Available tools:\n"
-    '- list_directory: {"path": "..."}\n'
-    '- read_file: {"path": "...", "limit": 5000}\n'
-    '- search_content: {"query": "...", "path": "...", "max_results": 20}\n'
-    '- run_shell: {"command": "..."}\n'
-    '- write_file: {"filename": "...", "content": "...", "append": false}\n'
-    '- run_applescript: {"script": "..."}\n'
-    "- get_current_time: {}\n"
-    "Do not explain. Do not use natural language outside the step lines. "
-    "The last step should usually be SAY: to summarize results."
-)
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "Get the current local date and time on the Mac.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_directory",
-            "description": "List files and folders in a local directory. Defaults to the user's home directory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or tilde-expanded path to the directory.",
-                    }
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_applescript",
-            "description": "Run a short, safe AppleScript to control macOS. Use only for opening apps, revealing files, or simple system actions.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "script": {
-                        "type": "string",
-                        "description": "The AppleScript source to run.",
-                    }
-                },
-                "required": ["script"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_local_files",
-            "description": "Search for files by name under the user home directory using Spotlight/mdfind.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Filename or pattern to search for.",
-                    }
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "index_documents",
-            "description": "Index the user's local text/code/PDF/EPUB files for RAG. Provide an absolute path or '~' for the home directory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or tilde-expanded path to a directory or file to index.",
-                    }
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_notes",
-            "description": "Search the indexed local documents by semantic meaning and return the most relevant excerpts.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The question or topic to search for in the indexed documents.",
-                    }
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_document",
-            "description": "Extract and read text from a local PDF, EPUB, or other document. Returns a text preview.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or tilde-expanded path to the document.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max characters to return. Default 10000.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the text content of a local file. Only reads text files and stops at a size limit.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or tilde-expanded path to the file.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max characters to return. Default 10000.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write a text note to the Bad Apple data directory (~/.bad_apple/notes). Create or append.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": "The filename, e.g. 'shopping_list.txt' or 'idea.md'.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The text to write.",
-                    },
-                    "append": {
-                        "type": "boolean",
-                        "description": "If true, append to the file instead of overwriting.",
-                    },
-                },
-                "required": ["filename", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_content",
-            "description": "Search for a text string inside files under a directory using grep. Returns matching lines with file paths.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The text to search for.",
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or tilde-expanded directory to search. Default is the user's home directory.",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of matches to return. Default 20.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_shell",
-            "description": "Run a read-only shell command from a safe allowlist (ls, cat, head, tail, find, grep, wc, file, pwd, mdfind, ps, df, du). No redirection, pipes, or multiple commands.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to run. Must begin with an allowed command and contain no dangerous characters.",
-                    }
-                },
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_shortcut",
-            "description": "Run a named macOS Shortcut from the Shortcuts app. Returns the shortcut's text output if any.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The exact name of the macOS Shortcut to run.",
-                    },
-                    "input": {
-                        "type": "string",
-                        "description": "Optional text input to pass to the shortcut.",
-                    },
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_shortcuts",
-            "description": "List the names of installed macOS Shortcuts.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_working_memory",
-            "description": "Read the assistant's working memory scratchpad. Use this to recall intermediate state the model wrote earlier.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum characters to return. Default 5000.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_working_memory",
-            "description": "Write or append to the assistant's working memory scratchpad. Use this to hold intermediate state or show your work.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The content to write.",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["replace", "append", "prepend"],
-                        "description": "How to write. Default replace.",
-                    },
-                },
-                "required": ["content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "clear_working_memory",
-            "description": "Clear the assistant's working memory scratchpad.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "consolidate_memory",
-            "description": "Run the offline dream/consolidation pass on the long-term memory graph.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "screen_capture",
-            "description": "Capture the main Mac screen to a PNG and return the local file path.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Optional absolute path to save the screenshot. Defaults to a temp file.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "capture_and_extract_screen",
-            "description": "Capture the main screen and return the visible text using the local MLX vision model.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Max output tokens. Default 256.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "capture_and_describe_screen",
-            "description": "Capture the main screen and describe what is visible using the local MLX vision model. Use this when the user asks what is on their screen or to summarize the current view.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "The question or instruction for the vision model. Default: 'Describe what is on the screen.'",
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Max output tokens. Default 256.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "describe_image",
-            "description": "Run the local MLX vision model on an image and answer a question about it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to a PNG/JPG image.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The question or instruction for the vision model. Default: 'Describe this image.'",
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Max output tokens. Default 256.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "extract_text_from_image",
-            "description": "Extract visible text from a PNG/JPG image using the local MLX vision model.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to a PNG/JPG image.",
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Max output tokens. Default 256.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "transcribe_audio",
-            "description": "Transcribe a local audio file (wav, mp3, m4a) to text using on-device Whisper. No cloud.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to the audio file.",
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Language code, e.g. 'en'. Default 'en'.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_image",
-            "description": "Generate an image from a text prompt using a local FLUX.2-klein-4B MLX model. No cloud after the model is cached.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Text description of the image to generate.",
-                    },
-                    "width": {
-                        "type": "integer",
-                        "description": "Width in pixels. Default 512.",
-                    },
-                    "height": {
-                        "type": "integer",
-                        "description": "Height in pixels. Default 512.",
-                    },
-                    "steps": {
-                        "type": "integer",
-                        "description": "Inference steps. Default 4.",
-                    },
-                    "seed": {
-                        "type": "integer",
-                        "description": "Random seed. Optional.",
-                    },
-                },
-                "required": ["prompt"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_mcp_server",
-            "description": "Register a local MCP (Model Context Protocol) stdio server command.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Short name for the server."},
-                    "command": {"type": "string", "description": "Shell-style command string, e.g. 'python -m mcp_server_time'."},
-                    "env": {"type": "object", "description": "Optional environment variables."},
-                },
-                "required": ["name", "command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "remove_mcp_server",
-            "description": "Remove a registered MCP server.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_mcp_servers",
-            "description": "List registered MCP servers.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_mcp_tools",
-            "description": "List tools exposed by a registered MCP server.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "server": {"type": "string", "description": "The registered MCP server name."},
-                },
-                "required": ["server"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "invoke_mcp_tool",
-            "description": "Call a tool on a registered MCP server.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "server": {"type": "string"},
-                    "tool": {"type": "string"},
-                    "arguments": {"type": "object"},
-                },
-                "required": ["server", "tool"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "translate_text",
-            "description": "Translate text locally between languages using the small on-device m2m100 model. No cloud after model is cached.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "The text to translate.",
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "Target language code (ISO 639-1), e.g. 'en', 'fr', 'de'. Default 'en'.",
-                    },
-                    "source": {
-                        "type": "string",
-                        "description": "Source language code, e.g. 'fr'. Default 'en'.",
-                    },
-                },
-                "required": ["text", "target"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lora_add_example",
-            "description": "Add a personal prompt/completion example to a LoRA training dataset. The dataset is stored locally and never leaves the device.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "dataset": {
-                        "type": "string",
-                        "description": "Name of the local dataset to append to.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The user prompt for this example.",
-                    },
-                    "completion": {
-                        "type": "string",
-                        "description": "The desired assistant response for this example.",
-                    },
-                },
-                "required": ["dataset", "prompt", "completion"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lora_train",
-            "description": "Train a local LoRA adapter on a dataset using mlx-lm. The adapter is saved to the local adapters directory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "dataset": {
-                        "type": "string",
-                        "description": "Name of the dataset to train on.",
-                    },
-                    "adapter": {
-                        "type": "string",
-                        "description": "Name for the saved adapter.",
-                    },
-                    "iters": {
-                        "type": "integer",
-                        "description": "Number of training iterations. Default 100.",
-                    },
-                    "learning_rate": {
-                        "type": "number",
-                        "description": "Learning rate. Default 1e-4.",
-                    },
-                },
-                "required": ["dataset", "adapter"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lora_adapters",
-            "description": "List saved local LoRA adapters.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lora_generate",
-            "description": "Generate a response with a saved LoRA adapter using the local mlx-lm CLI.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "adapter": {
-                        "type": "string",
-                        "description": "Name of the saved adapter.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The prompt to generate from.",
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Max tokens. Default 120.",
-                    },
-                },
-                "required": ["adapter", "prompt"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_status",
-            "description": "Show a concise git status for a repository (defaults to current working directory).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to a git repository. Defaults to current directory.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_diff",
-            "description": "Show git diff stats and the diff for a repository. No cloud.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to a git repository. Defaults to current directory.",
-                    },
-                    "staged": {
-                        "type": "boolean",
-                        "description": "Show staged diff. Default false.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_log",
-            "description": "Show recent git log for a repository.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to a git repository. Defaults to current directory.",
-                    },
-                    "n": {
-                        "type": "integer",
-                        "description": "Number of commits. Default 10.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_commit",
-            "description": "Stage all changes and commit with a message. Requires approval. No cloud.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to a git repository. Defaults to current directory.",
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Commit message.",
-                    },
-                },
-                "required": ["message"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "system_dashboard",
-            "description": "Return a local power and performance dashboard: CPU, memory, swap, disk, battery, thermal pressure, Bad Apple process stats, and the latest log perf line.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "workspace_status",
-            "description": "Return the active workspace summary: build system, recent files, git state, README summary.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_session_seed",
-            "description": "Pin the session random seed so model outputs are deterministic and reproducible. Pass 0 to return to random (non-deterministic).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "seed": {
-                        "type": "integer",
-                        "description": "The random seed to pin. 0 disables pinned seed.",
-                    },
-                },
-                "required": ["seed"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_session_seed",
-            "description": "Return the current pinned session seed, if any.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "schedule_task",
-            "description": "Schedule a local shell command or Bad Apple query to run later. Commands are restricted to the same read-only allowlist as run_shell (ls, cat, head, tail, find, grep, wc, file, pwd, mdfind, ps, df, du, echo, whoami, id, git, swift, cargo, rustc, python3, python), no redirection/pipes/multiple commands. `when` is seconds from now or an ISO timestamp. `repeat` is optional seconds for recurring tasks.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "when": {
-                        "type": "string",
-                        "description": "When to run: seconds from now, or an ISO timestamp like 2026-08-23T08:00.",
-                    },
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command or Bad Apple query to run. Use JSON list for exact args.",
-                    },
-                    "repeat": {
-                        "type": "string",
-                        "description": "Optional interval in seconds to repeat the task.",
-                    },
-                },
-                "required": ["when", "command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_scheduled_tasks",
-            "description": "List pending and completed scheduled tasks.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_shortcut",
-            "description": "Run a macOS Shortcuts shortcut by name. Optionally pass input text.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Name of the shortcut.",
-                    },
-                    "input": {
-                        "type": "string",
-                        "description": "Optional input text.",
-                    },
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_marketplace",
-            "description": "List the curated local MCP marketplace. Use mcp_install to add a server from the marketplace.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mcp_install",
-            "description": "Install an MCP server from the curated marketplace by name (filesystem, sqlite, fetch).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "supervisor_status",
-            "description": "Get the latest self-healing supervisor health report for gatekeeper, MLX, and TTS services.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "heal",
-            "description": "Run a self-healing check that restarts unhealthy services and returns the health report.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_benchmark",
-            "description": "Run the Bad Apple benchmark suite and report decode tokens/s and memory usage. Use to measure and auto-tune local performance.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {"type": "string", "description": "Optional single prompt to benchmark. If empty, runs the default suite."},
-                    "max_tokens": {"type": "integer", "description": "Maximum tokens to generate. Default 120."},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "p2p_send_adapter",
-            "description": "Send a local LoRA adapter to a discovered Bad Apple peer over the encrypted P2P link. Like AirDrop for models.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "peer_id": {
-                        "type": "string",
-                        "description": "The peer origin_id (use p2p_peers to discover).",
-                    },
-                    "adapter": {
-                        "type": "string",
-                        "description": "Name of the local adapter to send.",
-                    },
-                },
-                "required": ["peer_id", "adapter"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "p2p_list_adapters",
-            "description": "List local LoRA adapters available to share.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ambient_start",
-            "description": "Start always-on ambient screen/app context capture. Optionally set interval in seconds (default 30).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "interval": {
-                        "type": "number",
-                        "description": "Capture interval in seconds. Default 30.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ambient_stop",
-            "description": "Stop always-on ambient screen/app context capture.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ambient_context",
-            "description": "Get the latest ambient screen/app context: active app, window title, timestamp, and screenshot path.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ocular_start",
-            "description": "Start the Ocular UI Stream. Captures the screen every capture_interval seconds and, if describe_interval > 0, runs the local VLM to describe it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "capture_interval": {"type": "number", "description": "Screen capture interval in seconds. Default 5."},
-                    "describe_interval": {"type": "number", "description": "VLM describe interval in seconds. 0 disables description. Default 0."},
-                    "prompt": {"type": "string", "description": "Optional prompt for the VLM description."},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ocular_stop",
-            "description": "Stop the Ocular UI Stream and unload the vision model.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ocular_context",
-            "description": "Get the latest Ocular UI Stream context: screenshot, active app/window, and the most recent VLM description.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "spotlight_search",
-            "description": "Universal local Spotlight-style search across macOS Notes, Mail, files, and Bad Apple history. No cloud.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query.",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Max results per category. Default 20.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "xcode_index_project",
-            "description": "Index an Xcode / Swift / source project into the local RAG pipeline for coding questions. No cloud.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "project_path": {
-                        "type": "string",
-                        "description": "Absolute path to the Xcode project or source directory.",
-                    },
-                },
-                "required": ["project_path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "xcode_search",
-            "description": "Search the indexed Xcode project for code, symbols, or concepts.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query, e.g. 'where is accessibility handled'.",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Max results. Default 10.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "slicks_keychain_store",
-            "description": "Store or rotate the SLICKS secret in the macOS Keychain instead of a plain file. Requires approval.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "service": {
-                        "type": "string",
-                        "description": "Keychain service name. Default 'com.badapple.slicks'.",
-                    },
-                    "account": {
-                        "type": "string",
-                        "description": "Keychain account name. Default 'mlx-server'.",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "p2p_peers",
-            "description": "List Bad Apple peers discovered on the local network via encrypted link-local broadcast.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "accessibility_action",
-            "description": "Perform a local macOS UI action via System Events/AppleScript: type text, press a key, click a menu, or click a UI element by name. Use only for approved local actions.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["type", "key", "menu", "click"],
-                        "description": "The UI action to perform.",
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "The app name, menu path, or UI element name to target.",
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "The text to type, key to press, or menu/item to select.",
-                    },
-                },
-                "required": ["action", "target"],
-            },
-        },
-    },
-]
-
-TOOLS.extend([
-    {
-        "type": "function",
-        "function": {
-            "name": "learn_workflow",
-            "description": "Learn a reviewed compound workflow from named local tool steps. New workflows are disabled until explicitly enabled.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "trigger": {"type": "string"},
-                    "steps": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "tool": {"type": "string"},
-                                "args": {"type": "object"},
-                            },
-                            "required": ["tool"],
-                        },
-                    },
-                },
-                "required": ["name", "trigger", "steps"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_workflows",
-            "description": "List locally learned workflows and whether each is enabled.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_workflow_enabled",
-            "description": "Enable or disable a reviewed learned workflow.",
-            "parameters": {
-                "type": "object",
-                "properties": {"name": {"type": "string"}, "enabled": {"type": "boolean"}},
-                "required": ["name", "enabled"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_workflow",
-            "description": "Run an enabled learned workflow through normal policy and approval checks.",
-            "parameters": {
-                "type": "object",
-                "properties": {"name": {"type": "string"}},
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "xcode_project_info",
-            "description": "List targets, configurations, and schemes for a local Xcode project.",
-            "parameters": {
-                "type": "object",
-                "properties": {"project_path": {"type": "string"}},
-                "required": ["project_path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "xcode_build_diagnostics",
-            "description": "Run a local unsigned Xcode build and return focused errors and warnings.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "project_path": {"type": "string"},
-                    "scheme": {"type": "string"},
-                    "configuration": {"type": "string"},
-                },
-                "required": ["project_path", "scheme"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "undo_last",
-            "description": "Undo the most recent reversible Bad Apple file mutation from its verified snapshot.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "today_events",
-            "description": "List today's Calendar events from the local macOS Calendar app.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "upcoming_events",
-            "description": "List upcoming Calendar events for the next N days.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "days": {"type": "integer", "description": "Number of days ahead to look. Default 7."},
-                    "limit": {"type": "integer", "description": "Maximum events. Default 20."},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_reminders",
-            "description": "List local macOS Reminders.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "list_name": {"type": "string", "description": "Optional list name."},
-                    "completed": {"type": "boolean", "description": "Show completed reminders. Default false."},
-                    "limit": {"type": "integer", "description": "Max reminders. Default 20."},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "unread_emails",
-            "description": "Show sender and subject lines of unread Mail messages.",
-            "parameters": {
-                "type": "object",
-                "properties": {"limit": {"type": "integer", "description": "Max messages. Default 10."}},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_mail",
-            "description": "Search local Mail by subject or sender.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Text to search for in subject or sender."},
-                    "limit": {"type": "integer", "description": "Max messages. Default 10."},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_reminder",
-            "description": "Add a reminder to the local macOS Reminders app.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Text of the reminder."},
-                    "list_name": {"type": "string", "description": "Optional target list name."},
-                    "due": {"type": "string", "description": "Optional due date string AppleScript can parse, e.g. 'today at 5pm'."},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ui_action",
-            "description": "Control the foreground macOS application via the accessibility UI. Actions: 'info' returns the frontmost app, window, and a JSON UI tree; 'click' clicks a named element; 'focus' sets keyboard focus; 'type' sets text into a focused/named text field.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["info", "click", "focus", "type"],
-                        "description": "The UI action to perform.",
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "For click/focus/type, the accessible name of the target element.",
-                    },
-                    "role": {
-                        "type": "string",
-                        "description": "Optional AX role to disambiguate the target (e.g., 'AXButton', 'AXTextField').",
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "For type, the text to enter.",
-                    },
-                },
-                "required": ["action"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "browser_action",
-            "description": "Drive Safari autonomously via AppleScript. Actions: 'navigate' opens a URL; 'url' returns the current page URL; 'title' returns the page title; 'text' returns visible page text; 'click' clicks an element by CSS selector; 'type' fills an input by CSS selector; 'scroll' scrolls the page; 'exec' runs arbitrary JavaScript in the page and returns the result.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["navigate", "url", "title", "text", "click", "type", "scroll", "exec"],
-                        "description": "The browser action to perform.",
-                    },
-                    "url": {
-                        "type": "string",
-                        "description": "For navigate, the URL to open.",
-                    },
-                    "selector": {
-                        "type": "string",
-                        "description": "For click/type, a CSS selector for the target element.",
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "For type, the text to enter into the field.",
-                    },
-                    "amount": {
-                        "type": "integer",
-                        "description": "For scroll, pixels to scroll (positive=down, negative=up).",
-                    },
-                    "javascript": {
-                        "type": "string",
-                        "description": "For exec, the JavaScript code to run in the page.",
-                    },
-                },
-                "required": ["action"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_agent_task",
-            "description": "Execute a multi-step goal autonomously by planning, acting with tools, observing results, and correcting. Use when the user says 'do X', 'plan and do X', or asks for a task that requires multiple tools.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "goal": {
-                        "type": "string",
-                        "description": "The high-level task to accomplish.",
-                    },
-                    "max_steps": {
-                        "type": "integer",
-                        "description": "Maximum number of steps to take before giving up. Default 10.",
-                    },
-                },
-                "required": ["goal"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_project_context",
-            "description": "Set a long-horizon project context so Bad Apple remembers the project's name, description, goals, and tags across sessions.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "description": {"type": "string"},
-                    "goals": {"type": "array", "items": {"type": "string"}},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["name", "description"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_project_context",
-            "description": "Return the active long-horizon project context.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-])
-
-
-def _compact_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
-    """Return a token-light tool schema for the 9B chat template.
-
-    The full TOOLS schemas are still used for API discovery and execution.
-    In the prompt we only expose the tool name; the system prompt already
-    describes what each tool does, so prefill latency stays low while the
-    model still knows the tool is available.
-    """
-    return {
-        "type": "function",
-        "function": {
-            "name": tool["function"]["name"],
-            "description": "tool",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    }
-
-
-COMPACT_TOOLS = [_compact_tool_schema(t) for t in TOOLS]
-
-TOOL_KEYWORDS = [
-    "what time", "current time", "time is it", "date and time", "today's date",
-    "list files", "show files", "files in", "directory", "folder", "what's in",
-    "search for", "find file", "mdfind", "spotlight",
-    "run applescript", "run script", "applescript",
-    "index", "index documents", "index my", "index files",
-    "search my notes", "search notes", "what do I have", "what did I write", "find in my",
-    "read file", "read the file", "contents of", "show me the file",
-    "write file", "save to file", "create a file", "append to file", "write a note",
-    "run command", "run shell", "execute command", "shell command", "run git", "git status",
-    "search content", "search in", "grep", "find text", "find in files",
-    "screen", "screenshot", "what's on my screen", "describe my screen", "what do you see",
-    "image", "describe this image", "what is in this image", "extract text from image",
-    "capture screen",
-    "workspace", "project status", "build system", "workspace status",
-    "calendar", "events", "meetings", "reminders", "unread mail", "email", "mail",
-    "working memory", "scratchpad",
-    "consolidate memory", "dream", "offline consolidation",
-    "supervisor status", "health check", "self healing", "heal services",
-    "benchmark", "run benchmark", "measure performance", "tokens per second",
-    "mcp", "model context protocol", "mcp server", "mcp tool", "mcp marketplace",
-    "do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step",
-    "set project", "this project is", "project context", "project goals",
-]
-
-# Map query keywords to the most relevant tool names.  This lets the 9B chat
-# template receive a small, focused tool schema instead of all 60+ tools,
-# which keeps prefill latency fast while still letting the model pick the right tool.
-KEYWORD_TOOL_MAP = [
-    (["what time", "current time", "time is it", "date and time", "today's date"], ["get_current_time", "run_applescript"]),
-    (["list files", "show files", "files in", "directory", "folder", "what's in"], ["list_directory"]),
-    (["search for", "find file", "mdfind", "spotlight"], ["search_local_files"]),
-    (["read file", "read the file", "contents of", "show me the file"], ["read_file"]),
-    (["write file", "save to file", "create a file", "append to file", "write a note"], ["write_file"]),
-    (["run command", "run shell", "execute command", "shell command"], ["run_shell"]),
-    (["git status", "run git", "git diff", "git log", "git commit"], ["git_status", "git_diff", "git_log", "git_commit"]),
-    (["search content", "search in", "grep", "find text", "find in files"], ["search_content"]),
-    (["index documents", "index my", "index files"], ["index_documents"]),
-    (["search my notes", "search notes", "what do I have", "what did I write"], ["search_notes"]),
-    (["screen", "screenshot", "what's on my screen", "describe my screen", "what do you see", "capture screen"], ["capture_and_describe_screen", "capture_and_extract_screen", "screen_capture", "describe_image", "extract_text_from_image"]),
-    (["image", "describe this image", "what is in this image", "extract text from image"], ["describe_image", "extract_text_from_image"]),
-    (["workspace", "project status", "build system", "workspace status"], ["workspace_status", "run_shell"]),
-    (["project status"], ["workspace_status"]),
-    (["calendar", "events", "meetings"], ["today_events", "upcoming_events"]),
-    (["reminders"], ["list_reminders", "add_reminder"]),
-    (["unread mail", "email", "mail"], ["unread_emails", "search_mail"]),
-    (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
-    (["consolidate memory", "dream", "offline consolidation"], ["consolidate_memory"]),
-    (["supervisor status", "health check", "self healing", "heal services"], ["supervisor_status", "heal"]),
-    (["benchmark", "run benchmark", "measure performance", "tokens per second"], ["run_benchmark"]),
-    (["run shortcut", "list shortcuts", "shortcut"], ["run_shortcut"]),
-    (["run applescript", "run script", "applescript"], ["run_applescript"]),
-    (["ui", "click", "type in", "fill in", "press button", "click button", "what ui", "ui tree"], ["ui_action"]),
-    (["browser", "safari", "web page", "website", "navigate to", "open url", "click on page", "fill form", "search the web", "go to website"], ["browser_action"]),
-    (["mcp", "model context protocol", "mcp server", "mcp tool", "mcp marketplace"], ["list_mcp_servers", "add_mcp_server", "list_mcp_tools", "invoke_mcp_tool", "mcp_marketplace"]),
-    (["do for me", "do this", "do the following", "run a task", "execute a task", "plan and", "multi-step", "step by step"], ["run_agent_task"]),
-    (["set project", "this project is", "project context", "project goals"], ["set_project_context", "get_project_context"]),
-]
-
-
-# Fallback tools for queries that look like commands but don't match a specific keyword.
-DEFAULT_TOOL_NAMES = {
-    "get_current_time", "list_directory", "read_file", "write_file", "run_shell",
-    "run_applescript", "run_shortcut", "search_content", "search_local_files",
-    "git_status", "index_documents", "search_notes", "read_working_memory",
-    "capture_and_describe_screen", "workspace_status", "ui_action", "browser_action",
-}
-
-
-def tools_for_prompt(prompt: str) -> list[dict[str, Any]]:
-    """Return a small, focused tool schema for the 9B chat template."""
-    low = prompt.lower()
-    selected = set()
-    for keywords, names in KEYWORD_TOOL_MAP:
-        if any(k in low for k in keywords):
-            selected.update(names)
-    if not selected:
-        selected = set(DEFAULT_TOOL_NAMES)
-    return [t for t in TOOLS if t.get("function", {}).get("name") in selected]
-
 
 load_slicks_secret = badapple_slicks.load_slicks_secret
 
@@ -1745,455 +266,6 @@ def validate_request(prompt, max_new_tokens):
         raise ValueError("prompt exceeds maximum length")
     if not (1 <= max_new_tokens <= MAX_NEW_TOKENS):
         raise ValueError(f"max_new_tokens must be between 1 and {MAX_NEW_TOKENS}")
-
-
-async def _write_frame(writer: asyncio.StreamWriter, frame: dict):
-    data = json.dumps(frame).encode() + b"\n"
-    writer.write(data)
-    await writer.drain()
-
-
-def memory_path() -> Path:
-    path = Path(os.environ.get("BADAPPLE_MEMORY_PATH", "/var/lib/bad_apple/user_memory.json"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def conversation_path() -> Path:
-    path = Path(os.environ.get("BADAPPLE_CONVERSATION_PATH", "/var/lib/bad_apple/conversation.json"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def load_user_memory() -> list[str]:
-    try:
-        with open(memory_path()) as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return data[-50:]
-    except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
-        print(f"[mlx_server] open failed: {e}", flush=True)
-    return []
-
-
-def save_user_memory(facts: list[str]):
-    try:
-        with open(memory_path(), "w") as f:
-            json.dump(facts[-50:], f, indent=2)
-    except (TypeError, ValueError, OSError) as e:
-        print(f"[mlx_server] open failed: {e}", flush=True)
-
-
-def load_conversation() -> list[dict[str, str]]:
-    try:
-        with open(conversation_path()) as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return [m for m in data if isinstance(m, dict) and "role" in m and "content" in m]
-    except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
-        print(f"[mlx_server] open failed: {e}", flush=True)
-    return []
-
-
-def save_conversation(messages: list[dict[str, str]]):
-    try:
-        path = conversation_path()
-        # Persist last 40 messages max to keep file small and token count sane.
-        with open(path, "w") as f:
-            json.dump(messages[-40:], f, indent=2)
-        # Make it readable by the user and group so the menu bar can open it.
-        os.chmod(path, 0o644)
-    except Exception:  # noqa: BLE001,S110 - cleanup
-        pass
-
-
-def should_use_tools(prompt: str) -> bool:
-    low = prompt.lower()
-    return any(k in low for k in TOOL_KEYWORDS)
-
-
-
-
-def _resolve_common_path(raw: str) -> str:
-    low = raw.lower().strip().rstrip(".!?")
-    if low in ("my home", "my home directory", "home", "home directory"):
-        return "~"
-    if low in ("this directory", "current directory", "here", "."):
-        return "."
-    if low in ("my documents", "documents"):
-        return "~/Documents"
-    if low in ("my downloads", "downloads"):
-        return "~/Downloads"
-    if low in ("my desktop", "desktop"):
-        return "~/Desktop"
-    return raw.strip().rstrip(".!?,;")
-
-
-MULTI_STEP_PATTERNS = [
-    r"\band\s+then\b", r"\band\s+save\b", r"\band\s+write\b", r"\band\s+show\b",
-    r"\band\s+list\b", r"\band\s+read\b", r"\band\s+run\b",
-    r"\bfind\b.*\band\s+write\b", r"\bsearch\b.*\band\s+save\b",
-    r"\bplan\b", r"\bstep\s+by\s+step\b", r"\bmulti.?(?:step|task)\b",
-]
-
-
-def is_multi_step(prompt: str) -> bool:
-    low = prompt.lower()
-    return any(re.search(p, low) for p in MULTI_STEP_PATTERNS)
-
-
-def fast_execute(
-    prompt: str,
-    knowledge: BadAppleKnowledge | None = None,
-    approval: Any | None = None,
-    policy: Any | None = None,
-    workspace: Any | None = None,
-    mcp_marketplace: Any | None = None,
-) -> str | None:
-    """Fast deterministic path for common local tool commands.
-
-    Recognizes patterns like:
-      - "list files in /tmp" / "list /tmp"
-      - "read file /etc/hosts" / "read /etc/hosts"
-      - "run ls /tmp" / "run shell ls /tmp"
-      - "search for 'todo' in ~/Documents" / "grep 'todo' in ~/Documents"
-      - "write note todo.txt: buy milk" / "write a file todo.txt with buy milk"
-    """
-    low = prompt.lower().strip()
-
-    def _rt(name, args):
-        return run_tool(name, args, knowledge, approval=approval, policy=policy, workspace=workspace, user_prompt=prompt, mcp_marketplace=mcp_marketplace)
-
-    # Working memory read/clear are deterministic; writes use quoted or trailing text.
-    if re.search(r"\b(working memory|scratchpad)\b", low):
-        if re.search(r"\b(clear|erase|reset)\b", low):
-            return _rt("clear_working_memory", {})
-        m = re.search(r"['\"](.+?)['\"]", low)
-        content = m.group(1).strip() if m else None
-        if not content:
-            m = re.search(r"(?:write|add)\s+(?:to\s+)?(?:working memory|scratchpad)\s*[:-]?\s*(.+?)$", low, re.IGNORECASE)
-            content = m.group(1).strip() if m else None
-        if content:
-            return _rt("write_working_memory", {
-                "content": content,
-                "mode": "append" if "add" in low else "replace",
-            })
-        return _rt("read_working_memory", {})
-
-    # Workspace status.
-    if re.search(r"\b(project status|workspace status|active workspace)\b", low):
-        return _rt("workspace_status", {})
-
-    # Local macOS app integrations.
-    if re.search(r"\b(calendar|events|meetings|today's schedule)\b", low):
-        if "upcoming" in low or "next" in low:
-            m = re.search(r"\b(\d+)\s+days?\b", low)
-            return _rt("upcoming_events", {"days": int(m.group(1)) if m else 7})
-        return _rt("today_events", {})
-    if re.search(r"\b(reminders?|todo)\b", low):
-        if re.search(r"\b(add|create)\b", low):
-            m = re.search(r"(?:add|create)\s+a?\s*(?:reminder|todo)\s*[:-]?\s*['\"]?(.+?)['\"]?$", low, re.IGNORECASE)
-            return _rt("add_reminder", {"name": m.group(1).strip() if m else low})
-        return _rt("list_reminders", {"completed": "completed" in low or "done" in low})
-    if re.search(r"\b(unread mail|unread emails?|new mail|new emails?)\b", low):
-        return _rt("unread_emails", {})
-    if re.search(r"\b(search mail|search email|find email|find mail)\b", low):
-        m = re.search(r"(?:search|find)\s+(?:mail|email)\s+(?:for\s+)?['\"]?(.+?)['\"]?$", low, re.IGNORECASE)
-        return _rt("search_mail", {"query": m.group(1).strip() if m else low})
-
-    # Multi-step: find ... and save to ...
-    m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+in\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
-    if m:
-        query = m.group(1).strip("'\"")
-        path = _resolve_common_path(m.group(2))
-        found = _rt("search_content", {"query": query, "path": path, "max_results": 100})
-        if found.startswith("Error:"):
-            return found
-        written = _rt("write_file", {"filename": m.group(3).strip(), "content": f"Results for '{query}' in {path}:\n\n{found}"})
-        return f"{written}\n\nFound matches:\n{found[:500]}"
-
-    # Multi-step: find ... and save to ... (no 'in' path, default home)
-    m = re.search(r"\bfind\b(?:\s+all)?\s+['\"]?(.+?)['\"]?\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
-    if m:
-        query = m.group(1).strip("'\"")
-        found = _rt("search_content", {"query": query, "path": "~", "max_results": 100})
-        if found.startswith("Error:"):
-            return found
-        written = _rt("write_file", {"filename": m.group(2).strip(), "content": f"Results for '{query}' in home:\n\n{found}"})
-        return f"{written}\n\nFound matches:\n{found[:500]}"
-
-    # Multi-step: index ... and search for ...
-    m = re.search(r"\bindex\b(?:\s+my)?\s+(.+?)\s+and\s+(?:search|search\s+for)\s+['\"]?(.+?)['\"]?$", low, re.IGNORECASE)
-    if m:
-        path = _resolve_common_path(m.group(1))
-        indexed = _rt("index_documents", {"path": path})
-        results = _rt("search_notes", {"query": m.group(2).strip("'\"")})
-        return f"{indexed}\n\n{results}"
-
-    # Multi-step: list ... and save to ...
-    m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)\s+(?:and\s+save\s+(?:it\s+)?to|and\s+write\s+(?:it\s+)?to)\s+([\w\.\-_]+)", low, re.IGNORECASE)
-    if m:
-        path = _resolve_common_path(m.group(1))
-        listed = _rt("list_directory", {"path": path})
-        if listed.startswith("Error:"):
-            return listed
-        written = _rt("write_file", {"filename": m.group(2).strip(), "content": f"Files in {path}:\n\n{listed}"})
-        return f"{written}\n\nFiles:\n{listed[:500]}"
-
-    # list files (but not MCP commands, which the tool router handles)
-    if "mcp" not in low:
-        m = re.search(r"\blist\b(?:\s+(?:the\s+)?files)?(?:\s+in)?\s+(.+?)(?!\s+(?:and|or)\b)$", low, re.IGNORECASE)
-        if m:
-            return _rt("list_directory", {"path": _resolve_common_path(m.group(1))})
-
-    # read file
-    m = re.search(r"\bread\b(?:\s+file)?\s+(.+)$", low, re.IGNORECASE)
-    if m:
-        return _rt("read_file", {"path": _resolve_common_path(m.group(1)), "limit": 5000})
-
-    # run shell
-    m = re.search(r"\b(?:run|execute)\b(?:\s+shell|\s+command)?\s+(.+)$", low, re.IGNORECASE)
-    if m:
-        return _rt("run_shell", {"command": m.group(1).strip()})
-
-    # search content
-    m = re.search(r"\b(?:search|grep)\b(?:\s+for)?\s+['\"]?(.+?)['\"]?(?!\s+(?:and|or)\b)(?:\s+in\s+(.+))?$", low, re.IGNORECASE)
-    if m:
-        query = m.group(1).strip("'\"")
-        path = _resolve_common_path(m.group(2)) if m.group(2) else "~"
-        return _rt("search_content", {"query": query, "path": path, "max_results": 20})
-
-    # write note
-    m = re.search(r"\bwrite\b(?:\s+a?\s+note|\s+file|\s+to)?\s+([\w\.\-_]+)\s*(?::|with|containing)\s+(.+)$", low, re.IGNORECASE)
-    if m:
-        return _rt("write_file", {"filename": m.group(1).strip(), "content": m.group(2).strip()})
-
-    # Shortcuts / Accessibility
-    m = re.search(r"\blist\b(?:\s+(?:my|all))?(?:\s+shortcuts)$", low, re.IGNORECASE)
-    if m or re.search(r"\bwhat\s+shortcuts\b", low, re.IGNORECASE):
-        return _rt("list_shortcuts", {})
-
-    m = re.search(r"\brun\s+shortcut\s+['\"]?(.+?)['\"]?(?:\s+with\s+input\s+['\"]?(.+?)['\"]?)?$", low, re.IGNORECASE)
-    if m:
-        return _rt("run_shortcut", {"name": m.group(1).strip("'\""), "input": (m.group(2) or "").strip("'\"")})
-
-    return None
-
-
-
-
-
-
-
-
-
-
-
-def extract_tool_calls(text: str):
-    """Extract tool calls from the model output.
-
-    Supports two formats:
-      - Bad Apple JSON: <tool_call>{"name":"...","arguments":{...}}</tool_call>
-      - Qwen XML:       <tool_call> <function=name> {"arg":...} </function> </tool_call>
-    """
-    calls = []
-
-    # Bad Apple JSON format.
-    json_pattern = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-    for m in json_pattern.finditer(text):
-        try:
-            obj = json.loads(m.group(1))
-            if isinstance(obj, dict) and "name" in obj:
-                calls.append(obj)
-        except json.JSONDecodeError:
-            continue
-
-    # Qwen XML function-call format.
-    xml_pattern = re.compile(r"<tool_call>\s*<function=(\w+)>\s*(.*?)\s*</function>\s*</tool_call>", re.DOTALL)
-    for m in xml_pattern.finditer(text):
-        name = m.group(1)
-        arg_text = m.group(2).strip()
-        args = {}
-        if arg_text:
-            try:
-                parsed = json.loads(arg_text)
-                if isinstance(parsed, dict):
-                    args = parsed
-            except json.JSONDecodeError:
-                # Some models omit braces; wrap to make it parseable JSON.
-                try:
-                    parsed = json.loads("{" + arg_text + "}")
-                    if isinstance(parsed, dict):
-                        args = parsed
-                except json.JSONDecodeError:
-                    pass
-        calls.append({"name": name, "arguments": args})
-
-    # Remove all recognized call blocks from the returned text.
-    cleaned = json_pattern.sub("", text)
-    cleaned = xml_pattern.sub("", cleaned).strip()
-    return calls, cleaned
-
-
-def polish_text(text: str) -> str:
-    """Light cleanup for streaming chunks; does not add or force a sign-off."""
-    # Strip Qwen3 thinking blocks and special stop tokens if they leak into the stream.
-    text = re.sub(r"\n?\s*<thinking>.*?\s*\n?", "", text, flags=re.DOTALL)
-    text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
-    text = re.sub(r"</s>|<\|endoftext\|>|</thinking>", "", text)
-    text = text.replace("— —", "—")
-    text = text.replace("*", "")
-    text = re.sub(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]+", " ", text)
-    text = re.sub(r"[ʋʌɑɒɛɪʊɔəæ]", lambda m: {"ʋ":"v","ʌ":"v","ɑ":"a","ɒ":"o","ɛ":"e","ɪ":"i","ʊ":"u","ɔ":"o","ə":"a","æ":"a"}[m.group()], text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r" ?— ?", "—", text)
-    text = re.sub(r"\.\.\.", "…", text)
-    text = re.sub(r"\s+([.,!?;:])", r"\1", text)
-    # Ensure a space after sentence punctuation when the next token runs together.
-    text = re.sub(r"([.!?…])([A-Za-z])", r"\1 \2", text)
-    # Rewrite "fr fr" / "frfr" to the full phrase so it is spoken clearly.
-    text = re.sub(r"\bfr fr\b", "for real for real", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bfrfr\b", "for real for real", text, flags=re.IGNORECASE)
-    return text.strip()
-
-
-def _is_sentence_end(text: str) -> bool:
-    """Heuristic to flush a streaming chunk when a sentence or utterance is done."""
-    t = text.strip()
-    if not t or len(t) <= 40:
-        return False
-    if t.lower().endswith("—mwah") or t.lower().endswith("mwah"):
-        return True
-    if t.lower().endswith("—xoxo") or t.lower().endswith("xoxo"):
-        return True
-    if t.endswith((".", "!", "?", "…")):
-        return True
-    if "\n\n" in t:
-        return True
-    # Force a flush on very long runs without punctuation so the client doesn't stall.
-    if len(t) > 200:
-        return True
-    return False
-
-
-# California beach girl English. Strip any foreign-language leakage.
-ALLOWED_ENGLISH = {
-    "babe", "hon", "bestie", "girly", "doll", "sweets", "dude",
-}
-FORBIDDEN_WORDS = {
-    "hola", "adiós", "adios", "gracias", "por favor", "mira", "oye",
-    "bueno", "muy", "mucho", "bien", "mal", "dios", "vaya",
-    "nivel", "conciencia", "estoy", "estás", "siento", "tengo", "ayuda", "algo",
-    "papi", "mami", "amor", "corazón", "corazon", "cariño", "carino",
-    "mija", "mijo", "besos", "cielo", "linda", "lindo", "princesa", "reina",
-    "mi amor",
-}
-
-def _strip_existing_signoff(text: str) -> str:
-    """Remove any trailing sign-off tokens."""
-    text = re.sub(r"[—-]\s*(mwah|besos|kisses)\s*\.?\s*$", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"\b(mwah|besos|kisses)\b", "", text, flags=re.IGNORECASE).strip()
-    return text
-
-
-def _filter_english_sentences(text: str) -> str:
-    """Drop sentences that langdetect flags as mostly non-English."""
-    # Split on sentence terminators while keeping the punctuation.
-    # Do not split on ellipses (...) because short fragments confuse langdetect.
-    parts = re.split(r"(?<=[.!?])\s+", text)
-    cleaned = []
-    for part in parts:
-        if not part.strip():
-            continue
-        # Keep short fragments and known sign-offs.
-        if part.strip().lower().rstrip(".") in {"—mwah", "mwah", "—besos", "besos"}:
-            continue
-        try:
-            lang = detect(part)
-        except LangDetectException:
-            lang = "en"
-        # Keep if English dominates, otherwise drop the whole sentence.
-        if lang in {"en", "ca", "tl"}:  # ca/tl can be confused with short spicy English
-            cleaned.append(part)
-    return " ".join(cleaned).strip()
-
-
-def _queue_get(q: queue.Queue, timeout: float = 0.1) -> Any | None:
-    try:
-        return q.get(block=True, timeout=timeout)
-    except queue.Empty:
-        return None
-
-
-def postprocess_output(text: str, sign_off: str = "") -> str:
-    # Strip Qwen3 thinking blocks; they often precede the real answer.
-    text = re.sub(r"\n?\s*<think>.*?\s*\n?", "", text, flags=re.DOTALL)
-    text = re.sub(r"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)", "", text, flags=re.DOTALL)
-    text = re.sub(r"</s>|<\|endoftext\|>|</thinking>", "", text)
-    text = text.replace("— —", "—")
-    text = re.sub(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]+", " ", text)
-    text = re.sub(r"[ʋʌɑɒɛɪʊɔəæ]", lambda m: {"ʋ":"v","ʌ":"v","ɑ":"a","ɒ":"o","ɛ":"e","ɪ":"i","ʊ":"u","ɔ":"o","ə":"a","æ":"a"}[m.group()], text)
-    # Remove disallowed persona ticks and normalize endearments.
-    text = re.sub(r"\b[pP]+f+[tT]+\b", "", text)
-    text = re.sub(r"\bhon\b", "hun", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip()
-
-    text = _strip_existing_signoff(text)
-
-    # Strip forbidden non-English words.
-    for word in FORBIDDEN_WORDS:
-        text = re.sub(r"\b" + re.escape(word) + r"\b", "", text, flags=re.IGNORECASE)
-
-    # Clean up repeated punctuation and spaces.
-    text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"\s*,\s*([.!?])", r"\1", text)
-    text = re.sub(r"\s*,\s*,", ",", text)
-    text = re.sub(r"\s*,\s*—", "—", text)
-    text = re.sub(r"^,\s*", "", text)
-    text = re.sub(r"\s*,\s*$", "", text)
-    text = re.sub(r"\s+([.!?])", r"\1", text)
-    text = re.sub(r"([.!?])([—-])", r"\1 \2", text)
-
-    # Collapse immediately repeated sentences (the 9B sometimes echoes itself).
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", text) if s.strip()]
-    deduped: list[str] = []
-    for s in sentences:
-        low = s.lower().strip(".!?")
-        if deduped and low == deduped[-1].lower().strip(".!?"):
-            continue
-        deduped.append(s)
-    text = " ".join(deduped)
-
-    if not sign_off:
-        return text.strip()
-    if text.endswith("—"):
-        return f"{text}{sign_off.lstrip('—')}".strip()
-    if text.endswith(".") or text.endswith("!") or text.endswith("?") or text.endswith("…"):
-        return f"{text} {sign_off}".strip()
-    return f"{text} {sign_off}".strip()
-
-
-STOP_WORDS = {
-    "i", "me", "mine", "you", "your", "yours", "it", "its", "am", "are",
-    "was", "were", "be", "been", "being", "the", "a", "an", "this", "that", "these",
-    "those", "and", "or", "but", "if", "then", "than", "as", "of", "in", "on", "at",
-    "to", "for", "with", "from", "up", "down", "out", "off", "over", "under", "again",
-    "which", "who", "when", "where", "why", "how", "do", "does", "did", "just",
-    "can", "could", "would", "should", "will", "shall", "may", "might", "must",
-}
-
-
-def relevant_memories(user_prompt: str, memories: list[str]) -> list[str]:
-    words = set(w for w in re.findall(r"\b\w+\b", user_prompt.lower()) if w not in STOP_WORDS)
-    scored = []
-    for m in memories:
-        m_words = set(w for w in re.findall(r"\b\w+\b", m.lower()) if w not in STOP_WORDS)
-        score = len(words & m_words)
-        if score >= 2:
-            scored.append((score, m))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [m for _, m in scored[:3]]
-
 
 class MLXServer:
     def __init__(self, secret: bytes, system_prompt: str):
@@ -2422,6 +494,78 @@ class MLXServer:
             badapple_speculate.unload_draft(self.draft_model)
             self.draft_model = None
 
+    def _model_config_hash_path(self) -> Path:
+        """Path to the persisted model config.json hash (kept next to the semantic cache)."""
+        return self.data_dir / "model_config_hash.json"
+
+    def _resolve_config_json(self) -> Path | None:
+        """Locate ``config.json`` for the current main model on disk.
+
+        For a local path model the file is read directly. For a HuggingFace repo
+        the config.json for the pinned ``MODEL_REVISION`` was already fetched by
+        ``mlx_lm.load``, so ``hf_hub_download`` resolves it from the local cache
+        without any network access.
+        """
+        local = Path(MAIN_MODEL)
+        if local.is_dir():
+            cfg = local / "config.json"
+            return cfg if cfg.is_file() else None
+        try:
+            from huggingface_hub import hf_hub_download
+
+            cfg_path = hf_hub_download(MAIN_MODEL, "config.json", revision=MODEL_REVISION)
+        except Exception as e:  # noqa: BLE001 - integrity check is best-effort
+            print(f"[integrity] could not locate config.json for {MAIN_MODEL}: {e}", flush=True)
+            return None
+        p = Path(cfg_path)
+        return p if p.is_file() else None
+
+    def _verify_model_integrity(self) -> None:
+        """Hash the loaded model's ``config.json`` and warn if it changed.
+
+        The semantic-cache embeddings, token vectors, and ANE shard manifest are
+        all tied to a specific model revision. If ``config.json`` changes between
+        loads (e.g. the upstream repo was updated or yanked while pinned to
+        ``main``), those cached artifacts may be stale and should be cleared.
+        """
+        cfg = self._resolve_config_json()
+        if cfg is None:
+            print(f"[integrity] config.json not found for {MAIN_MODEL}; skipping config hash check.", flush=True)
+            return
+        try:
+            digest = hashlib.sha256(cfg.read_bytes()).hexdigest()
+        except OSError as e:
+            print(f"[integrity] could not read {cfg}: {e}", flush=True)
+            return
+        print(
+            f"[integrity] {MAIN_MODEL} (revision={MODEL_REVISION}) "
+            f"config.json sha256={digest[:16]}...",
+            flush=True,
+        )
+        hash_path = self._model_config_hash_path()
+        try:
+            prev = json.loads(hash_path.read_text()) if hash_path.is_file() else None
+        except (OSError, json.JSONDecodeError):
+            prev = None
+        if prev is not None:
+            prev_hash = prev.get("config_sha256")
+            if prev_hash and prev_hash != digest:
+                print(
+                    "[integrity] WARNING: model config.json hash changed since last load "
+                    f"({prev_hash[:16]} -> {digest[:16]}). The semantic cache, KV cache, "
+                    "and ANE shard manifest may be stale. Consider clearing "
+                    "`/var/lib/bad_apple/semantic_cache.json` and the `kv_cache` directory.",
+                    flush=True,
+                )
+            elif prev_hash == digest:
+                print("[integrity] config.json hash matches last load.", flush=True)
+        # Persist the current hash so subsequent loads can detect drift.
+        record = {"model": MAIN_MODEL, "revision": MODEL_REVISION, "config_sha256": digest}
+        try:
+            hash_path.write_text(json.dumps(record, indent=2))
+        except OSError as e:
+            print(f"[integrity] could not persist config hash: {e}", flush=True)
+
     def _ensure_main_model(self) -> None:
         """Load the 9B main brain on first use if lazy loading is enabled."""
         if self.model is not None and self.tokenizer is not None:
@@ -2442,8 +586,9 @@ class MLXServer:
                     raise RuntimeError(f"main model provenance check failed: {prov.get('error')}")
                 if prov.get("status") == "missing":
                     raise RuntimeError(f"main model not available: {prov.get('error')}")
-            self.model, self.tokenizer = load(MAIN_MODEL)
+            self.model, self.tokenizer = load(MAIN_MODEL, revision=MODEL_REVISION)
             print("Bad Apple MLX brain loaded.", flush=True)
+            self._verify_model_integrity()
             if getattr(self, "model_manager", None) is not None:
                 self.model_manager.mark_loaded("main_9b")
             self.model_registry.set_current(MAIN_MODEL)
@@ -2460,181 +605,24 @@ class MLXServer:
         self._prime_system_cache(self.personas.get_system_prompt(voice_mode=False), voice_mode=False)
 
     def _prime_system_cache(self, system_content: str, voice_mode: bool) -> None:
-        """Run the system message through the model and keep a pristine KV copy.
-
-        This populates `_system_prompt_cache` once. `_stream` deep-copies it for
-        each query, so the expensive system prefill is paid once on model load
-        (or when the system prompt changes), not after every response.
-
-        If a persisted KV cache matching the current model + system prompt exists
-        on disk, it is warm-loaded instead of re-prefilling.
-        """
-        if self.model is None or self.tokenizer is None:
-            return
-        t0 = time.time()
-        # The model's chat template requires at least a user message, so render
-        # a dummy one and keep only the system-message prefix.
-        rendered_dummy = self.tokenizer.apply_chat_template(
-            [{"role": "system", "content": system_content}, {"role": "user", "content": ""}],
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-        user_marker = "<|im_start|>user\n"
-        idx = rendered_dummy.find(user_marker)
-        if idx == -1:
-            rendered = rendered_dummy
-        else:
-            rendered = rendered_dummy[:idx]
-        tokens = self.tokenizer.encode(rendered, add_special_tokens=False)
-        self._cache_system_hash = f"{voice_mode}:{hashlib.sha256(rendered.encode()).hexdigest()[:16]}"
-
-        # Try warm-loading a persisted cache before paying the prefill cost.
-        # Create a throwaway cache to learn the expected layer count for validation.
-        _probe = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
-        expected_layer_count = len(_probe)
-        del _probe
-        if self._load_kv_cache(expected_layer_count=expected_layer_count):
-            print(f"[perf] system prompt cache warm-loaded ({len(tokens)} tokens) in {time.time() - t0:.2f}s", flush=True)
-            return
-
-        try:
-            self._system_prompt_cache = make_prompt_cache(self.model, max_kv_size=self.max_kv_size)
-            _ = self.model(mx.array(tokens)[None], cache=self._system_prompt_cache)
-            mx.eval([c.state for c in self._system_prompt_cache])
-            mx.clear_cache()
-            print(f"[perf] system prompt cache primed ({len(tokens)} tokens) in {time.time() - t0:.2f}s", flush=True)
-        except Exception as e:  # noqa: BLE001 - cache priming is best-effort
-            print(f"[main] system prompt cache priming failed: {e}", flush=True)
-            self._cache_system_hash = None
-            self._system_prompt_cache = None
-        else:
-            # Persist the freshly primed cache so the next daemon restart
-            # can warm-load it instead of re-prefilling the system prompt.
-            self._save_kv_cache()
+        """Run the system message through the model and keep a pristine KV copy."""
+        prime_system_cache(self, system_content, voice_mode)
 
     def _kv_cache_paths(self) -> tuple[Path, Path]:
         """Return (safetensors_path, metadata_path) for the current model+prompt."""
-        from hashlib import sha256
-        model_ref = os.environ.get("BADAPPLE_MAIN_MODEL", "unknown")
-        key = f"{model_ref}:{self.max_kv_size}:{self._cache_system_hash}"
-        digest = sha256(key.encode()).hexdigest()[:16]
-        self._kv_cache_dir.mkdir(parents=True, exist_ok=True)
-        return self._kv_cache_dir / f"sys_{digest}.safetensors", self._kv_cache_dir / f"sys_{digest}.json"
+        return kv_cache_paths(self)
 
     def _save_kv_cache(self) -> None:
         """Persist the system prompt KV cache to disk for warm-loading on restart."""
-        if self._system_prompt_cache is None or self._cache_system_hash is None:
-            return
-        try:
-            arrays: dict[str, mx.array] = {}
-            metadata: list[dict[str, Any]] = []
-            for i, c in enumerate(self._system_prompt_cache):
-                ctype = type(c).__name__
-                state = c.state
-                meta = c.meta_state
-                if ctype == "ArraysCache":
-                    # state is a list of arrays (or None); save each non-None entry.
-                    cache_list = state if isinstance(state, list) else list(state)
-                    none_indices = []
-                    for j, arr in enumerate(cache_list):
-                        if arr is not None:
-                            arrays[f"layer_{i}_arr_{j}"] = arr
-                        else:
-                            none_indices.append(j)
-                    metadata.append({
-                        "type": ctype,
-                        "meta_state": list(meta) if not isinstance(meta, str) else meta,
-                        "cache_size": len(cache_list),
-                        "none_indices": none_indices,
-                    })
-                else:
-                    # KVCache / RotatingKVCache: state is (keys, values).
-                    k, v = state
-                    arrays[f"layer_{i}_keys"] = k
-                    arrays[f"layer_{i}_values"] = v
-                    metadata.append({
-                        "type": ctype,
-                        "meta_state": list(meta),
-                    })
-            weights_path, meta_path = self._kv_cache_paths()
-            # mx.save_safetensors appends .safetensors if not already present.
-            tmp_w = weights_path.with_name(weights_path.stem + ".tmp.safetensors")
-            tmp_m = meta_path.with_name(meta_path.stem + ".tmp.json")
-            mx.save_safetensors(str(tmp_w), arrays)
-            import json
-            tmp_m.write_text(json.dumps({
-                "model": os.environ.get("BADAPPLE_MAIN_MODEL", ""),
-                "max_kv_size": self.max_kv_size,
-                "system_hash": self._cache_system_hash,
-                "num_layers": len(self._system_prompt_cache),
-                "layers": metadata,
-            }), encoding="utf-8")
-            tmp_w.replace(weights_path)
-            tmp_m.replace(meta_path)
-            print(f"[kv] system prompt cache saved to {weights_path.name}", flush=True)
-        except Exception as e:  # noqa: BLE001 - persistence is best-effort
-            print(f"[kv] failed to save system cache: {e}", flush=True)
+        save_kv_cache(self)
 
     def _load_kv_cache(self, expected_layer_count: int = 0) -> bool:
         """Try to warm-load a persisted system prompt KV cache. Returns True on success."""
-        if self._cache_system_hash is None or self.model is None:
-            return False
-        try:
-            weights_path, meta_path = self._kv_cache_paths()
-            if not weights_path.is_file() or not meta_path.is_file():
-                return False
-            import json
-
-            from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
-            _cache_types = {"ArraysCache": ArraysCache, "RotatingKVCache": RotatingKVCache, "KVCache": KVCache}
-            meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
-            # Validate the persisted cache matches the current model architecture.
-            if expected_layer_count and meta_doc.get("num_layers") != expected_layer_count:
-                return False
-            if meta_doc.get("max_kv_size") != self.max_kv_size:
-                return False
-            loaded = mx.load(str(weights_path))
-            reconstructed: list[Any] = []
-            for i, layer_meta in enumerate(meta_doc["layers"]):
-                ctype = layer_meta["type"]
-                cls = _cache_types.get(ctype, KVCache)
-                if ctype == "ArraysCache":
-                    cache_size = layer_meta.get("cache_size", 0)
-                    none_indices = set(layer_meta.get("none_indices", []))
-                    cache_list: list[Any] = []
-                    for j in range(cache_size):
-                        if j in none_indices:
-                            cache_list.append(None)
-                        else:
-                            cache_list.append(loaded[f"layer_{i}_arr_{j}"])
-                    meta_state = layer_meta["meta_state"]
-                    obj = cls.from_state(cache_list, meta_state)
-                else:
-                    state = (loaded[f"layer_{i}_keys"], loaded[f"layer_{i}_values"])
-                    meta_state = tuple(layer_meta["meta_state"])
-                    obj = cls.from_state(state, meta_state)
-                reconstructed.append(obj)
-            self._system_prompt_cache = reconstructed
-            print(f"[kv] system prompt cache warm-loaded from {weights_path.name}", flush=True)
-            return True
-        except Exception as e:  # noqa: BLE001 - loading is best-effort
-            print(f"[kv] failed to warm-load system cache: {e}", flush=True)
-            return False
+        return load_kv_cache(self, expected_layer_count=expected_layer_count)
 
     def _ensure_prompt_cache(self, system_content: str, voice_mode: bool) -> None:
         """Re-prime the pristine system cache if the system prompt or voice mode changed."""
-        # Compute the same rendered prefix used in _prime_system_cache to compare hashes.
-        rendered_dummy = self.tokenizer.apply_chat_template(
-            [{"role": "system", "content": system_content}, {"role": "user", "content": ""}],
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-        user_marker = "<|im_start|>user\n"
-        idx = rendered_dummy.find(user_marker)
-        rendered = rendered_dummy if idx == -1 else rendered_dummy[:idx]
-        expected_hash = f"{voice_mode}:{hashlib.sha256(rendered.encode()).hexdigest()[:16]}"
-        if self._system_prompt_cache is None or self._cache_system_hash != expected_hash:
-            self._prime_system_cache(system_content, voice_mode=voice_mode)
+        ensure_prompt_cache(self, system_content, voice_mode)
 
     def flush_vram(self) -> dict[str, Any]:
         """Clear the Metal allocation cache instantly."""
@@ -2909,60 +897,10 @@ class MLXServer:
         self.prune_history()
         return list(self.messages)
 
+
     def plan_and_execute(self, task: str, max_tokens: int, voice_mode: bool = False) -> str | None:
         """Generate a step plan and execute it using local tools."""
-        # 1. Ask the 8B for a dry, structured plan.
-        plan_messages = [
-            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-            {"role": "user", "content": task},
-        ]
-        plan_prompt = self.tokenizer.apply_chat_template(
-            plan_messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        plan_raw = self._stream(plan_prompt, max_tokens=200, voice_mode=voice_mode)
-        plan_lines = [line.strip() for line in plan_raw.splitlines() if line.strip().startswith(("TOOL:", "SAY:"))]
-        if not plan_lines:
-            return None
-
-        # 2. Execute tool steps, collecting the last tool result.
-        last_tool_result = ""
-        final_say = ""
-        for line in plan_lines:
-            if line.startswith("TOOL:"):
-                parts = line.split(":", 2)
-                if len(parts) < 3:
-                    continue
-                tool_name = parts[1].strip()
-                try:
-                    args = json.loads(parts[2].strip())
-                except json.JSONDecodeError:
-                    continue
-                last_tool_result = self._run_approved_tool(tool_name, args, task)
-            elif line.startswith("SAY:"):
-                final_say = line.split(":", 1)[1].strip()
-
-        # 3. If a SAY step exists, use it as a prompt to summarize the last tool result.
-        if final_say:
-            summary_messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": task},
-                {"role": "tool", "content": f"Tool result:\n{last_tool_result}"},
-                {"role": "user", "content": final_say},
-            ]
-            summary_prompt = self.tokenizer.apply_chat_template(
-                summary_messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            raw = self._stream(summary_prompt.rstrip(), max_tokens, voice_mode=voice_mode)
-            return postprocess_output(raw.strip())
-
-        # No SAY step: just return the last tool result with persona polish.
-        return postprocess_output(last_tool_result)
+        return _plan_and_execute(self, task, max_tokens, voice_mode=voice_mode)
 
     def render_prompt(self, messages: list[dict[str, str]], use_tools: bool = False, voice_mode: bool = False, benchmark: bool = False) -> str:
         # Build retrieved context from long-term memory and local documents.
@@ -3011,53 +949,9 @@ class MLXServer:
                     "content": f"{last['content']}\n\n(Vibe: {mood} — this turn's roast target is {target}.)",
                 }
 
-        # Tight context fetches to keep prompt tokens and prefill latency low.
-        rel_mem = [] if self.runtime.private_mode else self.memory.search(messages[-1]["content"], k=1)
-
-        # If a user-fact is already remembered, answer from that instead of
-        # getting distracted by unrelated documents.
-        rel_know = []
-        if not rel_mem and not voice_mode:
-            rel_know = self.knowledge.search(messages[-1]["content"], k=1, threshold=0.92)
-
-        # Put user memories right in the current user message so the assistant
-        # can't ignore them. Keep snippets short so prefill stays fast.
-        if rel_mem:
-            memory_text = "Things you remember about the user:\n" + "\n".join(
-                f"- {m[:80]}" for m in rel_mem[:1]
-            )
-            last = patched[-1]
-            if last["role"] == "user":
-                patched[-1] = {
-                    "role": "user",
-                    "content": f"{last['content']}\n\n{memory_text}",
-                }
-
-        # Put local documents right before the user question (long, retrieved).
-        # Cap snippet length to avoid ballooning the prompt and killing TTFT.
-        if rel_know:
-            docs_text = "Relevant local documents:\n" + "\n".join(
-                f"- {c[:160]}" for c, _ in rel_know[:1]
-            )
-            patched.insert(-1, {
-                "role": "user",
-                "content": f"Use this context if relevant:\n\n{docs_text}",
-            })
-
-        # Include the active workspace/project context.
-        if self.workspace.path:
-            ws_text = f"Active workspace:\n{self.workspace.summary()}"
-            patched.insert(-1, {
-                "role": "user",
-                "content": f"Use this project context if relevant:\n\n{ws_text}",
-            })
-
-        project_ctx = self.memory.get_project_context()
-        if project_ctx:
-            patched.insert(-1, {
-                "role": "user",
-                "content": f"Long-horizon project context:\n\n{project_ctx}",
-            })
+        # RAG: build retrieved context from long-term memory, local documents,
+        # and the active workspace. Delegates to badapple_mlx_rag.
+        patched = build_retrieval_context(self, messages, patched, voice_mode=voice_mode)
 
         rendered = self.tokenizer.apply_chat_template(
             patched,
@@ -3071,6 +965,7 @@ class MLXServer:
         # </thinking>\n\n marker; trimming that whitespace confuses the draft.
         return rendered
 
+
     def generate_with_tools(
         self,
         user_prompt: str,
@@ -3079,256 +974,21 @@ class MLXServer:
         stream_queue: queue.Queue | None = None,
         benchmark: bool = False,
     ) -> str:
-        self.touch_activity()
-        self.check_prompt_reload()
+        return _generate_with_tools(self, user_prompt, max_tokens, voice_mode=voice_mode, stream_queue=stream_queue, benchmark=benchmark)
 
-        # Workspace commands (set workspace to ... / clear workspace) are handled
-        # without the 9B model (unless benchmarking, where we want to force generation).
-        if not benchmark:
-            ws_low = user_prompt.strip().lower()
-            if ws_low.startswith("set workspace to "):
-                path = user_prompt[16:].strip()
-                resp = self.workspace.set(path)
-                self.workspace_watcher.set_workspace(Path(path).expanduser() if path else None)
-                self._audit_record("workspace", {"prompt": user_prompt, "response": resp})
-                self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": resp})
-                self.prune_history()
-                self._save_conversation()
-                return resp
-            if ws_low in ("clear workspace", "unset workspace"):
-                resp = self.workspace.clear()
-                self._audit_record("workspace", {"prompt": user_prompt, "response": resp})
-                self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": resp})
-                self.prune_history()
-                self._save_conversation()
-                return resp
-
-            # Persona commands (switch, teach) are handled without the 9B model.
-            persona_resp = self.personas.handle_command(user_prompt)
-            if persona_resp is not None:
-                self._audit_record("persona_command", {
-                    "prompt": user_prompt,
-                    "active_persona": self.personas.active,
-                    "response": persona_resp,
-                })
-                self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": persona_resp})
-                self.prune_history()
-                self._save_conversation()
-                return persona_resp
-
-            # Capability and creator questions are answered directly so the 9B does
-            # not fall back into generic model identity or skip the useful part.
-            meta_resp = self._try_meta_response(user_prompt, voice_mode=voice_mode)
-            if meta_resp is not None:
-                kind = "capabilities" if "can do" in meta_resp or "what I can do" in meta_resp else "identity"
-                self._audit_record(kind, {"prompt": user_prompt, "response": meta_resp})
-                self.messages.append({"role": "user", "content": user_prompt})
-                self.messages.append({"role": "assistant", "content": meta_resp})
-                self.prune_history()
-                self._save_conversation()
-                if stream_queue is not None:
-                    stream_queue.put(meta_resp)
-                return meta_resp
-
-            # Semantic cache: bypass the 9B for repeated questions.
-            if not self.runtime.private_mode and not voice_mode and not should_use_tools(user_prompt):
-                cached = self.cache.lookup(user_prompt, persona=self.personas.active)
-                if cached:
-                    if self.firewall.check_full(cached):
-                        cached = "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
-                    self._audit_record("cache_hit", {"prompt": user_prompt, "response": cached[:500], "persona": self.personas.active})
-                    self.messages.append({"role": "user", "content": user_prompt})
-                    self.messages.append({"role": "assistant", "content": cached})
-                    self.prune_history()
-                    self._save_conversation()
-                    return cached
-
-        if user_prompt.strip().lower() == "new chat":
-            self.reset_conversation()
-            # Ask the model for a fresh English greeting instead of treating it as a command.
-            user_prompt = "Greet me"
-        self.record_fact(user_prompt, source="user")
-        messages = self.build_messages(user_prompt)
-        use_tools = should_use_tools(user_prompt) and not benchmark
-
-        self._audit_record("query", {
-            "prompt": user_prompt,
-            "persona": self.personas.active,
-            "voice_mode": voice_mode,
-            "use_tools": use_tools,
-        })
-
-        def clean(raw: str) -> str:
-            _, text = extract_tool_calls(raw)
-            text = postprocess_output(text)
-            if os.environ.get("BADAPPLE_DISABLE_FIREWALL") == "1":
-                return text
-            matched = self.firewall.check_full(text)
-            if matched:
-                print(f"[firewall] blocked pattern {matched!r} in final text: {text[:200]!r}", flush=True)
-                return "[Output firewall: I caught a pattern I am not allowed to say out loud.]"
-            return text
-
-        # Ensure the main model is loaded before we try to use its tokenizer
-        # in render_prompt (lazy loading defers this until the first request).
-        self._ensure_main_model()
-
-        # First generation. Only stream when tools are not offered, because tool
-        # reasoning can produce intermediate <tool_call> blocks we don't want
-        # mixed into the streamed voice/text output.
-        raw = self._stream(
-            self.render_prompt(messages, use_tools=use_tools, voice_mode=voice_mode),
-            max_tokens,
-            stream_queue=stream_queue if not use_tools else None,
-            voice_mode=voice_mode,
-        )
-        tool_calls, _ = extract_tool_calls(raw)
-
-        if not tool_calls:
-            final = clean(raw)
-            self._cache_store(user_prompt, final)
-            return final
-
-        # Tool loop (multi-step task execution; allow more chained tool calls)
-        for _ in range(5):
-            for call in tool_calls:
-                result = self._run_approved_tool(call["name"], call.get("arguments", {}), user_prompt)
-                self.messages.append({
-                    "role": "user",
-                    "content": f"Tool result for {call['name']}:\n{result}",
-                })
-                self._audit_record("tool_result", {
-                    "prompt": user_prompt,
-                    "tool": call["name"],
-                    "result": result[:500],
-                })
-            # Re-render and generate after tool results
-            raw = self._stream(self.render_prompt(self.messages, use_tools=True, voice_mode=voice_mode), max_tokens, voice_mode=voice_mode)
-            tool_calls, _ = extract_tool_calls(raw)
-            if not tool_calls:
-                final = clean(raw)
-                self._cache_store(user_prompt, final)
-                return final
-
-        final = clean(raw)
-        self._cache_store(user_prompt, final)
-        return final
 
     def _run_approved_tool(self, name: str, args: dict[str, Any], user_prompt: str) -> str:
         """Run a tool, but gate destructive tools behind the approval workflow."""
-        if not self.runtime.allows_mutation():
-            return "Runtime is stopped or in safe mode; tool execution is disabled."
-        capability = {
-            "generate_image": "image_generation",
-            "lora_train": "lora_training",
-            "index_documents": "document_index",
-            "xcode_index_project": "document_index",
-            "describe_image": "vision",
-            "capture_and_describe_screen": "vision",
-            "capture_and_extract_screen": "vision",
-            "screen_capture": "vision",
-            "extract_text_from_image": "vision",
-            "translate_text": "translation",
-        }.get(name, "routine")
-        admitted, reason, _ = self.resources.admit(capability)
-        if not admitted:
-            return f"Resource governor: {reason}."
-        if not self.breakers.allow("tools"):
-            return "Tool circuit breaker is open; retry after the cooldown."
-        if not self.policy.is_allowed(name):
-            return f"Policy: tool '{name}' is not allowed."
-        error = self.policy.validate(name, args)
-        if error:
-            return f"Policy: {error}"
-        if self.approval.needs_approval(name):
-            proposal_id = self.approval.propose(name, args, user_prompt)
-            return (
-                f"Approval required before I can run {name}. "
-                f"Reply with 'approve {proposal_id}' to proceed. "
-                f"(Set BADAPPLE_AUTOPILOT=1 to skip these prompts.)"
-            )
-        try:
-            if name == "learn_workflow":
-                result = self.memory.learn_workflow(args.get("name", ""), args.get("trigger", ""), args.get("steps") or [])
-            elif name == "list_workflows":
-                result = json.dumps(self.memory.workflows(), indent=2, default=str)
-            elif name == "consolidate_memory":
-                result = self.memory.consolidate()
-            elif name == "set_workflow_enabled":
-                result = self.memory.set_workflow_enabled(args.get("name", ""), bool(args.get("enabled")))
-            elif name == "run_agent_task":
-                result = self.run_agent_task(args.get("goal", ""), int(args.get("max_steps") or 10))
-            elif name == "set_project_context":
-                result = self.memory.set_project_context(
-                    args.get("name", ""),
-                    args.get("description", ""),
-                    args.get("goals") or [],
-                    args.get("tags") or [],
-                )
-            elif name == "get_project_context":
-                result = self.memory.get_project_context()
-            elif name == "run_workflow":
-                workflow = next((item for item in self.memory.workflows() if item.get("name") == args.get("name")), None)
-                if workflow is None:
-                    result = f"Workflow '{args.get('name', '')}' not found."
-                elif not workflow.get("enabled"):
-                    result = f"Workflow '{args.get('name', '')}' is disabled pending review."
-                else:
-                    outputs = []
-                    for step in workflow.get("steps", [])[:20]:
-                        if step.get("tool") == "run_workflow":
-                            outputs.append("Nested workflows are not allowed.")
-                            break
-                        output = self._run_approved_tool(step.get("tool", ""), step.get("args") or {}, user_prompt)
-                        outputs.append(f"{step.get('tool')}: {output}")
-                        if output.startswith(("Approval required", "Policy:", "Runtime", "Tool error")):
-                            break
-                    result = "\n".join(outputs)
-            elif self.plugins.has_tool(name):
-                result = self.plugins.invoke(name, args, timeout=self.policy.timeout(name))
-            else:
-                result = run_tool(name, args, self.knowledge, approval=self.approval, policy=self.policy, workspace=self.workspace, user_prompt=user_prompt, mcp_marketplace=self.mcp_marketplace)
-            if result.lower().startswith("error"):
-                self.breakers.failure("tools")
-            else:
-                self.breakers.success("tools")
-            return result
-        except (TypeError, ValueError, LookupError) as e:
-            self.breakers.failure("tools")
-            return f"Tool error: {e}"
+        return _run_approved_tool_func(self, name, args, user_prompt)
+
 
     def _extract_agent_json(self, text: str) -> dict[str, Any] | None:
         """Pull a JSON object out of a model response for the agent loop."""
-        # Try a fenced JSON block first.
-        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(1))
-            except json.JSONDecodeError:
-                pass
-        # Fall back to the first bare JSON object.
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                pass
-        return None
+        return _extract_agent_json_func(text)
 
     def _extract_agent_xml(self, text: str) -> dict[str, Any] | None:
-        """Convert a Qwen-style <tool_call> into an agent decision."""
-        calls, _ = extract_tool_calls(text)
-        if not calls:
-            return None
-        call = calls[0]
-        return {
-            "thought": text.strip(),
-            "tool": call.get("name", ""),
-            "args": call.get("arguments") or call.get("args") or {},
-        }
+        """Convert a Qwen-style tool_call into an agent decision."""
+        return _extract_agent_xml_func(text)
 
     def run_agent_task(
         self,
@@ -3337,197 +997,29 @@ class MLXServer:
         voice_mode: bool = False,
         task_id: str | None = None,
     ) -> str:
-        max_steps = max(1, min(int(max_steps), 50))
-        """Autonomous plan/act/observe loop for multi-step tasks.
-
-        If task_id is provided, the AgentTaskManager record is updated in place.
-        Otherwise a new task is created and tracked.
-        """
-        max_steps = max(1, min(max_steps, 50))
-        task = (
-            self.agent_task_manager.get(task_id)
-            if task_id
-            else self.agent_task_manager.create(goal, max_steps)
-        )
-        if task is None:
-            return f"Agent task {task_id} not found."
-        task_id = task.task_id
-        self.agent_task_manager.update_status(task_id, "running")
-
-        def _record_step(thought: str, tool: str, args: dict[str, Any], result: str, error: str = "") -> None:
-            step = badapple_agent_tasks.AgentStep(
-                thought=thought,
-                tool=tool,
-                args=args,
-                result=result[:500],
-                error=error,
-            )
-            self.agent_task_manager.add_step(task_id, step)
-
-        # Pick a focused tool set for the goal so the prompt stays small.
-        agent_tools = tools_for_prompt(goal)
-        agent_tools = [t for t in agent_tools if t["function"]["name"] != "run_agent_task"]
-        if not agent_tools:
-            agent_tools = [t for t in TOOLS if t["function"]["name"] != "run_agent_task"][:12]
-        tool_names = ", ".join(t["function"]["name"] for t in agent_tools)
-        tool_docs = "\n".join(
-            f"- {t['function']['name']}: {t['function'].get('description', '')}\n  args: {json.dumps(t['function'].get('parameters', {}))}"
-            for t in agent_tools
-        )
-
-        history_for_model: list[dict[str, Any]] = []
-        system_prompt = (
-            "You are an autonomous agent inside Bad Apple. "
-            "You have a goal and a focused set of tools. "
-            "Think step by step. For each step, output a single JSON object with one of these shapes:\n"
-            '1. To take an action: {"thought": "...", "tool": "tool_name", "args": {...}}\n'
-            '2. To finish the task: {"thought": "...", "finish": "final answer to the user"}\n\n'
-            "Important: 'finish' is NOT a tool. When the task is done, emit the finish JSON and do not call any tool.\n"
-            "Available tools: " + tool_names + "\n\n"
-            + tool_docs + "\n\n"
-            "Rules:\n"
-            "- Output ONLY the JSON object. No markdown, no explanation outside the JSON.\n"
-            "- Choose the right tool for each step.\n"
-            "- If a tool returns an error or unexpected result, decide whether to retry with different arguments, try a different tool, or finish with what you know.\n"
-            "- Do not repeat the same failed action more than once without changing something.\n"
-            "- Keep going until the goal is fully achieved or you are stuck."
-        )
-
-        last_tool_name = ""
-        repeated_failures = 0
-        for step in range(max_steps):
-            if self.agent_task_manager.get(task_id).status == "cancelled":  # type: ignore[union-attr]
-                return f"Agent task {task_id} cancelled."
-
-            recent_history = history_for_model[-3:]
-            step_messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Goal: {goal}\n\nHistory so far:\n{json.dumps(recent_history, indent=2, default=str)}\n\nWhat is the next step?"},
-            ]
-            prompt_text = self.tokenizer.apply_chat_template(
-                step_messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            raw = self._stream(prompt_text, 220, voice_mode=voice_mode)
-
-            decision = self._extract_agent_json(raw)
-            if decision is None:
-                decision = self._extract_agent_xml(raw)
-
-            if decision is None:
-                _record_step("", "", {}, raw[:500], "could not parse agent JSON")
-                continue
-
-            thought = str(decision.get("thought", ""))
-            if "finish" in decision:
-                finish = str(decision["finish"])
-                self.agent_task_manager.update_status(task_id, "completed", summary=finish)
-                return finish
-
-            tool_name = decision.get("tool", "")
-            tool_args = decision.get("args", {})
-            if tool_name == "finish":
-                finish = str(decision.get("finish", decision.get("args", json.dumps(decision))))
-                self.agent_task_manager.update_status(task_id, "completed", summary=finish)
-                return finish
-            if not tool_name:
-                _record_step(thought, "", {}, raw[:500], "no tool chosen")
-                continue
-
-            result = self._run_approved_tool(tool_name, tool_args, f"agent task: {goal}")
-            _record_step(thought, tool_name, tool_args, str(result))
-            history_for_model.append({
-                "step": step,
-                "thought": thought,
-                "tool": tool_name,
-                "args": tool_args,
-                "result": str(result)[:280],
-            })
-
-            if str(result).startswith(("Approval required", "Policy:", "Runtime", "Tool error")):
-                self.agent_task_manager.update_status(task_id, "paused", error=str(result))
-                return f"Agent task {task_id} paused: {result}"
-
-            if tool_name == last_tool_name and str(result).startswith("Tool error"):
-                repeated_failures += 1
-            else:
-                repeated_failures = 0
-            last_tool_name = tool_name
-            if repeated_failures >= 2:
-                self.agent_task_manager.update_status(
-                    task_id, "failed", error="Repeated failures on the same tool."
-                )
-                return f"Agent task {task_id} failed after repeated errors."
-
-        progress = [s.to_dict() for s in self.agent_task_manager.get(task_id).steps]  # type: ignore[union-attr]
-        self.agent_task_manager.update_status(
-            task_id, "failed", error=f"Reached step limit ({max_steps})."
-        )
-        return (
-            f'Agent task {task_id} for "{goal}" reached the step limit '
-            f"({max_steps}).\n\nProgress:\n{json.dumps(progress, indent=2, default=str)}"
-        )
+        return _run_agent_task_func(self, goal, max_steps, voice_mode=voice_mode, task_id=task_id)
 
     def _agent_done(self, future: Any, task_id: str) -> None:
-        try:
-            future.result()
-        except Exception as e:  # noqa: BLE001
-            self.agent_task_manager.update_status(
-                task_id, "failed", error=f"Uncaught exception: {e}"
-            )
+        _agent_done_func(self, future, task_id)
 
     def submit_agent_task(self, goal: str, max_steps: int = 10) -> badapple_agent_tasks.AgentTask:
         """Queue a background agent task and return immediately."""
-        task = self.agent_task_manager.create(goal, max_steps)
-        if not getattr(self, "loop", None) or not getattr(self, "executor", None):
-            return task
-        future = self.loop.run_in_executor(
-            self.executor,
-            self.run_agent_task,
-            goal,
-            max_steps,
-            False,
-            task.task_id,
-        )
-        future.add_done_callback(lambda fut: self._agent_done(fut, task.task_id))
-        return task
+        return _submit_agent_task(self, goal, max_steps)
 
     def list_agent_tasks(self) -> list[dict[str, Any]]:
-        return self.agent_task_manager.status()
+        return _list_agent_tasks(self)
 
     def get_agent_task(self, task_id: str) -> dict[str, Any] | None:
-        task = self.agent_task_manager.get(task_id)
-        if task is None:
-            return None
-        return task.to_dict()
+        return _get_agent_task(self, task_id)
 
     def cancel_agent_task(self, task_id: str) -> bool:
-        return self.agent_task_manager.cancel(task_id)
+        return _cancel_agent_task(self, task_id)
 
     def pause_agent_task(self, task_id: str) -> bool:
-        return self.agent_task_manager.pause(task_id)
+        return _pause_agent_task(self, task_id)
 
     def resume_agent_task(self, task_id: str) -> bool:
-        ok = self.agent_task_manager.resume(task_id)
-        if not ok:
-            return False
-        task = self.agent_task_manager.get(task_id)
-        if task is None:
-            return False
-        if not getattr(self, "loop", None) or not getattr(self, "executor", None):
-            return True
-        future = self.loop.run_in_executor(
-            self.executor,
-            self.run_agent_task,
-            task.goal,
-            task.max_steps,
-            False,
-            task.task_id,
-        )
-        future.add_done_callback(lambda fut: self._agent_done(fut, task.task_id))
-        return True
+        return _resume_agent_task(self, task_id)
 
     def _memory_for_model(self, model_ref: str) -> float:
         """Return estimated memory in GB for a model ref/id."""
@@ -3883,6 +1375,7 @@ class MLXServer:
                 "persona": self.personas.active,
                 "airgap": self.airgap,
                 "model_id": MAIN_MODEL,
+                "tier": "main",
             }
             try:
                 self.metrics_actor.tell({"method": "record", **self.last_metrics})
@@ -4039,6 +1532,7 @@ class MLXServer:
                 "total_tps": float(total_tps),
                 "draft_accept_pct": float(accept_pct),
                 "peak_memory_gb": float(summary.peak_memory_gb),
+                "tier": "main",
             }
         elif token_count > 0:
             # DFlash did not yield a SummaryEvent (e.g., stopped on a boundary token).
@@ -4059,6 +1553,7 @@ class MLXServer:
                 "total_tps": float(decode_tps),
                 "draft_accept_pct": 0.0,
                 "peak_memory_gb": float(mx.get_peak_memory() / (1024 ** 3)),
+                "tier": "main",
             }
         # Purge Metal memory only when pressure is elevated.
         _maybe_purge_metal_cache()
@@ -4091,502 +1586,13 @@ class MLXServer:
         text = re.sub(r"\bfrfr\b", "for real for real", text, flags=re.IGNORECASE)
         return text
 
+
     async def _handle_agent_request(self, raw: str, writer: asyncio.StreamWriter):
         """Minimal local agent protocol (LAP) over SLICKS.
 
-        Request envelope (JSON, embedded after the `__BADAPPLE_AGENT__ ` sentinel):
-            {"id": "req-1", "method": "discover_tools"}
-            {"id": "req-2", "method": "invoke_tool", "params": {"name": "run_shell", "args": {"command": "ls"}}}
-            {"id": "req-3", "method": "inference", "params": {"prompt": "what is 2+2?", "max_new_tokens": 120}}
+        Delegates to badapple_mlx_agent.handle_agent_request.
         """
-
-        async def _respond(req_id: str | None, result: Any, error: str | None = None):
-            frame: dict[str, Any] = {"id": req_id}
-            if error:
-                frame["type"] = "error"
-                frame["message"] = error
-            else:
-                frame["type"] = "response"
-                frame["result"] = result
-            await _write_frame(writer, frame)
-
-        try:
-            req = json.loads(raw[len("__BADAPPLE_AGENT__ "):])
-        except json.JSONDecodeError as e:
-            await _respond(None, None, f"invalid agent JSON: {e}")
-            return
-
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params") or {}
-
-        if not self._is_passive_method(method):
-            self.touch_activity()
-
-        if method == "set_hibernate_after":
-            seconds = float(params.get("seconds", 300))
-            self.hibernate_after = max(0, seconds)
-            await _respond(req_id, {"hibernate_after": self.hibernate_after})
-            return
-
-        if method == "model_status":
-            await _respond(req_id, self.model_manager.status(params.get("model_id")))
-            return
-
-        if method == "list_models":
-            await _respond(req_id, {"text": self.model_registry.list_models(), "models": self.model_registry._state.get("models", [])})
-            return
-
-        if method == "scan_models":
-            await _respond(req_id, {"text": self.model_registry.scan(), "models": self.model_registry._state.get("models", [])})
-            return
-
-        if method == "model_info":
-            model_id = str(params.get("model_id", ""))
-            if not model_id:
-                await _respond(req_id, None, "model_id is required")
-                return
-            await _respond(req_id, {"text": self.model_registry.info(model_id)})
-            return
-
-        if method == "verify_models":
-            model_id = params.get("model_id")
-            result = self.model_registry.verify(model_id)
-            await _respond(req_id, result)
-            return
-
-        if method == "add_model":
-            path = str(params.get("path", ""))
-            model_id = str(params.get("model_id", ""))
-            if not path:
-                await _respond(req_id, None, "path is required")
-                return
-            result = self.model_registry.add_model(path, model_id)
-            await _respond(req_id, result)
-            return
-
-        if method == "remove_model":
-            model_id = str(params.get("model_id", ""))
-            if not model_id:
-                await _respond(req_id, None, "model_id is required")
-                return
-            result = self.model_registry.remove_model(model_id)
-            await _respond(req_id, result)
-            return
-
-        if method == "download_model":
-            model_id = str(params.get("model_id", ""))
-            if not model_id:
-                await _respond(req_id, None, "model_id is required")
-                return
-            if not self.model_manager.allow_downloads:
-                await _respond(req_id, None, "downloads disabled; call set_allow_downloads first")
-                return
-            await _respond(req_id, self.model_manager.start_download(model_id))
-            return
-
-        if method == "set_allow_downloads":
-            enabled = bool(params.get("enabled", False))
-            if self.airgap and enabled:
-                await _respond(req_id, None, "downloads cannot be enabled while air-gap mode is on")
-                return
-            self.model_manager.set_allow_downloads(enabled)
-            await _respond(req_id, {"allow_downloads": enabled})
-            return
-
-        if method == "set_airgap":
-            enabled = bool(params.get("enabled", False))
-            self._set_airgap(enabled)
-            await _respond(req_id, {"airgap": self.airgap})
-            return
-        if method == "airgap_status":
-            await _respond(req_id, {"airgap": self.airgap})
-            return
-
-        if method == "recommend_model":
-            await _respond(req_id, self.recommend_model(str(params.get("query", ""))))
-            return
-
-        if method == "admit_model":
-            model_ref = str(params.get("model_ref", ""))
-            if not model_ref:
-                await _respond(req_id, None, "model_ref is required")
-                return
-            await _respond(req_id, self.admit_model(model_ref, bool(params.get("auto_unload", True))))
-            return
-
-        if method == "switch_main_model":
-            model_ref = str(params.get("model_ref", ""))
-            if not model_ref:
-                await _respond(req_id, None, "model_ref is required")
-                return
-            # Run the heavy load in the MLX executor.
-            if not getattr(self, "loop", None) or not getattr(self, "executor", None):
-                await _respond(req_id, None, "server not initialized")
-                return
-            future = self.loop.run_in_executor(self.executor, self.switch_main_model, model_ref)
-            result = await future
-            await _respond(req_id, {"result": result})
-            return
-
-        if method == "preload_models":
-            model_ids = params.get("model_ids")
-            if isinstance(model_ids, str):
-                model_ids = [m.strip() for m in model_ids.split(",") if m.strip()]
-            result = self.submit_preload_models(model_ids)
-            await _respond(req_id, {"preloaded": result})
-            return
-
-        if method == "run_agent_task":
-            goal = str(params.get("goal", ""))
-            max_steps = int(params.get("max_steps") or 10)
-            if not goal:
-                await _respond(req_id, None, "goal is required")
-                return
-            task = self.submit_agent_task(goal, max_steps)
-            await _respond(req_id, {"task_id": task.task_id, "status": task.status, "goal": task.goal})
-            return
-
-        if method == "list_agent_tasks":
-            await _respond(req_id, {"tasks": self.list_agent_tasks()})
-            return
-
-        if method == "get_agent_task":
-            task = self.get_agent_task(str(params.get("task_id", "")))
-            await _respond(req_id, {"task": task})
-            return
-
-        if method == "cancel_agent_task":
-            ok = self.cancel_agent_task(str(params.get("task_id", "")))
-            await _respond(req_id, {"cancelled": ok})
-            return
-
-        if method == "pause_agent_task":
-            ok = self.pause_agent_task(str(params.get("task_id", "")))
-            await _respond(req_id, {"paused": ok})
-            return
-
-        if method == "resume_agent_task":
-            ok = self.resume_agent_task(str(params.get("task_id", "")))
-            await _respond(req_id, {"resumed": ok})
-            return
-
-        if method == "runtime_status":
-            ambient = None
-            try:
-                ambient = json.loads(badapple_ambient.get_context()) if badapple_ambient._CONTEXT_FILE.is_file() else None
-            except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
-                print(f"[mlx_server] is_file failed: {e}", flush=True)
-            ambient_running = badapple_ambient.is_running()
-            ocular = None
-            try:
-                ocular = badapple_ocular.status() if badapple_ocular.OCULAR_CONTEXT.is_file() else None
-            except Exception as e:  # noqa: BLE001
-                print(f"[mlx_server] ocular status error: {e}", flush=True)
-            await _respond(req_id, {
-                "runtime": self.runtime.status(),
-                "health": self.health.snapshot(),
-                "resources": self.resources.snapshot(),
-                "active_models": self.active_models(),
-                "breakers": self.breakers.snapshot_all(),
-                "autopilot": self.policy.autopilot,
-                "fast_tier": self.fast_tier_enabled,
-                "ambient_running": ambient_running,
-                "ambient": ambient,
-                "ocular_running": badapple_ocular.is_running(),
-                "ocular": ocular,
-                "workspace": str(self.workspace.path) if self.workspace.path else None,
-                "airgap": self.airgap,
-                "p2p_enabled": self.p2p is not None and self.p2p.is_running(),
-                "p2p_peers": self.p2p.get_peers() if self.p2p is not None and self.p2p.is_running() else [],
-                "mcp_socket": os.environ.get("BADAPPLE_MCP_SOCKET", "/var/run/badapple/mcp.sock"),
-                "fast_model": self.fast_model_info,
-                "main_model_loaded": self.model is not None and self.tokenizer is not None,
-                "models": self.model_manager.status() if getattr(self, "model_manager", None) is not None else {},
-                "agent_tasks": self.list_agent_tasks(),
-                "hibernating": self.hibernating,
-                "idle_seconds": round(time.time() - self.last_activity, 1),
-            })
-            return
-
-        if method == "identity_status":
-            await _respond(req_id, {"status": badapple_identity.status(), "public_key": badapple_identity.public_key()})
-            return
-
-        if method == "identity_sign":
-            challenge = str(params.get("challenge", ""))
-            if not challenge or len(challenge) > 4096:
-                await _respond(req_id, None, "identity_sign requires a challenge up to 4096 characters")
-                return
-            await _respond(req_id, {"signature": badapple_identity.sign(challenge.encode("utf-8"))})
-            return
-
-        if method == "kill_switch":
-            enabled = bool(params.get("enabled", True))
-            if enabled:
-                state = self.runtime.engage_kill_switch(params.get("reason", "agent requested"))
-            else:
-                state = self.runtime.reset_kill_switch()
-                if state.get("safe_mode_reason"):
-                    state = self.runtime.leave_safe_mode()
-            await _respond(req_id, {"runtime": state})
-            return
-
-        if method == "private_mode":
-            state = self.runtime.set_private_mode(bool(params.get("enabled", True)))
-            await _respond(req_id, {"runtime": state})
-            return
-
-        if method == "discover_tools":
-            await _respond(req_id, {"tools": TOOLS})
-            return
-
-        if method == "invoke_tool":
-            if not self.runtime.allows_mutation():
-                await _respond(req_id, None, "runtime is stopped or in safe mode")
-                return
-            tool_name = params.get("name", "")
-            tool_args = params.get("args") or {}
-            result = self._run_approved_tool(tool_name, tool_args, "agent request")
-            await _respond(req_id, {"tool": tool_name, "result": result})
-            return
-
-        if method == "set_fast_tier":
-            self.fast_tier_enabled = bool(params.get("enabled", True))
-            await _respond(req_id, {"fast_tier": self.fast_tier_enabled})
-            return
-
-        if method == "set_autopilot":
-            self.policy.set_autopilot(bool(params.get("enabled", False)))
-            await _respond(req_id, {"autopilot": self.policy.autopilot})
-            return
-
-        if method == "inference":
-            if not self.runtime.allows_generation():
-                await _respond(req_id, None, "kill switch is engaged")
-                return
-            prompt = params.get("prompt", "")
-            max_tokens = int(params.get("max_new_tokens", 120))
-            if not prompt:
-                await _respond(req_id, None, "inference requires prompt")
-                return
-            loop = asyncio.get_event_loop()
-
-            def _gen():
-                mx.set_default_device(self.mlx_device)
-                try:
-                    # The inference API is stateless: it must not mutate the
-                    # conversational turn cache or return a cached conversational
-                    # response. Build a single-turn prompt and stream directly.
-                    # Ensure the lazily-loaded main model (and its tokenizer) exist
-                    # before render_prompt needs them.
-                    self._ensure_main_model()
-                    messages = [
-                        {"role": "system", "content": self.personas.get_system_prompt()},
-                        {"role": "user", "content": prompt},
-                    ]
-                    rendered = self.render_prompt(messages, use_tools=False, voice_mode=False)
-                    raw = self._stream(rendered, max_tokens, voice_mode=False)
-                    text = self.polish_response(raw)
-                    self._audit_record("query", {
-                        "prompt": prompt,
-                        "persona": self.personas.active,
-                        "voice_mode": False,
-                        "use_tools": False,
-                    })
-                    self._audit_record("response", {
-                        "prompt": prompt,
-                        "response": text[:500],
-                        "persona": self.personas.active,
-                    })
-                    return text
-                except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                    traceback.print_exc()
-                    return f"Error generating response: {e}"
-
-            text = await loop.run_in_executor(self.executor, _gen)
-            metrics = self.last_metrics
-            await _respond(req_id, {"text": text, "metrics": metrics})
-            return
-
-        if method == "switch_persona":
-            name = params.get("name", "")
-            if self.personas.switch(name):
-                await _respond(req_id, {"active_persona": self.personas.active})
-            else:
-                await _respond(req_id, None, f"unknown persona '{name}'")
-            return
-
-        if method == "set_workspace":
-            path = params.get("path", "")
-            if not path:
-                await _respond(req_id, None, "set_workspace requires path")
-                return
-            result = self.workspace.set(path)
-            await _respond(req_id, {"status": result})
-            return
-
-        if method == "get_workspace":
-            summary = self.workspace.summary() if self.workspace.path else None
-            await _respond(req_id, {"workspace": str(self.workspace.path) if self.workspace.path else None, "summary": summary})
-            return
-
-        if method == "set_p2p":
-            enabled = bool(params.get("enabled", False))
-            if self.p2p is None:
-                await _respond(req_id, None, "P2P is not available")
-                return
-            try:
-                if enabled:
-                    await asyncio.to_thread(self.p2p.start)
-                else:
-                    await asyncio.to_thread(self.p2p.stop)
-            except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                await _respond(req_id, None, f"P2P toggle failed: {e}")
-                return
-            await _respond(req_id, {"p2p_enabled": self.p2p.is_running()})
-            return
-
-        if method == "set_ambient":
-            enabled = bool(params.get("enabled", False))
-            text = badapple_ambient.start() if enabled else badapple_ambient.stop()
-            await _respond(req_id, {"ambient_running": badapple_ambient.is_running(), "message": text})
-            return
-
-        if method == "set_ocular":
-            enabled = bool(params.get("enabled", False))
-            text = badapple_ocular.start(
-                float(params.get("capture_interval", 5)),
-                float(params.get("describe_interval", 0)),
-                params.get("prompt"),
-            ) if enabled else badapple_ocular.stop()
-            await _respond(req_id, {"ocular_running": badapple_ocular.is_running(), "message": text})
-            return
-
-        if method == "audit_tail":
-            n = int(params.get("n", 20))
-            entries = []
-            if self.audit_collector.ledger_path.is_file():
-                try:
-                    with open(self.audit_collector.ledger_path, encoding="utf-8") as f:
-                        lines = f.readlines()
-                    entries = [json.loads(line) for line in lines[-n:] if line.strip()]
-                except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OSError) as e:
-                    await _respond(req_id, None, f"could not read ledger: {e}")
-                    return
-            await _respond(req_id, {"entries": entries})
-            return
-
-        if method == "flush_vram":
-            result = self.flush_vram()
-            await _respond(req_id, {"result": result})
-            return
-
-        if method == "unload_model":
-            model_type = str(params.get("type", "vision"))
-            result = self.unload_model(model_type)
-            await _respond(req_id, {"result": result})
-            return
-
-        if method == "get_pending_approvals":
-            await _respond(req_id, {"pending": self.approval.get_pending_summary()})
-            return
-        if method == "audit_checkpoint":
-            # Actor .ask() blocks on a queue; run off the event loop thread.
-            result = await asyncio.get_event_loop().run_in_executor(
-                self.executor, self.audit_actor.ask, {"method": "sign_checkpoint"}
-            )
-            await _respond(req_id, {"result": result})
-            return
-        if method == "audit_verify":
-            results = await asyncio.get_event_loop().run_in_executor(
-                self.executor, self.audit_actor.ask, {"method": "verify"}
-            )
-            invalid = [r for r in (results or []) if not r.get("valid")]
-            await _respond(req_id, {"result": {
-                "total_entries": len(results or []),
-                "invalid_entries": len(invalid),
-                "valid": not invalid,
-                "first_invalid": invalid[0] if invalid else None,
-            }})
-            return
-        if method == "p2p_peers":
-            daemon = badapple_p2p.get_p2p_daemon()
-            if daemon is None:
-                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
-                return
-            await _respond(req_id, {"peers_summary": daemon.get_peers()})
-            return
-        if method == "p2p_sync":
-            daemon = badapple_p2p.get_p2p_daemon()
-            if daemon is None:
-                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
-                return
-            try:
-                result = await asyncio.to_thread(daemon.sync_memory)
-            except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                await _respond(req_id, None, f"P2P sync failed: {e}")
-                return
-            await _respond(req_id, {"sync_status": result})
-            return
-        if method == "p2p_models":
-            if self.p2p is None:
-                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
-                return
-            try:
-                result = await asyncio.to_thread(self.p2p.remote_models)
-            except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                await _respond(req_id, None, f"P2P models failed: {e}")
-                return
-            await _respond(req_id, result)
-            return
-        if method == "p2p_pull_model":
-            if self.p2p is None:
-                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
-                return
-            peer_id = str(params.get("peer_id", ""))
-            model_id = str(params.get("model_id", ""))
-            if not peer_id or not model_id:
-                await _respond(req_id, None, "Both a peer and a model name are needed to pull a model.")
-                return
-            try:
-                result = await asyncio.to_thread(self.p2p.pull_model_manifest, peer_id, model_id)
-            except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                await _respond(req_id, None, f"P2P pull failed: {e}")
-                return
-            await _respond(req_id, result)
-            return
-        if method == "p2p_send_model":
-            if self.p2p is None:
-                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
-                return
-            peer_id = str(params.get("peer_id", ""))
-            model_id = str(params.get("model_id", ""))
-            if not peer_id or not model_id:
-                await _respond(req_id, None, "Both a peer and a model name are needed to send a model.")
-                return
-            try:
-                result = await asyncio.to_thread(self.p2p.send_model, peer_id, model_id)
-            except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                await _respond(req_id, None, f"P2P send failed: {e}")
-                return
-            await _respond(req_id, {"send_status": result})
-            return
-        if method == "p2p_receive_model":
-            if self.p2p is None:
-                await _respond(req_id, None, "P2P is off. Turn it on from the menu bar or with `badapple p2p on`.")
-                return
-            peer_id = str(params.get("peer_id", ""))
-            model_id = str(params.get("model_id", ""))
-            try:
-                result = await asyncio.to_thread(self.p2p.receive_model, peer_id, model_id)
-            except Exception as e:  # noqa: BLE001 - catch-all wrapper
-                await _respond(req_id, None, f"P2P receive failed: {e}")
-                return
-            await _respond(req_id, result)
-            return
-
-        await _respond(req_id, None, f"unknown method '{method}'")
+        await _handle_agent_request_func(self, raw, writer)
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -4607,6 +1613,10 @@ class MLXServer:
 
             timestamp_ms = hello["timestamp_ms"]
             client_nonce = hello["client_nonce"]
+            # Extract the client's public key from the Hello frame for v2.
+            # This is the ONLY trusted source of the client identity — the
+            # Execute frame's client_pubkey must match this value.
+            hello_client_pubkey = hello.get("client_pubkey")
             server_nonce = random_nonce()
             if accepted_version == SLICKS_VERSION:
                 challenge = {
@@ -4650,8 +1660,19 @@ class MLXServer:
             if accepted_version == SLICKS_VERSION:
                 client_ok = badapple_slicks.v1_verify_client_proof(self.secret, timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens, proof)
             else:
-                client_pubkey_b64 = execute.get("client_pubkey") or badapple_slicks.v2_public_key_b64()
-                client_pubkey = base64.b64decode(client_pubkey_b64) if client_pubkey_b64 and client_pubkey_b64 != server_pubkey else badapple_slicks.v2_public_key()
+                # CRITICAL: Use the client_pubkey from the Hello frame, not the
+                # Execute frame. The Execute frame's client_pubkey is attacker-
+                # controllable and must match the Hello's value exactly.
+                # If the Hello didn't include a pubkey, reject — v2 requires it.
+                if not hello_client_pubkey:
+                    await _write_frame(writer, {"type": "error", "message": "SLICKS v2 requires client_pubkey in Hello"})
+                    return
+                # The Execute frame's client_pubkey (if present) must match.
+                exec_pubkey = execute.get("client_pubkey")
+                if exec_pubkey and exec_pubkey != hello_client_pubkey:
+                    await _write_frame(writer, {"type": "error", "message": "SLICKS v2 client_pubkey mismatch"})
+                    return
+                client_pubkey = base64.b64decode(hello_client_pubkey)
                 client_ok = badapple_slicks.v2_verify_client_proof(timestamp_ms, client_nonce, server_nonce, prompt, max_new_tokens, proof, client_pubkey)
             if not client_ok:
                 await _write_frame(writer, {"type": "error", "message": "SLICKS client authentication failed"})
@@ -5055,7 +2076,7 @@ class MLXServer:
                 self._save_conversation()
                 kind = "capabilities" if "what I can do" in meta_resp else "identity"
                 self._audit_record(kind, {"prompt": prompt, "response": meta_resp})
-                await _write_frame(writer, {"type": "done", "text": meta_resp})
+                await _write_frame(writer, {"type": "done", "text": meta_resp, "metrics": {"tier": "deterministic", "tokens": 0}})
                 return
 
             fast = None if (benchmark_mode or self.runtime.safe_mode) else fast_execute(
@@ -5080,7 +2101,8 @@ class MLXServer:
                     "response": fast[:500],
                     "persona": self.personas.active,
                 })
-                metrics = self.last_metrics
+                metrics = dict(self.last_metrics) if self.last_metrics else {}
+                metrics["tier"] = "fast"
                 await _write_frame(writer, {"type": "done", "text": fast, "metrics": metrics})
                 return
 
@@ -5211,6 +2233,8 @@ class MLXServer:
                 await writer.wait_closed()
             except Exception:  # noqa: BLE001,S110 - cleanup
                 pass
+
+
 
 
 class DashboardServer:
@@ -5351,10 +2375,10 @@ async def main():
         loop.add_signal_handler(sig, stop_event.set)
 
     srv = await asyncio.start_unix_server(server.handle_client, path=socket_path)
-    os.chmod(socket_path, 0o666)
+    os.chmod(socket_path, 0o660)
     try:
         os.symlink(socket_path, fast_socket_path)
-        os.chmod(fast_socket_path, 0o666)
+        os.chmod(fast_socket_path, 0o660)
     except FileExistsError:
         pass
     print("=" * 40, flush=True)

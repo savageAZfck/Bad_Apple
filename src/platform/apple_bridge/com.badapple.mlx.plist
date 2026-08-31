@@ -31,6 +31,8 @@
         <string>/var/run/badapple/substrate_mlx.sock</string>
         <key>BADAPPLE_MAIN_MODEL</key>
         <string>caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit</string>
+        <key>BADAPPLE_MODEL_REVISION</key>
+        <string></string>
         <key>BADAPPLE_DRAFT_MODEL</key>
         <string></string>
         <key>BADAPPLE_NUM_DRAFT_TOKENS</key>

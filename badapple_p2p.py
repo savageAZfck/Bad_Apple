@@ -250,7 +250,7 @@ class P2PDaemon:
         # address itself.
         self._tcp_server = await asyncio.start_server(
             self._handle_sync_client,
-            host="0.0.0.0",  # noqa: S104 - see _is_local_peer_address for the real enforcement
+            host="127.0.0.1",  # bind loopback only; link-local peers use UDP beacons
             port=self.sync_port,
             limit=P2P_MAX_SYNC_SIZE,
         )
@@ -473,14 +473,27 @@ class P2PDaemon:
                     if frame.frame_type == "adapter":
                         packet = json.loads(plaintext.decode())
                         adapter_name = packet.get("name", " unnamed")
-                        adapters_dir = Path(packet.get("adapters_dir", str(self.data_dir / "lora_adapters")))
-                        target = adapters_dir / adapter_name
+                        # SECURITY: Ignore peer-supplied adapters_dir — always
+                        # use the local data dir to prevent zip slip / path
+                        # traversal to arbitrary locations like ~/.ssh.
+                        # Sanitize adapter_name to prevent path traversal.
+                        safe_name = "".join(c for c in adapter_name if c.isalnum() or c in "-_.")
+                        if not safe_name or safe_name in (".", ".."):
+                            writer.write(json.dumps({"ok": False, "error": "invalid adapter name"}).encode() + b"\n")
+                            await writer.drain()
+                            break
+                        target = self.data_dir / "lora_adapters" / safe_name
                         try:
                             target.mkdir(parents=True, exist_ok=True)
                             import io
                             import zipfile
                             zip_bytes = base64.b64decode(packet.get("data_b64", ""))
                             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                                # Validate each entry stays under target
+                                for member in zf.namelist():
+                                    member_path = (target / member).resolve()
+                                    if not str(member_path).startswith(str(target.resolve())):
+                                        raise ValueError(f"zip slip detected: {member}")
                                 zf.extractall(target)
                             print(f"[p2p] received adapter '{adapter_name}' into {target}", flush=True)
                             writer.write(b'{"ok":true}\n')

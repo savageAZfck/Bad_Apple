@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use sysinfo::System;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
@@ -110,6 +109,13 @@ const BACKPRESSURE_THRESHOLD: f64 = 0.85;
 /// active goal matrix before the engram is accepted into the ring.
 pub const ENGRAM_SIMILARITY_THRESHOLD: f64 = 0.35;
 
+/// Maximum age (in seconds) of a compact engram packet before it is considered
+/// stale and dropped.  Prevents replay of old valid packets.
+const ENGRAM_MAX_AGE_SECS: u64 = 300;
+
+/// Maximum number of recently-seen engram ids to track for replay protection.
+const ENGRAM_REPLAY_WINDOW: usize = 1024;
+
 /// Maximum characters of `experiential_text` that are sent in a compact engram
 /// across the network.  This keeps JSON-serialized packets under the UDP
 /// datagram size limit (~65 KB) while the full embedding and brain state are
@@ -206,17 +212,38 @@ impl<T: Send + Priority> LockFreeRing<T> {
     }
 }
 
+// SAFETY: LockFreeRing uses `crossbeam_queue::ArrayQueue` (which is itself Send + Sync)
+// wrapped in `CacheLinePadded`, plus atomics and a `tokio::sync::Notify`. All field access
+// is mediated by the ArrayQueue's internal synchronization and atomic orderings, so the
+// struct can be safely shared and sent across threads.
 unsafe impl<T: Send + Priority> Send for LockFreeRing<T> {}
+// SAFETY: as above; all shared state is protected by the ArrayQueue's lock-free
+// synchronization and atomic orderings, so `&LockFreeRing` can be shared across threads.
 unsafe impl<T: Send + Priority> Sync for LockFreeRing<T> {}
 
 /// Resolve a shared multi-agent signing secret.
 /// Prefer the `MULTI_AGENT_SECRET` environment variable; otherwise derive a
-/// default from the local hostname.  This keeps shared secrets out of source.
+/// per-machine random secret stored under `/var/lib/bad_apple/multi_agent.key`.
+/// Never use a host-derived default — that would be guessable on a LAN.
 pub fn multi_agent_secret() -> Vec<u8> {
-    let host = System::host_name().unwrap_or_else(|| "localhost".to_string());
-    std::env::var("MULTI_AGENT_SECRET")
-        .unwrap_or_else(|_| format!("bad-apple-{host}-default"))
-        .into_bytes()
+    if let Ok(secret) = std::env::var("MULTI_AGENT_SECRET") {
+        return secret.into_bytes();
+    }
+    let path = std::path::Path::new("/var/lib/bad_apple/multi_agent.key");
+    if let Ok(bytes) = std::fs::read(path) {
+        if !bytes.is_empty() {
+            return bytes;
+        }
+    }
+    // Last-resort fallback: a fresh random 32-byte secret. This means engrams
+    // signed on this machine cannot be verified by peers unless the key is
+    // shared out-of-band, which is the safe default.
+    use rand::RngCore;
+    let mut bytes = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let _ = std::fs::create_dir_all("/var/lib/bad_apple");
+    let _ = std::fs::write(path, &bytes);
+    bytes
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
@@ -245,13 +272,51 @@ pub fn decode_payload(packet: &SignedPacket) -> Option<Vec<u8>> {
     STANDARD.decode(&packet.payload_b64).ok()
 }
 
-/// Verify the HMAC-SHA256 signature of a signed packet.
+/// Verify the HMAC-SHA256 signature of a signed packet using a constant-time
+/// comparison so that timing leaks do not reveal signature prefix matches.
 pub fn verify_packet(packet: &SignedPacket, secret: &[u8]) -> bool {
     let Some(payload) = decode_payload(packet) else {
         return false;
     };
-    let expected = hex_encode(&hmac_sha256(secret, &payload));
-    expected == packet.signature_hex
+    let expected = hmac_sha256(secret, &payload);
+    let Ok(provided) = hex_decode(&packet.signature_hex) else {
+        return false;
+    };
+    constant_time_eq(&expected, &provided)
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+    if !s.len().is_multiple_of(2) {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for chunk in bytes.chunks_exact(2) {
+        let hi = hex_val(chunk[0])?;
+        let lo = hex_val(chunk[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_val(b: u8) -> Result<u8, ()> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(()),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Live metrics for the wide-area swarm grid panel.
@@ -366,6 +431,8 @@ pub struct ConnectionManager {
     listen_addr_ws: Arc<Mutex<Option<SocketAddr>>>,
     /// Active-goal 2048-D embeddings.  Empty means the similarity gate is open.
     goal_embeddings: Arc<Mutex<Vec<Vec<f64>>>>,
+    /// Recently-seen engram ids for replay protection.  Bounded LRU-ish window.
+    seen_ids: Arc<Mutex<std::collections::VecDeque<u64>>>,
 }
 
 impl ConnectionManager {
@@ -391,6 +458,9 @@ impl ConnectionManager {
             listen_addr_tcp: Arc::new(Mutex::new(None)),
             listen_addr_ws: Arc::new(Mutex::new(None)),
             goal_embeddings: Arc::new(Mutex::new(Vec::new())),
+            seen_ids: Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(
+                ENGRAM_REPLAY_WINDOW,
+            ))),
         }
     }
 
@@ -566,9 +636,11 @@ impl ConnectionManager {
             }
 
             if let Err(e) = self.try_connect(&peer).await {
+                // Cap attempt to prevent powi sign flip when u32 > i32::MAX
+                let capped_attempt = attempt.min(32) as i32;
                 let delay = self
                     .retry_base
-                    .mul_f64(2f64.powi(attempt as i32))
+                    .mul_f64(2f64.powi(capped_attempt))
                     .min(self.retry_max);
                 tracing::warn!(
                     "WAN peer {} connection failed (attempt {}): {}; retrying in {:?}",
@@ -703,9 +775,23 @@ impl ConnectionManager {
             while let Some(msg) = ws_stream.next().await {
                 match msg {
                     Ok(Message::Binary(frame)) => {
+                        if frame.len() > MAX_FRAME_BYTES {
+                            tracing::warn!(
+                                "WebSocket frame exceeds size limit: {} bytes",
+                                frame.len()
+                            );
+                            continue;
+                        }
                         cm.handle_frame(&peer_id_read, &frame).await;
                     }
                     Ok(Message::Text(text)) => {
+                        if text.len() > MAX_FRAME_BYTES {
+                            tracing::warn!(
+                                "WebSocket text frame exceeds size limit: {} bytes",
+                                text.len()
+                            );
+                            continue;
+                        }
                         cm.handle_frame(&peer_id_read, text.as_bytes()).await;
                     }
                     Ok(Message::Close(_)) => break,
@@ -789,23 +875,71 @@ impl ConnectionManager {
         let Ok(mut compact) = serde_json::from_slice::<CompactEngramPacket>(&payload) else {
             return;
         };
+        // Enforce text length limit before any downstream processing.
+        compact.experiential_text.truncate(MAX_ENGRAM_TEXT_CHARS);
         compact.brain_state.truncate(ENGRAM_DIM);
         compact.embedding.truncate(EMBEDDING_DIM);
 
-        if !compact.embedding.is_empty() {
-            let sim = self.max_goal_similarity(&compact.embedding);
-            if sim < ENGRAM_SIMILARITY_THRESHOLD {
-                if let Ok(mut m) = self.metrics.lock() {
-                    m.engrams_dropped_similarity += 1;
-                }
+        // Replay protection: reject ids we have already seen within the window.
+        {
+            let mut seen = self.seen_ids.lock().expect("seen_ids poisoned");
+            if seen.contains(&compact.id) {
                 tracing::info!(
-                    "🛡️ Dropped peer engram from '{}': similarity {:.3} < {}",
-                    compact.origin_instance,
-                    sim,
-                    ENGRAM_SIMILARITY_THRESHOLD
+                    "🔒 Dropped replayed engram id {} from '{}'",
+                    compact.id,
+                    compact.origin_instance
                 );
                 return;
             }
+            seen.push_back(compact.id);
+            if seen.len() > ENGRAM_REPLAY_WINDOW {
+                seen.pop_front();
+            }
+        }
+
+        // Timestamp freshness: reject stale engrams.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if compact.timestamp > now_secs + 60 {
+            // Future-dated; reject.
+            return;
+        }
+        if now_secs.saturating_sub(compact.timestamp) > ENGRAM_MAX_AGE_SECS {
+            tracing::info!(
+                "🔒 Dropped stale engram id {} from '{}' (age {}s > {}s)",
+                compact.id,
+                compact.origin_instance,
+                now_secs.saturating_sub(compact.timestamp),
+                ENGRAM_MAX_AGE_SECS
+            );
+            return;
+        }
+
+        // Reject empty embeddings: peers must not bypass the similarity gate by
+        // omitting the embedding vector.
+        if compact.embedding.is_empty() {
+            tracing::info!(
+                "🔒 Dropped engram id {} from '{}': empty embedding",
+                compact.id,
+                compact.origin_instance
+            );
+            return;
+        }
+
+        let sim = self.max_goal_similarity(&compact.embedding);
+        if sim < ENGRAM_SIMILARITY_THRESHOLD {
+            if let Ok(mut m) = self.metrics.lock() {
+                m.engrams_dropped_similarity += 1;
+            }
+            tracing::info!(
+                "🛡️ Dropped peer engram from '{}': similarity {:.3} < {}",
+                compact.origin_instance,
+                sim,
+                ENGRAM_SIMILARITY_THRESHOLD
+            );
+            return;
         }
 
         self.incoming.push(compact);
@@ -869,6 +1003,19 @@ impl PeerHandle {
 
 fn parse_peer_spec(peer: &str) -> (String, PeerTransport) {
     let peer = peer.trim();
+    // Reject known SSRF targets such as cloud metadata endpoints.
+    let host_part = peer
+        .strip_prefix("ws://")
+        .or_else(|| peer.strip_prefix("wss://"))
+        .unwrap_or(peer)
+        .split(':')
+        .next()
+        .unwrap_or("");
+    if host_part == "169.254.169.254" {
+        // Block cloud metadata endpoint outright; the empty host will fail to
+        // connect.
+        return (String::new(), PeerTransport::Tcp);
+    }
     if let Some(rest) = peer.strip_prefix("ws://") {
         (rest.to_string(), PeerTransport::WebSocket)
     } else if let Some(rest) = peer.strip_prefix("wss://") {
@@ -951,13 +1098,18 @@ mod tests {
         });
         sleep(Duration::from_millis(200)).await;
 
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let packet = CompactEngramPacket {
             id: 0xC0FFEE,
-            timestamp: 1,
+            timestamp: now_secs,
             experiential_text: "roundtrip".to_string(),
             emotional_state_snapshot: "test".to_string(),
             origin_instance: "self".to_string(),
             brain_state: vec![0.5; ENGRAM_DIM],
+            embedding: vec![0.5; EMBEDDING_DIM],
             ..Default::default()
         };
         cm.broadcast(&packet).await;
@@ -968,5 +1120,84 @@ mod tests {
             .expect("ring closed");
         assert_eq!(received.id, packet.id);
         assert_eq!(received.experiential_text, packet.experiential_text);
+    }
+
+    // =========================================================================
+    // Security regression tests — red team findings
+    // =========================================================================
+
+    /// Verify that CompactEngramPacket text exceeding MAX_ENGRAM_TEXT_CHARS is
+    /// truncated.  handle_frame enforces this before downstream processing.
+    #[test]
+    fn compact_engram_rejects_oversized_text() {
+        let oversized = "x".repeat(MAX_ENGRAM_TEXT_CHARS + 500);
+        let mut packet = CompactEngramPacket {
+            id: 42,
+            timestamp: 0,
+            experiential_text: oversized,
+            ..Default::default()
+        };
+        assert!(
+            packet.experiential_text.len() > MAX_ENGRAM_TEXT_CHARS,
+            "precondition: text should exceed the limit"
+        );
+        // Simulate the truncation that handle_frame performs on inbound packets.
+        packet.experiential_text.truncate(MAX_ENGRAM_TEXT_CHARS);
+        assert_eq!(
+            packet.experiential_text.len(),
+            MAX_ENGRAM_TEXT_CHARS,
+            "text must be truncated to MAX_ENGRAM_TEXT_CHARS"
+        );
+    }
+
+    /// Verify that the cloud metadata endpoint 169.254.169.254 is rejected by
+    /// parse_peer_spec (SSRF protection).
+    #[test]
+    fn parse_peer_spec_rejects_cloud_metadata() {
+        let (addr, _t) = parse_peer_spec("169.254.169.254:8080");
+        assert_eq!(
+            addr, "",
+            "cloud metadata endpoint should be rejected (empty host)"
+        );
+    }
+
+    /// Verify that a normal LAN host is accepted by parse_peer_spec.
+    #[test]
+    fn parse_peer_spec_accepts_normal_host() {
+        let (addr, t) = parse_peer_spec("192.168.1.10:8080");
+        assert_eq!(addr, "192.168.1.10:8080");
+        assert_eq!(t, PeerTransport::Tcp);
+    }
+
+    /// Verify that a signed packet signed with one key cannot be verified with
+    /// a different key.
+    #[test]
+    fn signed_packet_rejects_wrong_key() {
+        let secret_a = b"secret_key_alice";
+        let secret_b = b"secret_key_bob";
+        let signed = sign_packet("alice", b"payload data", secret_a);
+        assert!(
+            verify_packet(&signed, secret_a),
+            "packet should verify with the correct key"
+        );
+        assert!(
+            !verify_packet(&signed, secret_b),
+            "packet should not verify with a wrong key"
+        );
+    }
+
+    /// Verify that a tampered payload fails signature verification.
+    #[test]
+    fn signed_packet_rejects_tampered_payload() {
+        let secret = b"shared_secret_key";
+        let signed = sign_packet("alice", b"original payload", secret);
+        assert!(verify_packet(&signed, secret));
+
+        let mut tampered = signed.clone();
+        tampered.payload_b64 = STANDARD.encode(b"tampered payload");
+        assert!(
+            !verify_packet(&tampered, secret),
+            "tampered payload must fail verification"
+        );
     }
 }

@@ -21,6 +21,7 @@ pub mod automation_cage;
 pub mod bad_apple_ipc;
 pub mod benchmark;
 pub mod config;
+pub mod connectome_mmap;
 pub mod hyperdimensional_core;
 pub mod metal_uma;
 pub mod metrics;
@@ -31,6 +32,22 @@ pub mod simd;
 pub mod strategy_library;
 pub mod tensor_brain;
 pub mod wasm_cage;
+
+/// A node in the associative memory graph.  This lightweight struct is the
+/// common currency between the tensor brain, the connectome mmap persistence
+/// layer, and the state saver.  It carries the grounded 2048-D embedding and
+/// a 576-D brain-state snapshot alongside the experiential text.
+#[derive(Clone, Debug)]
+pub struct MemoryGraphNode {
+    pub id: u64,
+    pub timestamp: u64,
+    pub experiential_text: String,
+    pub emotional_state_snapshot: String,
+    pub embedding: Vec<f64>,
+    pub associated_edge_ids: Vec<u64>,
+    pub origin_instance: String,
+    pub brain_state: Vec<f64>,
+}
 
 pub use apple_intelligence::{
     call as apple_intelligence_call, call_sync as apple_intelligence_call_sync,
@@ -49,7 +66,13 @@ pub struct BadAppleContext {
     _private: *mut c_void,
 }
 
+// SAFETY: BadAppleContext is an opaque `#[repr(C)]` handle whose `_private` pointer is
+// only dereferenced inside FFI functions that synchronize access through the inner
+// `Mutex<BadAppleState>`. The handle itself is a plain pointer with no interior
+// mutability, so moving or sharing it across threads is sound.
 unsafe impl Send for BadAppleContext {}
+// SAFETY: &BadAppleContext provides no way to mutate the handle; all mutation goes
+// through the inner Mutex, so sharing references across threads is sound.
 unsafe impl Sync for BadAppleContext {}
 
 struct BadAppleState {
@@ -84,11 +107,11 @@ pub unsafe extern "C" fn bad_apple_init(config_path: *const c_char) -> *mut BadA
     let config = if config_path.is_null() {
         Config::from_env()
     } else {
-        let cstr = match CStr::from_ptr(config_path).to_str() {
-            Ok(s) if !s.is_empty() => Config::from_env(),
+        let cstr = CStr::from_ptr(config_path);
+        match cstr.to_str() {
+            Ok(s) if !s.is_empty() => Config::from_file(std::path::Path::new(s)),
             _ => Config::from_env(),
-        };
-        cstr
+        }
     };
 
     let state = BadAppleState::new(config);
@@ -346,18 +369,27 @@ mod tests {
 
     #[test]
     fn ffi_roundtrip() {
+        // SAFETY: passing a null config_path is explicitly supported by bad_apple_init,
+        // which falls back to environment-based configuration. The returned pointer is
+        // checked for null immediately.
         let ctx = unsafe { bad_apple_init(std::ptr::null()) };
         assert!(!ctx.is_null());
 
         let input = b"print hello world sum total";
+        // SAFETY: `ctx` is a valid pointer from bad_apple_init, `input` is a byte slice
+        // whose pointer and length are valid for the duration of the call.
         let out = unsafe { bad_apple_process_stream(ctx, input.as_ptr(), input.len()) };
         assert!(!out.is_null());
+        // SAFETY: `out` is a valid non-null C string returned by bad_apple_process_stream.
         let _ = unsafe { CStr::from_ptr(out) };
+        // SAFETY: `out` was allocated by CString::into_raw and is freed once here.
         unsafe { bad_apple_free_string(out) };
 
+        // SAFETY: `ctx` is still a valid, unfreed pointer from bad_apple_init.
         let idx = unsafe { bad_apple_get_mastery_index(ctx) };
         assert!((0.0..=1.0).contains(&idx));
 
+        // SAFETY: `ctx` is a valid pointer from bad_apple_init and has not been freed yet.
         unsafe { bad_apple_free(ctx) };
     }
 

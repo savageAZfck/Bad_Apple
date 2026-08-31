@@ -99,6 +99,10 @@ fn invoke_callback(prompt: &str) -> Option<String> {
     let guard = CStringOwner(result);
 
     let output = unsafe {
+        // SAFETY: `guard.0` was checked for null above, so it is a valid foreign-allocated
+        // C string. `CStringOwner` owns it and frees it on drop, so the pointer stays valid
+        // for the duration of this call. `to_string_lossy()` consumes the bytes regardless
+        // of whether they are strict UTF-8.
         // to_string_lossy() guarantees we always consume and free the C string,
         // even if the bytes are not strict UTF-8.
         CStr::from_ptr(guard.0).to_string_lossy().into_owned()
@@ -130,6 +134,10 @@ impl Drop for CStringOwner {
         if let Some(free) = FREE_CB.get() {
             free(self.0);
         } else {
+            // SAFETY: `self.0` was checked for null above and was allocated by the C
+            // library allocator (the bridge returns `strdup`-style strings). `libc::free`
+            // matches that allocator, so freeing here is correct and the pointer is not
+            // used again after this drop.
             unsafe { libc::free(self.0.cast::<c_void>()) };
         }
     }
@@ -187,11 +195,17 @@ pub fn try_load_bridge() -> Result<(), String> {
     paths.push("target/debug/libBadAppleBridge.dylib".to_string());
 
     for path in &paths {
+        // SAFETY: Library::new dlopens the dylib at `path`. The returned handle is
+        // checked for errors via the match, and the library handle is intentionally
+        // leaked later so the symbols remain valid for the process lifetime.
         let lib = match unsafe { Library::new(path) } {
             Ok(l) => l,
             Err(_) => continue,
         };
 
+        // SAFETY: `lib.get` looks up a NUL-terminated symbol name in the loaded dylib.
+        // The `init_bad_apple_bridge` symbol is an `extern "C" fn()` with no pointer
+        // arguments, so transmuting the raw symbol to `InitFn` is sound.
         let init: Symbol<InitFn> = unsafe { lib.get(b"init_bad_apple_bridge\0") }
             .map_err(|e| format!("Swift bridge lacks init symbol: {e}"))?;
 
@@ -200,11 +214,18 @@ pub fn try_load_bridge() -> Result<(), String> {
         // Load the bridge's matching string deallocator if it exposes one.
         // This lets us free returned C strings in the same runtime that
         // allocated them, avoiding cross-runtime allocator drift.
+        // SAFETY: `lib.get` resolves a NUL-terminated symbol name. The `free_swift_string`
+        // symbol is an `extern "C" fn(*mut c_char)` matching `FreeFn`; the returned pointer
+        // is dereferenced only after the match confirms the symbol resolved.
         if let Ok(free) = unsafe { lib.get::<FreeFn>(b"free_swift_string\0") } {
             let _ = FREE_CB.set(*free);
             tracing::info!("🏴‍☠️  BAD APPLE // Swift string deallocator registered");
         }
 
+        // SAFETY: `lib.get` resolves a NUL-terminated symbol name. The
+        // `dispatch_desktop_notification` symbol is an `extern "C" fn(*const c_char,
+        // *const c_char)` matching `NotifyFn`; the returned pointer is dereferenced only
+        // after the match confirms the symbol resolved.
         if let Ok(dispatch) = unsafe { lib.get::<NotifyFn>(b"dispatch_desktop_notification\0") } {
             let _ = NOTIFY_CB.set(*dispatch);
             tracing::info!("🏴‍☠️  BAD APPLE // Desktop notification dispatcher registered");

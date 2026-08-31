@@ -11,6 +11,11 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
 
+# Derive the bundle version from Cargo.toml so the updater can detect new
+# releases.  Falls back to 0.1.0 if parsing fails.
+BUNDLE_VERSION="$(awk -F'"' '/^\[package\]/{p=1} p && /^version = /{print $2; exit}' "${REPO_ROOT}/Cargo.toml")"
+BUNDLE_VERSION="${BUNDLE_VERSION:-0.1.0}"
+
 resolve_sdk() {
     local active_sdk
     active_sdk=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)
@@ -130,6 +135,7 @@ install -d "${CONTENTS_DIR}/Resources"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/update_bad_apple.sh" "${CONTENTS_DIR}/Resources/update_bad_apple.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${CONTENTS_DIR}/Resources/strip_quarantine.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/install_badapple.sh" "${CONTENTS_DIR}/Resources/install_badapple.sh"
+install -m 755 "${REPO_ROOT}/src/platform/apple_bridge/install_badapple_platform.sh" "${CONTENTS_DIR}/Resources/install_badapple_platform.sh"
 install -m 644 "${REPO_ROOT}/badapple_aqua_helper.py" "${CONTENTS_DIR}/Resources/badapple_aqua_helper.py"
 
 if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
@@ -138,7 +144,7 @@ if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
 fi
 install_name_tool -add_rpath "@executable_path/../Frameworks" "${MACOS_DIR}/BadApple" 2>/dev/null || true
 
-cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
+cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -163,7 +169,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${BUNDLE_VERSION}</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

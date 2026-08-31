@@ -403,7 +403,7 @@ impl CandleBrain {
         let mut early = Vec::new();
         let mut late = Vec::new();
         {
-            let data = varmap.data().lock().unwrap();
+            let data = varmap.data().lock().unwrap_or_else(|e| e.into_inner());
             for (name, var) in data.iter() {
                 if is_early_var(name) {
                     early.push(var.clone());
@@ -491,6 +491,16 @@ impl CandleBrain {
 
     /// Reshape a flat 2048 input into `(1, seq_len, token_dim)`.
     fn prepare_input(&self, input: &[f64]) -> Result<Tensor> {
+        if input.len() != self.seq_len * self.token_dim {
+            candle_core::bail!(
+                "input length {} does not match expected {} (seq_len * token_dim)",
+                input.len(),
+                self.seq_len * self.token_dim
+            );
+        }
+        if input.iter().any(|v| !v.is_finite()) {
+            candle_core::bail!("input contains NaN or Inf values");
+        }
         let input_f32: Vec<f32> = input.iter().map(|v| *v as f32).collect();
         let t = Tensor::new(input_f32.as_slice(), &self.device)?;
         t.reshape((1, self.seq_len, self.token_dim))
@@ -564,11 +574,14 @@ impl CandleBrain {
             &self.device,
         )?;
         let probs = nn_ops::softmax(&logits_t, D::Minus1)?.to_vec1::<f32>()?;
+        if probs.is_empty() {
+            return Ok((0, 0.0));
+        }
         let (idx, &p) = probs
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .unwrap();
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, &probs[0]));
         Ok((idx, p as f64))
     }
 
@@ -591,7 +604,7 @@ impl CandleBrain {
 
         // Global L2 norm across all parameter gradients.
         let mut norm_sq = 0.0;
-        let data = self.varmap.data().lock().unwrap();
+        let data = self.varmap.data().lock().unwrap_or_else(|e| e.into_inner());
         for var in data.values() {
             if let Some(g) = grads.get(var.as_tensor()) {
                 let n = g.sqr()?.sum_all()?.to_vec0::<f32>()? as f64;
@@ -608,7 +621,7 @@ impl CandleBrain {
         };
 
         if scale < 1.0 {
-            let data = self.varmap.data().lock().unwrap();
+            let data = self.varmap.data().lock().unwrap_or_else(|e| e.into_inner());
             for var in data.values() {
                 if let Some(g) = grads.get(var.as_tensor()) {
                     let scaled = g.affine(scale, 0.0)?;
@@ -689,11 +702,14 @@ impl CandleBrain {
         let logits_vec = logits.to_vec1::<f32>()?;
         let logits_t = Tensor::new(logits_vec.as_slice(), &self.device)?;
         let probs = nn_ops::softmax(&logits_t, D::Minus1)?.to_vec1::<f32>()?;
+        if probs.is_empty() {
+            return Ok((0, 0.0));
+        }
         let (idx, &p) = probs
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .unwrap();
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, &probs[0]));
         Ok((idx, p as f64))
     }
 
@@ -774,7 +790,7 @@ impl CandleBrain {
     /// go through the optimizer, so it works even when AdamW momentum has
     /// stalled.
     fn apply_symmetry_break(&mut self) -> Result<()> {
-        let data = self.varmap.data().lock().unwrap();
+        let data = self.varmap.data().lock().unwrap_or_else(|e| e.into_inner());
         let mut rng = StdRng::from_entropy();
         let prefixes = [
             "conscience_head",
@@ -850,7 +866,7 @@ impl CandleBrain {
     /// mutates weights inside the cognitive tick, so the worker has the whole
     /// inter-tick interval to copy and flush safely.
     pub fn snapshot_weights(&self) -> Result<HashMap<String, Tensor>> {
-        let data = self.varmap.data().lock().unwrap();
+        let data = self.varmap.data().lock().unwrap_or_else(|e| e.into_inner());
         let mut snapshot = HashMap::with_capacity(data.len());
         for (name, var) in data.iter() {
             // Shallow clone: increments the Arc to the underlying storage, so

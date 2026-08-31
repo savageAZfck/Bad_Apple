@@ -415,8 +415,12 @@ pub fn compile_rust_to_wasm(source: &str) -> Result<Vec<u8>, String> {
             "-A",
             "warnings",
             "-o",
-            wasm_path.to_str().unwrap(),
-            rs_path.to_str().unwrap(),
+            wasm_path
+                .to_str()
+                .ok_or_else(|| format!("non-UTF-8 wasm output path: {}", wasm_path.display()))?,
+            rs_path
+                .to_str()
+                .ok_or_else(|| format!("non-UTF-8 rust source path: {}", rs_path.display()))?,
         ])
         .output()
         .map_err(|e| format!("rustc failed to spawn: {}", e))?;
@@ -578,12 +582,12 @@ pub async fn run_wild_loop(
     tokio::spawn(async move {
         loop {
             let task = {
-                let mut q = worker_pending.lock().unwrap();
+                let mut q = worker_pending.lock().unwrap_or_else(|e| e.into_inner());
                 q.pop_front()
             };
             if let Some(task) = task {
                 let queue_len = {
-                    let q = worker_pending.lock().unwrap();
+                    let q = worker_pending.lock().unwrap_or_else(|e| e.into_inner());
                     q.len()
                 };
 
@@ -671,7 +675,7 @@ pub async fn run_wild_loop(
                                     source,
                                     is_script,
                                 };
-                                let mut q = pending.lock().unwrap();
+                                let mut q = pending.lock().unwrap_or_else(|e| e.into_inner());
                                 q.push_back(task);
                             }
                             Err(e) => {

@@ -295,7 +295,13 @@ fn is_host_reachable(addr: &str, port: u16) -> bool {
 /// library estimates.
 #[cfg(target_os = "macos")]
 fn rss_bytes() -> Option<u64> {
+    // SAFETY: `rusage_info_v4` is a plain POD struct of integer fields. `std::mem::zeroed`
+    // produces a valid zero-initialized instance, which is a safe starting state for the
+    // out-parameter passed to `proc_pid_rusage` below.
     let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: `proc_pid_rusage` is a libc syscall that takes our own pid, the
+    // `RUSAGE_INFO_V4` flavor, and a pointer to the zeroed `info` struct. The struct is
+    // stack-allocated and valid for the duration of the call. The return code is checked.
     let rc = unsafe {
         libc::proc_pid_rusage(
             std::process::id() as libc::c_int,

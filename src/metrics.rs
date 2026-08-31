@@ -441,8 +441,8 @@ impl MemoryProfiler {
         self.samples.push_back((now_secs, used_bytes));
 
         let drift = if self.samples.len() >= 2 {
-            let first = self.samples.front().copied().unwrap();
-            let last = self.samples.back().copied().unwrap();
+            let first = self.samples.front().copied().unwrap_or_default();
+            let last = self.samples.back().copied().unwrap_or_default();
             let dt = last.0.saturating_sub(first.0) as f64;
             if dt > 0.0 {
                 (last.1 as f64 - first.1 as f64) / dt
@@ -494,6 +494,9 @@ impl MemoryProfiler {
         // These calls are best-effort; if the symbol is absent the program
         // continues unaffected.
         #[cfg(target_os = "macos")]
+        // SAFETY: `malloc_zone_pressure_relief` is a libc allocator hint. Passing a null
+        // zone selects the default malloc zone, and `nbytes = 0` asks it to release as
+        // much as possible. The call is best-effort and reads no caller-owned memory.
         unsafe {
             extern "C" {
                 fn malloc_zone_pressure_relief(zone: *mut c_void, nbytes: usize) -> usize;
@@ -501,6 +504,9 @@ impl MemoryProfiler {
             let _ = malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
         }
         #[cfg(not(target_os = "macos"))]
+        // SAFETY: `malloc_trim` is a glibc allocator hint that releases free memory at the
+        // top of the heap. The argument `0` trims the maximum amount. The call is
+        // best-effort and takes no caller-owned pointers.
         unsafe {
             let _ = libc::malloc_trim(0);
         }
@@ -513,8 +519,8 @@ impl MemoryProfiler {
         if self.samples.len() < 2 {
             return 0.0;
         }
-        let first = self.samples.front().copied().unwrap();
-        let last = self.samples.back().copied().unwrap();
+        let first = self.samples.front().copied().unwrap_or_default();
+        let last = self.samples.back().copied().unwrap_or_default();
         let dt = last.0.saturating_sub(first.0) as f64;
         if dt > 0.0 {
             ((last.1 as f64 - first.1 as f64) / dt).max(0.0)

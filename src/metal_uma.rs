@@ -125,7 +125,7 @@ impl SimpleBackend for SharedVarMapBackend {
         device: &CandleDevice,
     ) -> candle_core::Result<Tensor> {
         {
-            let data = self.varmap.data().lock().unwrap();
+            let data = self.varmap.data().lock().unwrap_or_else(|e| e.into_inner());
             if let Some(var) = data.get(name) {
                 if var.shape() != &shape {
                     return Err(candle_core::Error::Msg(format!(
@@ -150,7 +150,7 @@ impl SimpleBackend for SharedVarMapBackend {
             init.var(shape.clone(), dtype, device)?
         };
 
-        let mut data = self.varmap.data().lock().unwrap();
+        let mut data = self.varmap.data().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = data.get(name) {
             return Ok(existing.as_tensor().clone());
         }
@@ -168,14 +168,18 @@ impl SimpleBackend for SharedVarMapBackend {
         self.varmap
             .data()
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(name)
             .map(|var| var.as_tensor().clone())
             .ok_or_else(|| candle_core::Error::Msg(format!("cannot find tensor {name}")))
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        self.varmap.data().lock().unwrap().contains_key(name)
+        self.varmap
+            .data()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(name)
     }
 }
 
@@ -256,6 +260,10 @@ impl View for UmaSafetensorView {
         const PAGE: usize = 4096;
         let mut i = 0;
         while i < self.len {
+            // SAFETY: `ptr` was asserted non-null above and points into the `MTLBuffer`
+            // contents, which `MetalStorage` owns for the lifetime of this view. The
+            // `offset + i` add stays within `[0, self.len)` so it remains in bounds, and
+            // `read_volatile` only reads a single byte without retaining the pointer.
             unsafe { std::ptr::read_volatile(ptr.add(self.offset + i)) };
             i += PAGE;
         }

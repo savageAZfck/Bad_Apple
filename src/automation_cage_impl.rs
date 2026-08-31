@@ -9,6 +9,176 @@ use std::time::Instant;
 
 pub const MAX_COPY_BYTES: u64 = 100 * 1024 * 1024;
 
+// ============================================================================
+// openat-based safe path operations — eliminate TOCTOU races by using fd-based
+// semantics instead of string-based path validation. Each component is opened
+// with O_NOFOLLOW so a symlink swapped between validation and use cannot
+// redirect the operation outside the cage.
+// ============================================================================
+
+/// Open a directory fd by walking from a root fd, component by component,
+/// rejecting symlinks at every step via O_NOFOLLOW. Returns the final fd
+/// or -1 on error. Caller is responsible for closing the fd.
+fn openat_walk(root_fd: i32, components: &[&str]) -> Result<i32> {
+    let mut fd = root_fd;
+    let mut need_close = false;
+    for &component in components {
+        // SAFETY: openat with O_NOFOLLOW is safe because the kernel atomically rejects
+        // symlinks at the leaf, preventing path substitution races. `fd` is a valid
+        // directory fd (the root fd or a previously-opened component), and `component`
+        // is a NUL-terminated C string borrowed from the caller's slice.
+        let next = unsafe {
+            libc::openat(
+                fd,
+                component.as_ptr() as *const _,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+            )
+        };
+        if next < 0 {
+            let err = std::io::Error::last_os_error();
+            if need_close {
+                // SAFETY: libc::close is safe to call on any valid fd. `fd` was obtained
+                // from a successful prior openat in this loop and has not been closed yet.
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            return Err(err).context(format!("openat {} failed", component));
+        }
+        if need_close {
+            // SAFETY: libc::close is safe to call on any valid fd. `fd` is the previous
+            // component's fd, which is now superseded by `next` and no longer needed.
+            unsafe {
+                libc::close(fd);
+            }
+        }
+        fd = next;
+        need_close = true;
+    }
+    Ok(fd)
+}
+
+/// Create a file safely using openat: walk to the parent directory fd with
+/// O_NOFOLLOW at each step, then openat the file with O_CREAT | O_EXCL |
+/// O_NOFOLLOW. This eliminates the TOCTOU between path validation and file
+/// creation.
+fn openat_create_file(root_fd: i32, parent_components: &[&str], filename: &str) -> Result<()> {
+    let parent_fd = openat_walk(root_fd, parent_components)?;
+    // SAFETY: openat with O_CREAT | O_EXCL | O_NOFOLLOW is safe because `parent_fd` is a
+    // valid directory fd returned by openat_walk, `filename` is a NUL-terminated C string,
+    // and O_EXCL ensures the file must not already exist, preventing overwrite races.
+    // O_NOFOLLOW rejects a symlink swapped at the leaf.
+    let result = unsafe {
+        libc::openat(
+            parent_fd,
+            filename.as_ptr() as *const _,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o644,
+        )
+    };
+    if parent_fd != root_fd {
+        // SAFETY: libc::close is safe to call on any valid fd. `parent_fd` was obtained
+        // from a successful openat_walk and is no longer referenced after this point.
+        unsafe {
+            libc::close(parent_fd);
+        }
+    }
+    if result < 0 {
+        return Err(std::io::Error::last_os_error()).context("openat create file failed");
+    }
+    // SAFETY: libc::close is safe to call on any valid fd. `result` is a non-negative fd
+    // returned by the openat above; we close it immediately since we only needed to prove
+    // the file could be created.
+    unsafe {
+        libc::close(result);
+    }
+    Ok(())
+}
+
+/// Create a directory safely using openat with O_NOFOLLOW at each step.
+fn openat_create_dir(root_fd: i32, components: &[&str]) -> Result<()> {
+    let mut fd = root_fd;
+    let mut need_close = false;
+    for &component in components {
+        // Try to open existing component first
+        // SAFETY: openat with O_NOFOLLOW | O_DIRECTORY is safe because `fd` is a valid
+        // directory fd and O_NOFOLLOW atomically rejects a symlink at the leaf, so a
+        // path component swapped between validation and use cannot escape the cage.
+        let existing = unsafe {
+            libc::openat(
+                fd,
+                component.as_ptr() as *const _,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+            )
+        };
+        if existing >= 0 {
+            if need_close {
+                // SAFETY: libc::close is safe to call on any valid fd. `fd` is the prior
+                // component fd now superseded by `existing`.
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            fd = existing;
+            need_close = true;
+        } else {
+            // Doesn't exist — create it
+            // SAFETY: mkdirat is safe because `fd` is a valid directory fd and `component`
+            // is a NUL-terminated C string. The new directory is created with mode 0o755.
+            let result = unsafe { libc::mkdirat(fd, component.as_ptr() as *const _, 0o755) };
+            if result < 0 {
+                let err = std::io::Error::last_os_error();
+                if need_close {
+                    // SAFETY: libc::close is safe to call on any valid fd. `fd` was
+                    // obtained from a prior successful openat and is no longer needed.
+                    unsafe {
+                        libc::close(fd);
+                    }
+                }
+                return Err(err).context(format!("mkdirat {} failed", component));
+            }
+            // Now open the newly created directory
+            // SAFETY: openat with O_NOFOLLOW | O_DIRECTORY is safe because the directory
+            // was just created by mkdirat above and `fd` is a valid parent directory fd.
+            let new_fd = unsafe {
+                libc::openat(
+                    fd,
+                    component.as_ptr() as *const _,
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+                )
+            };
+            if new_fd < 0 {
+                let err = std::io::Error::last_os_error();
+                if need_close {
+                    // SAFETY: libc::close is safe to call on any valid fd. `fd` was
+                    // obtained from a prior successful openat and is no longer needed.
+                    unsafe {
+                        libc::close(fd);
+                    }
+                }
+                return Err(err).context(format!("openat after mkdirat {} failed", component));
+            }
+            if need_close {
+                // SAFETY: libc::close is safe to call on any valid fd. `fd` is the prior
+                // component fd now superseded by `new_fd`.
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            fd = new_fd;
+            need_close = true;
+        }
+    }
+    if need_close {
+        // SAFETY: libc::close is safe to call on any valid fd. `fd` is the final
+        // component fd opened during the walk and is no longer needed by the caller.
+        unsafe {
+            libc::close(fd);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
@@ -112,9 +282,9 @@ pub fn parse_actions(input: &str) -> Result<Vec<Action>> {
         if !closed || body.trim().is_empty() {
             bail!("invalid or unterminated action fence");
         }
-        if let Ok(action) = serde_json::from_str::<Action>(&body) {
-            out.push(action);
-        }
+        let action = serde_json::from_str::<Action>(&body)
+            .context("invalid badapple-action or json fenced action")?;
+        out.push(action);
     }
     if out.is_empty() {
         bail!("no badapple-action or compatible json fenced action found");
@@ -238,8 +408,38 @@ impl AutomationCage {
                 create_directory_chain(&plan.resolved_paths[0], &self.roots)
             }
             Action::CopyFile { .. } => {
-                fs::copy(&plan.resolved_paths[0], &plan.resolved_paths[1])
-                    .context("copy failed")?;
+                // Open source with O_NOFOLLOW to atomically reject symlinks
+                // at the leaf, eliminating the TOCTOU between validate_regular_source
+                // and the actual read. Then open destination with O_NOFOLLOW too.
+                use std::os::unix::fs::OpenOptionsExt;
+                let source_file = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&plan.resolved_paths[0])
+                    .context("copy: source open failed (or symlink rejected)")?;
+                // Verify the fd is a regular file with nlink == 1
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let meta = source_file.metadata().context("copy: fstat source")?;
+                    if !meta.is_file() {
+                        bail!("copy: source is not a regular file");
+                    }
+                    if meta.nlink() > 1 {
+                        bail!("copy: source has multiple hard links");
+                    }
+                }
+                // Open destination with O_NOFOLLOW
+                let dest_file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&plan.resolved_paths[1])
+                    .context("copy: destination open failed (or symlink rejected)")?;
+                let mut source_file = source_file;
+                let mut dest_file = dest_file;
+                std::io::copy(&mut source_file, &mut dest_file)
+                    .context("copy: data transfer failed")?;
                 Ok(())
             }
             Action::MoveFile { .. } => {
@@ -263,10 +463,26 @@ impl AutomationCage {
         if !self.roots.iter().any(|root| resolved.starts_with(root)) {
             bail!("path escapes allowlisted roots");
         }
+        // Reject broken/dangling symlinks at the leaf: a missing leaf that is
+        // actually a symlink would be followed by fs::write/fs::copy and could
+        // escape the cage.  symlink_metadata returns Ok for a broken symlink,
+        // while metadata would fail.
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                bail!("symlink at path leaf is forbidden");
+            }
+        }
         Ok(resolved)
     }
 
     fn next_trash_destination(&self, source: &Path) -> Result<PathBuf> {
+        // Reject a symlinked ~/.Trash before canonicalizing it; otherwise a
+        // symlink could redirect trashed files outside the home directory.
+        let trash_meta =
+            fs::symlink_metadata(self.home.join(".Trash")).context("~/.Trash unavailable")?;
+        if trash_meta.file_type().is_symlink() {
+            bail!("~/.Trash must not be a symlink");
+        }
         let trash = fs::canonicalize(self.home.join(".Trash")).context("~/.Trash unavailable")?;
         if !trash.starts_with(&self.home) || !trash.is_dir() {
             bail!("unsafe trash directory");
@@ -294,9 +510,18 @@ impl AutomationCage {
             .parent()
             .ok_or_else(|| anyhow!("invalid log path"))?;
         fs::create_dir_all(parent)?;
+        // Validate that the parent directory is not a symlink, so an attacker
+        // cannot redirect the audit stream by replacing the directory.
+        // The log path itself is opened with O_NOFOLLOW below.
+        let parent_meta = fs::symlink_metadata(parent)?;
+        if parent_meta.file_type().is_symlink() {
+            bail!("log parent directory must not be a symlink");
+        }
+        use std::os::unix::fs::OpenOptionsExt;
         let mut log = OpenOptions::new()
             .create(true)
             .append(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&self.log_path)?;
         serde_json::to_writer(&mut log, report)?;
         log.write_all(b"\n")?;
@@ -437,6 +662,15 @@ fn validate_regular_source(path: &Path) -> Result<()> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         bail!("source must be a regular non-symlink file");
     }
+    // Reject hard links to sensitive files: a hard-linked inode shared with a
+    // file outside the cage would let CopyFile exfiltrate its contents.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() > 1 {
+            bail!("source has multiple hard links and may cross trust boundaries");
+        }
+    }
     Ok(())
 }
 
@@ -444,7 +678,12 @@ fn validate_destination(source: &Path, destination: &Path) -> Result<()> {
     if source == destination {
         bail!("source equals destination");
     }
-    if destination.exists() {
+    // Reject a dangling/broken symlink at the destination leaf: fs::copy and
+    // fs::rename would follow it and write outside the cage.
+    if let Ok(meta) = fs::symlink_metadata(destination) {
+        if meta.file_type().is_symlink() {
+            bail!("destination is a symlink; overwrite via symlink is forbidden");
+        }
         bail!("overwrite forbidden");
     }
     let parent = destination
@@ -463,20 +702,35 @@ fn create_directory_chain(path: &Path, roots: &[PathBuf]) -> Result<()> {
         .filter(|root| path.starts_with(root))
         .max_by_key(|root| root.components().count())
         .ok_or_else(|| anyhow!("outside roots"))?;
-    let mut current = root.clone();
-    for component in path.strip_prefix(root)?.components() {
-        let Component::Normal(name) = component else {
-            bail!("invalid component");
-        };
-        current.push(name);
-        if current.exists() {
-            let metadata = fs::symlink_metadata(&current)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                bail!("unsafe directory component");
-            }
-        } else {
-            fs::create_dir(&current)?;
-        }
+    // Open the root directory fd
+    // SAFETY: open with O_NOFOLLOW | O_DIRECTORY is safe because `root` is an allowlisted
+    // directory that was canonicalized at cage construction. O_NOFOLLOW rejects a symlink
+    // at the leaf, so a swapped root cannot redirect the fd outside the cage.
+    let root_fd = unsafe {
+        libc::open(
+            root.to_string_lossy().as_ptr() as *const _,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+        )
+    };
+    if root_fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("cannot open root directory with O_NOFOLLOW");
+    }
+    // Collect remaining components
+    let components: Vec<String> = path
+        .strip_prefix(root)?
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let c_refs: Vec<&str> = components.iter().map(|s| s.as_str()).collect();
+    openat_create_dir(root_fd, &c_refs)?;
+    // SAFETY: libc::close is safe to call on any valid fd. `root_fd` was obtained from a
+    // successful open above and is no longer needed after openat_create_dir returns.
+    unsafe {
+        libc::close(root_fd);
     }
     Ok(())
 }
@@ -488,8 +742,47 @@ fn create_file_chain(path: &Path, roots: &[PathBuf]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("file path has no parent"))?;
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow!("file path has no name"))?
+        .to_string_lossy()
+        .to_string();
     create_directory_chain(parent, roots)?;
-    fs::write(path, b"").context("create file failed")?;
+    // Now use openat to create the file with O_NOFOLLOW at the leaf,
+    // eliminating the TOCTOU between create_directory_chain and file creation.
+    let root = roots
+        .iter()
+        .filter(|root| parent.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .ok_or_else(|| anyhow!("outside roots"))?;
+    // SAFETY: open with O_NOFOLLOW | O_DIRECTORY is safe because `root` is an allowlisted
+    // canonicalized directory. O_NOFOLLOW rejects a symlink at the leaf so the fd cannot
+    // be redirected outside the cage.
+    let root_fd = unsafe {
+        libc::open(
+            root.to_string_lossy().as_ptr() as *const _,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+        )
+    };
+    if root_fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("cannot open root directory for file creation");
+    }
+    let parent_components: Vec<String> = parent
+        .strip_prefix(root)?
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let c_refs: Vec<&str> = parent_components.iter().map(|s| s.as_str()).collect();
+    openat_create_file(root_fd, &c_refs, &filename)?;
+    // SAFETY: libc::close is safe to call on any valid fd. `root_fd` was obtained from a
+    // successful open above and is no longer needed after openat_create_file returns.
+    unsafe {
+        libc::close(root_fd);
+    }
     Ok(())
 }
 
@@ -669,5 +962,183 @@ mod tests {
                 destination: directory.join("oversized-copy"),
             })
             .is_err());
+    }
+
+    #[test]
+    fn create_file_rejects_symlink_at_leaf() {
+        let fixture = Fixture::new();
+        let target = fixture.root.join("evil_link");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", &target).unwrap();
+        }
+        assert!(fixture
+            .cage
+            .validate(&Action::CreateFile {
+                path: target.clone(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn trash_symlink_is_rejected() {
+        let fixture = Fixture::new();
+        let trash = fixture.cage.home.join(".Trash");
+        let _ = fs::remove_dir_all(&trash);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&fixture.root, &trash).unwrap();
+        }
+        let file = fixture.root.join("to_trash");
+        fs::write(&file, b"data").unwrap();
+        let result = fixture.cage.execute(&Action::MoveToTrash { path: file });
+        assert!(result.is_err(), "trash symlink should be rejected");
+    }
+
+    // =========================================================================
+    // Security regression tests — red team findings
+    // =========================================================================
+
+    /// Verify that CopyFile rejects a symlink as the copy source.
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_rejects_symlink_source() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let dir = fixture.root.join("cage_dir");
+        fs::create_dir_all(&dir).unwrap();
+        let real_file = dir.join("real_file");
+        fs::write(&real_file, b"content").unwrap();
+        let link = dir.join("symlink_source");
+        symlink(&real_file, &link).unwrap();
+        let dest = dir.join("dest");
+        assert!(
+            fixture
+                .cage
+                .validate(&Action::CopyFile {
+                    source: link,
+                    destination: dest,
+                })
+                .is_err(),
+            "copy from a symlink source must be rejected"
+        );
+    }
+
+    /// Verify that CopyFile rejects a hard-linked source (nlink > 1).
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_rejects_hardlink_source() {
+        let fixture = Fixture::new();
+        let dir = fixture.root.join("hlink_dir");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source");
+        fs::write(&source, b"content").unwrap();
+        let hardlink = dir.join("hardlink_to_source");
+        fs::hard_link(&source, &hardlink).unwrap();
+        let dest = dir.join("dest");
+        assert!(
+            fixture
+                .cage
+                .validate(&Action::CopyFile {
+                    source: hardlink,
+                    destination: dest,
+                })
+                .is_err(),
+            "copy from a hard-linked source must be rejected"
+        );
+    }
+
+    /// Verify that CreateDirectory fails when a path component is a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn create_directory_rejects_symlink_component() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let outside = fixture.base.join("outside_target");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, fixture.root.join("evil_link")).unwrap();
+        assert!(
+            fixture
+                .cage
+                .validate(&Action::CreateDirectory {
+                    path: fixture.root.join("evil_link/subdir"),
+                })
+                .is_err(),
+            "create_directory through a symlink component must be rejected"
+        );
+    }
+
+    /// Verify that MoveFile rejects a symlink at the destination.
+    #[cfg(unix)]
+    #[test]
+    fn move_file_rejects_symlink_destination() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let dir = fixture.root.join("move_dir");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source");
+        fs::write(&source, b"content").unwrap();
+        let symlink_target = dir.join("symlink_target");
+        fs::write(&symlink_target, b"target_content").unwrap();
+        let dest = dir.join("dest_symlink");
+        symlink(&symlink_target, &dest).unwrap();
+        assert!(
+            fixture
+                .cage
+                .validate(&Action::MoveFile {
+                    source,
+                    destination: dest,
+                })
+                .is_err(),
+            "move to a symlink destination must be rejected"
+        );
+    }
+
+    /// Verify that CopyFile with source == destination is rejected.
+    #[test]
+    fn copy_file_source_equals_destination_rejected() {
+        let fixture = Fixture::new();
+        let dir = fixture.root.join("eq_dir");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file");
+        fs::write(&file, b"content").unwrap();
+        assert!(
+            fixture
+                .cage
+                .validate(&Action::CopyFile {
+                    source: file.clone(),
+                    destination: file,
+                })
+                .is_err(),
+            "copy where source equals destination must be rejected"
+        );
+    }
+
+    /// Verify that executing an action produces a log entry (the O_NOFOLLOW log
+    /// path works and writes valid JSONL).
+    #[test]
+    fn log_writes_to_o_nofollow_file() {
+        let fixture = Fixture::new();
+        let dir = fixture.root.join("log_test_dir");
+        fixture
+            .cage
+            .execute(&Action::CreateDirectory { path: dir.clone() })
+            .unwrap();
+
+        let log_path = fixture.base.join("audit.jsonl");
+        assert!(
+            log_path.exists(),
+            "audit log file should exist after execute"
+        );
+
+        let content = fs::read_to_string(&log_path).unwrap();
+        assert!(
+            content.contains("create_directory"),
+            "log should contain the operation name"
+        );
+        assert!(
+            content.contains("success"),
+            "log should contain success result"
+        );
     }
 }

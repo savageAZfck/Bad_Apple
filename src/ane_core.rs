@@ -206,10 +206,18 @@ pub struct AneCore {
     config: AneCoreConfig,
 }
 
+// SAFETY: AneCore owns a NonNull<c_void> handle obtained from the C bridge and the
+// function pointers loaded from the dylib. The handle is only mutated through &mut self
+// methods guarded by the global `ENGINE` Mutex, so there is no concurrent shared access.
+// The C bridge itself is not reentrant across threads, but the Mutex serializes all calls.
 unsafe impl Send for AneCore {}
 
 impl Drop for AneCore {
     fn drop(&mut self) {
+        // SAFETY: `self.handle` is a valid NonNull obtained from a successful `create` call
+        // at load time and is still owned exclusively by this instance (no clones of the
+        // handle exist). `self.destroy` is a verified C function pointer from the loaded
+        // dylib. Drop runs once and the handle is not used afterward.
         unsafe { (self.destroy)(self.handle.as_ptr()) };
     }
 }
@@ -232,8 +240,13 @@ impl AneCore {
         let symbols = load_bridge_symbols()?;
         let model_path = CString::new(config.model_path.to_string_lossy().as_bytes())
             .map_err(|error| AneCoreError::Bridge(error.to_string()))?;
-        let handle = NonNull::new(unsafe { (symbols.create)(model_path.as_ptr()) })
-            .ok_or_else(|| AneCoreError::Bridge("model load returned null".to_string()))?;
+        let handle = NonNull::new(unsafe {
+            // SAFETY: `symbols.create` is a verified C function pointer loaded from the
+            // bridge dylib. `model_path` is a valid NUL-terminated CString that outlives
+            // the call. The returned pointer is checked for null immediately below.
+            (symbols.create)(model_path.as_ptr())
+        })
+        .ok_or_else(|| AneCoreError::Bridge("model load returned null".to_string()))?;
 
         // The compiled model's max_seq_len is an upper bound on context length.
         // The runtime cap is the smaller of the user's preference and the model.
@@ -261,24 +274,35 @@ impl AneCore {
     }
 
     pub fn prewarm(&mut self) -> bool {
+        // SAFETY: `self.prewarm` is a verified C function pointer and `self.handle` is a
+        // valid NonNull obtained at load time. We hold &mut self so the call is exclusive.
         unsafe { (self.prewarm)(self.handle.as_ptr()) }
     }
 
     pub fn reset(&mut self) -> bool {
+        // SAFETY: `self.reset` is a verified C function pointer and `self.handle` is a
+        // valid NonNull obtained at load time. We hold &mut self so the call is exclusive.
         unsafe { (self.reset)(self.handle.as_ptr()) }
     }
 
     pub fn ane_placement_ratio(&mut self) -> f64 {
+        // SAFETY: `self.ane_ratio` is a verified C function pointer and `self.handle` is a
+        // valid NonNull obtained at load time. We hold &mut self so the call is exclusive.
         unsafe { (self.ane_ratio)(self.handle.as_ptr()) }
     }
 
     pub fn compute_units_raw_value(&self) -> i32 {
+        // SAFETY: `self.compute_units` is a verified C function pointer and `self.handle`
+        // is a valid NonNull obtained at load time. The call only reads model state.
         unsafe { (self.compute_units)(self.handle.as_ptr()) }
     }
 
     pub fn selection_latency_us(&self) -> Option<(u64, u64)> {
         let mut load = 0;
         let mut prewarm = 0;
+        // SAFETY: `self.selection_latency` is a verified C function pointer. `self.handle`
+        // is a valid NonNull. `load` and `prewarm` are stack u64s whose addresses are
+        // passed as out-parameters; the bridge writes through them only on success.
         unsafe {
             (self.selection_latency)(self.handle.as_ptr(), &raw mut load, &raw mut prewarm)
                 .then_some((load, prewarm))
@@ -409,6 +433,9 @@ impl AneCore {
         // A plain CPU slice avoids the per-token `new_buffer` overhead and the
         // command-encoder synchronization of a dedicated Metal allocation.
         let start = Instant::now();
+        // SAFETY: `self.predict` is a verified C function pointer. `self.handle` is a valid
+        // NonNull. `tokens` is a &[i32] whose pointer and length are valid for the duration
+        // of the call; the bridge only reads from it and does not retain the pointer.
         let output = unsafe { (self.predict)(self.handle.as_ptr(), tokens.as_ptr(), tokens.len()) };
         LAST_TOKEN_LATENCY_US.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         TOKEN_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -548,6 +575,9 @@ fn load_bridge_symbols() -> Result<BridgeSymbols, AneCoreError> {
         if !path.exists() {
             continue;
         }
+        // SAFETY: Library::new dlopens the dylib at `path`, which was checked to exist above.
+        // The returned handle is checked for errors via the match, and dlopen is safe for an
+        // existing, readable file. The library stays alive for the process lifetime.
         let library = match unsafe { Library::new(&path) } {
             Ok(library) => library,
             Err(error) => {
@@ -555,6 +585,9 @@ fn load_bridge_symbols() -> Result<BridgeSymbols, AneCoreError> {
                 continue;
             }
         };
+        // SAFETY: `library.get` looks up a symbol by NUL-terminated name in the loaded dylib.
+        // The returned symbols are transmuted to function pointers and validated against the
+        // expected signatures; only after all ten symbols resolve do we dereference them.
         unsafe {
             let create = library.get::<CreateFn>(b"bad_apple_ane_create\0");
             let destroy = library.get::<DestroyFn>(b"bad_apple_ane_destroy\0");
@@ -624,6 +657,9 @@ pub fn audit_artifact_placement(
     let symbols = load_bridge_symbols()?;
     let path = CString::new(path.to_string_lossy().as_bytes())
         .map_err(|error| AneCoreError::Bridge(error.to_string()))?;
+    // SAFETY: `symbols.artifact_ratio` is a verified C function pointer. `path` is a valid
+    // NUL-terminated CString that outlives the call. `compute_units_raw_value` is a plain
+    // i32 passed by value. The function returns a ratio; a negative value signals failure.
     let ratio = unsafe { (symbols.artifact_ratio)(path.as_ptr(), compute_units_raw_value) };
     if ratio < 0.0 {
         Err(AneCoreError::Bridge(
@@ -643,6 +679,10 @@ pub fn probe_compiled_shard(
     let path = CString::new(path.to_string_lossy().as_bytes())
         .map_err(|error| AneCoreError::Bridge(error.to_string()))?;
     let mut average_latency_us = 0;
+    // SAFETY: `symbols.probe_shard` is a verified C function pointer. `path` is a valid
+    // NUL-terminated CString that outlives the call. `iterations` is clamped to at least 1.
+    // `average_latency_us` is a stack u64 whose address is passed as an out-parameter and
+    // is only written through when the call returns true.
     let succeeded = unsafe {
         (symbols.probe_shard)(
             path.as_ptr(),
@@ -878,6 +918,10 @@ const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
 /// not permitted by the runtime. It does not lock memory bus lines.
 fn elevate_thread_qos() {
     #[cfg(target_os = "macos")]
+    // SAFETY: pthread_set_qos_class_self_np only affects the calling thread's scheduling
+    // class and accepts a known QOS_CLASS_USER_INTERACTIVE constant (0x21) with a relative
+    // priority of 0. It does not touch shared state and a non-zero return is logged, not
+    // treated as a safety violation.
     unsafe {
         let result = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         if result != 0 {

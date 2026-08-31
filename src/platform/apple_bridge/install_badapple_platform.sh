@@ -7,7 +7,8 @@ fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 CONSOLE_USER="${CONSOLE_USER:-$(stat -f %Su /dev/console)}"
 CONSOLE_UID="$(id -u "${CONSOLE_USER}")"
-CONSOLE_HOME="$(eval echo ~"${CONSOLE_USER}")"
+CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+CONSOLE_HOME="${CONSOLE_HOME:-/Users/${CONSOLE_USER}}"
 CONSOLE_GROUP="$(id -gn "${CONSOLE_USER}")"
 
 MODE="--dry-run"
@@ -100,19 +101,19 @@ if [[ "${UNSIGNED}" -eq 1 ]]; then
     fi
 fi
 
-install -d -o "${CONSOLE_USER}" -g staff -m 770 /var/lib/bad_apple /var/run/badapple
-chown -R "${CONSOLE_USER}":staff /var/lib/bad_apple
-chmod 600 /var/lib/bad_apple/slicks.key
+install -d -o "${CONSOLE_USER}" -g "${CONSOLE_GROUP}" -m 770 /var/lib/bad_apple /var/run/badapple
+chown -R "${CONSOLE_USER}":"${CONSOLE_GROUP}" /var/lib/bad_apple
+[[ -f /var/lib/bad_apple/slicks.key ]] && chmod 600 /var/lib/bad_apple/slicks.key
 install -d -o root -g wheel -m 750 "${BACKUP_DIR}"
 touch /var/log/bad_apple_mlx_server.log
-chown "${CONSOLE_USER}":staff /var/log/bad_apple_mlx_server.log
+chown "${CONSOLE_USER}":"${CONSOLE_GROUP}" /var/log/bad_apple_mlx_server.log
 chmod 644 /var/log/bad_apple_mlx_server.log
-USER_DATA="$(eval echo ~"${CONSOLE_USER}")/.bad_apple"
-install -d -o "${CONSOLE_USER}" -g staff -m 755 "${USER_DATA}"
-chown -R "${CONSOLE_USER}":staff "${USER_DATA}"
-HF_CACHE="$(eval echo ~"${CONSOLE_USER}")/.cache/huggingface"
+USER_DATA="${CONSOLE_HOME}/.bad_apple"
+install -d -o "${CONSOLE_USER}" -g "${CONSOLE_GROUP}" -m 755 "${USER_DATA}"
+chown -R "${CONSOLE_USER}":"${CONSOLE_GROUP}" "${USER_DATA}"
+HF_CACHE="${CONSOLE_HOME}/.cache/huggingface"
 if [[ -d "${HF_CACHE}" ]]; then
-    chown -R "${CONSOLE_USER}":staff "${HF_CACHE}"
+    chown -R "${CONSOLE_USER}":"${CONSOLE_GROUP}" "${HF_CACHE}"
 fi
 
 for plist in com.badapple.gatekeeper.plist com.badapple.mlx.plist com.badapple.supervisor.plist; do
@@ -149,7 +150,7 @@ launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist
 launchctl load -w /Library/LaunchDaemons/com.badapple.supervisor.plist
 
 ready=0
-for _ in $(seq 1 90); do
+for _ in {1..90}; do
     if [[ -S /var/run/badapple/substrate.sock && -S /var/run/badapple/substrate_mlx.sock ]]; then
         if "${REPO_ROOT}/target/release/badapple" -n 16 "Reply only: ready" >/dev/null 2>&1; then
             ready=1

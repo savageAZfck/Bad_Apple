@@ -19,6 +19,17 @@ __pycache__/
 src/platform/apple_desktop/.build
 src/platform/apple_bridge/.build
 
+# Fuzz build artifacts, corpora, and crash inputs
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+
+# Private business documents (emails, pitch drafts, LinkedIn posts)
+email_*.md
+linkedin_post_*.md
+nvidia_proposition.md
+hackernews_post.md
+
 # Cargo lock is intentionally committed for this binary
 # Cargo.lock
 

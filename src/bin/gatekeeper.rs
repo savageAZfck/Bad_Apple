@@ -12,6 +12,7 @@ use bad_apple::wasm_cage::WasmCage;
 use base64::{engine::general_purpose, Engine as _};
 use rand::Rng;
 use regex::Regex;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -19,10 +20,42 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MLX_SOCKET_PATH: &str = "/var/run/badapple/substrate_mlx.sock";
 const LOW_COMPLEXITY_THRESHOLD: f64 = 0.62;
+const REPLAY_CACHE_MAX: usize = 4096;
+
+/// Thread-safe replay cache: stores consumed (client_nonce, server_nonce) pairs
+/// to reject replayed Execute frames within the freshness window.
+struct ReplayCache {
+    seen: Mutex<HashSet<(String, String)>>,
+}
+
+impl ReplayCache {
+    fn new() -> Self {
+        Self {
+            seen: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Check if a nonce pair has been used, and insert it if not.
+    /// Returns `true` if the pair is fresh (not a replay).
+    fn check_and_insert(&self, client_nonce: &str, server_nonce: &str) -> bool {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (client_nonce.to_string(), server_nonce.to_string());
+        if seen.contains(&key) {
+            return false; // replay
+        }
+        // Evict oldest entries if cache is full (simple cap, not LRU)
+        if seen.len() >= REPLAY_CACHE_MAX {
+            seen.clear();
+        }
+        seen.insert(key);
+        true
+    }
+}
 
 /// One classification request sent to the brain worker thread.
 struct ClassifyRequest {
@@ -145,19 +178,19 @@ struct FastActionResolver {
 }
 
 impl FastActionResolver {
-    fn new() -> Self {
-        Self {
-            open_workspace: Regex::new(r"(?i)\bopen\b(?:\s+\w+){0,3}\s+(?:workspace|folder|repo|directory)\s+(?:my\s+)?([a-z0-9_\-\.]+)").unwrap(),
-            open_app: Regex::new(r"(?i)\b(open|launch)\b(?:\s+\w+){0,2}\s+(?:the\s+)?([a-z0-9_\-\.]+(?:\.app)?)").unwrap(),
-            create_file: Regex::new(r"(?i)\bcreate\b(?:\s+\w+){0,3}\s+(?:file)\s+(?:at\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
-            create_dir: Regex::new(r"(?i)\bcreate\b(?:\s+\w+){0,3}\s+(?:directory|folder)\s+(?:at\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
-            list_dir: Regex::new(r"(?i)\b(list|show)\b(?:\s+\w+){0,3}\s+(?:files|contents|in)?\s+(?:of\s+)?(.+?)(?:\s+(?:and|then|or)\b|$)").unwrap(),
-            delete: Regex::new(r"(?i)\b(delete|remove|trash)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)").unwrap(),
-            copy_file: Regex::new(r"(?i)\bcopy\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
-            move_file: Regex::new(r"(?i)\b(move)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").unwrap(),
-            run_wasm: Regex::new(r"(?i)\b(?:run|execute)\b(?:\s+\w+){0,3}\s+(?:wasm\s+)?script\s+([~/a-z0-9_\.\-\s/]+\.wasm)").unwrap(),
-            time: Regex::new(r"(?i)^(what'?s?\s+(?:the\s+)?time|what\s+time\s+is\s+it|current\s+time|time\s+is\s+it|clock|what\s+hour\s+is\s+it|qu[eé]\s+hora\s+es)\b").unwrap(),
-        }
+    fn new() -> Result<Self> {
+        Ok(Self {
+            open_workspace: Regex::new(r"(?i)\bopen\b(?:\s+\w+){0,3}\s+(?:workspace|folder|repo|directory)\s+(?:my\s+)?([a-z0-9_\-\.]+)").context("open_workspace regex")?,
+            open_app: Regex::new(r"(?i)\b(open|launch)\b(?:\s+\w+){0,2}\s+(?:the\s+)?([a-z0-9_\-\.]+(?:\.app)?)").context("open_app regex")?,
+            create_file: Regex::new(r"(?i)\bcreate\b(?:\s+\w+){0,3}\s+(?:file)\s+(?:at\s+)?([~/a-z0-9_\.\-\s/]+)").context("create_file regex")?,
+            create_dir: Regex::new(r"(?i)\bcreate\b(?:\s+\w+){0,3}\s+(?:directory|folder)\s+(?:at\s+)?([~/a-z0-9_\.\-\s/]+)").context("create_dir regex")?,
+            list_dir: Regex::new(r"(?i)\b(list|show)\b(?:\s+\w+){0,3}\s+(?:files|contents|in)?\s+(?:of\s+)?(.+?)(?:\s+(?:and|then|or)\b|$)").context("list_dir regex")?,
+            delete: Regex::new(r"(?i)\b(delete|remove|trash)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)").context("delete regex")?,
+            copy_file: Regex::new(r"(?i)\bcopy\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").context("copy_file regex")?,
+            move_file: Regex::new(r"(?i)\b(move)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").context("move_file regex")?,
+            run_wasm: Regex::new(r"(?i)\b(?:run|execute)\b(?:\s+\w+){0,3}\s+(?:wasm\s+)?script\s+([~/a-z0-9_\.\-\s/]+\.wasm)").context("run_wasm regex")?,
+            time: Regex::new(r"(?i)^(what'?s?\s+(?:the\s+)?time|what\s+time\s+is\s+it|current\s+time|time\s+is\s+it|clock|what\s+hour\s+is\s+it|qu[eé]\s+hora\s+es)\b").context("time regex")?,
+        })
     }
 
     fn resolve(&self, prompt: &str) -> Option<FastAction> {
@@ -244,6 +277,17 @@ fn expand_path(p: &str) -> String {
 fn is_allowed_path(path: &str, cage: &AutomationCage) -> bool {
     let expanded = expand_path(path);
     let target = PathBuf::from(&expanded);
+    // Reject broken/dangling symlinks: symlink_metadata succeeds on a symlink
+    // even if its target is missing, while canonicalize would fail.
+    if let Ok(meta) = fs::symlink_metadata(&target) {
+        if meta.file_type().is_symlink() {
+            // Follow the symlink and re-check the resolved target.
+            let Ok(canon) = target.canonicalize() else {
+                return false;
+            };
+            return cage.roots().iter().any(|r| canon.starts_with(r));
+        }
+    }
     let Ok(canon) = target.canonicalize() else {
         // For non-existent files, canonicalize the parent.
         let Some(parent) = target.parent() else {
@@ -352,7 +396,12 @@ fn execute_fast(action: FastAction, cage: &AutomationCage) -> Result<String> {
             )
         }
         FastAction::RunWasm(path) => {
-            let wasm_bytes = fs::read(&path).with_context(|| format!("cannot read WASM {path}"))?;
+            let expanded = expand_path(&path);
+            if !is_allowed_path(&expanded, cage) {
+                bail!("wasm path escapes allowlisted automation roots");
+            }
+            let wasm_bytes =
+                fs::read(&expanded).with_context(|| format!("cannot read WASM {expanded}"))?;
             let mut cage =
                 WasmCage::new().map_err(|e| anyhow!("WasmCage init failed: {}", e.reason))?;
             cage.compile(&wasm_bytes)
@@ -399,13 +448,20 @@ fn execute_cage_blocks(text: &str, cage: &AutomationCage) -> String {
 
 /// Scan the 8B response for ```badapple-wasm blocks. The block may be a path to
 /// a .wasm file or a base64 blob. Execute in the WasmCage and return outputs.
-fn execute_wasm_blocks(text: &str) -> String {
-    let re = Regex::new(r"(?s)```badapple-wasm\s*(.*?)\s*```").unwrap();
+fn execute_wasm_blocks(text: &str, cage: &AutomationCage) -> String {
+    let Ok(re) = Regex::new(r"(?s)```badapple-wasm\s*(.*?)\s*```") else {
+        // The pattern is a hardcoded constant; if it ever fails to compile,
+        // return the text unchanged rather than panicking.
+        return text.to_string();
+    };
     let mut outputs = Vec::new();
     let mut replaced = text.to_string();
 
     for cap in re.captures_iter(text) {
-        let body = cap.get(1).unwrap().as_str().trim();
+        let Some(body_match) = cap.get(1) else {
+            continue;
+        };
+        let body = body_match.as_str().trim();
         let result: Result<String> = (|| {
             let bytes = if body.starts_with('/')
                 || body.starts_with('~')
@@ -414,6 +470,9 @@ fn execute_wasm_blocks(text: &str) -> String {
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
             {
                 let path = expand_path(body);
+                if !is_allowed_path(&path, cage) {
+                    bail!("wasm path escapes allowlisted automation roots");
+                }
                 fs::read(&path).with_context(|| format!("cannot read WASM {path}"))?
             } else {
                 general_purpose::STANDARD
@@ -434,7 +493,9 @@ fn execute_wasm_blocks(text: &str) -> String {
             Err(e) => outputs.push(format!("[wasm error] {e:#}")),
         }
         // Remove the block from the display text and append the execution report.
-        replaced = replaced.replace(cap.get(0).unwrap().as_str(), "");
+        if let Some(full_match) = cap.get(0) {
+            replaced = replaced.replace(full_match.as_str(), "");
+        }
     }
 
     if outputs.is_empty() {
@@ -452,7 +513,7 @@ fn execute_wasm_blocks(text: &str) -> String {
 /// Combine cage and wasm post-processing.
 fn post_process_response(text: &str, cage: &AutomationCage) -> String {
     let text = execute_cage_blocks(text, cage);
-    execute_wasm_blocks(&text)
+    execute_wasm_blocks(&text, cage)
 }
 
 /// Forward an execute request to the Python MLX server and stream back responses.
@@ -582,14 +643,41 @@ fn forward_v2_to_mlx(
 
     // Client Execute -> MLX
     let execute: ClientFrame = read_frame(client_reader)?;
-    if !matches!(execute, ClientFrame::Execute { version, .. } if version == SLICKS_VERSION_2) {
+    // Validate the v2 Execute frame before forwarding — don't blindly proxy
+    // unvalidated requests to the MLX backend.
+    if let ClientFrame::Execute {
+        version,
+        prompt,
+        max_new_tokens,
+        ..
+    } = &execute
+    {
+        if *version != SLICKS_VERSION_2 {
+            write_frame(
+                client_writer,
+                &ServerFrame::Error {
+                    message: "invalid v2 execute frame".to_string(),
+                },
+            )?;
+            bail!("client sent a non-v2 execute frame on v2 path");
+        }
+        if let Err(e) = validate_request(prompt, *max_new_tokens) {
+            write_frame(
+                client_writer,
+                &ServerFrame::Error {
+                    message: e.to_string(),
+                },
+            )?;
+            return Ok(());
+        }
+    } else {
         write_frame(
             client_writer,
             &ServerFrame::Error {
                 message: "invalid v2 execute frame".to_string(),
             },
         )?;
-        bail!("client sent an invalid v2 execute frame");
+        bail!("client sent a non-execute frame on v2 path");
     }
     write_frame(&mut mlx_stream, &execute)?;
 
@@ -669,6 +757,7 @@ fn handle_client(
     router: &SemanticRouter,
     resolver: &FastActionResolver,
     cage: &AutomationCage,
+    replay_cache: &ReplayCache,
 ) -> Result<()> {
     let secret = load_slicks_secret()?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -684,7 +773,9 @@ fn handle_client(
             timestamp_ms,
             client_nonce,
             client_pubkey: _,
-        } if *version == SLICKS_VERSION || *version == SLICKS_VERSION_2 => {
+        } if (*version == SLICKS_VERSION || *version == SLICKS_VERSION_2)
+            && bad_apple::bad_apple_ipc::nonce_is_valid(client_nonce) =>
+        {
             (*timestamp_ms, client_nonce.clone(), *version)
         }
         _ => {
@@ -746,6 +837,16 @@ fn handle_client(
             if !bad_apple::bad_apple_ipc::timestamp_is_fresh(exec_ts) {
                 bail!("stale execute timestamp");
             }
+            // Replay protection: reject duplicate (client_nonce, server_nonce) pairs
+            if !replay_cache.check_and_insert(&client_nonce, &server_nonce) {
+                write_frame(
+                    &mut stream,
+                    &ServerFrame::Error {
+                        message: "replay detected".to_string(),
+                    },
+                )?;
+                bail!("replay detected: nonce pair already used");
+            }
             if !verify_client_proof(
                 &secret,
                 exec_ts,
@@ -781,6 +882,25 @@ fn handle_client(
 
     // 4) Classify and route. The 576-D trained brain produces a semantic
     // complexity score. Low = structural command, high = abstract reasoning.
+    // BADAPPLE_COGNITIVE=0 disables the cognitive layer entirely, routing all
+    // queries to the deep MLX core without classification.
+    let cognitive_enabled = std::env::var("BADAPPLE_COGNITIVE")
+        .map(|v| {
+            !matches!(
+                v.as_str(),
+                "0" | "false" | "no" | "off" | "disable" | "disabled"
+            )
+        })
+        .unwrap_or(true);
+
+    if !cognitive_enabled {
+        eprintln!(
+            "[gatekeeper] cognitive layer disabled (BADAPPLE_COGNITIVE=0), routing directly to MLX"
+        );
+        forward_to_mlx(&prompt, max_new_tokens, &mut stream, cage)?;
+        return Ok(());
+    }
+
     let start = Instant::now();
     let score = router.classify(&prompt)?;
     let classify_us = start.elapsed().as_micros();
@@ -798,7 +918,10 @@ fn handle_client(
                         &mut stream,
                         &ServerFrame::Done {
                             text: reply,
-                            metrics: None,
+                            metrics: Some(bad_apple::bad_apple_ipc::Metrics {
+                                tier: Some("fast_action".to_string()),
+                                ..Default::default()
+                            }),
                         },
                     )?;
                     return Ok(());
@@ -838,14 +961,18 @@ fn main() -> Result<()> {
     let router = SemanticRouter::new()?;
     eprintln!("[gatekeeper] router ready");
 
-    let resolver = FastActionResolver::new();
+    let resolver = FastActionResolver::new()?;
 
     let cage = AutomationCage::from_env().context("cannot initialize automation cage")?;
     eprintln!("[gatekeeper] automation cage roots: {:?}", cage.roots());
 
+    let replay_cache = Arc::new(ReplayCache::new());
+
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("cannot bind Bad Apple socket at {path:?}"))?;
-    let perms = std::fs::Permissions::from_mode(0o666);
+    // 0o660: owner and group can connect, no world access. The gatekeeper
+    // runs as root; the console user is added to the group at install time.
+    let perms = std::fs::Permissions::from_mode(0o660);
     std::fs::set_permissions(&path, perms)?;
     eprintln!("[gatekeeper] listening on {path:?}");
 
@@ -855,8 +982,10 @@ fn main() -> Result<()> {
                 let router = router.clone();
                 let resolver = resolver.clone();
                 let cage = cage.clone();
+                let replay_cache = Arc::clone(&replay_cache);
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, &router, &resolver, &cage) {
+                    if let Err(e) = handle_client(stream, &router, &resolver, &cage, &replay_cache)
+                    {
                         if is_benign_disconnect(&e) {
                             // A client (very often a health-check probe that
                             // connects and disconnects without ever sending a

@@ -274,7 +274,7 @@ def main():
         print(f"badapple_tts: cannot bind {socket_path}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    os.chmod(str(socket_path), 0o666)
+    os.chmod(str(socket_path), 0o660)
     print(f"badapple_tts: listening on {socket_path} (voice={DEFAULT_VOICE}, voices_dir={_voices_dir()})", file=sys.stderr)
 
     # Preload so first request is fast; if download fails, server still starts

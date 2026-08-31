@@ -18,6 +18,7 @@ fn main() -> Result<()> {
     let mut persona: Option<String> = None;
     let mut roast_mode = false;
     let mut doctor_mode = false;
+    let mut crash_report = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -38,8 +39,11 @@ fn main() -> Result<()> {
             "--roast" => {
                 roast_mode = true;
             }
-            "--doctor" => {
+            "--doctor" | "--diagnostics" => {
                 doctor_mode = true;
+            }
+            "--crash-report" => {
+                crash_report = true;
             }
             "--persona" => {
                 persona = Some(args.next().context("--persona requires a value")?);
@@ -65,6 +69,10 @@ fn main() -> Result<()> {
 
     if doctor_mode {
         return run_doctor();
+    }
+
+    if crash_report {
+        return run_crash_report();
     }
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("model") {
@@ -655,6 +663,180 @@ fn run_doctor() -> Result<()> {
     Ok(())
 }
 
+/// Collect crash logs, daemon state, and system info into a single shareable report.
+fn run_crash_report() -> Result<()> {
+    use std::fmt::Write;
+    use std::process::Command;
+    let mut report = String::new();
+    let _ = writeln!(report, "=== Bad Apple Crash Report ===");
+    let _ = writeln!(
+        report,
+        "Generated: {}",
+        std::process::Command::new("date")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    );
+
+    // System info
+    let _ = writeln!(report, "\n[system]");
+    if let Ok(out) = Command::new("sw_vers").output() {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout).trim());
+    }
+    if let Ok(out) = Command::new("uname").args(["-a"]).output() {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout).trim());
+    }
+
+    // Daemon status
+    let _ = writeln!(report, "\n[daemon status]");
+    for label in [
+        "com.badapple.mlx",
+        "com.badapple.gatekeeper",
+        "com.badapple.supervisor",
+    ] {
+        let status = Command::new("launchctl")
+            .args(["print", &format!("system/{label}")])
+            .output();
+        match status {
+            Ok(o) if o.status.success() => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                if let Some(line) = text.lines().find(|l| l.contains("state =")) {
+                    let _ = writeln!(report, "{label}: {}", line.trim());
+                } else {
+                    let _ = writeln!(report, "{label}: running (details in launchctl print)");
+                }
+            }
+            _ => {
+                let _ = writeln!(report, "{label}: not loaded or not found");
+            }
+        }
+    }
+
+    // Socket status
+    let _ = writeln!(report, "\n[sockets]");
+    for sock in [
+        "/var/run/badapple/substrate.sock",
+        "/var/run/badapple/substrate_mlx.sock",
+    ] {
+        let _ = writeln!(
+            report,
+            "{sock}: {}",
+            if std::path::Path::new(sock).exists() {
+                "present"
+            } else {
+                "missing"
+            }
+        );
+    }
+
+    // Recent gatekeeper log (last 50 lines)
+    let _ = writeln!(report, "\n[gatekeeper log — last 50 lines]");
+    if let Ok(out) = Command::new("tail")
+        .args(["-50", "/var/log/bad_apple_gatekeeper.log"])
+        .output()
+    {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
+    } else {
+        let _ = writeln!(report, "(log not found)");
+    }
+
+    // Recent MLX server log (last 50 lines)
+    let _ = writeln!(report, "\n[mlx server log — last 50 lines]");
+    if let Ok(out) = Command::new("tail")
+        .args(["-50", "/var/log/bad_apple_mlx_server.log"])
+        .output()
+    {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
+    } else {
+        let _ = writeln!(report, "(log not found)");
+    }
+
+    // Supervisor log
+    let _ = writeln!(report, "\n[supervisor log — last 20 lines]");
+    if let Ok(out) = Command::new("tail")
+        .args(["-20", "/var/log/bad_apple_supervisor.log"])
+        .output()
+    {
+        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
+    } else {
+        let _ = writeln!(report, "(log not found)");
+    }
+
+    // Crash logs from macOS DiagnosticReports
+    let _ = writeln!(report, "\n[crash logs]");
+    let crash_dir =
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+            .join("Library/Logs/DiagnosticReports");
+    if crash_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&crash_dir) {
+            let mut crashes: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.contains("badapple")
+                        || name.contains("BadApple")
+                        || name.contains("gatekeeper")
+                })
+                .collect();
+            crashes.sort_by_key(|e| {
+                std::cmp::Reverse(
+                    e.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                )
+            });
+            for crash in crashes.iter().take(5) {
+                let name = crash.file_name().to_string_lossy().into_owned();
+                let _ = writeln!(report, "  {name}");
+                if let Ok(content) = std::fs::read_to_string(crash.path()) {
+                    // Just the first 20 lines of each crash log
+                    for line in content.lines().take(20) {
+                        let _ = writeln!(report, "    {line}");
+                    }
+                    let _ = writeln!(report, "    ... (truncated)");
+                }
+            }
+            if crashes.is_empty() {
+                let _ = writeln!(report, "  (no Bad Apple crash logs found)");
+            }
+        }
+    } else {
+        let _ = writeln!(report, "  (DiagnosticReports directory not found)");
+    }
+
+    // Ledger tail (last 10 entries, redacted)
+    let _ = writeln!(report, "\n[audit ledger — last 10 entries]");
+    let ledger = std::path::PathBuf::from("/var/lib/bad_apple/ledger.jsonl");
+    if ledger.is_file() {
+        if let Ok(out) = Command::new("tail")
+            .args(["-10", "/var/lib/bad_apple/ledger.jsonl"])
+            .output()
+        {
+            let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
+        }
+    } else {
+        let _ = writeln!(report, "(ledger not found)");
+    }
+
+    // Memory
+    let _ = writeln!(report, "\n[memory]");
+    if let Ok(out) = Command::new("memory_pressure").output() {
+        let _ = writeln!(
+            report,
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .take(10)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    println!("{report}");
+    eprintln!("\nTo share this report: badapple --crash-report > crash_report.txt");
+    Ok(())
+}
+
 fn run_model_subcommand(args: &[String]) -> Result<()> {
     if args.is_empty() {
         bail!("usage: badapple model <list|scan|info|use|verify|add|remove|recommend> [args]");
@@ -792,7 +974,7 @@ fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
          Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n\n\
-         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
+         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)"
     );
 }

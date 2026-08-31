@@ -23,7 +23,8 @@ if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "${CERT_NAM
     "${REPO_ROOT}/src/platform/apple_desktop/create_dev_signing_cert.sh"
 fi
 
-# Sign the main app bundle and all embedded binaries.
-codesign --deep --force --verify --verbose --sign "${CERT_NAME}" "${APP_DIR}"
+# Sign the main app bundle and all embedded binaries, then verify.
+codesign --deep --force --sign "${CERT_NAME}" "${APP_DIR}"
+codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
 
 echo "Signed: ${APP_DIR}"

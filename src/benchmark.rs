@@ -611,7 +611,8 @@ impl Default for PilotReport {
 mod tests {
     use super::*;
     use crate::protocol::{
-        CompactEngramPacket, ConnectionManager, LockFreeRing, SwarmMetrics, ENGRAM_DIM,
+        CompactEngramPacket, ConnectionManager, LockFreeRing, SwarmMetrics, EMBEDDING_DIM,
+        ENGRAM_DIM,
     };
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
@@ -656,16 +657,21 @@ mod tests {
         let mut pending: HashSet<u64> = (0..N as u64).collect();
         let mut token_count = 0;
         let start = Instant::now();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         for i in 0..N {
             let text = format!("load {i}");
             token_count += text.len() + "ok".len() + "bench".len() + 4 * ENGRAM_DIM;
             let packet = CompactEngramPacket {
                 id: i as u64,
-                timestamp: i as u64,
+                timestamp: now_secs,
                 experiential_text: text,
                 emotional_state_snapshot: "ok".to_string(),
                 origin_instance: "bench".to_string(),
                 brain_state: vec![0.1; ENGRAM_DIM],
+                embedding: vec![0.1; EMBEDDING_DIM],
                 ..Default::default()
             };
             client_cm.broadcast(&packet).await;

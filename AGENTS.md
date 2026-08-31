@@ -526,3 +526,59 @@ In `badapple_mlx_server.py`:
   an IDE/agent session open alongside the model, which alone is enough to
   explain a real, reproducible slowdown that isn't Bad Apple's fault.
 - The menu bar `PiperTTSClient` streams chunked TTS through `PiperTTSPlaybackController`, which queues WAVs and crossfades consecutive chunks with a 50 ms volume ramp. If `AVAudioPlayer` fails, it falls back to the previous `afplay` path. Apple TTS fallback for a full Piper failure remains in `BadAppleVoiceHost`.
+
+## Cognitive architecture validation
+
+- `benchmark_cognitive.py` runs a standardized A/B benchmark that compares
+  Bad Apple with and without the cognitive architecture (connectome,
+  hyperdimensional core, dual-process governor) to measure whether it
+  improves outcomes.
+- It runs the same set of prompts (simple / medium / complex) in three modes:
+  `cognitive_full` (full cognitive stack), `fast_tier_only` (0.5B model, no
+  cognitive layer), and `9b_only` (9B brain, no cognitive layer, no fast tier).
+- Each mode is selected with env vars: `BADAPPLE_COGNITIVE` toggles the
+  cognitive layer and `BADAPPLE_FAST_TIER` toggles the fast 0.5B tier.
+- Metrics captured per query: latency, token count, decode tok/s, and tier.
+  Results print as a comparison table and can be saved as JSON.
+- Run it with:
+  ```bash
+  cargo build --release
+  .venv/bin/python benchmark_cognitive.py
+  # subset of modes
+  .venv/bin/python benchmark_cognitive.py --modes cognitive_full 9b_only
+  # save results
+  .venv/bin/python benchmark_cognitive.py --output benchmarks/results/cognitive.json
+  ```
+- Uses the CLI's `--json` stream, so the `badapple` binary must be built
+  (`target/release/badapple`) or on `PATH`. Each query has a 120 s timeout.
+
+## Model versioning
+
+The main brain is loaded by repo name (`BADAPPLE_MAIN_MODEL`, e.g.
+`caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`) in `badapple_mlx_server.py`. Loading
+by repo name alone resolves to whatever commit HuggingFace currently serves as
+`main`, so an upstream update or yank can swap the weights without notice. That
+silently breaks the semantic-cache embeddings, token vectors, and ANE shard
+manifest, which are all pinned to a specific snapshot.
+
+To prevent this, the MLX daemon pins to a revision when calling `mlx_lm.load`:
+
+- `DEFAULT_MODEL_REVISION` (constant in `badapple_mlx_server.py`) is the
+  hardcoded fallback. It currently defaults to `"main"`; **replace it with an
+  actual commit hash** for production pinning.
+- `BADAPPLE_MODEL_REVISION` (env var, exposed in
+  `src/platform/apple_bridge/com.badapple.mlx.plist`) overrides the constant at
+  runtime. An empty/unset value falls back to `DEFAULT_MODEL_REVISION`. Set it to
+  a branch, tag, or 40-char commit hash to pin a specific snapshot.
+
+After every load, `_verify_model_integrity()` computes a SHA-256 of the loaded
+model's `config.json` and logs it. The hash is persisted to
+`/var/lib/bad_apple/model_config_hash.json` (next to the semantic cache). On the
+next load, if the hash no longer matches, the daemon logs a warning that the
+semantic cache, KV cache, and ANE shard manifest may be stale and should be
+cleared. The check is best-effort: a missing or unreadable `config.json` is
+logged and skipped, never blocks startup.
+
+To pin a model after first download, capture the current commit hash from the HF
+cache snapshot dir (`~/.cache/huggingface/hub/models--<org>--<model>/snapshots/`)
+and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.

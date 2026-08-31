@@ -366,6 +366,15 @@ class AuditLedger:
         self.lock_path = data_dir / "ledger.lock"
         self.genesis = genesis
         self._secret = os.environ.get("BADAPPLE_LEDGER_SECRET", "").encode()
+        if not self._secret:
+            # Derive a stable secret from the SLICKS key if available so the
+            # ledger is HMAC-protected even without explicit configuration.
+            try:
+                slicks_key = Path(os.environ.get("BADAPPLE_SLICKS_KEY_PATH", "/var/lib/bad_apple/slicks.key"))
+                if slicks_key.is_file():
+                    self._secret = slicks_key.read_bytes()
+            except (OSError, ValueError):
+                pass
         self._lock = threading.RLock()
 
     def _last_hash(self) -> str:

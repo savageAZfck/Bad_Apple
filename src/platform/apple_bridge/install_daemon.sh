@@ -108,10 +108,10 @@ chown root:wheel "${PLIST_TARGET}"
 chmod 644 "${PLIST_TARGET}"
 plutil -lint "${PLIST_TARGET}"
 
-launchctl bootout system "${PLIST_TARGET}" 2>/dev/null || true
-launchctl bootstrap system "${PLIST_TARGET}"
+launchctl unload "${PLIST_TARGET}" 2>/dev/null || true
+launchctl load -w "${PLIST_TARGET}"
 
-echo "Bad Apple daemon installed and bootstrapped."
+echo "Bad Apple daemon installed and loaded."
 echo "Label:     com.badapple.substrate"
 echo "Daemon:    ${INSTALL_DIR}/badappled"
 echo "CLI:       ${CLI_TARGET}"
