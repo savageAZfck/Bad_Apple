@@ -22,12 +22,16 @@ final class BadAppleEngine {
     private let toolRouter = BadAppleToolRouter()
     private let policyEngine = BadApplePolicyEngine()
     private let toolExecutor = BadAppleToolExecutor()
+    private let semanticCache = BadAppleSemanticCache()
+    private let rag = BadAppleRAG()
 
     private(set) var isLoaded = false
     private(set) var isLoading = false
     private(set) var modelId: String = ""
     private(set) var lastTokensPerSecond: Float = 0
     private(set) var lastTokenCount: Int = 0
+    private(set) var lastCacheHit: Bool = false
+    var workspacePath: String?
 
     // MARK: - Init
 
@@ -115,8 +119,8 @@ final class BadAppleEngine {
             return
         }
 
-        let sysPrompt = systemPrompt(voiceMode: voiceMode)
         let persona = activePersona
+        lastCacheHit = false
 
         // Log the query to the audit ledger.
         auditLedger.append(
@@ -125,10 +129,19 @@ final class BadAppleEngine {
             persona: persona
         )
 
+        // Build system prompt with RAG context.
+        var sysPrompt = systemPrompt(voiceMode: voiceMode)
+        if let ragContext = rag.buildRetrievalContext(prompt: prompt, workspace: workspacePath) {
+            sysPrompt += "\n\nContext:\n\(ragContext)"
+        }
+
+        // Fast tier: short simple queries get fewer tokens for faster response.
+        let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
+
         inference.generateStreamingTokens(
             prompt: prompt,
             systemPrompt: sysPrompt,
-            maxTokens: maxTokens,
+            maxTokens: effectiveMaxTokens,
             temperature: 0.6,
             onToken: { token in
                 DispatchQueue.main.async { onToken(token) }
@@ -137,8 +150,10 @@ final class BadAppleEngine {
                 DispatchQueue.main.async {
                     self.lastTokensPerSecond = result.tokensPerSecond
                     self.lastTokenCount = result.tokenCount
+                    // Postprocess: clean up model output artifacts.
+                    let polished = postprocessOutput(result.text)
                     // Apply output firewall to the final response.
-                    let filtered = self.outputFirewall.check(result.text)
+                    let filtered = self.outputFirewall.check(polished)
                     // Log the response to the audit ledger.
                     self.auditLedger.append(
                         eventType: "response",
@@ -161,7 +176,7 @@ final class BadAppleEngine {
         )
     }
 
-    /// Generate a complete response (non-streaming).
+    /// Generate a complete response (non-streaming). Checks semantic cache first.
     func generate(
         prompt: String,
         voiceMode: Bool = false,
@@ -171,16 +186,74 @@ final class BadAppleEngine {
             return "The AI model is not loaded yet. Please wait a moment and try again."
         }
 
-        let sysPrompt = systemPrompt(voiceMode: voiceMode)
+        let persona = activePersona
+        lastCacheHit = false
+
+        // Check semantic cache for a matching response.
+        if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
+            lastCacheHit = true
+            auditLedger.append(
+                eventType: "cache_hit",
+                data: ["prompt": prompt],
+                persona: persona
+            )
+            return cached
+        }
+
+        // Build system prompt with RAG context.
+        var sysPrompt = systemPrompt(voiceMode: voiceMode)
+        if let ragContext = rag.buildRetrievalContext(prompt: prompt, workspace: workspacePath) {
+            sysPrompt += "\n\nContext:\n\(ragContext)"
+        }
+
+        let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
+
         let result = try await inference.generate(
             prompt: prompt,
             systemPrompt: sysPrompt,
-            maxTokens: maxTokens,
+            maxTokens: effectiveMaxTokens,
             temperature: 0.6
         )
         lastTokensPerSecond = result.tokensPerSecond
         lastTokenCount = result.tokenCount
-        return result.text
+
+        // Postprocess and filter.
+        let polished = postprocessOutput(result.text)
+        let filtered = outputFirewall.check(polished)
+
+        // Store in semantic cache (without embedding for now — the cache
+        // will use prompt text matching as a fallback).
+        semanticCache.store(
+            prompt: prompt,
+            response: filtered,
+            persona: persona,
+            embedding: []
+        )
+
+        // Audit log.
+        auditLedger.append(
+            eventType: "response",
+            data: ["text": filtered, "tps": result.tokensPerSecond],
+            persona: persona
+        )
+
+        return filtered
+    }
+
+    // MARK: - Fast Tier
+
+    /// Simple queries (greetings, math, time, identity) get fewer tokens.
+    private func isSimpleQuery(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        let simplePatterns = [
+            "what time", "who are you", "what is your name",
+            "hello", "hi ", "hey ", "good morning", "good afternoon",
+            "what is 2+2", "what is 1+1", "thank", "thanks",
+        ]
+        if simplePatterns.contains(where: { lower.contains($0) }) { return true }
+        // Very short prompts are likely simple.
+        if prompt.count < 30 { return true }
+        return false
     }
 
     // MARK: - Memory
