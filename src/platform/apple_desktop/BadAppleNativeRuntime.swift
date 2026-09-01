@@ -87,14 +87,24 @@ public actor BadAppleNativeRuntime {
     private var lastError: String?
     private var breakers: [String: CircuitBreaker] = [:]
 
+    // MARK: - Hibernation
+
+    /// Idle threshold (in seconds) before the runtime recommends hibernation.
+    public static let defaultIdleThreshold: TimeInterval = 300
+    private let idleThreshold: TimeInterval
+    private var lastActivityTime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var isHibernating = false
+
     public init(
         metricWindowSize: Int = 100,
         circuitFailureThreshold: Int = 3,
-        circuitRecoverySeconds: TimeInterval = 30
+        circuitRecoverySeconds: TimeInterval = 30,
+        idleThreshold: TimeInterval = BadAppleNativeRuntime.defaultIdleThreshold
     ) {
         self.metricWindowSize = min(10_000, max(1, metricWindowSize))
         self.defaultFailureThreshold = min(100, max(1, circuitFailureThreshold))
         self.defaultRecoverySeconds = min(86_400, max(0.001, circuitRecoverySeconds))
+        self.idleThreshold = min(86_400, max(1, idleThreshold))
     }
 
     // MARK: Model lifecycle
@@ -147,6 +157,8 @@ public actor BadAppleNativeRuntime {
             if let error, !error.isEmpty { lastError = error }
         }
 
+        markActivity()
+
         guard latencySeconds.isFinite, latencySeconds >= 0 else { return }
         let safeTokens = max(0, tokenCount)
         let tokenRate = latencySeconds > 0 ? Double(safeTokens) / latencySeconds : 0
@@ -154,6 +166,38 @@ public actor BadAppleNativeRuntime {
         if samples.count > metricWindowSize {
             samples.removeFirst(samples.count - metricWindowSize)
         }
+    }
+
+    // MARK: Hibernation
+
+    /// Mark activity (resets the idle timer and exits hibernation).
+    public func markActivity() {
+        lastActivityTime = ProcessInfo.processInfo.systemUptime
+        if isHibernating {
+            isHibernating = false
+        }
+    }
+
+    /// Check if the runtime has been idle long enough to hibernate.
+    public func shouldHibernate(nowUptime: TimeInterval? = nil) -> Bool {
+        let now = nowUptime ?? ProcessInfo.processInfo.systemUptime
+        return !isHibernating && (now - lastActivityTime) >= idleThreshold
+    }
+
+    /// Mark the runtime as hibernating.
+    public func enterHibernation() {
+        isHibernating = true
+    }
+
+    /// Whether the runtime is currently hibernating.
+    public var hibernating: Bool {
+        isHibernating
+    }
+
+    /// Seconds since the last activity.
+    public func idleSeconds(nowUptime: TimeInterval? = nil) -> TimeInterval {
+        let now = nowUptime ?? ProcessInfo.processInfo.systemUptime
+        return max(0, now - lastActivityTime)
     }
 
     public func setLastError(_ error: String?) {
@@ -264,7 +308,12 @@ public actor BadAppleNativeRuntime {
                 "used_ratio": memory.ratio,
                 "pressure": memory.pressure
             ],
-            "circuits": circuitStatuses
+            "circuits": circuitStatuses,
+            "hibernation": [
+                "active": isHibernating,
+                "idle_seconds": idleSeconds(nowUptime: now),
+                "idle_threshold_seconds": idleThreshold
+            ]
         ]
     }
 

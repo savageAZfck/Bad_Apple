@@ -458,3 +458,19 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
     }
 }
+
+// MARK: - Security Utilities
+
+/// Utility functions for security operations.
+enum BadAppleSecurity {
+    /// Compute the SHA-256 hash of arbitrary data and return a hex string.
+    static func sha256(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Compute the SHA-256 hash of a string (UTF-8 encoded).
+    static func sha256(_ string: String) -> String {
+        sha256(Data(string.utf8))
+    }
+}

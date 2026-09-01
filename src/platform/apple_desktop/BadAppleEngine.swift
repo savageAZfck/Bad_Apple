@@ -49,6 +49,34 @@ final class BadAppleEngine: @unchecked Sendable {
     private let conversationSessionId = "default"
     private let approvalLock = NSLock()
     private var pendingApprovals: [String: (name: String, args: [String: String])] = [:]
+
+    // MARK: - Conversation Pruning
+
+    /// Maximum number of turns (user+assistant pairs) to keep in conversation history.
+    /// Older turns are pruned to prevent unbounded context growth.
+    static let maxHistoryTurns = 20
+
+    // MARK: - Prompt Hot-Reload
+
+    private var promptFileURL: URL? {
+        let candidates = [
+            FileManager.default.currentDirectoryPath + "/prompt.txt",
+            NSHomeDirectory() + "/bad_apple/prompt.txt",
+            "/Users/savag3/bad_apple/prompt.txt",
+        ]
+        for path in candidates {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
+    }
+    private var lastPromptMtime: Date?
+
+    // MARK: - Model Integrity
+
+    private var lastConfigHash: String?
     private lazy var agent: BadAppleAgent? = try? BadAppleAgent(
         planner: { [weak self] goal, maximumSteps in
             guard let self else { return [] }
@@ -189,6 +217,11 @@ final class BadAppleEngine: @unchecked Sendable {
         var messages = conversation.loadConversation(sessionId: conversationSessionId)
         messages.append(BadAppleMessage(role: "user", content: prompt))
         messages.append(BadAppleMessage(role: "assistant", content: response))
+        // Prune oldest turns to prevent unbounded context growth.
+        let maxMessages = Self.maxHistoryTurns * 2
+        if messages.count > maxMessages {
+            messages = Array(messages.suffix(maxMessages))
+        }
         conversation.saveConversation(sessionId: conversationSessionId, messages: messages)
     }
 
@@ -386,6 +419,32 @@ final class BadAppleEngine: @unchecked Sendable {
             persona: persona
         )
 
+        // Check prompt hot-reload before generation.
+        checkPromptReload()
+
+        // Meta responses (identity, creator, capabilities) are deterministic.
+        if let meta = metaResponse(for: prompt) {
+            let filtered = outputFirewall.check(meta)
+            saveTurn(prompt: prompt, response: filtered)
+            auditLedger.append(
+                eventType: "response",
+                data: ["text": filtered, "tier": "meta"],
+                persona: persona
+            )
+            Task {
+                await runtime.recordQuery(
+                    latencySeconds: Date().timeIntervalSince(startedAt),
+                    tokenCount: 0,
+                    succeeded: true
+                )
+            }
+            DispatchQueue.main.async {
+                onToken(filtered)
+                onComplete(filtered)
+            }
+            return
+        }
+
         if let fast = deterministicResponse(for: prompt) {
             let filtered = outputFirewall.check(fast)
             saveTurn(prompt: prompt, response: filtered)
@@ -426,7 +485,12 @@ final class BadAppleEngine: @unchecked Sendable {
             }
 
             var sysPrompt = systemPrompt(voiceMode: voiceMode)
-            if let ragContext = rag.buildRetrievalContext(prompt: prompt, workspace: workspacePath) {
+            let ragContext = await rag.buildSemanticRetrievalContext(
+                prompt: prompt,
+                workspace: workspacePath,
+                embeddingProvider: NativeEmbeddingProvider(engine: embeddingEngine)
+            )
+            if let ragContext {
                 sysPrompt += "\n\nContext:\n\(ragContext)"
             }
 
@@ -544,6 +608,21 @@ final class BadAppleEngine: @unchecked Sendable {
         let history = inferenceHistory()
         lastCacheHit = false
 
+        // Check prompt hot-reload before generation.
+        checkPromptReload()
+
+        // Meta responses (identity, creator, capabilities) are deterministic.
+        if let meta = metaResponse(for: prompt) {
+            let filtered = outputFirewall.check(meta)
+            saveTurn(prompt: prompt, response: filtered)
+            auditLedger.append(
+                eventType: "response",
+                data: ["text": filtered, "tier": "meta"],
+                persona: persona
+            )
+            return filtered
+        }
+
         if let fast = deterministicResponse(for: prompt) {
             let filtered = outputFirewall.check(fast)
             saveTurn(prompt: prompt, response: filtered)
@@ -567,9 +646,14 @@ final class BadAppleEngine: @unchecked Sendable {
             return cached
         }
 
-        // Build system prompt with RAG context.
+        // Build system prompt with semantic RAG context.
         var sysPrompt = systemPrompt(voiceMode: voiceMode)
-        if let ragContext = rag.buildRetrievalContext(prompt: prompt, workspace: workspacePath) {
+        let ragContext = await rag.buildSemanticRetrievalContext(
+            prompt: prompt,
+            workspace: workspacePath,
+            embeddingProvider: NativeEmbeddingProvider(engine: embeddingEngine)
+        )
+        if let ragContext {
             sysPrompt += "\n\nContext:\n\(ragContext)"
         }
 
@@ -781,6 +865,104 @@ final class BadAppleEngine: @unchecked Sendable {
 
     var memoryUsageGB: Float {
         inference.memoryUsageGB
+    }
+
+    // MARK: - Pending Approvals
+
+    /// List all pending tool approvals awaiting user confirmation.
+    func listPendingApprovals() -> [(id: String, name: String, args: [String: String])] {
+        approvalLock.lock()
+        defer { approvalLock.unlock() }
+        return pendingApprovals.map { (id: $0.key, name: $0.value.name, args: $0.value.args) }
+            .sorted { $0.id < $1.id }
+    }
+
+    // MARK: - Prompt Hot-Reload
+
+    /// Check if prompt.txt has been modified and reload personas if so.
+    func checkPromptReload() {
+        guard let url = promptFileURL,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let mtime = attrs[.modificationDate] as? Date else { return }
+        if mtime != lastPromptMtime {
+            lastPromptMtime = mtime
+            personaManager.reloadPersonas()
+            print("[BadAppleEngine] Prompt file changed, reloaded personas")
+        }
+    }
+
+    // MARK: - Meta Responses
+
+    /// Intercept meta queries (identity, creator, capabilities) with deterministic answers.
+    /// Returns a response string if the query was handled, nil otherwise.
+    private func metaResponse(for prompt: String) -> String? {
+        let lower = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Identity queries
+        if lower == "who are you" || lower == "what are you" ||
+            lower.contains("what is your name") || lower.contains("what's your name") {
+            return "I'm Bad Apple, your private AI running directly on this Mac. No cloud, no data mining — just bare metal intelligence."
+        }
+
+        // Creator queries
+        if lower.contains("who created you") || lower.contains("who made you") ||
+            lower.contains("who built you") || lower.contains("your creator") {
+            return "I was created by my user. I'm a local-first AI assistant that lives entirely on this Mac."
+        }
+
+        // Capabilities queries
+        if lower.contains("what can you do") || lower.contains("your capabilities") ||
+            lower.contains("what are you capable of") || lower.contains("help me") {
+            return """
+            I can help you with:
+            • Answering questions and having conversations
+            • Reading and writing files on your Mac
+            • Running shell commands and AppleScripts (with your approval)
+            • Listing and running macOS Shortcuts
+            • Searching your local notes and documents
+            • Taking screenshots and describing images
+            • Managing a working memory scratchpad
+            • Multi-step agent tasks with planning
+            • Voice interaction with "Hey Bad Apple"
+
+            Everything runs locally on your Mac — no cloud, no data leaves your device.
+            """
+        }
+
+        // Privacy/local-first queries
+        if lower.contains("do you use the cloud") || lower.contains("are you local") ||
+            lower.contains("do you send data") || lower.contains("privacy") {
+            return "I run entirely on your Mac. No cloud servers, no data collection, no telemetry. Your conversations stay on this device."
+        }
+
+        return nil
+    }
+
+    // MARK: - Model Integrity
+
+    /// Verify model config.json integrity by computing its SHA-256 hash.
+    /// Returns the hash, or nil if the config cannot be read.
+    private func computeConfigHash(for modelDir: URL) -> String? {
+        let configPath = modelDir.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configPath) else { return nil }
+        return BadAppleSecurity.sha256(data)
+    }
+
+    /// Check model integrity and warn if the config hash has changed since last load.
+    func verifyModelIntegrity(modelDir: URL) -> Bool {
+        guard let hash = computeConfigHash(for: modelDir) else {
+            print("[BadAppleEngine] Warning: could not read config.json for integrity check")
+            return false
+        }
+        if let previous = lastConfigHash {
+            if previous != hash {
+                print("[BadAppleEngine] Warning: model config.json hash changed (was \(previous.prefix(8))..., now \(hash.prefix(8))...). KV cache may be stale.")
+                return false
+            }
+        } else {
+            lastConfigHash = hash
+        }
+        return true
     }
 
     // MARK: - Model Discovery

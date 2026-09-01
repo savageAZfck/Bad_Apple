@@ -503,6 +503,108 @@ final class BadAppleRAG: @unchecked Sendable {
         return "Use this context if relevant:\n\n" + blocks.joined(separator: "\n\n")
     }
 
+    /// Semantic retrieval: use an embedding provider to find the most relevant
+    /// memory facts by cosine similarity, falling back to keyword overlap.
+    func buildSemanticRetrievalContext(
+        prompt: String,
+        workspace: String?,
+        embeddingProvider: EmbeddingProvider?
+    ) async -> String? {
+        var blocks: [String] = []
+
+        // 1. Long-term memory facts with semantic retrieval.
+        let facts = loadMemoryGraph()
+        if !facts.isEmpty {
+            let relevant: [MemoryFact]
+            if let provider = embeddingProvider {
+                relevant = await semanticRelevantFacts(
+                    prompt: prompt, facts: facts, k: 5, provider: provider
+                )
+            } else {
+                relevant = relevantFacts(prompt: prompt, facts: facts, k: 5)
+            }
+            if !relevant.isEmpty {
+                let lines = relevant.map { fact in
+                    "- \(fact.subject) \(fact.predicate) \(fact.object)"
+                }
+                blocks.append(
+                    "Things you remember about the user:\n" + lines.joined(separator: "\n")
+                )
+            }
+        }
+
+        // 2. Active workspace context + local documents.
+        if let workspace, !workspace.isEmpty {
+            let expanded = (workspace as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue {
+                if let summary = workspaceSummary(path: expanded) {
+                    blocks.append("Active workspace:\n\(summary)")
+                }
+                if let docs = localDocumentContext(prompt: prompt, workspace: expanded) {
+                    blocks.append("Relevant local documents:\n\(docs)")
+                }
+            }
+        }
+
+        guard !blocks.isEmpty else { return nil }
+        return "Use this context if relevant:\n\n" + blocks.joined(separator: "\n\n")
+    }
+
+    /// Semantic retrieval: embed the prompt and each fact, then rank by cosine
+    /// similarity. Falls back to keyword overlap if embedding fails.
+    private func semanticRelevantFacts(
+        prompt: String,
+        facts: [MemoryFact],
+        k: Int,
+        provider: EmbeddingProvider
+    ) async -> [MemoryFact] {
+        guard !facts.isEmpty else { return [] }
+        let queryEmbedding = await provider.embed(prompt)
+        guard !queryEmbedding.isEmpty else {
+            return relevantFacts(prompt: prompt, facts: facts, k: k)
+        }
+
+        var scored: [(Float, MemoryFact)] = []
+        for fact in facts {
+            let text = "\(fact.subject) \(fact.predicate) \(fact.object)"
+            let factEmbedding = await provider.embed(text)
+            guard !factEmbedding.isEmpty else { continue }
+            let similarity = cosineSimilarity(queryEmbedding, factEmbedding)
+            if similarity > 0.3 {
+                scored.append((similarity, fact))
+            }
+        }
+        scored.sort { $0.0 > $1.0 }
+        return Array(scored.prefix(k).map { $0.1 })
+    }
+
+    /// Cosine similarity between two equal-length vectors.
+    private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dot: Float = 0
+        var normA: Float = 0
+        var normB: Float = 0
+        for i in 0..<a.count {
+            dot += a[i] * b[i]
+            normA += a[i] * a[i]
+            normB += b[i] * b[i]
+        }
+        let denom = sqrt(normA) * sqrt(normB)
+        return denom > 0 ? dot / denom : 0
+    }
+
+    /// Record a fact into the memory graph.
+    func addFact(subject: String, predicate: String, object: String) {
+        var facts = loadMemoryGraph()
+        let fact = MemoryFact(
+            subject: subject, predicate: predicate, object: object,
+            timestamp: isoTimestamp(), source: "conversation"
+        )
+        facts.append(fact)
+        saveMemoryGraph(facts)
+    }
+
     // MARK: - Retrieval helpers
 
     /// Tokenise `text` into lowercased alphanumeric words longer than two
