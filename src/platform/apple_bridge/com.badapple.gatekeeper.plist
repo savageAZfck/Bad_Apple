@@ -20,6 +20,8 @@
     <string>__BADAPPLE_ROOT__</string>
     <key>UserName</key>
     <string>root</string>
+    <key>GroupName</key>
+    <string>__CONSOLE_GROUP__</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>BADAPPLE_SLICKS_KEY_PATH</key>
