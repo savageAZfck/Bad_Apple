@@ -582,3 +582,26 @@ logged and skipped, never blocks startup.
 To pin a model after first download, capture the current commit hash from the HF
 cache snapshot dir (`~/.cache/huggingface/hub/models--<org>--<model>/snapshots/`)
 and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.
+
+## Swift-native MLX runtime
+
+- The native inference package is `src/platform/apple_desktop/MLXInference`.
+  Build its checks with `swift run -c release BadAppleMLXSelfTest` from that
+  directory.
+- `mlx-swift` 0.31.6 embeds MLX core 0.31.1 and requires the matching
+  `mlx-metal==0.31.1` `mlx.metallib`. The menu build caches the verified shader
+  at `~/.cache/badapple/mlx-metal-0.31.1/mlx.metallib` and packages it beside
+  `libBadAppleMLX.dylib` under `Contents/Libraries/`.
+- Do not put the bare MLX dylib in `Contents/Frameworks/`; AppKit treats entries
+  there as framework bundles during Accessibility loading. Keep both the dylib
+  and metallib in `Contents/Libraries/`.
+- Local builds use a deep ad-hoc signature even when `BADAPPLE_NO_SIGN=1` so
+  macOS validates all nested MLX code consistently.
+- Before replacing `/Applications/Bad Apple.app`, unload the menu LaunchAgent;
+  reload it only after replacement. macOS launchd records a launch constraint
+  for the prior code hash and otherwise enters a restart/rejection loop.
+- Do not launch permission-sensitive builds through an IDE automation process
+  when testing TCC prompts. macOS may attribute the permission request to the
+  responsible IDE process instead of Bad Apple. Use the registered LaunchAgent.
+- A successful native smoke test logs `Native Swift MLX engine loaded` and a
+  Swift audit-ledger response with a nonzero `tps` value.

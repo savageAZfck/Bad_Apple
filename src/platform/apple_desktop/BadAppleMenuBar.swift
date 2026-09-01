@@ -4083,6 +4083,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var lastTelemetryTime: TimeInterval = 0
     private var lastRuntimeStatus: [String: Any] = [:]
     private var lastRuntimeReachable = false
+    private var nativeAgentTasks: [BadAppleAgentTask] = []
     private var autoPurgeEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "BadAppleAutoPurge") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleAutoPurge") }
@@ -4092,7 +4093,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleFastTierOnly") }
     }
     private var autopilotEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: "BadAppleAutopilot") as? Bool ?? true }
+        get { UserDefaults.standard.object(forKey: "BadAppleAutopilot") as? Bool ?? false }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleAutopilot") }
     }
     private var focusEnabled: Bool {
@@ -4183,8 +4184,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         registerSMAppService()
         // Start loading the native Swift MLX engine in the background.
         // When loaded, text/voice queries bypass the Python daemon entirely.
+        let nativeEngine = BadAppleEngine.shared
+        nativeEngine.autopilot = autopilotEnabled
+        nativeEngine.workspacePath = UserDefaults.standard.string(forKey: "BadAppleSettingsWorkspace")
+        _ = nativeEngine.switchPersona(roastEnabled ? "drill" : selectedPersona)
         Task.detached(priority: .background) {
-            await BadAppleEngine.shared.loadModel()
+            await nativeEngine.loadModel()
             await MainActor.run {
                 if BadAppleEngine.shared.isLoaded {
                     badAppleVoiceLog("Native Swift MLX engine loaded — queries will bypass the daemon")
@@ -4310,20 +4315,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             guard let self = self else { finish(); return }
             // NATIVE ENGINE: route through Swift if loaded.
             if BadAppleEngine.shared.isLoaded {
-                let prompt = "Describe this image in detail: \(imagePath)"
-                BadAppleEngine.shared.generateStreaming(
-                    prompt: prompt,
-                    voiceMode: false,
-                    maxTokens: 512
+                BadAppleEngine.shared.describeImage(
+                    at: imagePath,
+                    prompt: "Describe this image in detail."
                 ) { chunk in
-                    DispatchQueue.main.async { append(chunk) }
+                    append(chunk)
                 } onComplete: { _ in
-                    DispatchQueue.main.async { finish() }
+                    finish()
                 } onError: { error in
-                    DispatchQueue.main.async {
-                        append("Error: \(error)")
-                        finish()
-                    }
+                    append("Error: \(error)")
+                    finish()
                 }
                 return
             }
@@ -4709,6 +4710,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     private func refreshTelemetry() {
+        if BadAppleEngine.shared.isLoaded || BadAppleEngine.shared.isLoading {
+            let ready = BadAppleEngine.shared.isLoaded
+            let status: [String: Any] = [
+                "mode": ready ? "READY" : "LOADING",
+                "model_id": BadAppleEngine.shared.modelId,
+                "active_models": ready ? ["main_9b"] : [],
+                "native_engine": true,
+                "memory_gb": BadAppleEngine.shared.memoryUsageGB,
+                "tokens_per_second": BadAppleEngine.shared.lastTokensPerSecond,
+                "fast_tier": true,
+            ]
+            activeModels = status["active_models"] as? [String] ?? []
+            lastRuntimeStatus = status
+            lastRuntimeReachable = true
+            updateStatusIcon()
+            rebuildMenu()
+            splash.update(status: status)
+            chatWindow.tierName = ready ? "9B Native" : "Loading"
+            Task {
+                let tasks = await BadAppleEngine.shared.listAgentTasks()
+                await MainActor.run {
+                    self.nativeAgentTasks = tasks
+                }
+            }
+            return
+        }
         Task {
             do {
                 let output = try await runBadAppleCLI(prompt: "runtime status", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
@@ -4749,30 +4776,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     private func autoPurgeVRAM() {
         badAppleVoiceLog("Memory critical: auto-purging VRAM")
-        Task {
-            _ = try? await runBadAppleCLI(prompt: "flush vram", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
-        }
+        BadAppleEngine.shared.clearCache()
     }
 
     private func unloadOptionalModels() {
         badAppleVoiceLog("Memory critical: unloading optional models")
-        Task {
-            _ = try? await runBadAppleCLI(prompt: "unload all models", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
-        }
+        BadAppleEngine.shared.clearCache()
     }
 
     @objc private func purgeVRAM() {
-        Task {
-            _ = try? await runBadAppleCLI(prompt: "flush vram", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
-            await MainActor.run { self.refreshTelemetry() }
-        }
+        BadAppleEngine.shared.clearCache()
+        refreshTelemetry()
     }
 
     @objc private func unloadModels() {
-        Task {
-            _ = try? await runBadAppleCLI(prompt: "unload all models", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
-            await MainActor.run { self.refreshTelemetry() }
-        }
+        BadAppleEngine.shared.clearCache()
+        refreshTelemetry()
     }
 
     @objc private func toggleAutoPurge() {
@@ -5216,33 +5235,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     @objc private func newChat() {
-        Task {
-            do {
-                let response = try await runBadAppleCLI(prompt: "new chat", socketPath: BadAppleBrain.deepSocket, maxTokens: 80)
-                await MainActor.run {
-                    self.lastPrompt = "new chat"
-                    self.lastError = nil
-                    self.streamedTokenCount = 0
-                    self.voiceHost.speak(response)
-                    self.rebuildMenu()
-                }
-            } catch {
-                await MainActor.run {
-                    self.lastError = error.localizedDescription
-                    self.rebuildMenu()
-                }
-            }
-        }
+        BadAppleEngine.shared.resetConversation()
+        lastPrompt = "new chat"
+        lastError = nil
+        streamedTokenCount = 0
+        voiceHost.speak("Started a new chat.")
+        rebuildMenu()
     }
 
     @objc private func toggleRoast() {
         roastEnabled.toggle()
+        _ = BadAppleEngine.shared.switchPersona(roastEnabled ? "drill" : selectedPersona)
         rebuildMenu()
     }
 
     @objc private func selectPersona(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         selectedPersona = name
+        if !roastEnabled {
+            _ = BadAppleEngine.shared.switchPersona(name)
+        }
         let displayNames: [String: String] = ["default": "Default", "wicket": "Wicket", "genz": "Gen Z", "drill": "Drill", "midwest": "Midwest Aunt"]
         chatWindow.personaName = displayNames[name] ?? name.capitalized
         rebuildMenu()
@@ -5750,7 +5762,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             menu.addItem(errorItem)
         }
 
-        let engineMode = BadAppleEngine.shared.isLoaded ? "Swift (Native)" : "Daemon (Python)"
+        let engineMode = BadAppleEngine.shared.isLoaded ? "Swift (Native)" : "Loading Swift Engine"
         let mode = NSMenuItem(title: "AI Engine: Qwen 3.5 9B — \(engineMode)", action: nil, keyEquivalent: "")
         mode.isEnabled = false
         menu.addItem(mode)
@@ -6082,26 +6094,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         ffiStatus.isEnabled = false
         menu.addItem(ffiStatus)
 
-        if BadAppleFFI.shared.isLoaded {
-            let pursuits = BadAppleFFI.shared.activePursuits()
-            let subMenu = NSMenu(title: "Current Tasks")
-            if pursuits.isEmpty {
-                let empty = NSMenuItem(title: "No active pursuits", action: nil, keyEquivalent: "")
-                empty.isEnabled = false
-                subMenu.addItem(empty)
-            } else {
-                for pursuit in pursuits.suffix(8) {
-                    let item = NSMenuItem(title: pursuit.truncated(to: 70), action: nil, keyEquivalent: "")
-                    item.isEnabled = false
-                    item.toolTip = pursuit
-                    subMenu.addItem(item)
-                }
+        let subMenu = NSMenu(title: "Current Tasks")
+        if nativeAgentTasks.isEmpty {
+            let empty = NSMenuItem(title: "No active tasks", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            subMenu.addItem(empty)
+        } else {
+            for task in nativeAgentTasks.prefix(8) {
+                let title = "[\(task.status.rawValue)] \(task.goal)".truncated(to: 70)
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                item.toolTip = task.summary.isEmpty ? task.goal : task.summary
+                subMenu.addItem(item)
             }
-            let parent = NSMenuItem(title: "Current Tasks", action: nil, keyEquivalent: "")
-            parent.submenu = subMenu
-            menu.addItem(parent)
-            menu.addItem(NSMenuItem(title: "Add a Task...", action: #selector(pushPursuit), keyEquivalent: "p"))
         }
+        let parent = NSMenuItem(title: "Current Tasks", action: nil, keyEquivalent: "")
+        parent.submenu = subMenu
+        menu.addItem(parent)
+        menu.addItem(NSMenuItem(title: "Add a Task...", action: #selector(pushPursuit), keyEquivalent: "p"))
         menu.addItem(NSMenuItem.separator())
         let helpMenu = NSMenu(title: "Help & Fixes")
         let restartDaemonItem = NSMenuItem(title: "Restart Bad Apple", action: #selector(restartDaemon), keyEquivalent: "")
@@ -6445,19 +6455,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     @objc private func pushPursuit() {
-        guard BadAppleFFI.shared.isLoaded else { return }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Push a new active pursuit"
+        alert.messageText = "Add a task"
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
         alert.accessoryView = textField
-        alert.addButton(withTitle: "Push")
+        alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
             let text = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty { _ = BadAppleFFI.shared.pushPursuit(text) }
+            if !text.isEmpty {
+                Task {
+                    do {
+                        _ = try await BadAppleEngine.shared.submitAgentTask(goal: text)
+                        let tasks = await BadAppleEngine.shared.listAgentTasks()
+                        await MainActor.run {
+                            self.nativeAgentTasks = tasks
+                            self.rebuildMenu()
+                        }
+                    } catch {
+                        await MainActor.run {
+                            self.lastError = error.localizedDescription
+                            self.rebuildMenu()
+                        }
+                    }
+                }
+            }
         }
-        rebuildMenu()
     }
 
     // MARK: NSMenuDelegate
@@ -6854,6 +6878,7 @@ final class BadAppleSettingsWindow: NSObject {
         let enabled = sender.state == .on
         UserDefaults.standard.set(enabled, forKey: autopilotKey)
         autopilotLabel?.textColor = enabled ? .systemOrange : .labelColor
+        BadAppleEngine.shared.autopilot = enabled
         sendCommand(enabled ? "enable autopilot" : "disable autopilot")
     }
 
@@ -6886,6 +6911,7 @@ final class BadAppleSettingsWindow: NSObject {
         guard index < personas.count else { return }
         let personaId = personas[index].id
         UserDefaults.standard.set(personaId, forKey: personaKey)
+        _ = BadAppleEngine.shared.switchPersona(personaId)
         sendCommand("switch to \(personaId)")
     }
 
@@ -6904,6 +6930,7 @@ final class BadAppleSettingsWindow: NSObject {
         let path = workspaceField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !path.isEmpty else { return }
         UserDefaults.standard.set(path, forKey: workspaceKey)
+        BadAppleEngine.shared.workspacePath = path
         sendCommand("set workspace to \(path)")
     }
 

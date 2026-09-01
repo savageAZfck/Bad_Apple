@@ -63,6 +63,12 @@ download_asset() {
 
 [[ "$(id -u)" -eq 0 ]] || fail "update must run as root so it can replace /Applications/Bad Apple.app"
 
+CONSOLE_USER="$(stat -f %Su /dev/console 2>/dev/null || echo "${SUDO_USER:-${USER:-root}}")"
+CONSOLE_UID="$(id -u "${CONSOLE_USER}" 2>/dev/null || echo 0)"
+CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+CONSOLE_HOME="${CONSOLE_HOME:-/Users/${CONSOLE_USER}}"
+PLIST="${CONSOLE_HOME}/Library/LaunchAgents/com.badapple.menubar.plist"
+
 current=$(installed_version)
 echo "Installed version: ${current}"
 
@@ -83,6 +89,9 @@ echo "Downloading update..."
 zip=$(download_asset "${TAG}")
 
 echo "Stopping Bad Apple..."
+if [[ -f "${PLIST}" && "${CONSOLE_UID}" -ne 0 ]]; then
+    launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" launchctl unload "${PLIST}" 2>/dev/null || true
+fi
 osascript -e 'tell application "Bad Apple" to quit' 2>/dev/null || true
 sleep 1
 
@@ -110,6 +119,9 @@ if [[ -x "${LOCAL_STRIP}" ]]; then
     "${LOCAL_STRIP}" 2>/dev/null || xattr -dr com.apple.quarantine "${APP}" 2>/dev/null || true
 else
     xattr -dr com.apple.quarantine "${APP}" 2>/dev/null || true
+fi
+if ! codesign --verify --deep --strict "${APP}" >/dev/null 2>&1; then
+    codesign --force --deep --sign - "${APP}"
 fi
 
 # Try to update the full platform if a full release zip is available.
@@ -149,30 +161,13 @@ else
 fi
 
 echo "Restarting Bad Apple..."
-# Derive the console user so we can restart the menu bar in the right Aqua
-# session even though the updater runs as root.
-CONSOLE_USER="$(stat -f %Su /dev/console 2>/dev/null || echo "${SUDO_USER:-${USER:-root}}")"
-CONSOLE_UID="$(id -u "${CONSOLE_USER}" 2>/dev/null || echo 0)"
-if [[ "${CONSOLE_UID}" -ne 0 ]]; then
+if [[ -f "${PLIST}" && "${CONSOLE_UID}" -ne 0 ]]; then
+    launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" launchctl load -w "${PLIST}" 2>/dev/null || true
+elif [[ "${CONSOLE_UID}" -ne 0 ]]; then
     launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" open -a "Bad Apple" 2>/dev/null || \
         sudo -u "${CONSOLE_USER}" open -a "Bad Apple" 2>/dev/null || true
 else
     open -a "Bad Apple" 2>/dev/null || true
-fi
-
-# If the menu bar LaunchAgent is already installed, make sure it is loaded in
-# the console user's session, not root's.
-CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-CONSOLE_HOME="${CONSOLE_HOME:-/Users/${CONSOLE_USER}}"
-PLIST="${CONSOLE_HOME}/Library/LaunchAgents/com.badapple.menubar.plist"
-if [[ -f "${PLIST}" ]]; then
-    if [[ "${CONSOLE_UID}" -ne 0 ]]; then
-        launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" launchctl unload "${PLIST}" 2>/dev/null || true
-        launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" launchctl load -w "${PLIST}" 2>/dev/null || true
-    else
-        launchctl unload "${PLIST}" 2>/dev/null || true
-        launchctl load -w "${PLIST}" 2>/dev/null || true
-    fi
 fi
 
 echo "Updated Bad Apple to ${new_version}."

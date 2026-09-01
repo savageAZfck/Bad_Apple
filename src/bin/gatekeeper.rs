@@ -15,7 +15,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{chown, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -970,6 +970,10 @@ fn main() -> Result<()> {
 
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("cannot bind Bad Apple socket at {path:?}"))?;
+    if let Some(parent) = path.parent() {
+        let parent_gid = fs::metadata(parent)?.gid();
+        chown(&path, None, Some(parent_gid))?;
+    }
     // 0o660: owner and group can connect, no world access. The gatekeeper
     // runs as root; the console user is added to the group at install time.
     let perms = std::fs::Permissions::from_mode(0o660);

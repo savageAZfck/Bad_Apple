@@ -68,6 +68,25 @@ jobs:
           cargo build --release
           BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
           tests/test_clean_install.sh
+      - name: Swift inference self-test
+        working-directory: src/platform/apple_desktop/MLXInference
+        run: swift run -c release BadAppleMLXSelfTest
+      - name: Swift native logic tests
+        run: |
+          xcrun swiftc -O \
+            src/platform/apple_desktop/BadAppleTools.swift \
+            src/platform/apple_desktop/BadAppleSecurity.swift \
+            src/platform/apple_desktop/BadAppleRAG.swift \
+            tests/test_badapple_native_logic.swift \
+            -o /tmp/badapple-native-logic-tests
+          /tmp/badapple-native-logic-tests
+      - name: Swift native runtime tests
+        run: |
+          xcrun swiftc -swift-version 5 \
+            src/platform/apple_desktop/BadAppleNativeRuntime.swift \
+            tests/test_badapple_native_runtime.swift \
+            -o /tmp/badapple-native-runtime-tests
+          /tmp/badapple-native-runtime-tests
 
   fuzz:
     name: Fuzz (nightly only)

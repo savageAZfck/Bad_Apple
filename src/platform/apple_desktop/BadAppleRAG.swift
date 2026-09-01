@@ -62,6 +62,25 @@ protocol EmbeddingProvider {
     func embed(_ text: String) async -> [Float]
 }
 
+struct BadAppleLexicalEmbeddingProvider: EmbeddingProvider {
+    private let dimensions = 512
+
+    func embed(_ text: String) async -> [Float] {
+        let words = text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        guard !words.isEmpty else { return [] }
+        var vector = [Float](repeating: 0, count: dimensions)
+        let features = words + zip(words, words.dropFirst()).map { "\($0)_\($1)" }
+        for feature in features {
+            guard let hash = UInt64(fnv1aHex(feature), radix: 16) else { continue }
+            let index = Int(hash % UInt64(dimensions))
+            vector[index] += (hash & 1) == 0 ? 1 : -1
+        }
+        let magnitude = sqrt(vector.reduce(Float(0)) { $0 + $1 * $1 })
+        guard magnitude > 0 else { return [] }
+        return vector.map { $0 / magnitude }
+    }
+}
+
 // MARK: - BadAppleSemanticCache
 
 /// Query-to-response cache using embedding cosine similarity.
@@ -164,7 +183,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
     ///     `BADAPPLE_CACHE_THRESHOLD` environment variable, then
     ///     `defaultThreshold` (0.92).
     ///   - cachePath: Override for the on-disk cache file.
-    init(embeddingProvider: EmbeddingProvider? = nil,
+    init(embeddingProvider: EmbeddingProvider? = BadAppleLexicalEmbeddingProvider(),
          threshold: Float? = nil,
          cachePath: String? = nil,
          fileManager: FileManager = .default) {
@@ -270,6 +289,13 @@ final class BadAppleSemanticCache: @unchecked Sendable {
             entries = Array(entries.suffix(Self.maxCacheSize))
         }
         saveLocked()
+    }
+
+    func store(prompt: String, response: String, persona: String) async {
+        guard let embeddingProvider else { return }
+        let embedding = await embeddingProvider.embed(prompt)
+        guard !embedding.isEmpty else { return }
+        store(prompt: prompt, response: response, persona: persona, embedding: embedding)
     }
 
     /// Cosine similarity between two vectors: dot(a,b) / (|a| * |b|). Returns 0

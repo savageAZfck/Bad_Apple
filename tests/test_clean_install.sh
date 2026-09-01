@@ -63,6 +63,10 @@ if [[ -f "${APP}/Contents/MacOS/BadApple" ]]; then ok "Main executable"; else fa
 # Helper binary
 if [[ -f "${APP}/Contents/Helpers/badapple" ]]; then ok "Helper binary"; else fail "Helper binary missing"; fi
 
+if [[ -f "${APP}/Contents/Libraries/libBadAppleMLX.dylib" ]]; then ok "Native Swift MLX runtime"; else fail "Native Swift MLX runtime missing"; fi
+if [[ -f "${APP}/Contents/Libraries/mlx.metallib" ]]; then ok "MLX Metal shaders"; else fail "MLX Metal shaders missing"; fi
+if codesign --verify --deep --strict "${APP}" >/dev/null 2>&1; then ok "App code signature"; else fail "App code signature invalid"; fi
+
 # Info.plist
 if [[ -f "${APP}/Contents/Info.plist" ]]; then ok "Info.plist"; else fail "Info.plist missing"; fi
 

@@ -134,6 +134,16 @@ public final class BadAppleInference: @unchecked Sendable {
         }
     }
 
+    public struct ChatMessage: Sendable {
+        public let role: String
+        public let content: String
+
+        public init(role: String, content: String) {
+            self.role = role
+            self.content = content
+        }
+    }
+
     public struct GenerationResult: Sendable {
         public let text: String
         public let tokensPerSecond: Float
@@ -252,6 +262,7 @@ public final class BadAppleInference: @unchecked Sendable {
     public func generateStreamingTokens(
         prompt: String,
         systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
         maxTokens: Int? = nil,
         temperature: Float? = nil,
         onToken: @escaping @Sendable (String) -> Void,
@@ -269,9 +280,22 @@ public final class BadAppleInference: @unchecked Sendable {
                 if let systemPrompt = systemPrompt {
                     messages.append(.system(systemPrompt))
                 }
+                for message in history.suffix(12) {
+                    switch message.role.lowercased() {
+                    case "assistant":
+                        messages.append(.assistant(message.content))
+                    case "system":
+                        messages.append(.system(message.content))
+                    default:
+                        messages.append(.user(message.content))
+                    }
+                }
                 messages.append(.user(prompt))
 
-                let userInput = UserInput(chat: messages)
+                let userInput = UserInput(
+                    chat: messages,
+                    additionalContext: ["enable_thinking": false]
+                )
                 let lmInput = try await container.prepare(input: userInput)
                 let params = GenerateParameters(
                     maxTokens: maxTokens ?? config.maxTokens,
@@ -316,6 +340,7 @@ public final class BadAppleInference: @unchecked Sendable {
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
         maxTokens: Int? = nil,
         temperature: Float? = nil
     ) async throws -> GenerationResult {
@@ -323,6 +348,7 @@ public final class BadAppleInference: @unchecked Sendable {
             generateStreamingTokens(
                 prompt: prompt,
                 systemPrompt: systemPrompt,
+                history: history,
                 maxTokens: maxTokens,
                 temperature: temperature,
                 onToken: { _ in },
@@ -341,6 +367,7 @@ public final class BadAppleInference: @unchecked Sendable {
     public func generateWithSpeculativeDecoding(
         prompt: String,
         systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
         draftModelId: String,
         numDraftTokens: Int = 2,
         maxTokens: Int? = nil,
@@ -360,9 +387,22 @@ public final class BadAppleInference: @unchecked Sendable {
                 if let systemPrompt = systemPrompt {
                     messages.append(.system(systemPrompt))
                 }
+                for message in history.suffix(12) {
+                    switch message.role.lowercased() {
+                    case "assistant":
+                        messages.append(.assistant(message.content))
+                    case "system":
+                        messages.append(.system(message.content))
+                    default:
+                        messages.append(.user(message.content))
+                    }
+                }
                 messages.append(.user(prompt))
 
-                let userInput = UserInput(chat: messages)
+                let userInput = UserInput(
+                    chat: messages,
+                    additionalContext: ["enable_thinking": false]
+                )
                 let lmInput = try await container.prepare(input: userInput)
 
                 let draftConfiguration = ModelConfiguration(id: draftModelId)

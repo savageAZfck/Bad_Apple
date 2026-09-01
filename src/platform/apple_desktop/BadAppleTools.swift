@@ -83,6 +83,7 @@ func polishText(_ text: String) -> String {
     var result = text
 
     // Strip Qwen3 thinking blocks and leaked stop tokens.
+    result = regexReplace(#"^Thinking Process:.*?(?:Final Answer:|Answer:)\s*"#, in: result, with: "", options: [.dotMatchesLineSeparators, .caseInsensitive])
     result = regexReplace(#"\n?\s*<thinking>.*?\s*\n?"#, in: result, with: "", options: [.dotMatchesLineSeparators])
     result = regexReplace(#"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)"#, in: result, with: "", options: [.dotMatchesLineSeparators])
     result = regexReplace(#"</s>|<\|endoftext\|>|</thinking>"#, in: result, with: "")
@@ -128,6 +129,7 @@ func postprocessOutput(_ text: String) -> String {
     var result = text
 
     // Strip Qwen3 thinking blocks.
+    result = regexReplace(#"^Thinking Process:.*?(?:Final Answer:|Answer:)\s*"#, in: result, with: "", options: [.dotMatchesLineSeparators, .caseInsensitive])
     result = regexReplace(#"\n?\s*<thinking>.*?\s*\n?"#, in: result, with: "", options: [.dotMatchesLineSeparators])
     result = regexReplace(#"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)"#, in: result, with: "", options: [.dotMatchesLineSeparators])
     result = regexReplace(#"</s>|<\|endoftext\|>|</thinking>"#, in: result, with: "")
@@ -210,8 +212,14 @@ final class BadAppleToolRouter: @unchecked Sendable {
 
     // MARK: - Tool Registry
 
-    /// The six core tools exposed to the model.
+    /// Native tools exposed to the model.
     private let tools: [BadAppleTool] = [
+        BadAppleTool(
+            name: "get_current_time",
+            description: "Get the current local date and time on the Mac.",
+            parameters: [],
+            requiresApproval: false
+        ),
         BadAppleTool(
             name: "read_file",
             description: "Read the text content of a local file. Only reads text files and stops at a size limit.",
@@ -263,7 +271,80 @@ final class BadAppleToolRouter: @unchecked Sendable {
             ],
             requiresApproval: true
         ),
+        BadAppleTool(
+            name: "run_applescript",
+            description: "Run a short AppleScript directly with /usr/bin/osascript. Shell commands and network download commands are rejected.",
+            parameters: [
+                .init(name: "script", description: "The AppleScript source to run.", required: true),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "list_shortcuts",
+            description: "List the names of installed macOS Shortcuts.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "run_shortcut",
+            description: "Run a named macOS Shortcut. Shortcuts may mutate apps or data, so approval is required.",
+            parameters: [
+                .init(name: "name", description: "The exact name of the Shortcut to run.", required: true),
+                .init(name: "input", description: "Optional text input for the Shortcut.", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "index_documents",
+            description: "Securely enumerate local text and code files under a jailed path and return an indexing summary.",
+            parameters: [
+                .init(name: "path", description: "A jailed directory or text file to enumerate.", required: true),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "search_notes",
+            description: "Search text documents read-only within ~/Documents and the active workspace.",
+            parameters: [
+                .init(name: "query", description: "Text to search for in local notes and documents.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "read_working_memory",
+            description: "Read the assistant scratchpad at ~/.bad_apple/working_memory.txt.",
+            parameters: [
+                .init(name: "limit", description: "Maximum characters to return. Default 5000.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "write_working_memory",
+            description: "Write or append to the assistant scratchpad at ~/.bad_apple/working_memory.txt.",
+            parameters: [
+                .init(name: "content", description: "The text to store.", required: true),
+                .init(name: "mode", description: "replace (default) or append.", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "clear_working_memory",
+            description: "Clear the assistant scratchpad at ~/.bad_apple/working_memory.txt.",
+            parameters: [],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "runtime_status",
+            description: "Return native macOS, process, memory, uptime, and workspace status.",
+            parameters: [],
+            requiresApproval: false
+        ),
     ]
+
+    /// Names in the native registry, exposed for discovery and logic tests.
+    func registeredToolNames() -> [String] {
+        tools.map(\.name)
+    }
 
     // MARK: - Keyword Maps
 
@@ -283,6 +364,10 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "screenshot", "screen capture", "capture screen", "what's on my screen",
         // Math
         "calculate", "compute", "math", "how much", "how many",
+        // Native automation and local knowledge
+        "run applescript", "applescript", "run shortcut", "list shortcuts", "shortcut",
+        "index documents", "index files", "search notes", "search my notes",
+        "working memory", "scratchpad", "runtime status", "health status",
         // System
         "system", "process", "memory", "disk usage",
         // Code
@@ -291,12 +376,20 @@ final class BadAppleToolRouter: @unchecked Sendable {
 
     /// Maps keyword groups to the tools they suggest.
     private let keywordToolMap: [(keywords: [String], toolNames: [String])] = [
+        (["what time", "current time", "time is it", "date and time", "today's date", "what day"], ["get_current_time"]),
         (["list files", "show files", "files in", "directory", "folder", "what's in"], ["list_directory"]),
         (["read file", "read the file", "contents of", "show me the file"], ["read_file"]),
         (["write file", "save to file", "create a file", "append to file", "write a note"], ["write_file"]),
         (["run command", "run shell", "execute command", "shell command"], ["run_shell"]),
         (["search content", "search in", "grep", "find text", "find in files", "search for"], ["search_content"]),
         (["screenshot", "screen capture", "capture screen", "what's on my screen"], ["screen_capture"]),
+        (["run applescript", "run script", "applescript"], ["run_applescript"]),
+        (["list shortcuts"], ["list_shortcuts"]),
+        (["run shortcut", "shortcut"], ["run_shortcut", "list_shortcuts"]),
+        (["index documents", "index my", "index files"], ["index_documents"]),
+        (["search my notes", "search notes", "what did I write"], ["search_notes"]),
+        (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
+        (["runtime status", "health status", "system status", "process", "memory"], ["runtime_status"]),
     ]
 
     // MARK: - Prompt Routing
@@ -378,6 +471,50 @@ final class BadAppleToolRouter: @unchecked Sendable {
             calls.append((name: name, args: args))
         }
 
+        let jsonMatches = regexAllMatches(
+            #"<tool_call>\s*(\{.*?\})\s*</tool_call>"#,
+            in: text,
+            options: [.dotMatchesLineSeparators]
+        )
+        for match in jsonMatches {
+            guard match.numberOfRanges >= 2,
+                  let jsonRange = Range(match.range(at: 1), in: text),
+                  let data = String(text[jsonRange]).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = object["name"] as? String else { continue }
+            let rawArgs = object["arguments"] as? [String: Any] ?? [:]
+            let args = rawArgs.mapValues { value in
+                if let string = value as? String { return string }
+                return String(describing: value)
+            }
+            calls.append((name: name, args: args))
+        }
+
+        let functionMatches = regexAllMatches(
+            #"<tool_call>\s*<function=(\w+)>\s*(.*?)\s*</function>\s*</tool_call>"#,
+            in: text,
+            options: [.dotMatchesLineSeparators]
+        )
+        for match in functionMatches {
+            guard match.numberOfRanges >= 3,
+                  let nameRange = Range(match.range(at: 1), in: text),
+                  let argsRange = Range(match.range(at: 2), in: text) else { continue }
+            let name = String(text[nameRange])
+            let raw = String(text[argsRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidates = [raw, "{\(raw)}"]
+            var args: [String: String] = [:]
+            for candidate in candidates {
+                guard let data = candidate.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                args = object.mapValues { value in
+                    if let string = value as? String { return string }
+                    return String(describing: value)
+                }
+                break
+            }
+            calls.append((name: name, args: args))
+        }
+
         return calls
     }
 
@@ -427,7 +564,9 @@ final class BadApplePolicyEngine: @unchecked Sendable {
 
     /// Tools that always require approval regardless of policy file.
     private let hardcodedApprovalRequired: Set<String> = [
-        "run_shell", "run_applescript", "write_file", "index_documents",
+        "run_shell", "run_applescript", "run_shortcut", "write_file",
+        "write_working_memory", "clear_working_memory", "index_documents",
+        "screen_capture",
     ]
 
     /// Policy file path.
@@ -462,13 +601,18 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        // Code-level safety requirements cannot be relaxed by a stale or
+        // permissive policy file. Autopilot is handled separately by evaluate.
+        if hardcodedApprovalRequired.contains(toolName) {
+            return true
+        }
         if let value = toolApproval[toolName] {
             return value
         }
         if policyLoaded {
             return defaultRequireApproval
         }
-        return hardcodedApprovalRequired.contains(toolName)
+        return false
     }
 
     /// Check whether a tool is allowed at all by policy.
@@ -596,6 +740,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     private let lock = NSLock()
     private var _workspace: String?
     private let policyEngine: BadApplePolicyEngine?
+    private let startedAt = Date()
 
     /// Optional workspace root. When set, paths within the workspace are
     /// allowed in addition to the home and temp directories.
@@ -622,9 +767,9 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     /// Execute a tool by name with the given arguments.
     /// Returns the tool result as a string (or an error message).
-    func executeTool(name: String, args: [String: String]) async -> String {
+    func executeTool(name: String, args: [String: String], approved: Bool = false) async -> String {
         // Check policy if a policy engine is attached.
-        if let policy = policyEngine {
+        if !approved, let policy = policyEngine {
             let decision = policy.evaluate(toolName: name, args: args)
             switch decision {
             case .denied:
@@ -637,6 +782,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
 
         switch name {
+        case "get_current_time":
+            return getCurrentTime()
         case "read_file":
             return readFile(path: args["path"] ?? "")
         case "list_directory":
@@ -651,6 +798,24 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return writeFile(path: args["path"] ?? "", content: args["content"] ?? "")
         case "screen_capture":
             return screenCapture(path: args["path"])
+        case "run_applescript":
+            return runAppleScript(script: args["script"] ?? "")
+        case "list_shortcuts":
+            return listShortcuts()
+        case "run_shortcut":
+            return runShortcut(name: args["name"] ?? "", input: args["input"])
+        case "index_documents":
+            return indexDocuments(path: args["path"] ?? "")
+        case "search_notes":
+            return searchNotes(query: args["query"] ?? "")
+        case "read_working_memory":
+            return readWorkingMemory(limit: parseLimit(args["limit"], defaultValue: 5_000, maximum: 50_000))
+        case "write_working_memory":
+            return writeWorkingMemory(content: args["content"] ?? "", mode: args["mode"] ?? "replace")
+        case "clear_working_memory":
+            return clearWorkingMemory()
+        case "runtime_status":
+            return runtimeStatus()
         default:
             return "Unknown tool: \(name)"
         }
@@ -723,6 +888,26 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     }
 
     // MARK: - Individual Tool Implementations
+
+    private let textFileExtensions: Set<String> = [
+        "txt", "md", "markdown", "rst", "rtf", "csv", "tsv", "json", "jsonl",
+        "yaml", "yml", "toml", "xml", "html", "htm", "swift", "py", "rs",
+        "c", "h", "m", "mm", "cpp", "hpp", "js", "jsx", "ts", "tsx", "java",
+        "kt", "go", "rb", "php", "sh", "zsh", "fish", "sql", "css", "scss",
+    ]
+
+    private var workingMemoryPath: String {
+        NSHomeDirectory() + "/.bad_apple/working_memory.txt"
+    }
+
+    /// Return local time without invoking an external process.
+    func getCurrentTime() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+        return formatter.string(from: Date())
+    }
 
     /// Read the text content of a file, respecting the jail and a size limit.
     func readFile(path: String) -> String {
@@ -923,6 +1108,203 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
     }
 
+    /// Execute AppleScript directly. Arguments are passed to osascript without
+    /// a shell, and script features that could bypass the command cage are denied.
+    func runAppleScript(script: String) -> String {
+        let source = script.trimmingCharacters(in: .whitespacesAndNewlines)
+        if source.isEmpty { return "Error: no AppleScript provided" }
+        if source.count > 10_000 || source.contains("\0") {
+            return "Error: AppleScript is too large or contains invalid characters"
+        }
+        let lowered = source.lowercased()
+        let denied = [
+            "do shell script", "do script", "run script", "use framework",
+            "current application's", "curl", "wget", "rm -rf",
+        ]
+        if let match = denied.first(where: { lowered.contains($0) }) {
+            return "Error: AppleScript contains denied operation '\(match)'"
+        }
+
+        let result = runProcess(launchPath: "/usr/bin/osascript", arguments: ["-e", source], timeout: 15)
+        if result.exitCode != 0 {
+            let error = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Error running AppleScript: \(error.isEmpty ? "osascript failed" : error)"
+        }
+        let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.isEmpty ? "done" : String(output.prefix(10_000))
+    }
+
+    /// List Shortcuts using Apple's fixed command-line executable.
+    func listShortcuts() -> String {
+        let result = runProcess(launchPath: "/usr/bin/shortcuts", arguments: ["list"], timeout: 15)
+        if result.exitCode != 0 {
+            let error = (result.stderr.isEmpty ? result.stdout : result.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Error listing shortcuts: \(error.isEmpty ? "shortcuts failed" : error)"
+        }
+        let names = result.stdout.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        return names.isEmpty ? "No shortcuts found" : names.prefix(100).joined(separator: "\n")
+    }
+
+    /// Run an exact Shortcut name without shell interpolation.
+    func runShortcut(name: String, input: String?) -> String {
+        let shortcutName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if shortcutName.isEmpty || shortcutName.count > 255 || shortcutName.contains("\0") {
+            return "Error: invalid shortcut name"
+        }
+        var arguments = ["run", shortcutName]
+        var standardInput: Data?
+        if let input, !input.isEmpty {
+            guard input.utf8.count <= 100_000 else { return "Error: shortcut input is too large" }
+            arguments.append(contentsOf: ["-i", "-"])
+            standardInput = input.data(using: .utf8)
+        }
+        let result = runProcess(
+            launchPath: "/usr/bin/shortcuts",
+            arguments: arguments,
+            timeout: 60,
+            standardInput: standardInput
+        )
+        if result.exitCode != 0 {
+            let error = (result.stderr.isEmpty ? result.stdout : result.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Error running shortcut: \(error.isEmpty ? "shortcuts failed" : error)"
+        }
+        let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.isEmpty ? "done" : String(output.prefix(20_000))
+    }
+
+    /// Enumerate supported text files under a jailed path and summarize them.
+    func indexDocuments(path: String) -> String {
+        guard !path.isEmpty, let jailed = jailPath(path) else {
+            return "Error: path '\(path)' is outside allowed roots"
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: jailed, isDirectory: &isDirectory) else {
+            return "Error: \(jailed) does not exist"
+        }
+
+        let files = secureTextFiles(at: jailed, maximum: 2_000)
+        if files.isEmpty { return "No supported text files found under \(jailed)" }
+        var totalBytes = 0
+        for url in files {
+            totalBytes += (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        }
+        let sample = files.prefix(20).map(\.path).joined(separator: "\n")
+        let truncated = files.count == 2_000 ? " (enumeration limit reached)" : ""
+        return "Indexed \(files.count) text files totaling \(totalBytes) bytes from \(jailed)\(truncated)\n\(sample)"
+    }
+
+    /// Read-only case-insensitive search limited to Documents and workspace.
+    func searchNotes(query: String) -> String {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if needle.isEmpty { return "Error: no search query provided" }
+        if needle.count > 500 || needle.contains("\0") { return "Error: invalid search query" }
+
+        var roots: [String] = []
+        let documents = NSHomeDirectory() + "/Documents"
+        if let jailedDocuments = jailPath(documents), FileManager.default.fileExists(atPath: jailedDocuments) {
+            roots.append(jailedDocuments)
+        }
+        if let workspace, let jailedWorkspace = jailPath(workspace), !roots.contains(jailedWorkspace),
+           FileManager.default.fileExists(atPath: jailedWorkspace) {
+            roots.append(jailedWorkspace)
+        }
+        if roots.isEmpty { return "No searchable Documents directory or workspace found" }
+
+        var matches: [String] = []
+        for root in roots {
+            for url in secureTextFiles(at: root, maximum: 1_000) {
+                guard matches.count < 20,
+                      let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                      size <= 2_000_000,
+                      let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                for (offset, line) in text.components(separatedBy: .newlines).enumerated()
+                    where line.localizedCaseInsensitiveContains(needle) {
+                    let excerpt = String(line.trimmingCharacters(in: .whitespaces).prefix(500))
+                    matches.append("\(url.path):\(offset + 1): \(excerpt)")
+                    if matches.count == 20 { break }
+                }
+            }
+            if matches.count == 20 { break }
+        }
+        return matches.isEmpty ? "No relevant notes found." : matches.joined(separator: "\n")
+    }
+
+    func readWorkingMemory(limit: Int) -> String {
+        guard let jailed = jailPath(workingMemoryPath) else {
+            return "Error: working memory path is outside allowed roots"
+        }
+        guard FileManager.default.fileExists(atPath: jailed) else { return "Working memory is empty." }
+        guard let text = try? String(contentsOfFile: jailed, encoding: .utf8) else {
+            return "Error: could not read working memory"
+        }
+        if text.isEmpty { return "Working memory is empty." }
+        return text.count > limit ? String(text.prefix(limit)) + "\n... (truncated)" : text
+    }
+
+    func writeWorkingMemory(content: String, mode: String) -> String {
+        guard content.utf8.count <= 1_000_000 else { return "Error: working memory content is too large" }
+        guard mode == "replace" || mode == "append" else {
+            return "Error: mode must be 'replace' or 'append'"
+        }
+        guard let jailed = jailPath(workingMemoryPath) else {
+            return "Error: working memory path is outside allowed roots"
+        }
+        let url = URL(fileURLWithPath: jailed)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            var output = content
+            if mode == "append", FileManager.default.fileExists(atPath: jailed) {
+                let existing = try String(contentsOf: url, encoding: .utf8)
+                output = existing + (existing.isEmpty || content.isEmpty ? "" : "\n") + content
+            }
+            try output.write(to: url, atomically: true, encoding: .utf8)
+            return "Working memory \(mode == "append" ? "updated" : "written") (\(output.count) characters)."
+        } catch {
+            return "Error writing working memory: \(error.localizedDescription)"
+        }
+    }
+
+    func clearWorkingMemory() -> String {
+        guard let jailed = jailPath(workingMemoryPath) else {
+            return "Error: working memory path is outside allowed roots"
+        }
+        do {
+            if FileManager.default.fileExists(atPath: jailed) {
+                try FileManager.default.removeItem(atPath: jailed)
+            }
+            return "Working memory cleared."
+        } catch {
+            return "Error clearing working memory: \(error.localizedDescription)"
+        }
+    }
+
+    /// Native process and host information, with no shell or Python dependency.
+    func runtimeStatus() -> String {
+        let info = ProcessInfo.processInfo
+        let uptime = max(0, info.systemUptime)
+        let workspaceValue = workspace ?? "(not set)"
+        return [
+            "status: ready",
+            "process_id: \(info.processIdentifier)",
+            "process_name: \(info.processName)",
+            "host: \(info.hostName)",
+            "operating_system: \(info.operatingSystemVersionString)",
+            "processor_count: \(info.processorCount)",
+            "active_processor_count: \(info.activeProcessorCount)",
+            "physical_memory_bytes: \(info.physicalMemory)",
+            "system_uptime_seconds: \(Int(uptime))",
+            "process_uptime_seconds: \(Int(max(0, Date().timeIntervalSince(startedAt))))",
+            "thermal_state: \(thermalStateDescription(info.thermalState))",
+            "low_power_mode: \(info.isLowPowerModeEnabled)",
+            "workspace: \(workspaceValue)",
+        ].joined(separator: "\n")
+    }
+
     // MARK: - Private Helpers
 
     /// Capture the screen to a PNG file using the `screencapture` command.
@@ -949,6 +1331,55 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         return "Error: screen capture failed: \(result.stderr)"
     }
 
+    /// Return regular, non-symlink text files whose resolved paths remain jailed.
+    private func secureTextFiles(at root: String, maximum: Int) -> [URL] {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root, isDirectory: &isDirectory) else { return [] }
+
+        if !isDirectory.boolValue {
+            let url = URL(fileURLWithPath: root)
+            guard textFileExtensions.contains(url.pathExtension.lowercased()),
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  jailPath(url.path) != nil else { return [] }
+            return [url]
+        }
+
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: URL(fileURLWithPath: root),
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, _ in true }
+        ) else { return [] }
+
+        var files: [URL] = []
+        for case let url as URL in enumerator {
+            if files.count >= maximum { break }
+            guard textFileExtensions.contains(url.pathExtension.lowercased()),
+                  let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  let jailed = jailPath(url.path), jailed == url.resolvingSymlinksInPath().path else { continue }
+            files.append(URL(fileURLWithPath: jailed))
+        }
+        return files.sorted { $0.path < $1.path }
+    }
+
+    private func parseLimit(_ value: String?, defaultValue: Int, maximum: Int) -> Int {
+        guard let value, let parsed = Int(value) else { return defaultValue }
+        return min(max(parsed, 1), maximum)
+    }
+
+    private func thermalStateDescription(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
     /// Resolve a command name to its full path by checking standard PATH dirs.
     private func resolveCommand(_ name: String) -> String? {
         let searchPaths = ["/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"]
@@ -966,7 +1397,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     private func runProcess(
         launchPath: String,
         arguments: [String],
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        standardInput: Data? = nil
     ) -> (stdout: String, stderr: String, exitCode: Int) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
@@ -976,6 +1408,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        let stdinPipe = standardInput == nil ? nil : Pipe()
+        process.standardInput = stdinPipe
 
         var stdoutData = Data()
         var stderrData = Data()
@@ -993,7 +1427,12 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         do {
             try process.run()
         } catch {
+            stdinPipe?.fileHandleForWriting.closeFile()
             return ("", "Error: \(error.localizedDescription)", -1)
+        }
+        if let standardInput, let stdinPipe {
+            stdinPipe.fileHandleForWriting.write(standardInput)
+            stdinPipe.fileHandleForWriting.closeFile()
         }
 
         // Wait with timeout.

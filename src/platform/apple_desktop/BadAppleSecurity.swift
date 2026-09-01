@@ -374,12 +374,23 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
     func check(_ text: String) -> String {
         let snapshot = snapshotPatterns()
         let marker = Self.blockedMarker
+        let structuralText = Self.structuralForm(text)
+        if snapshot.contains(where: {
+            let pattern = Self.structuralForm($0)
+            return pattern.count >= 8 && structuralText.contains(pattern)
+        }) {
+            return marker
+        }
         var result = text
         for pattern in snapshot {
             guard !pattern.isEmpty else { continue }
             var cursor = result.startIndex
             while cursor < result.endIndex,
-                  let range = result.range(of: pattern, range: cursor..<result.endIndex) {
+                  let range = result.range(
+                    of: pattern,
+                    options: [.caseInsensitive],
+                    range: cursor..<result.endIndex
+                  ) {
                 result.replaceSubrange(range, with: marker)
                 // Advance past the inserted marker so the marker itself is
                 // never re-scanned (avoids infinite loops if a pattern is a
@@ -409,9 +420,14 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
     func checkChunk(_ chunk: String, accumulated: String) -> (String, Bool) {
         let snapshot = snapshotPatterns()
         let combined = accumulated + chunk
+        let structuralCombined = Self.structuralForm(combined)
         for pattern in snapshot {
             guard !pattern.isEmpty else { continue }
-            if combined.range(of: pattern) != nil {
+            if combined.range(of: pattern, options: [.caseInsensitive]) != nil {
+                return (Self.blockedMarker, true)
+            }
+            let structuralPattern = Self.structuralForm(pattern)
+            if structuralPattern.count >= 8 && structuralCombined.contains(structuralPattern) {
                 return (Self.blockedMarker, true)
             }
         }
@@ -419,6 +435,12 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
     }
 
     // MARK: - Private
+
+    private static func structuralForm(_ text: String) -> String {
+        String(text.lowercased().unicodeScalars.filter {
+            CharacterSet.alphanumerics.contains($0)
+        })
+    }
 
     private func snapshotPatterns() -> [String] {
         lock.lock()

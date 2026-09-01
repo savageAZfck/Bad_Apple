@@ -7,7 +7,7 @@ import BadAppleMLX
 
 /// The main AI engine. Loads the model, manages personas, and generates
 /// responses directly in-process — no subprocess, no daemon, no Python.
-final class BadAppleEngine {
+final class BadAppleEngine: @unchecked Sendable {
 
     // MARK: - Singleton
 
@@ -15,15 +15,70 @@ final class BadAppleEngine {
 
     // MARK: - State
 
+    private final class NativeEmbeddingProvider: EmbeddingProvider, @unchecked Sendable {
+        let engine: BadAppleEmbeddingEngine
+        let fallback = BadAppleLexicalEmbeddingProvider()
+
+        init(engine: BadAppleEmbeddingEngine) {
+            self.engine = engine
+        }
+
+        func embed(_ text: String) async -> [Float] {
+            if let vector = try? await engine.embed(text) {
+                return vector
+            }
+            return await fallback.embed(text)
+        }
+    }
+
     private let inference: BadAppleInference
     private let personaManager = BadApplePersonaManager()
     private let auditLedger = BadAppleAuditLedger()
     private let outputFirewall = BadAppleOutputFirewall()
     private let toolRouter = BadAppleToolRouter()
     private let policyEngine = BadApplePolicyEngine()
-    private let toolExecutor = BadAppleToolExecutor()
-    private let semanticCache = BadAppleSemanticCache()
+    private lazy var toolExecutor = BadAppleToolExecutor(policyEngine: policyEngine)
+    private let embeddingEngine = BadAppleEmbeddingEngine()
+    private let visionEngine = BadAppleVisionEngine()
+    private lazy var semanticCache = BadAppleSemanticCache(
+        embeddingProvider: NativeEmbeddingProvider(engine: embeddingEngine)
+    )
     private let rag = BadAppleRAG()
+    private let runtime = BadAppleNativeRuntime()
+    private let conversation = BadAppleConversation()
+    private let conversationSessionId = "default"
+    private let approvalLock = NSLock()
+    private var pendingApprovals: [String: (name: String, args: [String: String])] = [:]
+    private lazy var agent: BadAppleAgent? = try? BadAppleAgent(
+        planner: { [weak self] goal, maximumSteps in
+            guard let self else { return [] }
+            return try await self.planAgentGoal(goal, maximumSteps: maximumSteps)
+        },
+        generator: { [weak self] context in
+            guard let self else { return .finish("The native engine is unavailable.") }
+            return try await self.generateAgentAction(context)
+        },
+        executor: { [weak self] tool, arguments, _ in
+            guard let self else { return "The native engine is unavailable." }
+            return await self.toolExecutor.executeTool(name: tool, args: arguments)
+        }
+    )
+
+    private final class StreamState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var accumulated = ""
+        private var blocked = false
+
+        func filter(_ chunk: String, with firewall: BadAppleOutputFirewall) -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !blocked else { return "" }
+            let result = firewall.checkChunk(chunk, accumulated: accumulated)
+            accumulated += chunk
+            blocked = result.1
+            return result.0
+        }
+    }
 
     private(set) var isLoaded = false
     private(set) var isLoading = false
@@ -76,13 +131,30 @@ final class BadAppleEngine {
     func loadModel() async {
         guard !isLoaded && !isLoading else { return }
         isLoading = true
+        await runtime.markModelLoading(modelId)
 
         do {
             try await inference.loadModel()
             isLoaded = true
+            await runtime.markModelReady(modelId)
+            Task {
+                await runtime.markModelLoading(embeddingEngine.configuration.modelId)
+                do {
+                    try await embeddingEngine.loadModel()
+                    await runtime.markModelReady(embeddingEngine.configuration.modelId)
+                    print("[BadAppleEngine] Native embedding model loaded")
+                } catch {
+                    print("[BadAppleEngine] Native embedding model failed: \(error.localizedDescription)")
+                    await runtime.markModelFailed(
+                        embeddingEngine.configuration.modelId,
+                        error: error.localizedDescription
+                    )
+                }
+            }
         } catch {
             print("[BadAppleEngine] Failed to load model: \(error.localizedDescription)")
             isLoaded = false
+            await runtime.markModelFailed(modelId, error: error.localizedDescription)
         }
         isLoading = false
     }
@@ -91,18 +163,177 @@ final class BadAppleEngine {
     func loadModel(from directory: URL) async {
         guard !isLoaded && !isLoading else { return }
         isLoading = true
+        await runtime.markModelLoading(modelId)
 
         do {
             try await inference.loadModel(from: directory)
             isLoaded = true
+            await runtime.markModelReady(modelId)
         } catch {
             print("[BadAppleEngine] Failed to load model from \(directory): \(error.localizedDescription)")
             isLoaded = false
+            await runtime.markModelFailed(modelId, error: error.localizedDescription)
         }
         isLoading = false
     }
 
     // MARK: - Generation
+
+    private func inferenceHistory() -> [BadAppleInference.ChatMessage] {
+        conversation.loadConversation(sessionId: conversationSessionId).map {
+            BadAppleInference.ChatMessage(role: $0.role, content: $0.content)
+        }
+    }
+
+    private func saveTurn(prompt: String, response: String) {
+        var messages = conversation.loadConversation(sessionId: conversationSessionId)
+        messages.append(BadAppleMessage(role: "user", content: prompt))
+        messages.append(BadAppleMessage(role: "assistant", content: response))
+        conversation.saveConversation(sessionId: conversationSessionId, messages: messages)
+    }
+
+    func resetConversation() {
+        conversation.clearConversation(sessionId: conversationSessionId)
+    }
+
+    private func planAgentGoal(
+        _ goal: String,
+        maximumSteps: Int
+    ) async throws -> [BadAppleAgentPlannedStep] {
+        let result = try await inference.generate(
+            prompt: "Break this goal into at most \(maximumSteps) concrete steps. Return only a JSON array of objects with an instruction string. Goal: \(goal)",
+            systemPrompt: "You are a task planner. Return valid JSON only.",
+            maxTokens: 256,
+            temperature: 0
+        )
+        if let start = result.text.firstIndex(of: "["),
+           let end = result.text.lastIndex(of: "]"),
+           start <= end,
+           let data = String(result.text[start...end]).data(using: .utf8),
+           let objects = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            let steps = objects.prefix(maximumSteps).compactMap { object -> BadAppleAgentPlannedStep? in
+                guard let instruction = object["instruction"] as? String,
+                      !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return BadAppleAgentPlannedStep(instruction: instruction)
+            }
+            if !steps.isEmpty { return steps }
+        }
+        return [BadAppleAgentPlannedStep(instruction: goal)]
+    }
+
+    private func generateAgentAction(
+        _ context: BadAppleAgentGenerationContext
+    ) async throws -> BadAppleAgentAction {
+        let tools = toolRouter.toolsForPrompt(text: context.plannedStep.instruction) ?? "No tools are available."
+        let result = try await inference.generate(
+            prompt: "Goal: \(context.goal)\nCurrent step: \(context.plannedStep.instruction)\n\(tools)\nReturn only JSON with thought, tool, arguments, and finish. Use either tool or finish, not both.",
+            systemPrompt: systemPrompt(voiceMode: false),
+            maxTokens: 256,
+            temperature: 0
+        )
+        if let start = result.text.firstIndex(of: "{"),
+           let end = result.text.lastIndex(of: "}"),
+           start <= end,
+           let data = String(result.text[start...end]).data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let thought = object["thought"] as? String ?? ""
+            let tool = object["tool"] as? String
+            let finish = object["finish"] as? String
+            let rawArgs = object["arguments"] as? [String: Any] ?? [:]
+            let arguments = rawArgs.mapValues { value in
+                if let string = value as? String { return string }
+                return String(describing: value)
+            }
+            return BadAppleAgentAction(
+                thought: thought,
+                tool: tool?.isEmpty == true ? nil : tool,
+                arguments: arguments,
+                finish: finish?.isEmpty == true ? nil : finish
+            )
+        }
+        return .finish(postprocessOutput(result.text))
+    }
+
+    private func createApproval(name: String, args: [String: String]) -> String {
+        let id = String(UUID().uuidString.lowercased().prefix(8))
+        approvalLock.lock()
+        pendingApprovals[id] = (name, args)
+        approvalLock.unlock()
+        return id
+    }
+
+    private func takeApproval(from prompt: String) -> (id: String, name: String, args: [String: String])? {
+        let parts = prompt.lowercased().split(whereSeparator: { $0.isWhitespace })
+        guard parts.count == 2, parts[0] == "approve" else { return nil }
+        let id = String(parts[1])
+        approvalLock.lock()
+        defer { approvalLock.unlock() }
+        guard let call = pendingApprovals.removeValue(forKey: id) else { return nil }
+        return (id, call.name, call.args)
+    }
+
+    private func toolAwareGeneration(
+        prompt: String,
+        systemPrompt: String,
+        history: [BadAppleInference.ChatMessage],
+        maxTokens: Int,
+        persona: String
+    ) async throws -> BadAppleInference.GenerationResult {
+        var currentPrompt = prompt
+        var currentHistory = history
+        var lastResult = BadAppleInference.GenerationResult(text: "")
+
+        for _ in 0..<5 {
+            lastResult = try await inference.generate(
+                prompt: currentPrompt,
+                systemPrompt: systemPrompt,
+                history: currentHistory,
+                maxTokens: maxTokens,
+                temperature: 0.6
+            )
+            let calls = toolRouter.extractToolCalls(text: lastResult.text)
+            guard !calls.isEmpty else { return lastResult }
+
+            var outputs: [String] = []
+            for call in calls {
+                auditLedger.append(
+                    eventType: "tool_call",
+                    data: ["name": call.name, "arguments": call.args],
+                    persona: persona
+                )
+                let output: String
+                switch policyEngine.evaluate(toolName: call.name, args: call.args) {
+                case .denied:
+                    output = "That action is blocked by your safety settings."
+                case .needsApproval:
+                    let id = createApproval(name: call.name, args: call.args)
+                    auditLedger.append(
+                        eventType: "approval_requested",
+                        data: ["id": id, "name": call.name, "arguments": call.args],
+                        persona: persona
+                    )
+                    return BadAppleInference.GenerationResult(
+                        text: "This action needs your approval. Reply with: approve \(id)",
+                        tier: "approval"
+                    )
+                case .approved:
+                    output = await toolExecutor.executeTool(name: call.name, args: call.args)
+                }
+                auditLedger.append(
+                    eventType: "tool_result",
+                    data: ["name": call.name, "result": output],
+                    persona: persona
+                )
+                outputs.append("\(call.name): \(output)")
+            }
+
+            currentHistory.append(BadAppleInference.ChatMessage(role: "user", content: currentPrompt))
+            currentHistory.append(BadAppleInference.ChatMessage(role: "assistant", content: lastResult.text))
+            currentPrompt = "Tool results:\n\(outputs.joined(separator: "\n"))\n\nAnswer the user's original request using these results."
+        }
+
+        return lastResult
+    }
 
     /// Generate a response with streaming token callbacks.
     /// This is the direct Swift path — no subprocess, no daemon.
@@ -118,62 +349,170 @@ final class BadAppleEngine {
             onError("The AI model is not loaded yet. Please wait a moment and try again.")
             return
         }
+        let startedAt = Date()
+
+        if let approval = takeApproval(from: prompt) {
+            Task {
+                let output = await toolExecutor.executeTool(
+                    name: approval.name,
+                    args: approval.args,
+                    approved: true
+                )
+                auditLedger.append(
+                    eventType: "approval_executed",
+                    data: ["id": approval.id, "name": approval.name, "result": output],
+                    persona: activePersona
+                )
+                saveTurn(prompt: prompt, response: output)
+                await runtime.recordQuery(
+                    latencySeconds: Date().timeIntervalSince(startedAt),
+                    tokenCount: 0,
+                    succeeded: true
+                )
+                DispatchQueue.main.async {
+                    onToken(output)
+                    onComplete(output)
+                }
+            }
+            return
+        }
 
         let persona = activePersona
         lastCacheHit = false
 
-        // Log the query to the audit ledger.
         auditLedger.append(
             eventType: "query",
             data: ["prompt": prompt, "voice": voiceMode],
             persona: persona
         )
 
-        // Build system prompt with RAG context.
-        var sysPrompt = systemPrompt(voiceMode: voiceMode)
-        if let ragContext = rag.buildRetrievalContext(prompt: prompt, workspace: workspacePath) {
-            sysPrompt += "\n\nContext:\n\(ragContext)"
+        if let fast = deterministicResponse(for: prompt) {
+            let filtered = outputFirewall.check(fast)
+            saveTurn(prompt: prompt, response: filtered)
+            auditLedger.append(
+                eventType: "response",
+                data: ["text": filtered, "tier": "deterministic"],
+                persona: persona
+            )
+            Task {
+                await runtime.recordQuery(
+                    latencySeconds: Date().timeIntervalSince(startedAt),
+                    tokenCount: 0,
+                    succeeded: true
+                )
+            }
+            DispatchQueue.main.async {
+                onToken(filtered)
+                onComplete(filtered)
+            }
+            return
         }
 
-        // Fast tier: short simple queries get fewer tokens for faster response.
-        let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
-
-        inference.generateStreamingTokens(
-            prompt: prompt,
-            systemPrompt: sysPrompt,
-            maxTokens: effectiveMaxTokens,
-            temperature: 0.6,
-            onToken: { token in
-                DispatchQueue.main.async { onToken(token) }
-            },
-            onComplete: { result in
+        Task {
+            let history = inferenceHistory()
+            if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
+                lastCacheHit = true
+                auditLedger.append(
+                    eventType: "cache_hit",
+                    data: ["prompt": prompt],
+                    persona: persona
+                )
+                saveTurn(prompt: prompt, response: cached)
                 DispatchQueue.main.async {
-                    self.lastTokensPerSecond = result.tokensPerSecond
-                    self.lastTokenCount = result.tokenCount
-                    // Postprocess: clean up model output artifacts.
-                    let polished = postprocessOutput(result.text)
-                    // Apply output firewall to the final response.
-                    let filtered = self.outputFirewall.check(polished)
-                    // Log the response to the audit ledger.
-                    self.auditLedger.append(
+                    onToken(cached)
+                    onComplete(cached)
+                }
+                return
+            }
+
+            var sysPrompt = systemPrompt(voiceMode: voiceMode)
+            if let ragContext = rag.buildRetrievalContext(prompt: prompt, workspace: workspacePath) {
+                sysPrompt += "\n\nContext:\n\(ragContext)"
+            }
+
+            let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
+            if let tools = toolRouter.toolsForPrompt(text: prompt) {
+                sysPrompt += "\n\n\(tools)\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
+                do {
+                    let result = try await toolAwareGeneration(
+                        prompt: prompt,
+                        systemPrompt: sysPrompt,
+                        history: history,
+                        maxTokens: effectiveMaxTokens,
+                        persona: persona
+                    )
+                    let filtered = outputFirewall.check(postprocessOutput(result.text))
+                    saveTurn(prompt: prompt, response: filtered)
+                    await semanticCache.store(prompt: prompt, response: filtered, persona: persona)
+                    auditLedger.append(
                         eventType: "response",
                         data: ["text": filtered, "tps": result.tokensPerSecond],
                         persona: persona
                     )
-                    onComplete(filtered)
-                }
-            },
-            onError: { error in
-                DispatchQueue.main.async {
-                    self.auditLedger.append(
+                    DispatchQueue.main.async {
+                        self.lastTokensPerSecond = result.tokensPerSecond
+                        self.lastTokenCount = result.tokenCount
+                        onToken(filtered)
+                        onComplete(filtered)
+                    }
+                } catch {
+                    auditLedger.append(
                         eventType: "error",
                         data: ["error": error.localizedDescription],
                         persona: persona
                     )
-                    onError(error.localizedDescription)
+                    DispatchQueue.main.async { onError(error.localizedDescription) }
                 }
+                return
             }
-        )
+
+            let streamState = StreamState()
+
+            inference.generateStreamingTokens(
+                prompt: prompt,
+                systemPrompt: sysPrompt,
+                history: history,
+                maxTokens: effectiveMaxTokens,
+                temperature: 0.6,
+                onToken: { token in
+                    let filteredToken = streamState.filter(token, with: self.outputFirewall)
+                    guard !filteredToken.isEmpty else { return }
+                    DispatchQueue.main.async { onToken(filteredToken) }
+                },
+                onComplete: { result in
+                    let polished = postprocessOutput(result.text)
+                    let filtered = self.outputFirewall.check(polished)
+                    self.saveTurn(prompt: prompt, response: filtered)
+                    Task {
+                        await self.semanticCache.store(
+                            prompt: prompt,
+                            response: filtered,
+                            persona: persona
+                        )
+                    }
+                    DispatchQueue.main.async {
+                        self.lastTokensPerSecond = result.tokensPerSecond
+                        self.lastTokenCount = result.tokenCount
+                        self.auditLedger.append(
+                            eventType: "response",
+                            data: ["text": filtered, "tps": result.tokensPerSecond],
+                            persona: persona
+                        )
+                        onComplete(filtered)
+                    }
+                },
+                onError: { error in
+                    DispatchQueue.main.async {
+                        self.auditLedger.append(
+                            eventType: "error",
+                            data: ["error": error.localizedDescription],
+                            persona: persona
+                        )
+                        onError(error.localizedDescription)
+                    }
+                }
+            )
+        }
     }
 
     /// Generate a complete response (non-streaming). Checks semantic cache first.
@@ -186,8 +525,35 @@ final class BadAppleEngine {
             return "The AI model is not loaded yet. Please wait a moment and try again."
         }
 
+        if let approval = takeApproval(from: prompt) {
+            let output = await toolExecutor.executeTool(
+                name: approval.name,
+                args: approval.args,
+                approved: true
+            )
+            auditLedger.append(
+                eventType: "approval_executed",
+                data: ["id": approval.id, "name": approval.name, "result": output],
+                persona: activePersona
+            )
+            saveTurn(prompt: prompt, response: output)
+            return output
+        }
+
         let persona = activePersona
+        let history = inferenceHistory()
         lastCacheHit = false
+
+        if let fast = deterministicResponse(for: prompt) {
+            let filtered = outputFirewall.check(fast)
+            saveTurn(prompt: prompt, response: filtered)
+            auditLedger.append(
+                eventType: "response",
+                data: ["text": filtered, "tier": "deterministic"],
+                persona: persona
+            )
+            return filtered
+        }
 
         // Check semantic cache for a matching response.
         if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
@@ -197,6 +563,7 @@ final class BadAppleEngine {
                 data: ["prompt": prompt],
                 persona: persona
             )
+            saveTurn(prompt: prompt, response: cached)
             return cached
         }
 
@@ -208,12 +575,25 @@ final class BadAppleEngine {
 
         let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
 
-        let result = try await inference.generate(
-            prompt: prompt,
-            systemPrompt: sysPrompt,
-            maxTokens: effectiveMaxTokens,
-            temperature: 0.6
-        )
+        let result: BadAppleInference.GenerationResult
+        if let tools = toolRouter.toolsForPrompt(text: prompt) {
+            sysPrompt += "\n\n\(tools)\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
+            result = try await toolAwareGeneration(
+                prompt: prompt,
+                systemPrompt: sysPrompt,
+                history: history,
+                maxTokens: effectiveMaxTokens,
+                persona: persona
+            )
+        } else {
+            result = try await inference.generate(
+                prompt: prompt,
+                systemPrompt: sysPrompt,
+                history: history,
+                maxTokens: effectiveMaxTokens,
+                temperature: 0.6
+            )
+        }
         lastTokensPerSecond = result.tokensPerSecond
         lastTokenCount = result.tokenCount
 
@@ -221,13 +601,10 @@ final class BadAppleEngine {
         let polished = postprocessOutput(result.text)
         let filtered = outputFirewall.check(polished)
 
-        // Store in semantic cache (without embedding for now — the cache
-        // will use prompt text matching as a fallback).
-        semanticCache.store(
+        await semanticCache.store(
             prompt: prompt,
             response: filtered,
-            persona: persona,
-            embedding: []
+            persona: persona
         )
 
         // Audit log.
@@ -236,11 +613,57 @@ final class BadAppleEngine {
             data: ["text": filtered, "tps": result.tokensPerSecond],
             persona: persona
         )
+        saveTurn(prompt: prompt, response: filtered)
 
         return filtered
     }
 
     // MARK: - Fast Tier
+
+    private func deterministicResponse(for prompt: String) -> String? {
+        let lower = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if lower.contains("what time") || lower == "time" {
+            let formatter = DateFormatter()
+            formatter.timeStyle = .short
+            formatter.dateStyle = .none
+            return "It's \(formatter.string(from: Date()))."
+        }
+        if lower.contains("what date") || lower.contains("what day") || lower == "date" {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .full
+            formatter.timeStyle = .none
+            return "It's \(formatter.string(from: Date()))."
+        }
+        if lower == "who are you" || lower == "what are you" || lower.contains("what is your name") {
+            return "I'm Bad Apple, your private AI running directly on this Mac."
+        }
+        if lower.contains("who created you") || lower.contains("who made you") {
+            return "You created me."
+        }
+        if ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"].contains(lower) {
+            return "Hey! What can I help you with?"
+        }
+
+        let pattern = #"^\s*(?:what is|calculate)?\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*\??\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: prompt, range: NSRange(prompt.startIndex..., in: prompt)),
+              let leftRange = Range(match.range(at: 1), in: prompt),
+              let operatorRange = Range(match.range(at: 2), in: prompt),
+              let rightRange = Range(match.range(at: 3), in: prompt),
+              let left = Double(prompt[leftRange]),
+              let right = Double(prompt[rightRange]) else { return nil }
+        let result: Double
+        switch String(prompt[operatorRange]) {
+        case "+": result = left + right
+        case "-": result = left - right
+        case "*": result = left * right
+        case "/":
+            guard right != 0 else { return "I can't divide by zero." }
+            result = left / right
+        default: return nil
+        }
+        return result.rounded() == result ? String(Int(result)) : String(result)
+    }
 
     /// Simple queries (greetings, math, time, identity) get fewer tokens.
     private func isSimpleQuery(_ prompt: String) -> Bool {
@@ -254,6 +677,44 @@ final class BadAppleEngine {
         // Very short prompts are likely simple.
         if prompt.count < 30 { return true }
         return false
+    }
+
+    // MARK: - Vision
+
+    func describeImage(
+        at path: String,
+        prompt: String = "Describe this image clearly and concisely.",
+        onToken: @escaping (String) -> Void,
+        onComplete: @escaping (String) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        Task {
+            do {
+                if !(await visionEngine.ready) {
+                    await runtime.markModelLoading(visionEngine.configuration.modelId)
+                    try await visionEngine.loadModel()
+                    await runtime.markModelReady(visionEngine.configuration.modelId)
+                }
+                let stream = try await visionEngine.describe(
+                    imageURL: URL(fileURLWithPath: path),
+                    prompt: prompt,
+                    maxTokens: 256
+                )
+                var result = ""
+                for try await chunk in stream {
+                    result += chunk
+                    DispatchQueue.main.async { onToken(chunk) }
+                }
+                let filtered = outputFirewall.check(postprocessOutput(result))
+                DispatchQueue.main.async { onComplete(filtered) }
+            } catch {
+                await runtime.markModelFailed(
+                    visionEngine.configuration.modelId,
+                    error: error.localizedDescription
+                )
+                DispatchQueue.main.async { onError(error.localizedDescription) }
+            }
+        }
     }
 
     // MARK: - Memory
@@ -285,9 +746,37 @@ final class BadAppleEngine {
         toolRouter.extractToolCalls(text: text)
     }
 
+    func submitAgentTask(goal: String, maxSteps: Int = 10) async throws -> BadAppleAgentTask {
+        guard let agent else {
+            throw BadAppleAgentError.persistence("The native task manager could not start.")
+        }
+        return try await agent.submit(goal: goal, maxSteps: maxSteps)
+    }
+
+    func listAgentTasks() async -> [BadAppleAgentTask] {
+        await agent?.list() ?? []
+    }
+
+    func pauseAgentTask(_ id: String) async throws -> Bool {
+        try await agent?.pause(taskID: id) ?? false
+    }
+
+    func resumeAgentTask(_ id: String) async throws -> Bool {
+        try await agent?.resume(taskID: id) ?? false
+    }
+
+    func cancelAgentTask(_ id: String) async throws -> Bool {
+        try await agent?.cancel(taskID: id) ?? false
+    }
+
     func unload() async {
         await inference.unload()
         isLoaded = false
+        await runtime.markModelUnloaded(modelId)
+    }
+
+    func runtimeStatus() async -> [String: Any] {
+        await runtime.runtimeStatus()
     }
 
     var memoryUsageGB: Float {

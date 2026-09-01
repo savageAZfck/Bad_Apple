@@ -51,21 +51,41 @@ SWIFTC=$(xcrun --find swiftc)
 TARGET="arm64-apple-macosx26.0"
 FRAMEWORK_SEARCH="${SDK_PATH}/System/Library/Frameworks"
 
-# Build the Swift MLX inference module (BadAppleMLX) as a dylib.
+# Build the Swift MLX inference module and acquire its matching Metal shaders.
 MLX_INFERENCE_DIR="${REPO_ROOT}/src/platform/apple_desktop/MLXInference"
 MLX_BUILD_DIR="${MLX_INFERENCE_DIR}/.build/arm64-apple-macosx/release"
 MLX_DYLIB="${MLX_BUILD_DIR}/libBadAppleMLX.dylib"
 MLX_MODULE_PATH="${MLX_BUILD_DIR}/Modules"
+MLX_METAL_VERSION="0.31.1"
+MLX_METAL_SHA256="198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a597"
+MLX_METAL_CACHE="${HOME}/.cache/badapple/mlx-metal-${MLX_METAL_VERSION}/mlx.metallib"
 
-if [[ -f "${MLX_DYLIB}" ]]; then
-    echo "Using existing BadAppleMLX dylib: ${MLX_DYLIB}"
-else
-    echo "Building BadAppleMLX inference module..."
-    (cd "${MLX_INFERENCE_DIR}" && swift build -c release 2>&1) || {
-        echo "Warning: BadAppleMLX build failed — building menu bar without native MLX inference."
-        MLX_DYLIB=""
-    }
+echo "Building BadAppleMLX inference module..."
+(cd "${MLX_INFERENCE_DIR}" && swift build -c release)
+
+if [[ -f "${MLX_METAL_CACHE}" ]] && [[ "$(shasum -a 256 "${MLX_METAL_CACHE}" | awk '{print $1}')" != "${MLX_METAL_SHA256}" ]]; then
+    rm -f "${MLX_METAL_CACHE}"
 fi
+
+if [[ ! -f "${MLX_METAL_CACHE}" ]]; then
+    PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+    [[ -x "${PYTHON_BIN}" ]] || PYTHON_BIN="$(command -v python3)"
+    TMP_METAL_DIR="$(mktemp -d)"
+    "${PYTHON_BIN}" -m pip download --no-deps "mlx-metal==${MLX_METAL_VERSION}" -d "${TMP_METAL_DIR}"
+    METAL_WHEEL=("${TMP_METAL_DIR}"/mlx_metal-*.whl)
+    mkdir -p "${TMP_METAL_DIR}/extracted" "$(dirname "${MLX_METAL_CACHE}")"
+    "${PYTHON_BIN}" -m zipfile -e "${METAL_WHEEL[0]}" "${TMP_METAL_DIR}/extracted"
+    install -m 644 "${TMP_METAL_DIR}/extracted/mlx/lib/mlx.metallib" "${MLX_METAL_CACHE}"
+    rm -rf "${TMP_METAL_DIR}"
+fi
+
+[[ "$(shasum -a 256 "${MLX_METAL_CACHE}" | awk '{print $1}')" == "${MLX_METAL_SHA256}" ]] || {
+    echo "MLX Metal shader integrity verification failed." >&2
+    exit 1
+}
+
+echo "Using BadAppleMLX dylib: ${MLX_DYLIB}"
+echo "Using MLX Metal shaders: ${MLX_METAL_CACHE}"
 
 "${SWIFTC}" \
     -parse-as-library -swift-version 5 -O \
@@ -108,16 +128,18 @@ cat > "${EMBED_PLIST}" <<'PLIST'
 PLIST
 plutil -lint "${EMBED_PLIST}"
 
-# Build the menu bar app. If the MLX dylib exists, include BadAppleEngine.swift
-# and link against it for native in-process inference.
+# Build the menu bar app. Logic layer files (Security, Tools, Conversation, RAG)
+# are pure Foundation and always included. BadAppleEngine requires the MLX
+# dylib, so it's only included when MLX is available.
+LOGIC_SOURCES=""
+for src in BadAppleSecurity.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift; do
+    [[ -f "${REPO_ROOT}/src/platform/apple_desktop/${src}" ]] && LOGIC_SOURCES="${LOGIC_SOURCES} ${REPO_ROOT}/src/platform/apple_desktop/${src}"
+done
+
 MLX_SOURCES=""
 MLX_FLAGS=""
 if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
-    # Include all Swift logic layer files that depend on BadAppleMLX.
     MLX_SOURCES="${REPO_ROOT}/src/platform/apple_desktop/BadAppleEngine.swift"
-    for src in BadAppleConversation.swift BadAppleSecurity.swift BadAppleTools.swift BadAppleRAG.swift; do
-        [[ -f "${REPO_ROOT}/src/platform/apple_desktop/${src}" ]] && MLX_SOURCES="${MLX_SOURCES} ${REPO_ROOT}/src/platform/apple_desktop/${src}"
-    done
     # Swift modules are in Modules/. C module maps are in *.build/include/
     # and in the source checkouts (for C targets like _NumericsShims).
     # Filter out -tool duplicates and Swift module re-exports.
@@ -139,7 +161,7 @@ if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
     for dir in "${MLX_DIRS[@]}"; do
         [[ -n "$dir" ]] && MLX_FLAGS="${MLX_FLAGS} -I ${dir}"
     done
-    MLX_FLAGS="${MLX_FLAGS} -L ${MLX_BUILD_DIR} -lBadAppleMLX -Xlinker -rpath -Xlinker @executable_path/../Frameworks"
+    MLX_FLAGS="${MLX_FLAGS} -L ${MLX_BUILD_DIR} -lBadAppleMLX -Xlinker -rpath -Xlinker @executable_path/../Libraries"
     echo "Building with native MLX inference support."
 fi
 
@@ -153,16 +175,17 @@ fi
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBarUIResponder.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleControlCenter.swift" \
+    ${LOGIC_SOURCES} \
     ${MLX_SOURCES} \
     -lBadAppleBridge -ldl \
     -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "${EMBED_PLIST}"
 
-# Copy the MLX dylib into the app bundle if it was built.
-if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
-    install -m 755 "${MLX_DYLIB}" "${FRAMEWORKS_DIR}/libBadAppleMLX.dylib"
-    echo "Installed BadAppleMLX dylib into app bundle."
-fi
+# Copy the MLX runtime and its matching Metal shaders beside one another.
+install -d "${CONTENTS_DIR}/Libraries"
+install -m 755 "${MLX_DYLIB}" "${CONTENTS_DIR}/Libraries/libBadAppleMLX.dylib"
+install -m 644 "${MLX_METAL_CACHE}" "${CONTENTS_DIR}/Libraries/mlx.metallib"
+echo "Installed BadAppleMLX runtime and Metal shaders into app bundle Libraries."
 
 install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${MACOS_DIR}/BadApple"
 install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${BUILD_DIR}/BadAppleMenuBar"
@@ -303,8 +326,8 @@ plutil -lint "${CONTENTS_DIR}/Info.plist"
 
 SIGN_SCRIPT="${REPO_ROOT}/src/platform/apple_desktop/sign_bad_apple.sh"
 if [[ "${BADAPPLE_NO_SIGN:-0}" == "1" ]]; then
-    echo "Skipping code signing (BADAPPLE_NO_SIGN=1)."
-    rm -rf "${CONTENTS_DIR}/_CodeSignature"
+    codesign --force --deep --sign - "${APP_DIR}"
+    echo "Applied local ad-hoc signature (BADAPPLE_NO_SIGN=1)."
 elif [[ -x "${SIGN_SCRIPT}" ]]; then
     if "${SIGN_SCRIPT}"; then
         echo "Signed: ${APP_DIR}"
