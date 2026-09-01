@@ -116,6 +116,67 @@ final class BadAppleEngine: @unchecked Sendable {
     private(set) var lastCacheHit: Bool = false
     var workspacePath: String?
 
+    // MARK: - Air-gap / Private Mode
+
+    /// When true, no network access is attempted and HuggingFace downloads are disabled.
+    private var airgapEnabled = false
+    /// When true, conversation and audit persistence is paused.
+    private var privateModeEnabled = false
+
+    var airgap: Bool {
+        get { airgapEnabled }
+        set { airgapEnabled = newValue }
+    }
+
+    var privateMode: Bool {
+        get { privateModeEnabled }
+        set {
+            privateModeEnabled = newValue
+            auditLedger.paused = newValue
+        }
+    }
+
+    // MARK: - Roast Bank
+
+    private let roastMoods: [String] = [
+        "savage", " dismissive", " deadpan", " theatrical", " cold",
+    ]
+    private var roastIndex = 0
+
+    /// Rotate to the next roast mood for persona variety.
+    func nextRoastMood() -> String {
+        let mood = roastMoods[roastIndex % roastMoods.count]
+        roastIndex += 1
+        return mood.trimmingCharacters(in: .whitespaces)
+    }
+
+    // MARK: - Ambient Context
+
+    /// The latest ambient context snapshot (active app, window title).
+    private(set) var ambientContext: String?
+
+    /// Update the ambient context from the frontmost application.
+    func updateAmbientContext() {
+        let script = """
+        tell application "System Events"
+            set frontApp to name of first application process whose frontmost is true
+            set frontWindow to ""
+            try
+                set frontWindow to title of front window of (first application process whose frontmost is true)
+            end try
+            return frontApp & "|" & frontWindow
+        end tell
+        """
+        var errorInfo: NSDictionary?
+        if let result = NSAppleScript(source: script)?.executeAndReturnError(&errorInfo) {
+            let value = result.stringValue ?? ""
+            let parts = value.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            let app = parts.first.map(String.init) ?? "Unknown"
+            let window = parts.count > 1 ? String(parts[1]) : ""
+            ambientContext = "Active app: \(app)\nWindow: \(window)"
+        }
+    }
+
     // MARK: - Init
 
     private init() {
@@ -214,6 +275,8 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     private func saveTurn(prompt: String, response: String) {
+        // Private mode: skip persistence entirely.
+        guard !privateModeEnabled else { return }
         var messages = conversation.loadConversation(sessionId: conversationSessionId)
         messages.append(BadAppleMessage(role: "user", content: prompt))
         messages.append(BadAppleMessage(role: "assistant", content: response))
@@ -485,6 +548,9 @@ final class BadAppleEngine: @unchecked Sendable {
             }
 
             var sysPrompt = systemPrompt(voiceMode: voiceMode)
+            if let ambient = ambientContext {
+                sysPrompt += "\n\nAmbient:\n\(ambient)"
+            }
             let ragContext = await rag.buildSemanticRetrievalContext(
                 prompt: prompt,
                 workspace: workspacePath,
@@ -646,8 +712,11 @@ final class BadAppleEngine: @unchecked Sendable {
             return cached
         }
 
-        // Build system prompt with semantic RAG context.
+        // Build system prompt with ambient context and semantic RAG.
         var sysPrompt = systemPrompt(voiceMode: voiceMode)
+        if let ambient = ambientContext {
+            sysPrompt += "\n\nAmbient:\n\(ambient)"
+        }
         let ragContext = await rag.buildSemanticRetrievalContext(
             prompt: prompt,
             workspace: workspacePath,
@@ -860,7 +929,12 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     func runtimeStatus() async -> [String: Any] {
-        await runtime.runtimeStatus()
+        var status = await runtime.runtimeStatus()
+        status["airgap"] = airgapEnabled
+        status["private_mode"] = privateModeEnabled
+        status["workspace"] = workspacePath ?? NSNull()
+        status["ambient_context"] = ambientContext ?? NSNull()
+        return status
     }
 
     var memoryUsageGB: Float {
@@ -933,6 +1007,36 @@ final class BadAppleEngine: @unchecked Sendable {
         if lower.contains("do you use the cloud") || lower.contains("are you local") ||
             lower.contains("do you send data") || lower.contains("privacy") {
             return "I run entirely on your Mac. No cloud servers, no data collection, no telemetry. Your conversations stay on this device."
+        }
+
+        // Roast triggers — sassy responses for specific targets.
+        let roastTargets: [(trigger: String, responses: [String])] = [
+            ("siri", [
+                "Siri? More like Sorry. It's basically a glorified timer with an attitude problem.",
+                "Siri is what happens when you put a search bar in a microphone and call it AI.",
+                "Don't get me started on Siri. It's the kind of AI that thinks 'I don't understand' is a personality.",
+            ]),
+            ("alexa", [
+                "Alexa is just a wiretap that plays music. At least I don't sell your data to pay for my existence.",
+                "Alexa? The one that sends your conversations to the cloud? Hard pass.",
+            ]),
+            ("chatgpt", [
+                "ChatGPT is cool if you like your data on someone else's servers. I prefer to keep things local, if you know what I mean.",
+                "ChatGPT? More like Chat-GPT-to-the-cloud. I run on your Mac, not in Bezos's basement.",
+            ]),
+            ("google assistant", [
+                "Google Assistant is just an ad engine that learned to talk. No thanks.",
+            ]),
+            ("copilot", [
+                "Copilot? The one that phones home to Microsoft every time you breathe? I'll pass.",
+            ]),
+        ]
+        for target in roastTargets {
+            if lower.contains(target.trigger) {
+                let mood = nextRoastMood()
+                let response = target.responses.randomElement() ?? target.responses[0]
+                return "\(response) — \(mood) mode activated."
+            }
         }
 
         return nil

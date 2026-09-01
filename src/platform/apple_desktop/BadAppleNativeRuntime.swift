@@ -95,6 +95,25 @@ public actor BadAppleNativeRuntime {
     private var lastActivityTime: TimeInterval = ProcessInfo.processInfo.systemUptime
     private var isHibernating = false
 
+    // MARK: - VRAM Governor
+
+    /// Estimated memory budget for all loaded models (in bytes).
+    private var vramBudgetBytes: UInt64 = 0
+    /// Estimated memory used by currently loaded models (in bytes).
+    private var vramUsedBytes: UInt64 = 0
+    /// Whether VRAM admission checks are enforced.
+    private var vramAdmissionEnabled = true
+
+    // MARK: - Health Checks
+
+    public struct HealthCheck: Sendable {
+        public let name: String
+        public let level: String  // "liveness", "readiness", "correctness"
+        public let ok: Bool
+        public let detail: String
+    }
+    private var healthChecks: [String: HealthCheck] = [:]
+
     public init(
         metricWindowSize: Int = 100,
         circuitFailureThreshold: Int = 3,
@@ -105,6 +124,8 @@ public actor BadAppleNativeRuntime {
         self.defaultFailureThreshold = min(100, max(1, circuitFailureThreshold))
         self.defaultRecoverySeconds = min(86_400, max(0.001, circuitRecoverySeconds))
         self.idleThreshold = min(86_400, max(1, idleThreshold))
+        // Default VRAM budget: 80% of physical memory.
+        self.vramBudgetBytes = UInt64(Double(ProcessInfo.processInfo.physicalMemory) * 0.8)
     }
 
     // MARK: Model lifecycle
@@ -198,6 +219,105 @@ public actor BadAppleNativeRuntime {
     public func idleSeconds(nowUptime: TimeInterval? = nil) -> TimeInterval {
         let now = nowUptime ?? ProcessInfo.processInfo.systemUptime
         return max(0, now - lastActivityTime)
+    }
+
+    // MARK: VRAM Governor
+
+    /// Set the VRAM budget in bytes.
+    public func setVRAMBudget(_ bytes: UInt64) {
+        vramBudgetBytes = bytes
+    }
+
+    /// Track memory used by a loaded model.
+    public func trackModelMemory(_ modelID: String, bytes: UInt64) {
+        vramUsedBytes += bytes
+    }
+
+    /// Release memory tracked for a model.
+    public func releaseModelMemory(_ bytes: UInt64) {
+        vramUsedBytes = vramUsedBytes > bytes ? vramUsedBytes - bytes : 0
+    }
+
+    /// Check if a model with the given estimated size can be loaded within the VRAM budget.
+    /// Returns nil if admitted, or an error message explaining why not.
+    public func canFitModel(estimatedBytes: UInt64) -> String? {
+        guard vramAdmissionEnabled else { return nil }
+        let memory = Self.readMemorySnapshot()
+        let availableSystem = memory.totalBytes > memory.usedBytes ? memory.totalBytes - memory.usedBytes : 0
+        let projectedVRAM = vramUsedBytes + estimatedBytes
+        if projectedVRAM > vramBudgetBytes {
+            return "Model would exceed VRAM budget: \(projectedVRAM / 1_073_741_824)GB projected vs \(vramBudgetBytes / 1_073_741_824)GB budget"
+        }
+        if estimatedBytes > availableSystem {
+            return "Not enough system memory: \(estimatedBytes / 1_073_741_824)GB needed, \(availableSystem / 1_073_741_824)GB available"
+        }
+        return nil
+    }
+
+    /// Toggle VRAM admission checks.
+    public func setVRAMAdmission(enabled: Bool) {
+        vramAdmissionEnabled = enabled
+    }
+
+    /// Current VRAM usage summary.
+    public func vramStatus() -> [String: Any] {
+        let budgetGB = Double(vramBudgetBytes) / 1_073_741_824
+        let usedGB = Double(vramUsedBytes) / 1_073_741_824
+        return [
+            "budget_bytes": vramBudgetBytes,
+            "used_bytes": vramUsedBytes,
+            "budget_gb": budgetGB,
+            "used_gb": usedGB,
+            "ratio": vramBudgetBytes > 0 ? Double(vramUsedBytes) / Double(vramBudgetBytes) : 0,
+            "admission_enabled": vramAdmissionEnabled
+        ]
+    }
+
+    // MARK: Health Checks
+
+    /// Register or update a health check.
+    public func registerHealthCheck(_ check: HealthCheck) {
+        healthChecks[check.name] = check
+    }
+
+    /// Get all registered health checks.
+    public func healthCheckResults() -> [HealthCheck] {
+        Array(healthChecks.values).sorted { $0.name < $1.name }
+    }
+
+    /// Run built-in health checks and update their status.
+    public func runBuiltinHealthChecks() {
+        // Process check (always passes — we're running).
+        registerHealthCheck(HealthCheck(name: "process", level: "liveness", ok: true, detail: "running"))
+
+        // Memory pressure check.
+        let memory = Self.readMemorySnapshot()
+        let memoryOK = memory.ratio < 0.95
+        registerHealthCheck(HealthCheck(
+            name: "memory",
+            level: "readiness",
+            ok: memoryOK,
+            detail: memory.pressure
+        ))
+
+        // Model readiness check.
+        let hasReadyModel = models.values.contains { $0.status == .ready }
+        registerHealthCheck(HealthCheck(
+            name: "main_model",
+            level: "readiness",
+            ok: hasReadyModel,
+            detail: hasReadyModel ? "loaded" : "not loaded"
+        ))
+
+        // Audit ledger check (verify chain integrity).
+        let ledger = BadAppleAuditLedger()
+        let ledgerOK = ledger.verify()
+        registerHealthCheck(HealthCheck(
+            name: "audit_ledger",
+            level: "correctness",
+            ok: ledgerOK,
+            detail: ledgerOK ? "chain valid" : "chain broken"
+        ))
     }
 
     public func setLastError(_ error: String?) {
@@ -313,7 +433,15 @@ public actor BadAppleNativeRuntime {
                 "active": isHibernating,
                 "idle_seconds": idleSeconds(nowUptime: now),
                 "idle_threshold_seconds": idleThreshold
-            ]
+            ],
+            "vram": vramStatus(),
+            "health_checks": Dictionary(uniqueKeysWithValues: healthChecks.map { name, check in
+                (name, [
+                    "level": check.level,
+                    "ok": check.ok,
+                    "detail": check.detail
+                ] as [String: Any])
+            })
         ]
     }
 
@@ -322,6 +450,8 @@ public actor BadAppleNativeRuntime {
         clearMetrics()
         clearCircuits()
         clearLastError()
+        vramUsedBytes = 0
+        healthChecks.removeAll()
     }
 
     private func ensureCircuit(_ name: String) {

@@ -64,6 +64,9 @@ final class BadAppleAuditLedger: @unchecked Sendable {
         ensureDirectory()
     }
 
+    /// When true, no entries are written (private mode).
+    var paused = false
+
     // MARK: - Public API
 
     /// Append a redacted, hash-chained entry to the ledger.
@@ -74,6 +77,7 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     ///     tool_call).  Secrets and PII are redacted before writing.
     ///   - persona: active persona name.
     func append(eventType: String, data: [String: Any], persona: String) {
+        guard !paused else { return }
         lock.lock()
         defer { lock.unlock() }
 
@@ -370,8 +374,14 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
     // MARK: - Public API
 
     /// One-shot scan: replace every occurrence of any blocked pattern in
-    /// `text` with the blocked marker.
+    /// `text` with the blocked marker, then redact PII.
     func check(_ text: String) -> String {
+        let blocked = checkBlocklist(text)
+        return redactPII(blocked)
+    }
+
+    /// Blocklist-only scan (no PII redaction).
+    private func checkBlocklist(_ text: String) -> String {
         let snapshot = snapshotPatterns()
         let marker = Self.blockedMarker
         let structuralText = Self.structuralForm(text)
@@ -432,6 +442,42 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
             }
         }
         return (chunk, false)
+    }
+
+    // MARK: PII Redaction
+
+    /// PII redaction patterns (shared with the audit ledger's redaction rules).
+    private static let piiPatterns: [(NSRegularExpression, String)] = {
+        func regex(_ pattern: String) -> NSRegularExpression? {
+            try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        }
+        return [
+            (regex(#"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#), "[REDACTED_EMAIL]"),
+            (regex(#"\b\d{3}-\d{2}-\d{4}\b"#), "[REDACTED_SSN]"),
+            (regex(#"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"#), "[REDACTED_PHONE]"),
+            (regex(#"\b(sk-[a-zA-Z0-9_\-]{20,}|AIza[0-9A-Za-z_\-]{35,})"#), "[REDACTED_KEY]"),
+            (regex(#"[Bb]earer\s+[A-Za-z0-9_\-\.=]+"#), "[REDACTED_BEARER]"),
+        ].compactMap { (regex, replacement) in
+            guard let regex else { return nil }
+            return (regex, replacement)
+        }
+    }()
+
+    /// Redact PII (emails, SSNs, phone numbers, API keys, bearer tokens) from
+    /// output text. Unlike the blocklist check, PII is replaced in-place rather
+    /// than blocking the entire response.
+    func redactPII(_ text: String) -> String {
+        var result = text
+        for (regex, replacement) in Self.piiPatterns {
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: range,
+                withTemplate: replacement
+            )
+        }
+        return result
     }
 
     // MARK: - Private

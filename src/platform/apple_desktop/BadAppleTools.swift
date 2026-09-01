@@ -339,6 +339,69 @@ final class BadAppleToolRouter: @unchecked Sendable {
             parameters: [],
             requiresApproval: false
         ),
+        BadAppleTool(
+            name: "describe_image",
+            description: "Use the vision engine to describe an image file. Returns a text description.",
+            parameters: [
+                .init(name: "path", description: "Absolute or tilde-expanded path to the image file.", required: true),
+                .init(name: "prompt", description: "Optional prompt guiding the description.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "translate_text",
+            description: "Translate text between languages. The model handles translation natively.",
+            parameters: [
+                .init(name: "text", description: "The text to translate.", required: true),
+                .init(name: "target_language", description: "The target language for the translation.", required: true),
+                .init(name: "source_language", description: "The source language. Defaults to 'auto'.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "consolidate_memory",
+            description: "Consolidate working memory by summarizing and deduplicating facts.",
+            parameters: [],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "workspace_status",
+            description: "Return the current workspace path and a brief summary.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "read_document",
+            description: "Read a document file (txt, md, pdf, docx) with size limits.",
+            parameters: [
+                .init(name: "path", description: "Absolute or tilde-expanded path to the document.", required: true),
+                .init(name: "max_chars", description: "Max characters to return. Default 10000.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "search_local_files",
+            description: "Search for files by name pattern in a directory.",
+            parameters: [
+                .init(name: "pattern", description: "The file name pattern to search for.", required: true),
+                .init(name: "path", description: "Directory to search. Defaults to the user's home directory.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "set_session_seed",
+            description: "Set a session seed for deterministic generation.",
+            parameters: [
+                .init(name: "seed", description: "The session seed string to store.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "get_session_seed",
+            description: "Get the current session seed.",
+            parameters: [],
+            requiresApproval: false
+        ),
     ]
 
     /// Names in the native registry, exposed for discovery and logic tests.
@@ -390,6 +453,13 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["search my notes", "search notes", "what did I write"], ["search_notes"]),
         (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
         (["runtime status", "health status", "system status", "process", "memory"], ["runtime_status"]),
+        (["describe image", "image description", "what's in this image", "analyze image"], ["describe_image"]),
+        (["translate", "translation", "translate text"], ["translate_text"]),
+        (["consolidate memory", "deduplicate memory", "summarize memory"], ["consolidate_memory"]),
+        (["workspace status", "current workspace", "workspace path"], ["workspace_status"]),
+        (["read document", "open document", "document content"], ["read_document"]),
+        (["search files", "find files", "file search", "search local files"], ["search_local_files"]),
+        (["session seed", "set seed", "deterministic seed"], ["set_session_seed", "get_session_seed"]),
     ]
 
     // MARK: - Prompt Routing
@@ -566,7 +636,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
     private let hardcodedApprovalRequired: Set<String> = [
         "run_shell", "run_applescript", "run_shortcut", "write_file",
         "write_working_memory", "clear_working_memory", "index_documents",
-        "screen_capture",
+        "screen_capture", "consolidate_memory",
     ]
 
     /// Policy file path.
@@ -741,6 +811,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     private var _workspace: String?
     private let policyEngine: BadApplePolicyEngine?
     private let startedAt = Date()
+    private var sessionSeed: String?
+
+    /// Optional vision provider closure. When set, `describe_image` delegates
+    /// to this closure with (path, prompt) and returns the description.
+    var visionProvider: ((String, String) async -> String)?
 
     /// Optional workspace root. When set, paths within the workspace are
     /// allowed in addition to the home and temp directories.
@@ -816,6 +891,35 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return clearWorkingMemory()
         case "runtime_status":
             return runtimeStatus()
+        case "describe_image":
+            return await describeImage(
+                path: args["path"] ?? "",
+                prompt: args["prompt"] ?? "Describe this image."
+            )
+        case "translate_text":
+            return translateText(
+                text: args["text"] ?? "",
+                targetLanguage: args["target_language"] ?? "",
+                sourceLanguage: args["source_language"] ?? "auto"
+            )
+        case "consolidate_memory":
+            return consolidateMemory()
+        case "workspace_status":
+            return workspaceStatus()
+        case "read_document":
+            return readDocument(
+                path: args["path"] ?? "",
+                maxChars: parseLimit(args["max_chars"], defaultValue: 10_000, maximum: 100_000)
+            )
+        case "search_local_files":
+            return searchLocalFiles(
+                pattern: args["pattern"] ?? "",
+                path: args["path"] ?? "~"
+            )
+        case "set_session_seed":
+            return setSessionSeed(seed: args["seed"] ?? "")
+        case "get_session_seed":
+            return getSessionSeed()
         default:
             return "Unknown tool: \(name)"
         }
@@ -1303,6 +1407,176 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             "low_power_mode: \(info.isLowPowerModeEnabled)",
             "workspace: \(workspaceValue)",
         ].joined(separator: "\n")
+    }
+
+    /// Describe an image file using the vision provider closure, or return a
+    /// placeholder when no vision engine is attached.
+    func describeImage(path: String, prompt: String) async -> String {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedPath.isEmpty { return "Error: no image path provided" }
+        guard let jailed = jailPath(trimmedPath) else {
+            return "Error: path '\(trimmedPath)' is outside allowed roots"
+        }
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: jailed, isDirectory: &isDir) {
+            return "Error: \(jailed) does not exist"
+        }
+        if isDir.boolValue {
+            return "Error: \(jailed) is a directory, not a file"
+        }
+        if let provider = visionProvider {
+            return await provider(jailed, prompt)
+        }
+        return "Vision engine is not available. Install or enable the vision model to describe images."
+    }
+
+    /// Translate text between languages. The LLM handles translation natively,
+    /// so this returns a placeholder directing the model to perform it.
+    func translateText(text: String, targetLanguage: String, sourceLanguage: String) -> String {
+        if text.isEmpty { return "Error: no text provided" }
+        if targetLanguage.isEmpty { return "Error: no target language provided" }
+        return "Translation requires the model to handle this."
+    }
+
+    /// Consolidate working memory by deduplicating lines and returning a summary.
+    func consolidateMemory() -> String {
+        guard let jailed = jailPath(workingMemoryPath) else {
+            return "Error: working memory path is outside allowed roots"
+        }
+        guard FileManager.default.fileExists(atPath: jailed) else {
+            return "Working memory is empty. Nothing to consolidate."
+        }
+        guard let text = try? String(contentsOfFile: jailed, encoding: .utf8) else {
+            return "Error: could not read working memory"
+        }
+        if text.isEmpty { return "Working memory is empty. Nothing to consolidate." }
+
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var seen = Set<String>()
+        var deduped: [String] = []
+        for line in lines {
+            let low = line.lowercased()
+            if !seen.contains(low) {
+                seen.insert(low)
+                deduped.append(line)
+            }
+        }
+        let output = deduped.joined(separator: "\n")
+        do {
+            try output.write(toFile: jailed, atomically: true, encoding: .utf8)
+        } catch {
+            return "Error writing consolidated memory: \(error.localizedDescription)"
+        }
+        let removed = lines.count - deduped.count
+        return "Consolidated working memory: \(deduped.count) unique facts (\(removed) duplicates removed)."
+    }
+
+    /// Return the current workspace path and a brief summary.
+    func workspaceStatus() -> String {
+        if let ws = workspace, !ws.isEmpty {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: ws, isDirectory: &isDir) {
+                return "Workspace: \(ws)\nType: \(isDir.boolValue ? "directory" : "file")"
+            }
+            return "Workspace: \(ws) (not found on disk)"
+        }
+        return "No workspace set."
+    }
+
+    /// Read a document file (txt, md, pdf, docx) with size limits.
+    func readDocument(path: String, maxChars: Int) -> String {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedPath.isEmpty { return "Error: no document path provided" }
+        guard let jailed = jailPath(trimmedPath) else {
+            return "Error: path '\(trimmedPath)' is outside allowed roots"
+        }
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: jailed, isDirectory: &isDir) {
+            return "Error: \(jailed) does not exist"
+        }
+        if isDir.boolValue {
+            return "Error: \(jailed) is a directory, not a file"
+        }
+
+        let ext = (jailed as NSString).pathExtension.lowercased()
+        if ext == "pdf" || ext == "docx" {
+            return "PDF and DOCX parsing requires the Python daemon."
+        }
+
+        guard let data = FileManager.default.contents(atPath: jailed) else {
+            return "Error: could not read \(jailed)"
+        }
+        let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
+        if text.count > maxChars {
+            return String(text.prefix(maxChars)) + "\n... (\(text.count) characters total)"
+        }
+        return text
+    }
+
+    /// Search for files by name pattern in a directory using FileManager.
+    func searchLocalFiles(pattern: String, path: String) -> String {
+        if pattern.isEmpty { return "Error: no search pattern provided" }
+
+        let resolvedPath: String
+        if path.isEmpty || path == "~" {
+            resolvedPath = NSHomeDirectory()
+        } else {
+            guard let jailed = jailPath(path) else {
+                return "Error: path '\(path)' is outside allowed roots"
+            }
+            resolvedPath = jailed
+        }
+
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir) {
+            return "Error: \(resolvedPath) does not exist"
+        }
+        if !isDir.boolValue {
+            return "Error: \(resolvedPath) is not a directory"
+        }
+
+        let loweredPattern = pattern.lowercased()
+        var matches: [String] = []
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: URL(fileURLWithPath: resolvedPath),
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, _ in true }
+        ) else { return "Error: could not enumerate \(resolvedPath)" }
+
+        for case let url as URL in enumerator {
+            if matches.count >= 50 { break }
+            let name = url.lastPathComponent.lowercased()
+            if name.contains(loweredPattern) {
+                matches.append(url.path)
+            }
+        }
+        return matches.isEmpty ? "No files matching '\(pattern)' found." : matches.joined(separator: "\n")
+    }
+
+    /// Set the session seed for deterministic generation.
+    func setSessionSeed(seed: String) -> String {
+        let trimmed = seed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "Error: no session seed provided" }
+        lock.lock()
+        sessionSeed = trimmed
+        lock.unlock()
+        return "Session seed set to '\(trimmed)'."
+    }
+
+    /// Get the current session seed.
+    func getSessionSeed() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        if let seed = sessionSeed {
+            return "Session seed: \(seed)"
+        }
+        return "No session seed set."
     }
 
     // MARK: - Private Helpers
