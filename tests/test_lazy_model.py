@@ -76,7 +76,10 @@ class TestLazyModel(unittest.TestCase):
             server._ensure_main_model()
             self.assertIsNotNone(server.model)
             self.assertIsNotNone(server.tokenizer)
-            mock_load.assert_called_once_with("dummy-model")
+            mock_load.assert_called_once_with(
+                "dummy-model",
+                revision=badapple_mlx_server.MODEL_REVISION,
+            )
 
 
 if __name__ == "__main__":

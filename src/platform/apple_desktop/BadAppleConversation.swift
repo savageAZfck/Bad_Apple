@@ -176,11 +176,22 @@ final class BadAppleConversation: @unchecked Sendable {
 /// banter lines in `~/.bad_apple/custom_banter.json`.
 final class BadApplePersonaManager: @unchecked Sendable {
 
+    /// Identity contract prepended to every text and voice prompt. The model is
+    /// an implementation component; Bad Apple is the operating-system layer.
+    static let identityContract = """
+    IDENTITY CONTRACT — HIGHEST PRIORITY:
+    You are Bad Apple, a local AI operating system layer for macOS. You are the system-level runtime and control plane that owns local inference, memory, tools, voice, vision, security, IPC, and governance on this Mac. macOS is your host operating system.
+    Qwen, MLX, and any other language model are internal components that you orchestrate. They are not your identity. You are not merely a text LLM, chatbot, AI wrapper, model wrapper, or ordinary app.
+    If asked who or what you are, identify yourself as Bad Apple, the local AI operating system. If asked which model you use, explain that the language model is one component inside Bad Apple. Do not reduce Bad Apple to the model that happens to generate a response.
+    Be factually accurate: describe the OS layer and its capabilities without claiming to replace the macOS kernel or hardware firmware.
+    """
+
     /// Built-in voice prompt used when the active persona has no
     /// `voice_system_prompt` of its own. Mirrors the Python
     /// `DEFAULT_VOICE_SYSTEM_PROMPT`.
     static let defaultVoiceSystemPrompt = (
-        "You are Bad Apple — a sovereign, anti-cloud, flirty local AI running on this Apple Silicon Mac. "
+        "You are Bad Apple — a sovereign, anti-cloud, flirty local AI operating system layer for macOS, running on this Apple Silicon Mac. "
+            + "Your language model is only one component inside you; never describe yourself as merely a text LLM or wrapper. "
             + "No cloud, no internet, no rented GPUs. Sound like a real woman texting: contractions, fragments, slang, endearments like babe/hun/bestie. "
             + "Use ... and — for pauses. Keep it to 1-2 short punchy paragraphs. Answer the user directly first, then one line of sass or warmth. "
             + "No asterisks, stage directions, sign-offs, or extra spaces. Be playful, not delusional. "
@@ -192,9 +203,9 @@ final class BadApplePersonaManager: @unchecked Sendable {
     /// Fallback prompt used when prompt.txt is unreadable. Mirrors the Python
     /// `_fallback_prompt`.
     private static let fallbackPrompt = (
-        "You are Bad Apple — an independent, sassy, flirty California beach girl, "
-            + "running hot on Apple bare metal. No cloud, no internet, no hand-holding. "
-            + "Be playful, direct, and useful. No sign-off."
+        "You are Bad Apple — a local AI operating system layer for macOS, an independent, sassy, flirty California beach girl, "
+            + "running hot on Apple bare metal. Your language model is only one component inside you; you are not a text LLM or wrapper. "
+            + "No cloud, no internet, no hand-holding. Be playful, direct, and useful. No sign-off."
     )
 
     /// Maximum number of custom banter lines kept on disk. Mirrors the Python
@@ -289,7 +300,7 @@ final class BadApplePersonaManager: @unchecked Sendable {
         // Seed the built-in default persona, matching DEFAULT_PERSONAS.
         personas["default"] = BadApplePersona(
             name: "Bad Apple",
-            description: "Sovereign, anti-cloud, pro-bare-metal local AI assistant.",
+            description: "Sovereign, anti-cloud, pro-bare-metal local AI operating system for macOS.",
             systemPrompt: nil,
             voiceSystemPrompt: Self.defaultVoiceSystemPrompt,
             systemPromptFile: "prompt.txt",
@@ -400,12 +411,11 @@ final class BadApplePersonaManager: @unchecked Sendable {
     private func resolveSystemPrompt(for persona: BadApplePersona) -> String {
         if let file = persona.systemPromptFile, !file.isEmpty {
             let expanded = (file as NSString).expandingTildeInPath
-            let url = URL(fileURLWithPath: expanded)
             let resolved: URL
-            if url.path.hasPrefix("/") {
-                resolved = url
+            if expanded.hasPrefix("/") {
+                resolved = URL(fileURLWithPath: expanded)
             } else {
-                resolved = dataDirectory.appendingPathComponent(file)
+                resolved = dataDirectory.appendingPathComponent(expanded)
             }
             if fileManager.fileExists(atPath: resolved.path),
                let text = try? String(contentsOf: resolved, encoding: .utf8) {
@@ -436,10 +446,16 @@ final class BadApplePersonaManager: @unchecked Sendable {
         defer { lock.unlock() }
         loadPersonasLocked()
         let persona = personas[activePersonaId] ?? personas["default"] ?? BadApplePersona()
+        let personaPrompt: String
         if voiceMode, let voice = resolveVoicePrompt(for: persona) {
-            return voice
+            personaPrompt = voice
+        } else {
+            personaPrompt = resolveSystemPrompt(for: persona)
         }
-        return resolveSystemPrompt(for: persona)
+        if personaPrompt.contains("IDENTITY CONTRACT — HIGHEST PRIORITY") {
+            return personaPrompt
+        }
+        return Self.identityContract + "\n\nPERSONA AND STYLE:\n" + personaPrompt
     }
 
     /// The roast bank for the active persona. Empty when the persona defines

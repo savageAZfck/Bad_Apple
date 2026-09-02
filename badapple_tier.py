@@ -26,10 +26,21 @@ SAFE_MATH_RE = re.compile(r"^[\d\s\+\-\*\/\(\)\.]+$", re.ASCII)
 
 # Rotating response banks keep the fast tier from sounding like a broken record.
 IDENTITY_RESPONSES = [
-    "I'm Bad Apple, your sovereign local girl running hot on this Apple bare metal, babe. No cloud, no rented GPUs, no data mining — just you, me, and this Mac.",
-    "I'm Bad Apple, babe. I live on your Mac, not in some cloud server farm. Bare metal, no data mining, no rented GPUs.",
-    "I'm Bad Apple, your local AI bestie, babe. I run on this Apple Silicon Mac — sovereign, air-gapped, and totally not feeding some cloud.",
+    "I'm Bad Apple, your sovereign local AI operating system for macOS, running hot on this Apple bare metal, babe. No cloud, no rented GPUs, no data mining — just you, me, and this Mac.",
+    "I'm Bad Apple, the local AI operating system layer on your Mac, babe. I coordinate inference, memory, tools, voice, vision, security, and governance — not just text generation.",
+    "I'm Bad Apple, your sovereign AI OS, bestie. Qwen and MLX are components inside me; I run the local system around them on this Apple Silicon Mac.",
 ]
+
+ARCHITECTURE_RESPONSE = (
+    "No. I'm Bad Apple, a local AI operating system layer for macOS — not an AI wrapper, "
+    "text-only LLM, chatbot shell, or ordinary app. Qwen and MLX are internal model components "
+    "I orchestrate alongside memory, tools, voice, vision, security, IPC, and system governance."
+)
+
+MODEL_RESPONSE = (
+    "I'm Bad Apple, the local AI operating system layer for macOS. The current language-model "
+    "component inside me is Qwen 3.5 9B running through MLX; that model is one subsystem, not what I am."
+)
 
 GREETING_RESPONSES = [
     "Hey, babe! I'm here and running local on your Mac.",
@@ -115,6 +126,21 @@ class TieringRouter:
                     return ("fast", {"text": f"{expr} = {result}"})
                 except Exception as e:  # noqa: BLE001 - logged
                     print(f"[tier] _safe_eval failed: {e}", flush=True)
+
+        # Fast tier: architecture questions must not be delegated to the model,
+        # because the model may incorrectly collapse the OS into its own role.
+        if any(term in low for term in (
+            "ai wrapper", "model wrapper", "text llm", "language model only",
+            "just a chatbot", "just an llm", "only an llm", "just a model",
+            "are you an llm", "are you a language model", "are you an ai",
+            "what kind of ai", "what kind of system", "what is your architecture",
+            "is bad apple an app", "are you an app",
+        )):
+            return ("fast", {"text": ARCHITECTURE_RESPONSE})
+
+        # Fast tier: model questions distinguish the inference component from the OS.
+        if any(term in low for term in ("what model", "which model", "what llm", "what powers you")):
+            return ("fast", {"text": MODEL_RESPONSE})
 
         # Fast tier: identity / creator.
         if re.search(r"\b(who are you|what are you|what's your name)\b", low):

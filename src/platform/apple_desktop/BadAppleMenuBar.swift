@@ -3021,7 +3021,7 @@ private final class BadAppleFirstRunOnboarding {
 
     private func showWelcome() {
         let body = """
-        Bad Apple is a private AI that runs entirely on your Mac. It does not send your prompts to the cloud.
+        Bad Apple is a local AI operating system layer for macOS. It manages on-device inference, memory, tools, voice, vision, security, and governance entirely on your Mac — it does not send your prompts to the cloud.
 
         To finish setup, Bad Apple needs to install a small background helper. Your Mac will ask for your password.
 
@@ -5739,7 +5739,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         needsMenuRebuild = false
         menu.removeAllItems()
-        let header = NSMenuItem(title: "Bad Apple — 9B MLX + RAG", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Bad Apple — Local AI Operating System", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
 
@@ -5763,7 +5763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
 
         let engineMode = BadAppleEngine.shared.isLoaded ? "Swift (Native)" : "Loading Swift Engine"
-        let mode = NSMenuItem(title: "AI Engine: Qwen 3.5 9B — \(engineMode)", action: nil, keyEquivalent: "")
+        let mode = NSMenuItem(title: "Inference Component: Qwen 3.5 9B — \(engineMode)", action: nil, keyEquivalent: "")
         mode.isEnabled = false
         menu.addItem(mode)
         let runtime = runtimeState
@@ -7188,7 +7188,7 @@ final class BadAppleOnboardingWindow: NSObject, NSTextFieldDelegate {
         title.frame = NSRect(x: 0, y: size.height - 150, width: size.width, height: 34)
         v.addSubview(title)
 
-        let body = NSTextField(wrappingLabelWithString: "Bad Apple is a private AI assistant that runs entirely on your Mac. It can answer questions, automate tasks, read your screen, and control apps — all without sending your data to the cloud.\n\nThis quick setup will take about a minute.")
+        let body = NSTextField(wrappingLabelWithString: "Bad Apple is a local AI operating system layer for macOS. It manages on-device inference, memory, tools, voice, vision, security, and governance entirely on your Mac — without sending your data to the cloud.\n\nThis quick setup will take about a minute.")
         body.font = .systemFont(ofSize: 15)
         body.textColor = .secondaryLabelColor
         body.alignment = .center

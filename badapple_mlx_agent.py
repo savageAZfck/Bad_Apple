@@ -185,7 +185,9 @@ def run_agent_task(
 
     history_for_model: list[dict[str, Any]] = []
     system_prompt = (
-        "You are an autonomous agent inside Bad Apple. "
+        "Bad Apple is a local AI operating system layer for macOS. "
+        "The language model is an internal component, not Bad Apple's identity; Bad Apple is not merely a text LLM or AI wrapper. "
+        "You are an autonomous agent inside that operating system. "
         "You have a goal and a focused set of tools. "
         "Think step by step. For each step, output a single JSON object with one of these shapes:\n"
         '1. To take an action: {"thought": "...", "tool": "tool_name", "args": {...}}\n'

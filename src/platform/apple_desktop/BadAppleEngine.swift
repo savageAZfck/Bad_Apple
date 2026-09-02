@@ -788,10 +788,10 @@ final class BadAppleEngine: @unchecked Sendable {
             return "It's \(formatter.string(from: Date()))."
         }
         if lower == "who are you" || lower == "what are you" || lower.contains("what is your name") {
-            return "I'm Bad Apple, your private AI running directly on this Mac."
+            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac."
         }
         if lower.contains("who created you") || lower.contains("who made you") {
-            return "You created me."
+            return "You created me — Bad Apple, the local AI operating system layer running on your Mac."
         }
         if ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"].contains(lower) {
             return "Hey! What can I help you with?"
@@ -972,23 +972,41 @@ final class BadAppleEngine: @unchecked Sendable {
     private func metaResponse(for prompt: String) -> String? {
         let lower = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Architecture queries must be deterministic so the underlying model
+        // cannot incorrectly collapse the OS into its own role.
+        if [
+            "ai wrapper", "model wrapper", "text llm", "language model only",
+            "just a chatbot", "just an llm", "only an llm", "just a model",
+            "are you an llm", "are you a language model", "are you an ai",
+            "what kind of ai", "what kind of system", "what is your architecture",
+            "is bad apple an app", "are you an app",
+        ].contains(where: { lower.contains($0) }) {
+            return "No. I'm Bad Apple, a local AI operating system layer for macOS — not an AI wrapper, text-only LLM, chatbot shell, or ordinary app. Qwen and MLX are internal model components I orchestrate alongside memory, tools, voice, vision, security, IPC, and system governance."
+        }
+
+        // Model questions should distinguish the inference component from the OS.
+        if lower.contains("what model") || lower.contains("which model") ||
+            lower.contains("what llm") || lower.contains("what powers you") {
+            return "I am Bad Apple, the local AI operating system layer for macOS. The current language-model component inside me is Qwen 3.5 9B running through MLX; that model is one subsystem, not what I am."
+        }
+
         // Identity queries
         if lower == "who are you" || lower == "what are you" ||
             lower.contains("what is your name") || lower.contains("what's your name") {
-            return "I'm Bad Apple, your private AI running directly on this Mac. No cloud, no data mining — just bare metal intelligence."
+            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac."
         }
 
         // Creator queries
         if lower.contains("who created you") || lower.contains("who made you") ||
             lower.contains("who built you") || lower.contains("your creator") {
-            return "I was created by my user. I'm a local-first AI assistant that lives entirely on this Mac."
+            return "I was created by my user — Bad Apple, the local AI operating system layer that lives entirely on this Mac."
         }
 
         // Capabilities queries
         if lower.contains("what can you do") || lower.contains("your capabilities") ||
             lower.contains("what are you capable of") || lower.contains("help me") {
             return """
-            I can help you with:
+            I am Bad Apple, a local AI operating system layer for macOS. I coordinate these capabilities:
             • Answering questions and having conversations
             • Reading and writing files on your Mac
             • Running shell commands and AppleScripts (with your approval)

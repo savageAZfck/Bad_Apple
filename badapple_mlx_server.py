@@ -845,6 +845,27 @@ class MLXServer:
             "who created you", "who is your creator", "who made you",
             "who built you", "who owns you",
         )
+        architecture_phrases = (
+            "ai wrapper", "model wrapper", "text llm", "language model only",
+            "just a chatbot", "just an llm", "only an llm", "just a model",
+            "are you an llm", "are you a language model", "are you an ai",
+            "what kind of ai", "what kind of system", "what is your architecture",
+            "is bad apple an app", "are you an app",
+        )
+        if any(phrase in lower for phrase in architecture_phrases):
+            return (
+                "No. I'm Bad Apple, a local AI operating system layer for macOS — not an AI wrapper, "
+                "text-only LLM, chatbot shell, or ordinary app. Qwen and MLX are internal model "
+                "components I orchestrate alongside memory, tools, voice, vision, security, IPC, "
+                "and system governance."
+            )
+        model_phrases = ("what model", "which model", "what llm", "what powers you")
+        if any(phrase in lower for phrase in model_phrases):
+            return (
+                "I'm Bad Apple, the local AI operating system layer for macOS. The current "
+                "language-model component inside me is Qwen 3.5 9B running through MLX; that "
+                "model is one subsystem, not what I am."
+            )
         if any(phrase in lower for phrase in capability_phrases):
             return self._capabilities_answer(voice_mode=voice_mode)
         if any(phrase in lower for phrase in identity_phrases):
