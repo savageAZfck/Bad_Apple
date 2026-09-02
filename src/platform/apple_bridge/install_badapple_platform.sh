@@ -60,16 +60,11 @@ ensure_venv() {
 
 render_plist() {
     local src="$1" dst="$2"
-    /usr/bin/python3 - "$src" "$dst" "$REPO_ROOT" "$CONSOLE_USER" "$CONSOLE_HOME" "$CONSOLE_GROUP" <<'PY'
-import sys
-src, dst, root, user, home, group = sys.argv[1:7]
-text = open(src).read()
-text = text.replace("__BADAPPLE_ROOT__", root)
-text = text.replace("__CONSOLE_USER__", user)
-text = text.replace("__CONSOLE_HOME__", home)
-text = text.replace("__CONSOLE_GROUP__", group)
-open(dst, "w").write(text)
-PY
+    sed -e "s|__BADAPPLE_ROOT__|${REPO_ROOT}|g" \
+        -e "s|__CONSOLE_USER__|${CONSOLE_USER}|g" \
+        -e "s|__CONSOLE_HOME__|${CONSOLE_HOME}|g" \
+        -e "s|__CONSOLE_GROUP__|${CONSOLE_GROUP}|g" \
+        "${src}" > "${dst}"
 }
 
 ensure_venv

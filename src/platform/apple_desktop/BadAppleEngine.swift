@@ -31,7 +31,7 @@ final class BadAppleEngine: @unchecked Sendable {
         }
     }
 
-    private let inference: BadAppleInference
+    private var inference: BadAppleInference
     private let personaManager = BadApplePersonaManager()
     private let auditLedger = BadAppleAuditLedger()
     private let outputFirewall = BadAppleOutputFirewall()
@@ -243,6 +243,29 @@ final class BadAppleEngine: @unchecked Sendable {
         inference = BadAppleInference.createDefault()
         stateLock.lock()
         _modelId = BadAppleInference.defaultConfig.modelId
+        stateLock.unlock()
+    }
+
+    /// Replace the default main-model configuration before any load. No-op if
+    /// a model is already loaded or loading. Used by the native daemon to honour
+    /// `BADAPPLE_MODEL` / `BADAPPLE_MAIN_MODEL`.
+    func configureMainModel(modelId: String, revision: String = "main") {
+        stateLock.lock()
+        let canConfigure = !(_isLoaded || _isLoading)
+        stateLock.unlock()
+        guard canConfigure else { return }
+
+        let rev = revision.isEmpty ? "main" : revision
+        let config = BadAppleInference.ModelConfig(
+            modelId: modelId,
+            revision: rev,
+            maxTokens: BadAppleInference.defaultConfig.maxTokens,
+            temperature: BadAppleInference.defaultConfig.temperature,
+            topP: BadAppleInference.defaultConfig.topP
+        )
+        inference = BadAppleInference(config: config)
+        stateLock.lock()
+        _modelId = modelId
         stateLock.unlock()
     }
 

@@ -6,8 +6,7 @@
     <string>com.badapple.mlx</string>
     <key>ProgramArguments</key>
     <array>
-        <string>__BADAPPLE_ROOT__/.venv/bin/python</string>
-        <string>__BADAPPLE_ROOT__/badapple_mlx_server.py</string>
+        <string>__BADAPPLE_ROOT__/target/release/badapple-engine</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -65,8 +64,6 @@
         <string></string>
         <key>HOME</key>
         <string>__CONSOLE_HOME__</string>
-        <key>PYTHONUNBUFFERED</key>
-        <string>1</string>
         <key>HF_HUB_OFFLINE</key>
         <string>1</string>
     </dict>

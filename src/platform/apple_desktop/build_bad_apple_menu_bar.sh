@@ -196,6 +196,29 @@ echo "Installed BadAppleMLX runtime and Metal shaders into app bundle Libraries.
 install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${MACOS_DIR}/BadApple"
 install -m 755 "${SCRATCH_DIR}/native/BadAppleMenuBar" "${BUILD_DIR}/BadAppleMenuBar"
 install -m 755 "${BUILD_DIR}/libBadAppleBridge.dylib" "${FRAMEWORKS_DIR}/libBadAppleBridge.dylib"
+
+# Build the native badapple-engine daemon that replaces the Python MLX server.
+echo "Building badapple-engine daemon..."
+"${SWIFTC}" \
+    -parse-as-library -swift-version 5 -O \
+    -target "${TARGET}" -sdk "${SDK_PATH}" \
+    -I "${SCRATCH_DIR}/native" -L "${BUILD_DIR}" \
+    ${MLX_FLAGS} \
+    -o "${BUILD_DIR}/badapple-engine" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleEngineDaemon.swift" \
+    ${LOGIC_SOURCES} \
+    ${MLX_SOURCES} \
+    -L "${BUILD_DIR}" -lBadAppleBridge \
+    -F "${FRAMEWORK_SEARCH}" \
+    -framework Foundation -framework CryptoKit -framework Security -framework LocalAuthentication \
+    -Xlinker -rpath -Xlinker @executable_path \
+    -Xlinker -rpath -Xlinker @executable_path/../Libraries
+
+# The daemon runs from target/release and needs the MLX dylib and metallib beside it.
+install -m 755 "${MLX_DYLIB}" "${BUILD_DIR}/libBadAppleMLX.dylib"
+install -m 644 "${MLX_METAL_CACHE}" "${BUILD_DIR}/mlx.metallib"
+echo "Installed badapple-engine and MLX runtime into ${BUILD_DIR}."
+
 install -d "${CONTENTS_DIR}/Helpers"
 install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev/null || true
 
