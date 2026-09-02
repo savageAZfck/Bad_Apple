@@ -64,6 +64,40 @@ SHELL_ALLOWED_COMMANDS = {
 }
 SHELL_DANGEROUS_CHARS = set(";|&$`\"'\n\r<>{}[]*?")
 
+# Commands whose path-like arguments must be jailed to allowed roots.
+_SHELL_PATH_ARG_COMMANDS = {"cat", "head", "tail", "grep", "find", "file", "wc"}
+
+
+def _jail_shell_args(tokens: list[str]) -> str | None:
+    """Check path-like tokens and reject paths outside allowed roots.
+
+    Returns an error string if a path-like argument (one starting with ``/``,
+    ``~``, or ``.``) resolves outside the allowed roots (user home, ``/tmp``,
+    ``/var/tmp``). Returns ``None`` if all path-like arguments are safe.
+    """
+    home = Path("~").expanduser()
+    allowed_roots = [home, Path("/tmp"), Path("/var/tmp")]
+    allowed_resolved = []
+    for root in allowed_roots:
+        try:
+            allowed_resolved.append(str(root.resolve()))
+        except (OSError, ValueError):
+            continue
+    for tok in tokens[1:]:
+        if not tok or not (tok.startswith("/") or tok.startswith("~") or tok.startswith(".")):
+            continue
+        try:
+            p = Path(tok).expanduser()
+            resolved = p.resolve() if p.exists() else p.parent.resolve() / p.name
+        except (OSError, ValueError):
+            return f"Error: path '{tok}' is outside allowed roots"
+        for root_str in allowed_resolved:
+            if str(resolved).startswith(root_str):
+                break
+        else:
+            return f"Error: path '{tok}' is outside allowed roots"
+    return None
+
 
 def _run_shell(command: str) -> str:
     if not command:
@@ -100,6 +134,12 @@ def _run_shell(command: str) -> str:
         if resolved is None:
             return f"Error: '{name}' not found on PATH"
         tokens[0] = resolved
+    # Jailing: for commands that take file arguments, verify any path-like
+    # arguments stay within the allowed roots (home, /tmp, /var/tmp).
+    if name in _SHELL_PATH_ARG_COMMANDS:
+        err = _jail_shell_args(tokens)
+        if err:
+            return err
     try:
         result = subprocess.run(
             tokens,
@@ -388,6 +428,28 @@ def run_tool(
             return _run_shell(args.get("command", ""))
         if name == "run_applescript":
             script = args.get("script", "")
+            # Defense in depth: reject scripts that attempt to break out of the
+            # AppleScript sandbox. These patterns are checked here in addition to
+            # any policy.yaml deny list so they cannot be relaxed by config.
+            _APPLESCRIPT_FORBIDDEN = {
+                "do shell",
+                "shell script",
+                "system attribute",
+                "current application",
+                "NSTask",
+                "NSAppleScript",
+                "POSIX path of",
+                "/bin/",
+                "/usr/",
+                "/sbin/",
+                "osascript",
+                "terminal",
+                "do script",
+            }
+            lower = script.lower()
+            for pat in _APPLESCRIPT_FORBIDDEN:
+                if pat.lower() in lower:
+                    return "Error: AppleScript contains a forbidden operation"
             result = _run_as_user(["osascript", "-e", script], timeout=15)
             return (result.stdout or result.stderr or "done").strip()
         if name == "run_shortcut":

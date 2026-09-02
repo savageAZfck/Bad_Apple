@@ -940,10 +940,71 @@ fn handle_client(
     Ok(())
 }
 
+/// Detect the console user (the owner of `/dev/console`) so the gatekeeper
+/// — which runs as root — can hand the socket directory back to the user-owned
+/// MLX daemon after a restart. Falls back to the parent directory's current
+/// owner if `/dev/console` cannot be read.
+fn console_user() -> Option<(String, u32, u32)> {
+    // Primary: `stat -f %Su /dev/console` (macOS-specific).
+    if let Ok(out) = Command::new("stat")
+        .args(["-f", "%Su", "/dev/console"])
+        .output()
+    {
+        if out.status.success() {
+            let user = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !user.is_empty() && user != "root" {
+                if let (Ok(uid_out), Ok(gid_out)) = (
+                    Command::new("id").args(["-u", &user]).output(),
+                    Command::new("id").args(["-g", &user]).output(),
+                ) {
+                    let uid = String::from_utf8_lossy(&uid_out.stdout)
+                        .trim()
+                        .parse::<u32>()
+                        .ok();
+                    let gid = String::from_utf8_lossy(&gid_out.stdout)
+                        .trim()
+                        .parse::<u32>()
+                        .ok();
+                    if let (Some(uid), Some(gid)) = (uid, gid) {
+                        return Some((user, uid, gid));
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: inherit the existing owner/group of the socket directory's
+    // parent if it was already created with the correct ownership by the
+    // installer. This keeps restarts from clobbering a working setup.
+    None
+}
+
 fn ensure_socket_dir() -> Result<()> {
     let path = socket_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
+
+        // The installer creates /var/run/badapple as console_user:console_group
+        // mode 0o770. When the gatekeeper (running as root) recreates the
+        // directory after it was removed (e.g. a reboot cleared /var/run), it
+        // would otherwise be root:root 0o755, which the user-owned MLX daemon
+        // cannot write into. Restore the expected ownership and permissions so
+        // the daemon can bind its socket on the next launch.
+        let perms = std::fs::Permissions::from_mode(0o770);
+        let _ = fs::set_permissions(parent, perms);
+
+        if let Some((_user, uid, gid)) = console_user() {
+            // `std::os::unix::fs::chown` sets ownership without needing libc.
+            let _ = chown(parent, Some(uid), Some(gid));
+        } else {
+            // Last-resort fallback: shell out to `chown` using the parent
+            // directory's current group so the daemon (a member of that group)
+            // retains write access even if we could not resolve the console
+            // user. Ownership stays root but the group is preserved.
+            if let Ok(meta) = fs::metadata(parent) {
+                let parent_gid = meta.gid();
+                let _ = chown(parent, None, Some(parent_gid));
+            }
+        }
     }
     Ok(())
 }

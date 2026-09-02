@@ -18,10 +18,15 @@ import badapple_scheduler
 class ValidatedArgvTests(unittest.TestCase):
     def test_allows_allowlisted_command(self):
         self.assertEqual(badapple_scheduler._validated_argv("ls -la"), ["ls", "-la"])
-        self.assertEqual(badapple_scheduler._validated_argv("git status"), ["git", "status"])
+
+    def test_rejects_interpreters_and_build_tools(self):
+        # git, python3, swift, cargo, rustc were removed from the scheduler
+        # allowlist because they can execute arbitrary attacker-supplied code.
+        for cmd in ("git status", "python3 -c pass", "swift --version", "cargo build", "rustc --version"):
+            self.assertIsNone(badapple_scheduler._validated_argv(cmd), cmd)
 
     def test_allows_absolute_path_to_allowlisted_binary(self):
-        self.assertEqual(badapple_scheduler._validated_argv("/usr/bin/git status"), ["/usr/bin/git", "status"])
+        self.assertEqual(badapple_scheduler._validated_argv("/bin/ls -la"), ["/bin/ls", "-la"])
 
     def test_rejects_non_allowlisted_command(self):
         self.assertIsNone(badapple_scheduler._validated_argv("rm -rf /"))

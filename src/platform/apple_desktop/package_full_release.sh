@@ -16,6 +16,9 @@ cargo build --release
 echo "Building Bad Apple.app..."
 BADAPPLE_NO_SIGN=1 "${REPO_ROOT}/src/platform/apple_desktop/build_bad_apple_menu_bar.sh"
 
+echo "Building Apple bridge (badapple-identity)..."
+bash "${REPO_ROOT}/src/platform/apple_bridge/build_apple_bridge.sh"
+
 rm -rf "${PKG_DIR}"
 mkdir -p "${PKG_DIR}/bad_apple"
 
@@ -34,6 +37,8 @@ rsync -a \
   --exclude='test_cage' --exclude='wild_workspace' --exclude='*.defense' --exclude='*.network' --exclude='*.weights' \
   --exclude='src/platform/apple_bridge/install_daemon.sh' --exclude='src/platform/apple_bridge/com.badapple.substrate*' \
   --exclude='src/platform/apple_desktop/.build' --exclude='src/platform/apple_desktop/.swiftpm' \
+  --exclude='MLXInference/.build' --exclude='MLXInference/.swiftpm' \
+  --exclude='.build' --exclude='.swiftpm' \
   --exclude='requirements.in' \
   "${REPO_ROOT}/" "${PKG_DIR}/bad_apple/"
 

@@ -42,6 +42,12 @@ SDK_PATH=$(resolve_sdk)
 rm -rf "${APP_DIR}"
 mkdir -p "${BUILD_DIR}" "${MACOS_DIR}" "${FRAMEWORKS_DIR}" "${SCRATCH_DIR}/native"
 
+# Build the Apple Intelligence bridge (including the badapple-identity Secure
+# Enclave helper) so the resulting app bundle and release package always contain
+# the binaries that install_badapple_platform.sh hard-requires.
+echo "Building Apple bridge (libBadAppleBridge.dylib + badapple-identity)..."
+bash "${REPO_ROOT}/src/platform/apple_bridge/build_apple_bridge.sh"
+
 # Compile directly so this user-session host can be built even when the active
 # SwiftPM ManifestAPI predates macOS 26. The bridge module and dylib are emitted
 # together, ensuring the AppIntent and voice host use one SLICKS implementation.

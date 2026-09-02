@@ -2417,6 +2417,31 @@ async def main():
         loop.add_signal_handler(sig, stop_event.set)
 
     srv = await asyncio.start_unix_server(server.handle_client, path=socket_path)
+    # Ensure the socket directory is writable by the daemon (which runs as the
+    # console user, not root). If the gatekeeper recreated /var/run/badapple as
+    # root:root, we cannot chown it, but we can at least widen the mode so the
+    # bind above doesn't fail on the next restart and the symlink below works.
+    socket_dir = os.path.dirname(socket_path)
+    if socket_dir and os.path.isdir(socket_dir):
+        try:
+            st = os.stat(socket_dir)
+            if st.st_uid != os.getuid():
+                print(
+                    f"[main] WARNING: socket dir {socket_dir} is owned by uid "
+                    f"{st.st_uid}, not current uid {os.getuid()}; attempting to "
+                    "fix permissions",
+                    flush=True,
+                )
+                try:
+                    os.chmod(socket_dir, 0o770)
+                except PermissionError as e:
+                    print(
+                        f"[main] WARNING: could not chmod {socket_dir}: {e}; "
+                        "daemon may fail to restart cleanly",
+                        flush=True,
+                    )
+        except OSError as e:
+            print(f"[main] WARNING: could not stat socket dir {socket_dir}: {e}", flush=True)
     os.chmod(socket_path, 0o660)
     try:
         os.symlink(socket_path, fast_socket_path)

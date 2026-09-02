@@ -52,6 +52,28 @@ download_asset() {
         local out="${tmpdir}/${name}"
         tried+=("${url}")
         if curl -fsSL "${url}" -o "${out}"; then
+            # Verify SHA-256 checksum if checksums.txt is published alongside
+            # the release.  If checksums.txt is absent, warn but continue so
+            # older releases without checksums remain installable.
+            local checksums_url="https://github.com/${REPO}/releases/download/${tag}/checksums.txt"
+            local checksums_file="${tmpdir}/checksums.txt"
+            if curl -fsSL "${checksums_url}" -o "${checksums_file}" 2>/dev/null; then
+                local basename expected_sha actual_sha
+                basename="$(basename "${out}")"
+                expected_sha="$(grep -E "^[0-9a-fA-F]{64}  ${basename}$" "${checksums_file}" | awk '{print $1}')"
+                if [[ -n "${expected_sha}" ]]; then
+                    actual_sha="$(shasum -a 256 "${out}" | awk '{print $1}')"
+                    if [[ "${actual_sha}" != "${expected_sha}" ]]; then
+                        rm -rf "${tmpdir}"
+                        fail "checksum mismatch for ${basename}: expected ${expected_sha}, got ${actual_sha}"
+                    fi
+                    echo "Checksum verified for ${basename}." >&2
+                else
+                    echo "Warning: ${basename} not found in checksums.txt; skipping verification." >&2
+                fi
+            else
+                echo "Warning: checksums.txt not found for tag ${tag}; skipping checksum verification." >&2
+            fi
             echo "${out}"
             return
         fi

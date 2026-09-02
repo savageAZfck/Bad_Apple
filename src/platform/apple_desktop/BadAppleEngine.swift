@@ -37,7 +37,14 @@ final class BadAppleEngine: @unchecked Sendable {
     private let outputFirewall = BadAppleOutputFirewall()
     private let toolRouter = BadAppleToolRouter()
     private let policyEngine = BadApplePolicyEngine()
-    private lazy var toolExecutor = BadAppleToolExecutor(policyEngine: policyEngine)
+    private lazy var toolExecutor: BadAppleToolExecutor = {
+        let exec = BadAppleToolExecutor(policyEngine: policyEngine)
+        exec.visionProvider = { [weak self] path, prompt in
+            guard let self else { return "Vision engine unavailable." }
+            return await self.describeImageInternal(at: path, prompt: prompt)
+        }
+        return exec
+    }()
     private let embeddingEngine = BadAppleEmbeddingEngine()
     private let visionEngine = BadAppleVisionEngine()
     private lazy var semanticCache = BadAppleSemanticCache(
@@ -62,7 +69,7 @@ final class BadAppleEngine: @unchecked Sendable {
         let candidates = [
             FileManager.default.currentDirectoryPath + "/prompt.txt",
             NSHomeDirectory() + "/bad_apple/prompt.txt",
-            "/Users/savag3/bad_apple/prompt.txt",
+            NSHomeDirectory() + "/.bad_apple/prompt.txt",
         ]
         for path in candidates {
             let url = URL(fileURLWithPath: path)
@@ -108,30 +115,83 @@ final class BadAppleEngine: @unchecked Sendable {
         }
     }
 
-    private(set) var isLoaded = false
-    private(set) var isLoading = false
-    private(set) var modelId: String = ""
-    private(set) var lastTokensPerSecond: Float = 0
-    private(set) var lastTokenCount: Int = 0
-    private(set) var lastCacheHit: Bool = false
-    var workspacePath: String?
+    private let stateLock = NSLock()
+    private var _isLoaded = false
+    private var _isLoading = false
+    private var _modelId: String = ""
+    private var _lastTokensPerSecond: Float = 0
+    private var _lastTokenCount: Int = 0
+    private var _lastCacheHit: Bool = false
+    private var _workspacePath: String?
+    private var _airgapEnabled = false
+    private var _privateModeEnabled = false
+
+    var isLoaded: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _isLoaded
+    }
+
+    var isLoading: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _isLoading
+    }
+
+    var modelId: String {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _modelId
+    }
+
+    var lastTokensPerSecond: Float {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _lastTokensPerSecond
+    }
+
+    var lastTokenCount: Int {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _lastTokenCount
+    }
+
+    var lastCacheHit: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _lastCacheHit
+    }
+
+    var workspacePath: String? {
+        get {
+            stateLock.lock(); defer { stateLock.unlock() }
+            return _workspacePath
+        }
+        set {
+            stateLock.lock()
+            _workspacePath = newValue
+            stateLock.unlock()
+            toolExecutor.workspace = newValue
+        }
+    }
 
     // MARK: - Air-gap / Private Mode
 
-    /// When true, no network access is attempted and HuggingFace downloads are disabled.
-    private var airgapEnabled = false
-    /// When true, conversation and audit persistence is paused.
-    private var privateModeEnabled = false
-
     var airgap: Bool {
-        get { airgapEnabled }
-        set { airgapEnabled = newValue }
+        get {
+            stateLock.lock(); defer { stateLock.unlock() }
+            return _airgapEnabled
+        }
+        set {
+            stateLock.lock()
+            _airgapEnabled = newValue
+            stateLock.unlock()
+        }
     }
 
     var privateMode: Bool {
-        get { privateModeEnabled }
+        get {
+            stateLock.lock(); defer { stateLock.unlock() }
+            return _privateModeEnabled
+        }
         set {
-            privateModeEnabled = newValue
+            stateLock.lock()
+            _privateModeEnabled = newValue
+            stateLock.unlock()
             auditLedger.paused = newValue
         }
     }
@@ -181,7 +241,9 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private init() {
         inference = BadAppleInference.createDefault()
-        modelId = BadAppleInference.defaultConfig.modelId
+        stateLock.lock()
+        _modelId = BadAppleInference.defaultConfig.modelId
+        stateLock.unlock()
     }
 
     // MARK: - Persona Management
@@ -218,14 +280,17 @@ final class BadAppleEngine: @unchecked Sendable {
 
     /// Load the model. Call this at startup or when the model changes.
     func loadModel() async {
-        guard !isLoaded && !isLoading else { return }
-        isLoading = true
-        await runtime.markModelLoading(modelId)
+        stateLock.lock()
+        if _isLoaded || _isLoading { stateLock.unlock(); return }
+        _isLoading = true
+        let mid = _modelId
+        stateLock.unlock()
+        await runtime.markModelLoading(mid)
 
         do {
             try await inference.loadModel()
-            isLoaded = true
-            await runtime.markModelReady(modelId)
+            stateLock.lock(); _isLoaded = true; stateLock.unlock()
+            await runtime.markModelReady(mid)
             Task {
                 await runtime.markModelLoading(embeddingEngine.configuration.modelId)
                 do {
@@ -242,28 +307,31 @@ final class BadAppleEngine: @unchecked Sendable {
             }
         } catch {
             print("[BadAppleEngine] Failed to load model: \(error.localizedDescription)")
-            isLoaded = false
-            await runtime.markModelFailed(modelId, error: error.localizedDescription)
+            stateLock.lock(); _isLoaded = false; stateLock.unlock()
+            await runtime.markModelFailed(mid, error: error.localizedDescription)
         }
-        isLoading = false
+        stateLock.lock(); _isLoading = false; stateLock.unlock()
     }
 
     /// Load from a local directory (e.g., HuggingFace cache).
     func loadModel(from directory: URL) async {
-        guard !isLoaded && !isLoading else { return }
-        isLoading = true
-        await runtime.markModelLoading(modelId)
+        stateLock.lock()
+        if _isLoaded || _isLoading { stateLock.unlock(); return }
+        _isLoading = true
+        let mid = _modelId
+        stateLock.unlock()
+        await runtime.markModelLoading(mid)
 
         do {
             try await inference.loadModel(from: directory)
-            isLoaded = true
-            await runtime.markModelReady(modelId)
+            stateLock.lock(); _isLoaded = true; stateLock.unlock()
+            await runtime.markModelReady(mid)
         } catch {
             print("[BadAppleEngine] Failed to load model from \(directory): \(error.localizedDescription)")
-            isLoaded = false
-            await runtime.markModelFailed(modelId, error: error.localizedDescription)
+            stateLock.lock(); _isLoaded = false; stateLock.unlock()
+            await runtime.markModelFailed(mid, error: error.localizedDescription)
         }
-        isLoading = false
+        stateLock.lock(); _isLoading = false; stateLock.unlock()
     }
 
     // MARK: - Generation
@@ -276,7 +344,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private func saveTurn(prompt: String, response: String) {
         // Private mode: skip persistence entirely.
-        guard !privateModeEnabled else { return }
+        guard !privateMode else { return }
         var messages = conversation.loadConversation(sessionId: conversationSessionId)
         messages.append(BadAppleMessage(role: "user", content: prompt))
         messages.append(BadAppleMessage(role: "assistant", content: response))
@@ -413,7 +481,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         tier: "approval"
                     )
                 case .approved:
-                    output = await toolExecutor.executeTool(name: call.name, args: call.args)
+                    output = await toolExecutor.executeTool(name: call.name, args: call.args, approved: true)
                 }
                 auditLedger.append(
                     eventType: "tool_result",
@@ -474,7 +542,7 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         let persona = activePersona
-        lastCacheHit = false
+        stateLock.lock(); _lastCacheHit = false; stateLock.unlock()
 
         auditLedger.append(
             eventType: "query",
@@ -533,7 +601,7 @@ final class BadAppleEngine: @unchecked Sendable {
         Task {
             let history = inferenceHistory()
             if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
-                lastCacheHit = true
+                stateLock.lock(); _lastCacheHit = true; stateLock.unlock()
                 auditLedger.append(
                     eventType: "cache_hit",
                     data: ["prompt": prompt],
@@ -580,8 +648,10 @@ final class BadAppleEngine: @unchecked Sendable {
                         persona: persona
                     )
                     DispatchQueue.main.async {
-                        self.lastTokensPerSecond = result.tokensPerSecond
-                        self.lastTokenCount = result.tokenCount
+                        self.stateLock.lock()
+                        self._lastTokensPerSecond = result.tokensPerSecond
+                        self._lastTokenCount = result.tokenCount
+                        self.stateLock.unlock()
                         onToken(filtered)
                         onComplete(filtered)
                     }
@@ -621,8 +691,10 @@ final class BadAppleEngine: @unchecked Sendable {
                         )
                     }
                     DispatchQueue.main.async {
-                        self.lastTokensPerSecond = result.tokensPerSecond
-                        self.lastTokenCount = result.tokenCount
+                        self.stateLock.lock()
+                        self._lastTokensPerSecond = result.tokensPerSecond
+                        self._lastTokenCount = result.tokenCount
+                        self.stateLock.unlock()
                         self.auditLedger.append(
                             eventType: "response",
                             data: ["text": filtered, "tps": result.tokensPerSecond],
@@ -672,7 +744,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         let persona = activePersona
         let history = inferenceHistory()
-        lastCacheHit = false
+        stateLock.lock(); _lastCacheHit = false; stateLock.unlock()
 
         // Check prompt hot-reload before generation.
         checkPromptReload()
@@ -702,7 +774,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         // Check semantic cache for a matching response.
         if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
-            lastCacheHit = true
+            stateLock.lock(); _lastCacheHit = true; stateLock.unlock()
             auditLedger.append(
                 eventType: "cache_hit",
                 data: ["prompt": prompt],
@@ -747,8 +819,10 @@ final class BadAppleEngine: @unchecked Sendable {
                 temperature: 0.6
             )
         }
-        lastTokensPerSecond = result.tokensPerSecond
-        lastTokenCount = result.tokenCount
+        stateLock.lock()
+        _lastTokensPerSecond = result.tokensPerSecond
+        _lastTokenCount = result.tokenCount
+        stateLock.unlock()
 
         // Postprocess and filter.
         let polished = postprocessOutput(result.text)
@@ -870,6 +944,26 @@ final class BadAppleEngine: @unchecked Sendable {
         }
     }
 
+    private func describeImageInternal(at path: String, prompt: String) async -> String {
+        do {
+            if !(await visionEngine.ready) {
+                try await visionEngine.loadModel()
+            }
+            let stream = try await visionEngine.describe(
+                imageURL: URL(fileURLWithPath: path),
+                prompt: prompt,
+                maxTokens: 256
+            )
+            var result = ""
+            for try await chunk in stream {
+                result += chunk
+            }
+            return outputFirewall.check(postprocessOutput(result))
+        } catch {
+            return "Error describing image: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Memory
 
     func clearCache() {
@@ -924,14 +1018,14 @@ final class BadAppleEngine: @unchecked Sendable {
 
     func unload() async {
         await inference.unload()
-        isLoaded = false
-        await runtime.markModelUnloaded(modelId)
+        stateLock.lock(); _isLoaded = false; let mid = _modelId; stateLock.unlock()
+        await runtime.markModelUnloaded(mid)
     }
 
     func runtimeStatus() async -> [String: Any] {
         var status = await runtime.runtimeStatus()
-        status["airgap"] = airgapEnabled
-        status["private_mode"] = privateModeEnabled
+        status["airgap"] = airgap
+        status["private_mode"] = privateMode
         status["workspace"] = workspacePath ?? NSNull()
         status["ambient_context"] = ambientContext ?? NSNull()
         return status

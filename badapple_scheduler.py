@@ -27,7 +27,6 @@ from pathlib import Path
 _SHELL_ALLOWED_COMMANDS = {
     "ls", "cat", "head", "tail", "find", "grep", "wc", "file",
     "pwd", "mdfind", "ps", "df", "du", "echo", "whoami", "id",
-    "git", "swift", "cargo", "rustc", "python3", "python",
 }
 _SHELL_DANGEROUS_CHARS = set(";|&$`\"'\n\r<>{}[]*?")
 

@@ -1,41 +1,35 @@
 // BadAppleSecurity — Swift translation of the Python audit ledger and output
 // firewall from badapple_extras.py.
 //
-//   BadAppleAuditLedger     Append-only, SHA-256 hash-chained, redacted audit
-//                           log written to /var/lib/bad_apple/ledger.jsonl.
+//   BadAppleAuditLedger     Append-only, hash-chained, redacted audit log
+//                           written to /var/lib/bad_apple/ledger.jsonl.
 //   BadAppleOutputFirewall  Blocklist-driven output filter that replaces
 //                           forbidden patterns with "[Output firewall: blocked]".
 //
-// Both classes are marked @unchecked Sendable; internal state is guarded by
-// an NSLock, mirroring the threading.RLock / fcntl locking in the Python
-// original.  Hashing uses CryptoKit's SHA256.
+// The ledger format, field names, hashing algorithm, and cross-process file
+// locking are identical to the Python AuditLedger in badapple_extras.py so
+// both runtimes can safely append to the same ledger.jsonl file.
 
 import Foundation
 import CryptoKit
 
 // MARK: - Audit Ledger
 
-/// Append-only, SHA-256 hash-chained audit ledger with PII / secret redaction.
+/// Append-only, hash-chained audit ledger with PII / secret redaction.
 ///
-/// Ported from `AuditLedger` in badapple_extras.py.  Every prompt, response,
-/// and tool call is written to `/var/lib/bad_apple/ledger.jsonl` as one JSON
-/// line.  Each entry has:
-///
-///   - timestamp    ISO-8601 UTC timestamp
-///   - event_type   "prompt", "response", "tool_call", "error", ...
-///   - data         the redacted payload (typically prompt/response/tool_call)
-///   - persona      active persona name
-///   - hash         SHA256(previous_hash + canonical_entry_json)
-///
-/// The chain is rooted at a fixed genesis hash so tampering is detectable via
-/// `verify()`.  Secrets and PII (SSNs, emails, phone numbers, API keys, bearer
-/// tokens, long random tokens) are redacted before anything is written.
+/// Matches the Python `AuditLedger` in badapple_extras.py exactly:
+///   - Field names: ts, type, data, prev_hash, hash
+///   - Hashing: HMAC-SHA256 with the SLICKS key, or plain SHA-256 if no key
+///   - Cross-process locking via fcntl.flock on ledger.lock
+///   - The persona field is stored in data but not part of the hash body
 final class BadAppleAuditLedger: @unchecked Sendable {
 
     // MARK: - Paths & constants
 
     static let directoryPath = "/var/lib/bad_apple"
     static let ledgerPath = "/var/lib/bad_apple/ledger.jsonl"
+    static let lockPath = "/var/lib/bad_apple/ledger.lock"
+    private static let slicksKeyPath = "/var/lib/bad_apple/slicks.key"
     private static let genesis = "bad-apple-genesis-v1"
 
     // MARK: - Redaction markers
@@ -51,6 +45,7 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     // MARK: - State
 
     private let lock = NSLock()
+    private var cachedSecret: Data?
 
     private static let isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -62,6 +57,7 @@ final class BadAppleAuditLedger: @unchecked Sendable {
 
     init() {
         ensureDirectory()
+        cachedSecret = loadSlicksSecret()
     }
 
     /// When true, no entries are written (private mode).
@@ -70,12 +66,7 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     // MARK: - Public API
 
     /// Append a redacted, hash-chained entry to the ledger.
-    ///
-    /// - Parameters:
-    ///   - eventType: "prompt", "response", "tool_call", "error", etc.
-    ///   - data: payload dictionary (typically containing prompt/response/
-    ///     tool_call).  Secrets and PII are redacted before writing.
-    ///   - persona: active persona name.
+    /// Uses the same format and hashing as the Python AuditLedger.
     func append(eventType: String, data: [String: Any], persona: String) {
         guard !paused else { return }
         lock.lock()
@@ -83,15 +74,30 @@ final class BadAppleAuditLedger: @unchecked Sendable {
 
         ensureDirectory()
 
+        // Acquire cross-process file lock (same as Python's fcntl.flock).
+        guard let lockFd = openLockFile() else {
+            Self.log("[audit] could not acquire cross-process lock")
+            return
+        }
+        defer { close(lockFd) }
+        flock(lockFd, LOCK_EX)
+        defer { flock(lockFd, LOCK_UN) }
+
         let prevHash = lastHash()
-        let safeData = redact(sanitize(data))
+        var safeData = redact(sanitize(data))
+        // Store persona inside data (Python stores it there too).
+        if var dict = safeData as? [String: Any] {
+            dict["persona"] = persona
+            safeData = dict
+        }
         let timestamp = Self.isoFormatter.string(from: Date())
 
+        // The hash body matches Python: {ts, type, data, prev_hash}
         let body: [String: Any] = [
-            "timestamp": timestamp,
-            "event_type": eventType,
+            "ts": timestamp,
+            "type": eventType,
             "data": safeData,
-            "persona": persona,
+            "prev_hash": prevHash,
         ]
 
         guard let bodyJSON = canonicalJSON(body) else {
@@ -99,8 +105,13 @@ final class BadAppleAuditLedger: @unchecked Sendable {
             return
         }
 
-        // hash = SHA256(previous_hash + canonical_entry_json)
-        let hash = sha256Hex(prevHash + bodyJSON)
+        // HMAC-SHA256 with SLICKS key, or plain SHA-256 if no key (matches Python).
+        let hash: String
+        if let secret = cachedSecret, !secret.isEmpty {
+            hash = hmacSHA256Hex(secret, bodyJSON)
+        } else {
+            hash = sha256Hex(bodyJSON)
+        }
 
         var entry = body
         entry["hash"] = hash
@@ -115,10 +126,7 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     }
 
     /// Verify the integrity of the entire hash chain.
-    ///
-    /// Returns `true` only if every entry's stored hash matches
-    /// `SHA256(previous_hash + canonical_entry_json)` and the chain links back
-    /// to the genesis hash.  An empty or missing ledger is trivially valid.
+    /// Reads entries in the Python format (ts, type, data, prev_hash, hash).
     func verify() -> Bool {
         guard let lines = readLines() else {
             return true
@@ -133,19 +141,30 @@ final class BadAppleAuditLedger: @unchecked Sendable {
             }
 
             // Reconstruct the canonical body that was hashed on write.
+            // Match Python field names exactly.
             let body: [String: Any] = [
-                "timestamp": entry["timestamp"] ?? "",
-                "event_type": entry["event_type"] ?? "",
+                "ts": entry["ts"] ?? "",
+                "type": entry["type"] ?? "",
                 "data": entry["data"] ?? NSNull(),
-                "persona": entry["persona"] ?? "",
+                "prev_hash": entry["prev_hash"] ?? "",
             ]
 
             guard let bodyJSON = canonicalJSON(body) else {
                 return false
             }
 
-            let expected = sha256Hex(prev + bodyJSON)
+            let expected: String
+            if let secret = cachedSecret, !secret.isEmpty {
+                expected = hmacSHA256Hex(secret, bodyJSON)
+            } else {
+                expected = sha256Hex(bodyJSON)
+            }
+
             if expected != storedHash {
+                return false
+            }
+            // Also verify chain linkage.
+            if (entry["prev_hash"] as? String) != prev {
                 return false
             }
             prev = storedHash
@@ -164,7 +183,14 @@ final class BadAppleAuditLedger: @unchecked Sendable {
         return digest.map { String(format: "%02x", Int($0)) }.joined()
     }
 
+    private func hmacSHA256Hex(_ key: Data, _ string: String) -> String {
+        let key = SymmetricKey(data: key)
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(string.utf8), using: key)
+        return mac.map { String(format: "%02x", Int($0)) }.joined()
+    }
+
     /// Canonical (sorted-key, UTF-8) JSON string for deterministic hashing.
+    /// Matches Python's _safe_json: json.dumps(data, sort_keys=True, ensure_ascii=True, default=str)
     private func canonicalJSON(_ object: Any) -> String? {
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(
@@ -174,6 +200,54 @@ final class BadAppleAuditLedger: @unchecked Sendable {
             return nil
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    // MARK: - SLICKS Secret
+
+    private func loadSlicksSecret() -> Data? {
+        let keyPath = ProcessInfo.processInfo.environment["BADAPPLE_SLICKS_KEY_PATH"]
+            ?? Self.slicksKeyPath
+        guard FileManager.default.fileExists(atPath: keyPath) else {
+            return nil
+        }
+        guard let raw = try? String(contentsOfFile: keyPath, encoding: .utf8) else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // If it looks like hex, decode it (matching Python's bytes.fromhex).
+        if trimmed.allSatisfy({ $0.isHexDigit }) && trimmed.count >= 32 {
+            return hexToData(trimmed)
+        }
+        return trimmed.data(using: .utf8)
+    }
+
+    /// Convert a hex string to Data (matching Python's bytes.fromhex).
+    private func hexToData(_ hex: String) -> Data? {
+        guard hex.count % 2 == 0 else { return nil }
+        var data = Data(capacity: hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
+        }
+        return data
+    }
+
+    // MARK: - Cross-Process File Locking
+
+    /// Open the lock file and return its file descriptor for flock.
+    /// Matches Python's fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX).
+    private func openLockFile() -> Int32? {
+        let fm = FileManager.default
+        let parent = (Self.lockPath as NSString).deletingLastPathComponent
+        if !fm.fileExists(atPath: parent) {
+            try? fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
+        }
+        // Open with O_CREAT | O_APPEND, matching Python's "a+" mode.
+        let fd = open(Self.lockPath, O_CREAT | O_RDWR | O_APPEND, 0o644)
+        return fd >= 0 ? fd : nil
     }
 
     // MARK: - File I/O
@@ -189,7 +263,7 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     }
 
     /// Hash of the current chain tip, or the genesis hash if the ledger is
-    /// empty / missing / corrupt.
+    /// empty / missing / corrupt. Reads the last line's "hash" field.
     private func lastHash() -> String {
         guard let lines = readLines(),
               let last = lines.last,
@@ -220,8 +294,6 @@ final class BadAppleAuditLedger: @unchecked Sendable {
             Self.log("[audit] ledger write failed: could not open ledger")
             return
         }
-        // Seek to the current end of file (append) without relying on the
-        // deprecated seekToEndOfFile().
         var offset: UInt64 = 0
         if let attrs = try? fm.attributesOfItem(atPath: Self.ledgerPath),
            let size = attrs[.size] as? NSNumber {
