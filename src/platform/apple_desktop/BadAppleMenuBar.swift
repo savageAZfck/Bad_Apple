@@ -4137,6 +4137,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var aquaHelperProcess: Process?
     private let splash = BadAppleSplashWindow()
     private var runtimeState: [String: Any] {
+        // NATIVE ENGINE: When the Swift MLX engine is loaded, return the cached
+        // runtime status (refreshed asynchronously via runtimeStatus()) instead
+        // of reading the daemon's runtime_state.json file.  A background Task is
+        // kicked off here to keep the cache fresh; callers see lastRuntimeStatus
+        // immediately and a refreshed value on the next poll.
+        if BadAppleEngine.shared.isLoaded {
+            Task { @MainActor in
+                let status = await BadAppleEngine.shared.runtimeStatus()
+                self.lastRuntimeStatus = status
+            }
+            return lastRuntimeStatus
+        }
         let path = URL(fileURLWithPath: "/var/lib/bad_apple/runtime_state.json")
         guard let data = try? Data(contentsOf: path),
               let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
@@ -4351,6 +4363,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             formatter.timeStyle = .short
             let today = formatter.string(from: Date())
             let prompt = "Give me a concise daily briefing for \(today). Use local tools to check today’s calendar events, upcoming events, reminders, unread emails, the current workspace, and any relevant context. Summarize what’s coming up and what I should prioritize."
+            // NATIVE ENGINE: If the Swift MLX engine is loaded, route directly
+            // through it — no subprocess, no daemon, no Python.
+            if BadAppleEngine.shared.isLoaded {
+                BadAppleEngine.shared.generateStreaming(
+                    prompt: prompt,
+                    voiceMode: false,
+                    maxTokens: 500
+                ) { chunk in
+                    DispatchQueue.main.async { append(chunk) }
+                } onComplete: { _ in
+                    DispatchQueue.main.async { finish() }
+                } onError: { error in
+                    DispatchQueue.main.async {
+                        append("\n\nError: \(error)")
+                        finish()
+                    }
+                }
+                return
+            }
             Task {
                 do {
                     _ = try await self.runBadAppleCLIStreaming(
@@ -4376,6 +4407,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             User request about the screen or current app:
             \(prompt)
             """
+            // NATIVE ENGINE: If the Swift MLX engine is loaded, route directly
+            // through it — no subprocess, no daemon, no Python.
+            if BadAppleEngine.shared.isLoaded {
+                BadAppleEngine.shared.generateStreaming(
+                    prompt: fullPrompt,
+                    voiceMode: false,
+                    maxTokens: 400
+                ) { chunk in
+                    DispatchQueue.main.async { append(chunk) }
+                } onComplete: { _ in
+                    DispatchQueue.main.async { finish() }
+                } onError: { error in
+                    DispatchQueue.main.async {
+                        append("\n\nError: \(error)")
+                        finish()
+                    }
+                }
+                return
+            }
             Task {
                 do {
                     _ = try await self.runBadAppleCLIStreaming(
@@ -4393,6 +4443,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         imagePlayground.onGenerate = { [weak self] prompt, completion in
             guard let self = self else { completion("Cancelled", nil); return }
+            // NOTE: Image generation (mflux) is not supported by the native
+            // Swift engine — it always requires the Python daemon and its
+            // image model.  Even when BadAppleEngine.shared.isLoaded is true we
+            // keep the daemon path below so images can still be generated.
             let fullPrompt = "generate an image of \(prompt)"
             let before = Date().timeIntervalSince1970
             Task {
@@ -6943,7 +6997,62 @@ final class BadAppleSettingsWindow: NSObject {
     /// Runs the bundled badapple CLI with the given prompt, setting the
     /// socket and SLICKS key environment variables. Runs asynchronously on
     /// a background queue so the UI stays responsive.
+    ///
+    /// NATIVE ENGINE: When the Swift MLX engine is loaded, control commands
+    /// (autopilot, airgap, private mode, persona, workspace) are applied
+    /// directly to the engine instead of spawning a CLI subprocess. Commands
+    /// the native engine cannot handle (fast tier, p2p, kill switch) fall
+    /// through to the daemon CLI path below.
     private func sendCommand(_ prompt: String) {
+        // NATIVE ENGINE: handle control commands directly when loaded.
+        if BadAppleEngine.shared.isLoaded {
+            let lower = prompt.lowercased()
+            if lower == "enable autopilot" {
+                BadAppleEngine.shared.autopilot = true
+                badAppleVoiceLog("BadAppleSettings: native engine — autopilot enabled")
+                return
+            }
+            if lower == "disable autopilot" {
+                BadAppleEngine.shared.autopilot = false
+                badAppleVoiceLog("BadAppleSettings: native engine — autopilot disabled")
+                return
+            }
+            if lower == "enable air gap" {
+                BadAppleEngine.shared.airgap = true
+                badAppleVoiceLog("BadAppleSettings: native engine — air gap enabled")
+                return
+            }
+            if lower == "disable air gap" {
+                BadAppleEngine.shared.airgap = false
+                badAppleVoiceLog("BadAppleSettings: native engine — air gap disabled")
+                return
+            }
+            if lower == "private mode on" {
+                BadAppleEngine.shared.privateMode = true
+                badAppleVoiceLog("BadAppleSettings: native engine — private mode enabled")
+                return
+            }
+            if lower == "private mode off" {
+                BadAppleEngine.shared.privateMode = false
+                badAppleVoiceLog("BadAppleSettings: native engine — private mode disabled")
+                return
+            }
+            if lower.hasPrefix("switch to ") {
+                let persona = String(prompt.dropFirst("switch to ".count))
+                _ = BadAppleEngine.shared.switchPersona(persona)
+                badAppleVoiceLog("BadAppleSettings: native engine — switched to persona '\(persona)'")
+                return
+            }
+            if lower.hasPrefix("set workspace to ") {
+                let path = String(prompt.dropFirst("set workspace to ".count))
+                BadAppleEngine.shared.workspacePath = path
+                badAppleVoiceLog("BadAppleSettings: native engine — workspace set to '\(path)'")
+                return
+            }
+            // Unrecognized commands (fast tier, p2p, kill switch) are not
+            // supported by the native engine — fall through to the daemon CLI.
+            badAppleVoiceLog("BadAppleSettings: native engine cannot handle '\(prompt)', falling back to daemon")
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let binary = Bundle.main.bundleURL
                 .appendingPathComponent("Contents")

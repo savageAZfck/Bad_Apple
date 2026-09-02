@@ -97,7 +97,7 @@ done
 echo ""
 echo "Checking Rust binaries..."
 
-for bin in badapple gatekeeper badapple-identity; do
+for bin in badapple gatekeeper badapple-identity badapple-identity-agent badapple-supervisor; do
     if [[ -x "target/release/${bin}" ]]; then
         ok "Binary: ${bin}"
     else

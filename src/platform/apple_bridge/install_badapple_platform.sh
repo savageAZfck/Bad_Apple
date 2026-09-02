@@ -42,6 +42,8 @@ BACKUP_DIR="${BACKUP_ROOT}/${RELEASE_ID}"
 [[ -x "${REPO_ROOT}/target/release/badapple" ]] || fail "release CLI is missing"
 [[ -x "${REPO_ROOT}/target/release/gatekeeper" ]] || fail "release gatekeeper is missing"
 [[ -x "${REPO_ROOT}/target/release/badapple-identity" ]] || fail "Secure Enclave helper is missing"
+[[ -x "${REPO_ROOT}/target/release/badapple-identity-agent" ]] || fail "Secure Enclave identity agent is missing"
+[[ -x "${REPO_ROOT}/target/release/badapple-supervisor" ]] || fail "release supervisor is missing"
 [[ -x "/Applications/Bad Apple.app/Contents/MacOS/BadApple" ]] || fail "menu bar app is not installed"
 
 ensure_venv() {

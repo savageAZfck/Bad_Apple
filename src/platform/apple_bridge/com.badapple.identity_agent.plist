@@ -6,8 +6,7 @@
     <string>com.badapple.identity_agent</string>
     <key>ProgramArguments</key>
     <array>
-        <string>__BADAPPLE_ROOT__/.venv/bin/python</string>
-        <string>__BADAPPLE_ROOT__/badapple_identity_agent.py</string>
+        <string>__BADAPPLE_ROOT__/target/release/badapple-identity-agent</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -31,8 +30,8 @@
         <string>/var/run/badapple/identity.sock</string>
         <key>BADAPPLE_IDENTITY_BLOB</key>
         <string>__CONSOLE_HOME__/Library/Application Support/BadApple/identity.sekey</string>
-        <key>PYTHONUNBUFFERED</key>
-        <string>1</string>
+        <key>BADAPPLE_IDENTITY_HELPER</key>
+        <string>__BADAPPLE_ROOT__/target/release/badapple-identity</string>
     </dict>
     <key>StandardOutPath</key>
     <string>/tmp/bad_apple_identity_agent.log</string>
