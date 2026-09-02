@@ -453,6 +453,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["search my notes", "search notes", "what did I write"], ["search_notes"]),
         (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
         (["runtime status", "health status", "system status", "process", "memory"], ["runtime_status"]),
+        (["code", "coding", "program", "programming", "developer", "refactor", "debug", "build project", "run tests"], ["read_file", "search_content", "write_file", "run_shell", "index_documents", "workspace_status"]),
         (["describe image", "image description", "what's in this image", "analyze image"], ["describe_image"]),
         (["translate", "translation", "translate text"], ["translate_text"]),
         (["consolidate memory", "deduplicate memory", "summarize memory"], ["consolidate_memory"]),

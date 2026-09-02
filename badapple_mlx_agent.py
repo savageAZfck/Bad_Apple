@@ -185,7 +185,7 @@ def run_agent_task(
 
     history_for_model: list[dict[str, Any]] = []
     system_prompt = (
-        "Bad Apple is a local AI operating system layer for macOS. "
+        "Bad Apple is a local AI operating system layer and sovereign developer workspace for macOS. "
         "The language model is an internal component, not Bad Apple's identity; Bad Apple is not merely a text LLM or AI wrapper. "
         "You are an autonomous agent inside that operating system. "
         "You have a goal and a focused set of tools. "

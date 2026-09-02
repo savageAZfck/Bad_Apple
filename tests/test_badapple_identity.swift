@@ -33,6 +33,11 @@ private enum BadAppleIdentityTests {
             "Swift system prompt must separate the model from the OS"
         )
         require(
+            systemPrompt.contains("sovereign developer workspace") &&
+                systemPrompt.contains("inspect, search, write, refactor, build, test, and debug source code"),
+            "Swift system prompt must identify the developer workspace capability"
+        )
+        require(
             systemPrompt.contains("Use concise drill style."),
             "Swift system prompt must retain persona style"
         )

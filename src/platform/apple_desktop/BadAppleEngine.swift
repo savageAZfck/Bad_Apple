@@ -972,6 +972,22 @@ final class BadAppleEngine: @unchecked Sendable {
     private func metaResponse(for prompt: String) -> String? {
         let lower = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Developer-workspace questions must not be delegated to the model,
+        // because the model may incorrectly deny a capability the OS provides.
+        if [
+            "can you code", "can you program", "can you help me code", "can you help me program",
+            "can you write code", "can you edit code", "can you build code", "can you debug code",
+            "do you code", "do you program", "are you able to code", "are you able to program",
+            "are you a coder", "are you a developer", "are you a software engineer",
+            "do you support coding", "do you support programming", "are you a developer workspace",
+            "are you a sovereign developer workspace", "are you a dev workspace", "sovereign dev workspace",
+            "what is your developer workspace",
+            "why do you say you can't code", "why do you say you cannot code",
+            "can't code", "cannot code", "can't program", "cannot program",
+        ].contains(where: { lower.contains($0) }) {
+            return "Yes. I'm Bad Apple, a sovereign local developer workspace and AI operating system for macOS. I can inspect, write, refactor, build, test, and debug code in approved workspaces using local files, tools, agents, and project context. Qwen and MLX are internal components; I do not outsource your development work to a cloud model."
+        }
+
         // Architecture queries must be deterministic so the underlying model
         // cannot incorrectly collapse the OS into its own role.
         if [
@@ -1006,12 +1022,13 @@ final class BadAppleEngine: @unchecked Sendable {
         if lower.contains("what can you do") || lower.contains("your capabilities") ||
             lower.contains("what are you capable of") || lower.contains("help me") {
             return """
-            I am Bad Apple, a local AI operating system layer for macOS. I coordinate these capabilities:
+            I am Bad Apple, a sovereign local AI operating system and developer workspace for macOS. I coordinate these capabilities:
+            • Inspecting, writing, refactoring, building, testing, and debugging source code in approved workspaces
             • Answering questions and having conversations
             • Reading and writing files on your Mac
             • Running shell commands and AppleScripts (with your approval)
             • Listing and running macOS Shortcuts
-            • Searching your local notes and documents
+            • Searching your local notes, documents, and source repositories
             • Taking screenshots and describing images
             • Managing a working memory scratchpad
             • Multi-step agent tasks with planning

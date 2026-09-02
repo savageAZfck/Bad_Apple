@@ -770,24 +770,27 @@ class MLXServer:
         """Return a persona-flavored capability list; numbered for text, condensed for voice."""
         if voice_mode:
             base = (
-                "I can answer questions, run local tools and MCP servers, search files, write notes, "
-                "run Shortcuts, manage a workspace, run agent tasks, use the kill switch and air-gap switch, "
-                "pre-download models, capture ambient context, speak responses, switch personas, run benchmarks, "
-                "stream JSON, and show a web dashboard — all on your Mac, no cloud."
+                "I'm Bad Apple, a sovereign local AI operating system and developer workspace. "
+                "I can inspect, write, refactor, build, test, and debug code in approved workspaces; "
+                "answer questions, run local tools and MCP servers, search files, write notes, run Shortcuts, "
+                "manage projects, run agent tasks, use the kill switch and air-gap switch, pre-download models, "
+                "capture ambient context, speak responses, switch personas, run benchmarks, stream JSON, "
+                "and show a web dashboard — all on your Mac, no cloud."
             )
         else:
             base = (
-                "Here's what I can do, babe:\n"
-                "1. Answer questions, explain, summarize, brainstorm, and chat — fully local and air-gapped.\n"
-                "2. Run local tools: shell, AppleScript, file read/write/search, and macOS Shortcuts with your approval.\n"
-                "3. Use local MCP servers (time, filesystem, fetch, sqlite, etc.) with per-tool write approvals.\n"
-                "4. Index documents for RAG, remember facts, and manage a workspace / project context.\n"
-                "5. Run multi-step agent tasks and capture ambient context (screen, active app).\n"
-                "6. Engage the kill switch / emergency stop and the air-gap hard switch to lock down network access.\n"
-                "7. Pre-download models with a one-click memory check, switch personas, run benchmarks, and stream JSON.\n"
-                "8. Speak responses through the local Piper TTS server and integrate with macOS Shortcuts and Siri.\n"
-                "9. Show a local web dashboard / control center at http://127.0.0.1:8787.\n"
-                "10. Sync with other Bad Apple peers over P2P — off by default.\n"
+                "I'm Bad Apple, a sovereign local AI operating system and developer workspace. Here's what I can do, babe:\n"
+                "1. Inspect, write, refactor, build, test, and debug source code in approved local workspaces.\n"
+                "2. Answer questions, explain, summarize, brainstorm, and chat — fully local and air-gapped.\n"
+                "3. Run local tools: shell, AppleScript, file read/write/search, and macOS Shortcuts with your approval.\n"
+                "4. Use local MCP servers (time, filesystem, fetch, sqlite, etc.) with per-tool write approvals.\n"
+                "5. Index documents for RAG, remember facts, and manage a workspace / project context.\n"
+                "6. Run multi-step agent tasks and capture ambient context (screen, active app).\n"
+                "7. Engage the kill switch / emergency stop and the air-gap hard switch to lock down network access.\n"
+                "8. Pre-download models with a one-click memory check, switch personas, run benchmarks, and stream JSON.\n"
+                "9. Speak responses through the local Piper TTS server and integrate with macOS Shortcuts and Siri.\n"
+                "10. Show a local web dashboard / control center at http://127.0.0.1:8787.\n"
+                "11. Sync with other Bad Apple peers over P2P — off by default.\n"
                 "Everything stays on your Mac."
             )
         if self.approval.autopilot:
@@ -845,6 +848,24 @@ class MLXServer:
             "who created you", "who is your creator", "who made you",
             "who built you", "who owns you",
         )
+        developer_phrases = (
+            "can you code", "can you program", "can you help me code", "can you help me program",
+            "can you write code", "can you edit code", "can you build code", "can you debug code",
+            "do you code", "do you program", "are you able to code", "are you able to program",
+            "are you a coder", "are you a developer", "are you a software engineer",
+            "do you support coding", "do you support programming", "are you a developer workspace",
+            "are you a sovereign developer workspace", "are you a dev workspace", "sovereign dev workspace",
+            "what is your developer workspace",
+            "why do you say you can't code", "why do you say you cannot code",
+            "can't code", "cannot code", "can't program", "cannot program",
+        )
+        if any(phrase in lower for phrase in developer_phrases):
+            return (
+                "Yes. I'm Bad Apple, a sovereign local developer workspace and AI operating system for macOS. "
+                "I can inspect, write, refactor, build, test, and debug code in approved workspaces using "
+                "local files, tools, agents, and project context. Qwen and MLX are internal components; "
+                "I do not outsource your development work to a cloud model."
+            )
         architecture_phrases = (
             "ai wrapper", "model wrapper", "text llm", "language model only",
             "just a chatbot", "just an llm", "only an llm", "just a model",

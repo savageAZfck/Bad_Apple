@@ -42,6 +42,13 @@ MODEL_RESPONSE = (
     "component inside me is Qwen 3.5 9B running through MLX; that model is one subsystem, not what I am."
 )
 
+DEVELOPER_RESPONSE = (
+    "Yes. I'm Bad Apple, a sovereign local developer workspace and AI operating system for macOS. "
+    "I can inspect, write, refactor, build, test, and debug code in approved workspaces using local "
+    "files, tools, agents, and project context. Qwen and MLX are internal components; I do not outsource "
+    "your development work to a cloud model."
+)
+
 GREETING_RESPONSES = [
     "Hey, babe! I'm here and running local on your Mac.",
     "Hiiii. Bad Apple, live on your Mac, ready to go.",
@@ -126,6 +133,21 @@ class TieringRouter:
                     return ("fast", {"text": f"{expr} = {result}"})
                 except Exception as e:  # noqa: BLE001 - logged
                     print(f"[tier] _safe_eval failed: {e}", flush=True)
+
+        # Fast tier: developer-workspace questions must not be delegated to the
+        # model, because it may incorrectly deny a capability the OS provides.
+        if any(term in low for term in (
+            "can you code", "can you program", "can you help me code", "can you help me program",
+            "can you write code", "can you edit code", "can you build code", "can you debug code",
+            "do you code", "do you program", "are you able to code", "are you able to program",
+            "are you a coder", "are you a developer", "are you a software engineer",
+            "do you support coding", "do you support programming", "are you a developer workspace",
+            "are you a sovereign developer workspace", "are you a dev workspace", "sovereign dev workspace",
+            "what is your developer workspace",
+            "why do you say you can't code", "why do you say you cannot code",
+            "can't code", "cannot code", "can't program", "cannot program",
+        )):
+            return ("fast", {"text": DEVELOPER_RESPONSE})
 
         # Fast tier: architecture questions must not be delegated to the model,
         # because the model may incorrectly collapse the OS into its own role.

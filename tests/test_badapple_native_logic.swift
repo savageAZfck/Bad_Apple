@@ -42,7 +42,9 @@ enum BadAppleNativeLogicTests {
         }
         guard router.toolsForPrompt(text: "show runtime status")?.contains("[runtime_status]") == true,
               router.toolsForPrompt(text: "list shortcuts")?.contains("[list_shortcuts]") == true,
-              router.toolsForPrompt(text: "search my notes")?.contains("[search_notes]") == true else {
+              router.toolsForPrompt(text: "search my notes")?.contains("[search_notes]") == true,
+              router.toolsForPrompt(text: "refactor this code and run tests")?.contains("[write_file]") == true,
+              router.toolsForPrompt(text: "refactor this code and run tests")?.contains("[run_shell]") == true else {
             fail("native tool keyword routing")
         }
 

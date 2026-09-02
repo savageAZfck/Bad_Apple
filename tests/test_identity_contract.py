@@ -45,6 +45,27 @@ class IdentityContractTests(unittest.TestCase):
             payload["text"],
         )
 
+    def test_developer_workspace_is_a_first_class_capability(self) -> None:
+        router = TieringRouter(fast_model_enabled=False)
+        for question in (
+            "Can you code?",
+            "Are you a sovereign dev workspace?",
+            "Are you a sovereign developer workspace?",
+            "Why do you say you can't code?",
+        ):
+            tier, payload = router.select_tier(question)
+            self.assertEqual(tier, "fast")
+            self.assertIsNotNone(payload)
+            assert payload is not None
+            self.assertIn("sovereign local developer workspace", payload["text"])
+            self.assertIn("write", payload["text"])
+            self.assertIn("debug", payload["text"])
+            self.assertNotIn("can't code", payload["text"].lower())
+            self.assertNotIn("cannot code", payload["text"].lower())
+
+        tier, _ = router.select_tier("Write code to parse a JSON file")
+        self.assertEqual(tier, "reasoning")
+
     def test_swift_prompt_manager_contains_same_contract(self) -> None:
         root = Path(__file__).resolve().parents[1]
         prompt_source = (root / "src/platform/apple_desktop/BadAppleConversation.swift").read_text(encoding="utf-8")
@@ -52,8 +73,10 @@ class IdentityContractTests(unittest.TestCase):
         self.assertIn("local AI operating system layer for macOS", prompt_source)
         self.assertIn("Qwen, MLX", prompt_source)
         self.assertIn("not merely a text LLM", prompt_source)
+        self.assertIn("sovereign developer workspace", prompt_source)
         self.assertIn("not an AI wrapper", engine_source)
         self.assertIn("language-model component inside me", engine_source)
+        self.assertIn("I can inspect, write, refactor, build, test, and debug code", engine_source)
 
 
 if __name__ == "__main__":
