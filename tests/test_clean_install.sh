@@ -105,17 +105,16 @@ for bin in badapple gatekeeper badapple-identity badapple-identity-agent badappl
     fi
 done
 
-# --- Step 4: Verify Python files ---
+# --- Step 4: Verify there are no Python files in the project root ---
 echo ""
-echo "Checking Python files..."
+echo "Checking for legacy Python files..."
 
-for py in badapple_mlx_server.py badapple_tools.py badapple_extras.py badapple_aqua_helper.py badapple_slicks.py badapple_p2p.py badapple_dashboard.py; do
-    if [[ -f "${py}" ]]; then
-        ok "Python file: ${py}"
-    else
-        fail "Missing Python file: ${py}"
-    fi
-done
+PYTHON_FILES=$(find . -maxdepth 1 -name '*.py' -type f | wc -l | tr -d ' ')
+if [[ "${PYTHON_FILES}" -eq 0 ]]; then
+    ok "No legacy Python files in project root"
+else
+    fail "Found ${PYTHON_FILES} legacy Python file(s) in project root"
+fi
 
 # --- Step 5: Verify launchd plists ---
 echo ""
@@ -173,15 +172,10 @@ else
 fi
 
 # Shell allowlist doesn't include interpreters
-if grep -q 'python3\|swift\|cargo\|rustc' badapple_tools.py | grep -v '#' 2>/dev/null; then
-    # More precise check
-    if .venv/bin/python -c "from badapple_tools import SHELL_ALLOWED_COMMANDS; assert 'python3' not in SHELL_ALLOWED_COMMANDS" 2>/dev/null; then
-        ok "Shell allowlist excludes interpreters"
-    else
-        skip "Shell allowlist check (venv not available)"
-    fi
+if ! grep -qE 'python3|swift|cargo|rustc' policy.yaml; then
+    ok "Shell allowlist excludes interpreters"
 else
-    ok "Shell allowlist excludes interpreters (no matches)"
+    fail "policy.yaml still lists an interpreter in the allowlist"
 fi
 
 # --- Step 8: Test a query (if daemon is running) ---

@@ -70,11 +70,7 @@ if [[ "${UNSIGNED}" -eq 0 ]]; then
     codesign --verify --strict "${REPO_ROOT}/target/release/badapple-identity"
     codesign --verify --deep --strict "/Applications/Bad Apple.app"
 fi
-if [[ "${BADAPPLE_TTS:-0}" == "1" && -x "${REPO_ROOT}/.venv/bin/python" && -f "${REPO_ROOT}/badapple_tts_server.py" ]]; then
-    echo "TTS enabled and Python TTS agent is available."
-else
-    echo "Python TTS not enabled/available; continuing with native-only installation (no TTS support)."
-fi
+echo "Native-only installation (no Python venv required)."
 
 if [[ "${MODE}" == "--dry-run" ]]; then
     echo "Dry run passed. Re-run with --install to stage, promote, and health-check services."
@@ -164,14 +160,7 @@ trap - ERR
 
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_bridge/install_identity_agent.sh"
 
-# The TTS agent is the only remaining Python component. Install it only when
-# explicitly enabled and the required venv and server script are present;
-# otherwise the platform runs Python-free and voice output is unavailable.
-if [[ "${BADAPPLE_TTS:-0}" == "1" && -x "${REPO_ROOT}/.venv/bin/python" && -f "${REPO_ROOT}/badapple_tts_server.py" ]]; then
-    launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_tts_agent.sh"
-else
-    echo "Skipping Python TTS agent."
-fi
+# TTS is disabled until a native Swift implementation replaces the Python server.
 
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
 
