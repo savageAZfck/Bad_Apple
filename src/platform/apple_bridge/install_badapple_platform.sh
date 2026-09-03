@@ -121,19 +121,30 @@ rollback() {
         target="/Library/LaunchDaemons/${plist}"
         [[ ! -f "${backup}" ]] || cp -p "${backup}" "${target}"
     done
-    launchctl bootout system/com.badapple.supervisor 2>/dev/null || true
-    launchctl bootout system/com.badapple.mlx 2>/dev/null || true
-    launchctl bootout system/com.badapple.gatekeeper 2>/dev/null || true
+    unload_job system/com.badapple.supervisor
+    unload_job system/com.badapple.mlx
+    unload_job system/com.badapple.gatekeeper
+    sleep 1
     launchctl load -w /Library/LaunchDaemons/com.badapple.gatekeeper.plist || true
     launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist || true
     fail "readiness failed; previous launchd configuration restored from ${BACKUP_DIR}"
 }
 trap rollback ERR
 
-launchctl bootout system/com.badapple.supervisor 2>/dev/null || true
-launchctl bootout system/com.badapple.mlx 2>/dev/null || true
-launchctl bootout system/com.badapple.gatekeeper 2>/dev/null || true
+# Fully unload any previously loaded jobs before re-loading. `bootout` is
+# sometimes not enough when launchd has the job in an orphaned/enabled state;
+# disable + remove ensures the next `load -w` succeeds.
+unload_job() {
+    local label="$1"
+    launchctl disable "${label}" 2>/dev/null || true
+    launchctl remove "${label}" 2>/dev/null || true
+}
+
+unload_job system/com.badapple.supervisor
+unload_job system/com.badapple.mlx
+unload_job system/com.badapple.gatekeeper
 sleep 2
+
 launchctl load -w /Library/LaunchDaemons/com.badapple.gatekeeper.plist
 launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist
 launchctl load -w /Library/LaunchDaemons/com.badapple.supervisor.plist
