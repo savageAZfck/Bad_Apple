@@ -270,7 +270,7 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
     }
 }
 
-/// Send a chunk to the local Piper TTS server and play it with afplay.
+/// Send a chunk to the local native TTS server and play it with afplay.
 fn speak_chunk(text: &str) {
     let voice =
         std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "en_US-amy-medium".to_string());

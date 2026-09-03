@@ -144,6 +144,7 @@ private final class TTSServer {
 
         var on: Int32 = 1
         _ = setsockopt(newFd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        setNoSigPipe(fd: newFd)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -201,6 +202,11 @@ private final class TTSServer {
         try? fileManager.removeItem(atPath: socketPath)
     }
 
+    private func setNoSigPipe(fd: Int32) {
+        var on: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    }
+
     private func acceptLoop() {
         while gTTSShouldStop == 0 {
             var clientAddr = sockaddr_un()
@@ -223,6 +229,8 @@ private final class TTSServer {
                 break
             }
 
+            setNoSigPipe(fd: clientFd)
+
             synthQueue.async { [weak self] in
                 guard let self else {
                     close(clientFd)
@@ -235,6 +243,9 @@ private final class TTSServer {
 
     private func handleConnection(fd: Int32) {
         defer { close(fd) }
+
+        // Prevent a spurious SIGPIPE if the client disconnects before we reply.
+        setNoSigPipe(fd: fd)
 
         guard let requestData = readRequest(fd: fd) else {
             sendError(fd: fd, error: TTSError.socketReadFailed("empty or oversized request"))
@@ -517,6 +528,7 @@ private final class TTSServer {
         _ = signal(SIGINT, SIG_IGN)
         _ = signal(SIGTERM, SIG_IGN)
         _ = signal(SIGHUP, SIG_IGN)
+        _ = signal(SIGPIPE, SIG_IGN)
 
         let s1 = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         let s2 = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)

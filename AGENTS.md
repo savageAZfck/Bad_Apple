@@ -39,7 +39,7 @@ osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridg
 
 It creates a rollback snapshot under `/var/lib/bad_apple/install_backups/` and restores the previous launchd configuration if readiness does not pass.
 
-To enable the optional native TTS service, install with `BADAPPLE_TTS=1`.
+The native TTS agent (`badapple-tts`) is built and installed by default.
 
 ## Unsigned build and install
 
@@ -104,7 +104,7 @@ target/release/badapple "What is 2+2?"
 # voice (text output only, no audio)
 BADAPPLE_VOICE=1 target/release/badapple "What do you think of Siri?"
 
-# voice with TTS (Piper server must be running)
+# voice with TTS (badapple-tts server must be running)
 target/release/badapple --speak "What do you think of Siri?"
 
 # set max tokens
@@ -242,15 +242,16 @@ Look for log lines like:
 [perf] 31 tokens @ 20.1 decode t/s (5.4 total t/s), draft_accept_ratio=58%, block_tokens=6, peak_memory=5.72 GB
 ```
 
-## Optional native TTS
+## Native TTS
 
-TTS is now provided by the native `badapple-tts` binary / menu-bar TTS service,
-not a venv. Enable it at install time with `BADAPPLE_TTS=1`.
+TTS is now provided by the native `badapple-tts` binary. It is built by
+`build_bad_apple_menu_bar.sh` and installed by `install_badapple_platform.sh`
+by default; no Python venv is required.
 
-Install with TTS enabled:
+Install:
 
 ```bash
-BADAPPLE_TTS=1 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
+osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
 ```
 
 The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`, `__CONSOLE_HOME__`, and `__CONSOLE_GROUP__` placeholders. `install_badapple_platform.sh` renders them at install time, so the same release can be installed from any path and any user.
@@ -466,7 +467,7 @@ cargo clippy --release
   Mac has 16 GB total and routinely runs low on genuinely free memory with
   an IDE/agent session open alongside the model, which alone is enough to
   explain a real, reproducible slowdown that isn't Bad Apple's fault.
-- The menu bar `PiperTTSClient` streams chunked TTS through `PiperTTSPlaybackController`, which queues WAVs and crossfades consecutive chunks with a 50 ms volume ramp. If `AVAudioPlayer` fails, it falls back to the previous `afplay` path. Apple TTS fallback for a full Piper failure remains in `BadAppleVoiceHost`.
+- The menu bar streams chunked TTS through the native `badapple-tts` Unix socket (`/tmp/badapple_tts.sock`); each chunk is played with `afplay`.
 
 ## Cognitive architecture validation
 

@@ -704,7 +704,9 @@ final class PiperTTSClient {
     private func isTrustedTTSPath(_ url: URL) -> Bool {
         let path = url.path
         let normalized = (path as NSString).standardizingPath
-        guard normalized.hasPrefix("/tmp/badapple_tts_"), normalized.hasSuffix(".wav") else { return false }
+        guard normalized.hasPrefix("/tmp/badapple_tts_") else { return false }
+        let ext = (normalized as NSString).pathExtension.lowercased()
+        guard ext == "wav" || ext == "caf" else { return false }
         return true
     }
 

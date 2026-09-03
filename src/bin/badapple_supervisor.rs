@@ -210,10 +210,7 @@ fn check_once(repair: bool) -> serde_json::Value {
     let grace = startup_grace();
 
     for svc in services() {
-        let entry = state
-            .services
-            .entry(svc.name.clone())
-            .or_default();
+        let entry = state.services.entry(svc.name.clone()).or_default();
 
         let running = launchd_running(&svc.domain);
         if running {

@@ -10,8 +10,8 @@ PLIST_DST="${AGENT_DIR}/com.badapple.tts.plist"
 
 mkdir -p "${AGENT_DIR}"
 
-# Substitute placeholder tokens so the agent points at the right venv,
-# voices directory, and home directory on this machine.
+# Substitute placeholder tokens so the agent points at the native binary
+# and the console user's home directory.
 sed -e "s|__REPO_ROOT__|${REPO_ROOT}|g" \
     -e "s|__HOME__|${HOME}|g" \
     "${PLIST_SRC}" > "${PLIST_DST}"

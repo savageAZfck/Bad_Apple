@@ -2,7 +2,7 @@
 
 ## What it is
 
-Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a Qwen 3.5 9B brain and a Qwen 2.5 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, speaks responses through a local Piper TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
+Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a Qwen 3.5 9B brain and a Qwen 2.5 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, speaks responses through a native AVFoundation TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
 
 ## How to install (consumer)
 
@@ -29,7 +29,7 @@ Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 
 | Target LLM | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | All text and voice reasoning |
 | Fast tier | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Greetings, identity, time, simple math, deterministic queries |
 | Embeddings | `BAAI/bge-small-en-v1.5` | small | Local document / memory retrieval on CPU |
-| TTS voice | `en_US-amy-medium` (default) | small | Piper neural speech on a local socket |
+| TTS voice | `en_US-amy-medium` (default) | small | Native AVFoundation speech on a local socket |
 
 All models are cached on disk after the first download. Nothing is re-downloaded at runtime.
 
@@ -103,7 +103,7 @@ When asked, it should say:
 ### 3. Voice and interface
 1. Text input via the Rust CLI
 2. Voice mode with STT / "hey bad apple" wake
-3. Local Piper neural TTS with `--speak`
+3. Local native TTS with `--speak`
 4. macOS menu bar app with voice HUD
 5. macOS Shortcuts and Siri AppIntents
 6. Local web dashboard at `http://127.0.0.1:8787`
@@ -166,7 +166,7 @@ When asked, it should say:
 - **Persona** — switch between Default, Wicket, Gen Z, Drill, and Midwest Aunt
 - **Fast Tier Only** — toggle the 0.5B fast tier
 - **Benchmark** — runs the default prompt suite and shows results
-- **Voice (Piper / Apple)** and **Accent** — TTS engine and voice selection
+- **Voice (native / Apple)** and **Accent** — TTS engine and voice selection
 - **Quit**
 
 ## Privacy & security

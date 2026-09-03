@@ -16,7 +16,7 @@ The runtime now uses a single Qwen 3.5 9B 4-bit brain for both text and voice. T
 | Fast tier / tiny brain | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Instant answers for greetings, identity, time, simple math, and deterministic queries |
 | MLX-LM speculative draft (optional) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional small draft for the 9B brain; set `BADAPPLE_SPECULATIVE_DRAFT=auto` to enable |
 | RAG embeddings | `BAAI/bge-small-en-v1.5` | small | Local sentence-transformer on CPU |
-| TTS voice | `en_US-amy-medium` (default) | small | Piper neural TTS server (`badapple-tts`) |
+| TTS voice | `en_US-amy-medium` (default) | small | Native AVFoundation TTS server (`badapple-tts`) |
 
 All models are downloaded and cached on the Mac. At runtime, **no prompt, response, or action leaves the machine**.
 
@@ -77,7 +77,7 @@ Voice uses the 9B brain by default. When fast tier is on, short voice greetings 
 
 ## What Bad Apple can do
 
-Bad Apple is a private, on-device AI assistant for macOS. It runs the Qwen 3.5 9B brain and a 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes files, and speaks responses through a local Piper TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
+Bad Apple is a private, on-device AI assistant for macOS. It runs the Qwen 3.5 9B brain and a 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes files, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
 
 When asked, it can say:
 
@@ -156,16 +156,16 @@ The current build covers the following roadmap phases:
 - **Roast Mode** — alias for the `drill` persona on the next voice query
 - **Persona** — switch between Default, Wicket, Gen Z, Drill, and Midwest Aunt
 - **Benchmark** — runs the default prompt suite and shows results
-- **Voice (Piper / Apple)** and **Accent** — TTS engine and voice selection
+- **Voice (native / Apple)** and **Accent** — TTS engine and voice selection
 - **Quit**
 
 Voice queries respect the selected persona and roast mode by passing `--persona <name>` / `--roast` to the bundled `badapple` CLI helper.
 
 ### Voice / TTS
 
-- `--speak` streams each sentence to the local **Piper TTS server** and plays with `afplay`
+- `--speak` streams each sentence to the local **native TTS server** (`badapple-tts`) and plays with `afplay`
 - Voice can be changed via `BADAPPLE_TTS_VOICE` (default `en_US-amy-medium`)
-- `BADAPPLE_TTS_LENGTH_SCALE`, `BADAPPLE_TTS_NOISE_SCALE`, etc. control voice speed and tone
+- `BADAPPLE_TTS_LENGTH_SCALE` and `BADAPPLE_TTS_VOLUME` control voice speed and volume
 - TTS server runs under `com.badapple.tts`
 
 ### Persona
@@ -260,7 +260,7 @@ New flags:
             ▼
 ┌───────────────────────────────────────┐
 │  com.badapple.tts                     │
-│  badapple-tts (Piper)                 │
+│  badapple-tts (AVFoundation)          │
 └───────────────────────────────────────┘
 ```
 
