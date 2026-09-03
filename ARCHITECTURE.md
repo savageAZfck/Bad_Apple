@@ -85,7 +85,7 @@ This document describes the structure, data flow, and invariants of the Bad Appl
 
 ### `telemetry.rs`
 - Axum HTTP server with `/telemetry`, `/metrics`, `/dashboard`, `/tools/run`, `/skills/learn`, `/skills/run`, `/pursuits/add`, `/transfer/evaluate`, and `/identity` endpoints.
-- Sandboxed Python tool runner.
+- Sandboxed tool runner.
 
 ### `metrics.rs`
 - `MemoryProfiler`, `LatencyRingBuffer`, SVG dashboards, and `metrics.jsonl` logging.

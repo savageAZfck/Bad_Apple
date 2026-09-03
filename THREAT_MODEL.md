@@ -19,7 +19,7 @@ Bad Apple is a baremetal AI OS layer for Apple Silicon macOS. It runs as three s
 ### Boundary 3: MLX Daemon → Local Filesystem
 - **Trust level**: Semi-trusted. User-provided paths and tool arguments.
 - **Attack surface**: File read/write tools, AppleScript execution, shell commands, document indexing.
-- **Defense**: Fail-closed filesystem cage with openat-based operations, O_NOFOLLOW on all file creation, path jailing in Python tools, AppleScript escaping, shell allowlist (no interpreters), human-in-the-loop approval policy.
+- **Defense**: Fail-closed filesystem cage with openat-based operations, O_NOFOLLOW on all file creation, path jailing in tools, AppleScript escaping, shell allowlist (no interpreters), human-in-the-loop approval policy.
 
 ### Boundary 4: MLX Daemon → WebAssembly Sandbox
 - **Trust level**: Untrusted. Model-generated code executed in sandbox.
@@ -81,6 +81,6 @@ Bad Apple is a baremetal AI OS layer for Apple Silicon macOS. It runs as three s
 | cargo-fuzz (WASM) | Compilation + execution | 638K iterations, 0 crashes |
 | cargo-fuzz (Protocol) | P2P frame parsing | 694K iterations, 0 crashes |
 | cargo-fuzz (Scavenger) | Path handling | 760K iterations, 0 crashes |
-| Regression tests | Security boundaries | 78 Rust + 46 Python tests |
+| Regression tests | Security boundaries | 78 Rust + 32 install tests |
 | Install test | Distribution integrity | 32 checks |
 | cargo audit | Dependency vulnerabilities | 0 vulnerabilities |

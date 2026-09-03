@@ -2,12 +2,12 @@
 
 Most local AI tools ask you to trust their logs. Bad Apple's audit ledger is
 built so you don't have to — you can verify it yourself, with a tool short
-enough to read in five minutes, using nothing but Python's standard library
-and basic elliptic-curve math.
+enough to read in five minutes, using only a small, auditable verifier and
+basic elliptic-curve math.
 
 ## The three layers
 
-1. **Hash-chained ledger** (`badapple_extras.AuditLedger`, always on unless
+1. **Hash-chained ledger** (`AuditLedger` in the Swift security module, always on unless
    private mode is enabled). Every query, tool call, cache hit, and response
    is appended to `/var/lib/bad_apple/ledger.jsonl` with each entry's hash
    depending on the previous entry's hash. Editing or deleting any entry
@@ -20,7 +20,7 @@ and basic elliptic-curve math.
    tampering, not a determined attacker with file access.
 
 2. **Secure Enclave checkpoint** (`AuditLedger.sign_checkpoint()`, triggered
-   with `agent_client.py audit checkpoint`). Signs the current chain tip hash
+   from the menu bar or on a schedule). Signs the current chain tip hash
    and entry count with this device's Secure Enclave identity key — the same
    non-extractable hardware key used for SLICKS v2 authentication and model
    provenance. Writes `/var/lib/bad_apple/ledger_checkpoint.json`.
@@ -31,14 +31,13 @@ and basic elliptic-curve math.
    A checkpoint is a snapshot: it vouches for the chain *up to that point*,
    signed at a specific time, by a specific device.
 
-3. **Standalone verifier** (`tools/verify_ledger.py`). Imports nothing from
-   Bad Apple's codebase — only Python's standard library, plus the
-   widely-used `cryptography` package for the signature check. You do not
+3. **Standalone verifier** (`tools/verify-ledger`). Imports nothing from
+   Bad Apple's codebase — only a small P-256 signature implementation. You do not
    need Bad Apple installed, running, or trusted to use it. Point it at an
    exported `ledger.jsonl` and (optionally) `ledger_checkpoint.json`:
 
    ```bash
-   python3 tools/verify_ledger.py /path/to/ledger.jsonl \
+   target/release/verify-ledger /path/to/ledger.jsonl \
        --checkpoint /path/to/ledger_checkpoint.json
    ```
 
@@ -76,18 +75,23 @@ actually needs.
 
 ## Practical usage
 
+The ledger checkpoint, chain verification, and certification tools are being
+ported to Rust and are not currently available from the command line. In the
+meantime, the ledger files can be inspected directly and
+`target/release/badapple --doctor` reports socket/process health.
+
 ```bash
 # Sign a checkpoint of the current ledger state (do this before handing off
 # a ledger for review, or on a schedule).
-.venv/bin/python agent_client.py audit checkpoint
+# target/release/badapple audit checkpoint     # coming soon
 
 # Ask the live daemon to verify the chain (convenience path).
-.venv/bin/python agent_client.py audit verify
+# target/release/badapple audit verify         # coming soon
 
 # Independently verify without trusting the daemon at all.
-.venv/bin/python tools/verify_ledger.py /var/lib/bad_apple/ledger.jsonl \
-    --checkpoint /var/lib/bad_apple/ledger_checkpoint.json
+# target/release/verify-ledger /var/lib/bad_apple/ledger.jsonl \
+#     --checkpoint /var/lib/bad_apple/ledger_checkpoint.json
 
 # Also exercised automatically by the air-gap certification suite:
-sudo .venv/bin/python cert_suite.py
+# target/release/cert-suite                      # coming soon
 ```

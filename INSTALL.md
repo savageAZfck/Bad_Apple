@@ -8,7 +8,6 @@ Bad Apple runs entirely on your Mac. **No Apple Developer ID is required.** The 
 - Apple Silicon Mac (M1 or newer)
 - Xcode 16+ or Command Line Tools with `swiftc`
 - Rust via [rustup](https://rustup.rs)
-- Python 3.12 and a persistent virtual environment
 - Model weights cached locally (the first download can be several GB)
 
 ## One-command build (from source)
@@ -111,12 +110,10 @@ This:
 
 1. Copies `Bad Apple.app` into `/Applications`.
 2. Strips the Gatekeeper quarantine flag.
-3. Creates `bad_apple/.venv` and installs Python dependencies from `requirements.txt`.
+3. Installs the `badapple`, `gatekeeper`, `badapple-identity`, and `badapple-tts` native binaries.
 4. Renders the platform LaunchDaemon plists for your user and install path.
 5. Loads the gatekeeper, MLX, and supervisor daemons and waits for readiness.
 6. Installs the menu-bar login agent.
-
-No repo checkout or manual `pip install` is required.
 
 ## Using larger models
 

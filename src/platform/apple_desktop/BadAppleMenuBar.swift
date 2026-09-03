@@ -4134,7 +4134,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         get { UserDefaults.standard.object(forKey: "BadAppleSelectedPersona") as? String ?? "default" }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleSelectedPersona") }
     }
-    private var aquaHelperProcess: Process?
     private let splash = BadAppleSplashWindow()
     private var runtimeState: [String: Any] {
         // NATIVE ENGINE: When the Swift MLX engine is loaded, return the cached
@@ -4682,52 +4681,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         timer?.invalidate()
         memoryGovernor.stop()
         stopAquaHelper()
-    }
-
-    private func findAquaHelper() -> (python: URL, script: URL)? {
-        // SECURITY: Do not search ~/.bad_apple for the aqua helper — that
-        // directory is user-writable and an attacker could drop a malicious
-        // script there to gain the menu bar's Accessibility permissions.
-        // Only use the helper bundled inside the signed app bundle.
-        if let bundledScript = Bundle.main.url(forResource: "badapple_aqua_helper", withExtension: "py") {
-            return (URL(fileURLWithPath: "/usr/bin/python3"), bundledScript)
-        }
-
-        return nil
-    }
-
-    private func startAquaHelper() {
-        guard aquaHelperProcess == nil else { return }
-        guard let helper = findAquaHelper() else {
-            print("Aqua helper script not found", terminator: "\n")
-            return
-        }
-        let process = Process()
-        process.executableURL = helper.python
-        process.arguments = ["-u", helper.script.path]
-        // SECURITY: Build a minimal allow-list environment instead of inheriting
-        // the full parent environment, which could contain attacker-set
-        // BADAPPLE_SOCKET_PATH, BADAPPLE_AUTOPILOT, etc.
-        var env: [String: String] = [:]
-        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
-        env["HOME"] = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
-        env["LANG"] = ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8"
-        env["BADAPPLE_AQUA_SOCKET"] = "/var/run/badapple/aqua_helper.sock"
-        env["BADAPPLE_APP_BUNDLE"] = Bundle.main.bundlePath
-        process.environment = env
-        do {
-            try process.run()
-            aquaHelperProcess = process
-            print("Started Aqua helper for Shortcuts", terminator: "\n")
-        } catch {
-            print("Failed to start Aqua helper: \(error)", terminator: "\n")
-        }
-    }
-
-    private func stopAquaHelper() {
-        guard let process = aquaHelperProcess, process.isRunning else { return }
-        process.terminate()
-        aquaHelperProcess = nil
     }
 
     private func registerSMAppService() {

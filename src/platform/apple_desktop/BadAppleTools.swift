@@ -7,6 +7,8 @@
 
 import Foundation
 import Dispatch
+import CommonCrypto
+import Darwin
 
 // MARK: - Regex Helpers
 
@@ -1290,6 +1292,16 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     /// List Shortcuts using Apple's fixed command-line executable.
     func listShortcuts() -> String {
+        let payload: [String: Any] = ["timeout": 15]
+        if let response = callAqua(command: "list_shortcuts", payload: payload, timeout: 15),
+           let ok = response["ok"] as? Bool {
+            if ok, let shortcuts = response["shortcuts"] as? [String] {
+                return shortcuts.isEmpty ? "No shortcuts found" : shortcuts.joined(separator: "\n")
+            } else if let error = response["error"] as? String {
+                return "Error listing shortcuts: \(error)"
+            }
+        }
+
         let result = runProcess(launchPath: "/usr/bin/shortcuts", arguments: ["list"], timeout: 15)
         if result.exitCode != 0 {
             let error = (result.stderr.isEmpty ? result.stdout : result.stderr)
@@ -1306,6 +1318,21 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         if shortcutName.isEmpty || shortcutName.count > 255 || shortcutName.contains("\0") {
             return "Error: invalid shortcut name"
         }
+
+        var payload: [String: Any] = ["name": shortcutName, "timeout": 60]
+        if let input, !input.isEmpty {
+            guard input.utf8.count <= 100_000 else { return "Error: shortcut input is too large" }
+            payload["input"] = input
+        }
+        if let response = callAqua(command: "run_shortcut", payload: payload, timeout: 60),
+           let ok = response["ok"] as? Bool {
+            if ok, let output = response["output"] as? String {
+                return output.isEmpty ? "done" : String(output.prefix(20_000))
+            } else if let error = response["error"] as? String {
+                return "Error running shortcut: \(error)"
+            }
+        }
+
         var arguments = ["run", shortcutName]
         var standardInput: Data?
         if let input, !input.isEmpty {
@@ -1777,5 +1804,168 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
         let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         return (stdout, stderr, Int(process.terminationStatus))
+    }
+}
+
+// MARK: - Aqua helper client
+
+private func aquaSocketPath() -> String {
+    return ProcessInfo.processInfo.environment["BADAPPLE_AQUA_SOCKET"] ?? "/var/run/badapple/aqua_helper.sock"
+}
+
+private func aquaSocketExists(_ path: String) -> Bool {
+    var st = stat()
+    return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK
+}
+
+private func loadAquaSlicksSecret() -> Data? {
+    let env = ProcessInfo.processInfo.environment
+    let raw: String?
+    if let secretEnv = env["BADAPPLE_SLICKS_SECRET"], !secretEnv.isEmpty {
+        raw = secretEnv
+    } else {
+        let keyPath = env["BADAPPLE_SLICKS_KEY_PATH"] ?? "/var/lib/bad_apple/slicks.key"
+        raw = try? String(contentsOfFile: keyPath, encoding: .utf8)
+    }
+    guard let raw = raw else { return nil }
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.allSatisfy({ $0.isHexDigit }) && trimmed.count >= 32 {
+        return aquaHexToData(trimmed)
+    }
+    return trimmed.data(using: .utf8)
+}
+
+private func aquaHexToData(_ hex: String) -> Data? {
+    let lower = hex.lowercased()
+    guard lower.count % 2 == 0 else { return nil }
+    var data = Data(capacity: lower.count / 2)
+    let chars = Array(lower)
+    for i in stride(from: 0, to: chars.count, by: 2) {
+        guard let high = chars[i].hexDigitValue,
+              let low = chars[i + 1].hexDigitValue else { return nil }
+        data.append(UInt8(high * 16 + low))
+    }
+    return data
+}
+
+private func aquaHmacSHA256Hex(_ key: Data, _ message: String) -> String? {
+    var mac = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    let msgData = Data(message.utf8)
+    key.withUnsafeBytes { keyPtr in
+        msgData.withUnsafeBytes { msgPtr in
+            guard let keyBase = keyPtr.baseAddress, let msgBase = msgPtr.baseAddress else { return }
+            CCHmac(
+                CCHmacAlgorithm(kCCHmacAlgSHA256),
+                keyBase,
+                key.count,
+                msgBase,
+                msgData.count,
+                &mac
+            )
+        }
+    }
+    return mac.map { String(format: "%02x", $0) }.joined()
+}
+
+private func aquaCanonicalJSON(_ value: Any) -> String? {
+    guard JSONSerialization.isValidJSONObject(value) else { return nil }
+    guard let data = try? JSONSerialization.data(
+        withJSONObject: value,
+        options: [.sortedKeys, .withoutEscapingSlashes]
+    ) else { return nil }
+    return String(data: data, encoding: .utf8)
+}
+
+private func callAqua(command: String, payload: [String: Any], timeout: TimeInterval) -> [String: Any]? {
+    let path = aquaSocketPath()
+    guard aquaSocketExists(path) else { return nil }
+    guard let secret = loadAquaSlicksSecret(), !secret.isEmpty else { return nil }
+
+    var body = payload
+    body["command"] = command
+    body["timestamp_ms"] = Int(Date().timeIntervalSince1970 * 1000)
+    body["nonce"] = UUID().uuidString
+
+    guard let material = aquaCanonicalJSON(body),
+          let proof = aquaHmacSHA256Hex(secret, material) else { return nil }
+
+    var signed = body
+    signed["proof"] = proof
+
+    guard let requestText = aquaCanonicalJSON(signed),
+          let requestData = (requestText + "\n").data(using: .utf8) else { return nil }
+
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+
+    var nosigpipe: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+
+    var tv = timeval(tv_sec: __darwin_time_t(timeout), tv_usec: 0)
+    var tvRecv = timeval(tv_sec: __darwin_time_t(timeout), tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tvRecv, socklen_t(MemoryLayout<timeval>.size))
+
+    var addr = sockaddr_un()
+    memset(&addr, 0, MemoryLayout<sockaddr_un>.size)
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = Array(path.utf8)
+    let maxPath = MemoryLayout.size(ofValue: addr.sun_path) - 1
+    guard pathBytes.count < maxPath else { return nil }
+    _ = withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+        pathBytes.withUnsafeBufferPointer { src in
+            memcpy(UnsafeMutableRawPointer(dst), src.baseAddress!, pathBytes.count)
+        }
+    }
+    addr.sun_len = UInt8(2 + pathBytes.count + 1)
+    let addrLen = socklen_t(addr.sun_len)
+
+    let connectResult = withUnsafePointer(to: &addr) { ptr in
+        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+            connect(fd, sockaddrPtr, addrLen)
+        }
+    }
+    guard connectResult == 0 else { return nil }
+
+    guard writeAll(fd, data: requestData) else { return nil }
+
+    var buffer = Data()
+    while true {
+        if let newlineIndex = buffer.firstIndex(of: 0x0A) {
+            let line = Data(buffer[buffer.startIndex..<newlineIndex])
+            guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return nil }
+            return json
+        }
+
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        let n = read(fd, &chunk, 4096)
+        if n > 0 {
+            buffer.append(chunk, count: n)
+        } else if n == 0 {
+            return nil
+        } else {
+            let e = errno
+            if e == EINTR { continue }
+            return nil
+        }
+    }
+}
+
+private func writeAll(_ fd: Int32, data: Data) -> Bool {
+    var total = 0
+    return data.withUnsafeBytes { raw -> Bool in
+        guard let base = raw.baseAddress else { return false }
+        while total < data.count {
+            let n = write(fd, base.advanced(by: total), data.count - total)
+            if n < 0 {
+                let e = errno
+                if e == EINTR { continue }
+                return false
+            }
+            if n == 0 { return false }
+            total += n
+        }
+        return true
     }
 }

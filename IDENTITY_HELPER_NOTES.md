@@ -33,16 +33,16 @@ Swift helper that links `CryptoKit`, `Foundation`, `LocalAuthentication`, and
 4. The file is created `0o600`, so a `root`-running daemon (e.g. gatekeeper)
    cannot read a console user's key even if it can find the path.
 5. `status` can only report `unavailable` / `missing`; the non-zero exit is
-   surfaced as an `IdentityError` in `badapple_identity.py`.
+   surfaced as an `IdentityError` in the `badapple-identity` client.
 
 ## Workarounds / long-lived signing agent
 
 - Do not call the helper from a `LaunchDaemon`. Run an agent in the user's
   `Aqua` session (a `LaunchAgent` with `LimitLoadToSessionType` `Aqua`, or a
   child of the menu-bar app) and keep the `SecureEnclave` key loaded there.
-- Expose signing over a Unix domain socket the same way `badapple_aqua_helper.py`
+- Expose signing over a Unix domain socket the same way the menu-bar Aqua helper
   does for Shortcuts.
-- Make `badapple_identity.py` prefer `BADAPPLE_IDENTITY_AGENT_SOCKET` and
+- Make the `badapple-identity` client prefer `BADAPPLE_IDENTITY_AGENT_SOCKET` and
   fall back to the one-shot binary only when the agent is absent.
 - If signing while the screen is locked is required, change the file
   protection to `.completeFileProtectionUntilFirstUserAuthentication`

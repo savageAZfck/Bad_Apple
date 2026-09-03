@@ -5,7 +5,7 @@ Bad Apple is a sovereign, local AI OS. Because it runs entirely on your machine,
 ## Quick health check
 
 ```bash
-.venv/bin/python agent_client.py status
+target/release/badapple --doctor
 ```
 
 This returns runtime mode, health checks, active models, memory usage, and P2P state.
@@ -62,37 +62,39 @@ If that fails, the dashboard server is not running; restart the platform daemons
 
 ### Voice input does not work
 
-- Make sure `badapple_tts_server.py` is running and the TTS LaunchAgent is loaded.
+- Make sure `badapple-tts` is loaded and the TTS LaunchAgent is loaded.
 - Approve Microphone and Speech Recognition permissions when prompted.
 - Check `/tmp/badapple_voice_debug.log` for transcription errors.
 
 ### Model loads slowly or runs out of memory
 
 - Close other large apps before starting Bad Apple.
-- Use `agent_client.py flush` or `agent_client.py unload all` to free VRAM.
+- Use `badapple "flush vram"` or `badapple "unload all models"` to free VRAM.
 - Disable `BADAPPLE_FAST_TIER` if you are troubleshooting inference.
 
 ## Built-in diagnostic tools
 
 ```bash
 # Runtime and health
-.venv/bin/python agent_client.py status
+target/release/badapple --doctor
 
 # Flush Metal cache
-.venv/bin/python agent_client.py flush
+target/release/badapple "flush vram"
 
 # Unload optional models
-.venv/bin/python agent_client.py unload all
+target/release/badapple "unload all models"
 
 # Air-gap / security certification
-osascript -e 'do shell script "cd /path/to/bad_apple && /path/to/bad_apple/.venv/bin/python cert_suite.py" with administrator privileges'
+# The certification suite is being ported to Rust and is not currently available
+# from the command line. Run `target/release/badapple --doctor` for a socket/process
+# health report in the meantime.
 ```
 
 ## Reporting issues
 
 If you hit a bug that the steps above do not fix:
 
-1. Note the output of `agent_client.py status`.
+1. Note the output of `target/release/badapple --doctor`.
 2. Capture the last 100 lines of `/var/log/bad_apple_mlx_server.log`.
 3. Include your macOS version, Mac model, and whether you are running the signed or unsigned build.
 4. File an issue with that information.

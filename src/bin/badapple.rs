@@ -452,28 +452,34 @@ fn run_doctor() -> Result<()> {
         );
     }
 
-    // Python / venv
-    let _ = writeln!(report, "\n[python]");
-    if let Ok(out) = Command::new("python3").args(["--version"]).output() {
-        let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout).trim());
+    // Python-free status
+    let _ = writeln!(report, "\n[python-free status]");
+    if let Some(root) = badapple_root() {
+        let _ = writeln!(report, "project root: {}", root.display());
+        match Command::new("find")
+            .args([".", "-maxdepth", "1", "-name", "*.py"])
+            .current_dir(&root)
+            .output()
+        {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let files: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+                if files.is_empty() {
+                    let _ = writeln!(report, "python files in root: none");
+                } else {
+                    let _ = writeln!(report, "python files in root:");
+                    for f in files.iter().take(20) {
+                        let _ = writeln!(report, "  - {}", f);
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(report, "python files in root: check failed ({e})");
+            }
+        }
+    } else {
+        let _ = writeln!(report, "project root: not found");
     }
-    let venv: std::path::PathBuf = std::env::var("VIRTUAL_ENV")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .filter(|p| p.is_dir())
-        .or_else(|| badapple_root().map(|r| r.join(".venv")))
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".local/share/badapple/venv"))
-        })
-        .unwrap_or_default();
-    let _ = writeln!(report, "venv: {}", venv.display());
-    let _ = writeln!(
-        report,
-        "venv python ok: {}",
-        venv.join("bin/python").is_file()
-    );
 
     // Binaries
     let _ = writeln!(report, "\n[binaries]");

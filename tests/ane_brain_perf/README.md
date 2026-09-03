@@ -20,20 +20,14 @@ is passed as `BADAPPLE_ANE_MODEL`.
 For the current Qwen3-4B substrate, convert a local GGUF through the
 repository-local pipeline (see Conversion pipeline below).
 
-For a quick legacy benchmark, download a pre-converted Qwen2.5-3B artifact:
+For a quick legacy benchmark, place a pre-converted Qwen2.5-3B artifact in
+`artifacts/` (see `Model artifacts` below) and run:
 
 ```bash
-# 1. (Optional) create a Python venv with huggingface_hub.
-python3.12 -m venv .venv
-.venv/bin/pip install huggingface-hub "huggingface-hub[hf_xet]"
-
-# 2. Download the pre-converted CoreML model.
-python3 tests/ane_brain_perf/download_models.py qwen3b
-
-# 3. Build the Swift bridge if it is not already present.
+# Build the Swift bridge if it is not already present.
 bash src/platform/apple_bridge/build_apple_bridge.sh
 
-# 4. Run the benchmark.
+# Run the benchmark.
 cargo test --release --test ane_brain_perf -- --nocapture
 ```
 
@@ -75,25 +69,11 @@ an independently resumable stateful shard. Each conversion and compilation
 runs in its own subprocess, and `conversion_manifest.json` is updated after
 every successful stage without deleting prior attempts.
 
+The conversion pipeline is being ported to a native Swift/Rust
+toolchain and is not currently available from the command line. Pre-converted
+artifacts can be placed in `artifacts/` and validated with:
+
 ```bash
-.venv/bin/pip install coremltools torch==2.7.1
-
-# First validate one layer without weight compression.
-.venv/bin/python tests/ane_brain_perf/convert_ane_coreml.py \
-  tests/ane_brain_perf/artifacts/qwen3b_ane_src/Qwen3-4B-Q8_0.gguf \
-  --layers 36 --seq-len 512 --quant-bits 0 --compute-units all \
-  --shard-size 1 --stop-after-shards 1 \
-  --output-dir tests/ane_brain_perf/artifacts/qwen3b_ane_validation
-
-# Convert/compile all 36 stateful per-layer FP16 shards. Re-running this exact
-# command resumes the manifest and skips completed shards.
-.venv/bin/python tests/ane_brain_perf/convert_ane_coreml.py \
-  tests/ane_brain_perf/artifacts/qwen3b_ane_src/Qwen3-4B-Q8_0.gguf \
-  --layers 36 --seq-len 512 --quant-bits 0 --quant-strategy uniform \
-  --compute-units all --shard-size 1 --compile-shards \
-  --generation-artifacts --lm-head-shards 4 \
-  --output-dir tests/ane_brain_perf/artifacts/qwen3b_ane_shards
-
 # Audit all compiled compute plans and run a stateful shard prediction.
 cargo test --release --test ane_brain_perf ane_shard_residency \
   -- --ignored --nocapture

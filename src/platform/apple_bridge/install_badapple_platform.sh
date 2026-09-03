@@ -160,7 +160,10 @@ trap - ERR
 
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_bridge/install_identity_agent.sh"
 
-# TTS is disabled until a native Swift implementation replaces the Python server.
+# Optional native TTS agent.
+if [[ -x "${REPO_ROOT}/target/release/badapple-tts" ]]; then
+    launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_tts_agent.sh"
+fi
 
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
 

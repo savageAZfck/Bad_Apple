@@ -123,7 +123,7 @@ Two full security audit passes were conducted. 69 vulnerabilities were found and
 - WASM alloc bump pointer corruption (validates after mutating)
 - Browser action allows file:// and smb:// schemes
 - Screen capture writes to user-supplied path
-- Shell allowlist includes interpreters (python3, swift, cargo, rustc, git)
+- Shell allowlist includes interpreters (swift, cargo, rustc, git)
 - P2P retry backoff powi sign flip (u32 to i32 cast)
 - Aqua helper no replay/nonce protection
 - /tmp debug log pre-creation with world-readable permissions
@@ -145,7 +145,6 @@ Two full security audit passes were conducted. 69 vulnerabilities were found and
 ### Test Coverage
 
 - 78 Rust unit tests (including 25 security regression tests)
-- 46 Python security tests
 - 32 clean-machine install checks
 - 4 fuzzing targets with corpus
 - Cognitive architecture A/B benchmark

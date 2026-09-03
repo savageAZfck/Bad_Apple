@@ -6,7 +6,7 @@ Bad Apple is not an app. It's not a model wrapper. It's a system-level AI runtim
 
 ## What It Does
 
-- **Runs a 9B Qwen 3.5 model via native Swift MLX inference** — the menu bar app loads the model directly via mlx-swift-lm, no Python subprocess, no daemon overhead. Falls back to the Python daemon when the Swift engine isn't loaded.
+- **Runs a 9B Qwen 3.5 model via native Swift MLX inference** — the menu bar app loads the model directly via mlx-swift-lm, with no subprocess or daemon overhead.
 - **Provable air-gap privacy** — a toggle that turns off all network access, verified by a 12-test certification suite. Not a trust claim. A proof.
 - **Hash-chained audit ledger** with SHA-256 chaining — every query, tool call, and response is logged and tamper-evident (now in Swift via CryptoKit)
 - **Fail-closed filesystem cage** using openat-based fd operations with O_NOFOLLOW — structurally eliminates TOCTOU race conditions
@@ -39,7 +39,7 @@ badapple CLI / menu bar / voice host
      └─ Automation cage (openat, O_NOFOLLOW)
               │
               ▼
-   badapple_mlx_server.py  (Python + MLX)
+   badapple-engine  (Swift MLX)
    ├─ 9B Qwen 3.5 + 0.5B fast tier
    ├─ Speculative decoding (DFlash + MTP)
    ├─ RAG / embeddings / semantic cache
@@ -49,7 +49,7 @@ badapple CLI / menu bar / voice host
    └─ MCP server
               │
               ▼
-    badapple_tts_server.py  (Piper TTS)
+    badapple-tts  (Piper TTS)
     
     ANE Bridge (Swift FFI)
     ├─ Multi-shard CoreML execution
@@ -60,7 +60,7 @@ badapple CLI / menu bar / voice host
 
 ## Security
 
-Bad Apple has been through **two full security audit passes**. 69 vulnerabilities were found and fixed across all four code layers (Rust, Python, Swift, Shell). Four fuzzing targets were built with cargo-fuzz and run for 2 hours each — **127 million iterations, zero crashes**.
+Bad Apple has been through **two full security audit passes**. 69 vulnerabilities were found and fixed across the Rust, Swift, Shell, and Metal code layers. Four fuzzing targets were built with cargo-fuzz and run for 2 hours each — **127 million iterations, zero crashes**.
 
 | Attack Surface | Fuzzer | Iterations | Crashes |
 |---|---|---|---|
@@ -95,9 +95,6 @@ BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 ```bash
 # Rust tests (78 tests)
 cargo test --release
-
-# Python security tests (46 tests)
-.venv/bin/python -m unittest tests.test_redteam_v2
 
 # Clean install test (32 checks)
 tests/test_clean_install.sh
@@ -146,12 +143,12 @@ target/release/badapple --roast "Tell me about cloud AI"
 
 | Metric | Value |
 |---|---|
-| Lines of code | ~72,000 (Rust 18,864, Python 22,197, Swift 15,480, Shell 2,315) |
+| Lines of code | ~72,000 (Rust 18,864, Swift 15,480, Shell 2,315) |
 | Swift logic modules | BadAppleEngine, BadAppleMLX, BadAppleSecurity, BadAppleTools, BadAppleConversation, BadAppleRAG |
 | Build time | 35 days + Swift migration |
 | Security audits | 2 passes, 69 bugs found and fixed |
 | Fuzzer iterations | 127 million, zero crashes |
-| Tests | 78 Rust + 46 Python + 32 install + 4 fuzz targets |
+| Tests | 78 Rust + 32 install + 4 fuzz targets |
 | Model | 9B Qwen 3.5 4-bit (pinned to commit hash) |
 | Native inference | mlx-swift-lm (streaming, speculative decoding, KV cache) |
 | Security | SLICKS v1+v2, openat cage, WASM sandbox, audit ledger, air-gap cert |

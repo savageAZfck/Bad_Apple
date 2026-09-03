@@ -168,14 +168,14 @@ The ledger is a JSON-Lines file where every line is an entry and every entry is 
 
 ### 4.2 Hash computation
 
-```python
+```text
 payload = canonical_json({
     "timestamp": entry.timestamp,
     "event": entry.event,
     "data": entry.data,
     "previous_hash": entry.previous_hash,
 })
-entry.hash = sha256(payload).hexdigest()
+entry.hash = sha256(payload).to_hex()
 ```
 
 ### 4.3 Genesis
@@ -224,7 +224,7 @@ When a banned pattern is detected, the stream is replaced with a redaction marke
 
 ## 7. Certification Suite
 
-A bare-metal AI OS build must pass `cert_suite.py`.
+A bare-metal AI OS build must pass the air-gap certification suite.
 
 ### 7.1 Required checks
 
@@ -239,7 +239,9 @@ A bare-metal AI OS build must pass `cert_suite.py`.
 ### 7.2 Running the suite
 
 ```bash
-sudo /path/to/venv/bin/python cert_suite.py
+# The certification suite is being ported to Rust and is not currently available
+# from the command line. Run `target/release/badapple --doctor` for a socket/process
+# health report in the meantime.
 ```
 
 Root is preferred for full socket/process visibility, but many checks run unprivileged.

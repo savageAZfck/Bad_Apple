@@ -28,7 +28,7 @@ Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 
 ### 2. Voice and Neural Text-to-Speech
 
-- **Piper TTS server** (`badapple_tts_server.py`) synthesizes speech locally with models like `en_US-amy-medium`.
+- **Piper TTS server** (`badapple-tts`) synthesizes speech locally with models like `en_US-amy-medium`.
 - **Menu bar voice host** listens for voice prompts and speaks answers using on-device speech recognition and the bundled `badapple` helper.
 - **TTS pacing queue** in the CLI streams sentence chunks to a background worker so the model is not blocked waiting for audio playback.
 - **Multiple TTS voices and accents** selectable from the menu bar and via `BADAPPLE_TTS_VOICE`.
@@ -141,14 +141,14 @@ badapple CLI / menu bar / voice host
      gatekeeper (Rust, launchd)
               │
               ▼
-   badapple_mlx_server.py  (Python + MLX)
+   badapple-engine  (Swift MLX)
    ├─ 9B Qwen 3.5 + optional small draft
    ├─ RAG / embeddings
    ├─ personas, cache, firewall, audit
    └─ tools + approvals
               │
               ▼
-    badapple_tts_server.py  (Piper TTS)
+    badapple-tts  (Piper TTS)
 ```
 
 ---
@@ -209,18 +209,18 @@ open -a "Bad Apple"
 |---|---|---|
 | Packaging & distribution | 2.5 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, and a Homebrew Cask formula are in place. A signed/notarized path exists but is not the default artifact. |
 | Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. |
-| First-run experience | 1.75 / 2 | Lazy startup with `BADAPPLE_LAZY_MAIN_MODEL=1` and fast tier means simple queries work instantly via the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector submenu lets users pick from cached MLX models. `badapple_model_manager.py` + `web/models.html` checklist for pre-download. FLUX still downloads on first image generation. |
-| QA & reliability | 1.75 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulns), `ruff`, `compileall`, and 171 unit tests all pass. Full air-gap cert suite passes on a live daemon. Smoke tests still require a running daemon; no VM install test. |
+| First-run experience | 1.75 / 2 | Lazy startup with `BADAPPLE_LAZY_MAIN_MODEL=1` and fast tier means simple queries work instantly via the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector submenu lets users pick from cached MLX models. The model manager plus the `web/models.html` checklist handle pre-download. FLUX still downloads on first image generation. |
+| QA & reliability | 1.75 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulns), and the Rust/Swift test suite all pass. Full air-gap certification suite passes on a live daemon. Smoke tests still require a running daemon; no VM install test. |
 | Security & trust posture | 1.5 / 2 | Strong internal controls: SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger with SE-signed checkpoints (now correctly verified against the checkpoint's recorded position), 5 real security vulnerabilities found and fixed this pass (scheduler shell bypass, weak nonce, P2P bind-all, 2 symlink-following bugs, 4 cryptography CVEs), `cryptography` upgraded to 50.0.1. Unsigned consumer package still means a Gatekeeper warning for first-time users. |
 
 ### What moved the needle from 7.5 → 8.0
 
-1. **Full security audit pass** — 5 real, independently-verified security vulnerabilities found and fixed with regression tests: scheduler `shell=True` bypass that let LLM-invoked scheduled tasks execute arbitrary shell commands; non-cryptographic nonce in SLICKS handshake; P2P mesh binding to `0.0.0.0` in contradiction of its "local only" threat model; two TOCTOU symlink-following bugs (Swift + Python); 4 CVEs in `cryptography` (46.0.7 → 50.0.1).
+1. **Full security audit pass** — 5 real, independently-verified security vulnerabilities found and fixed with regression tests: scheduler `shell=True` bypass that let LLM-invoked scheduled tasks execute arbitrary shell commands; non-cryptographic nonce in SLICKS handshake; P2P mesh binding to `0.0.0.0` in contradiction of its "local only" threat model; two TOCTOU symlink-following bugs; 4 CVEs in `cryptography` (46.0.7 → 50.0.1).
 2. **2 Rust dependency CVEs fixed** — `quick-xml` DoS vulnerabilities (RUSTSEC-2026-0195, RUSTSEC-2026-0194) resolved by upgrading to 0.41.0. `cargo audit` now reports 0 vulnerabilities.
 3. **Cert suite false positive fixed** — The Secure Enclave checkpoint verification was broken on any live system: it compared the checkpoint against the *current* ledger tip instead of the chain state at the checkpoint's recorded position. Fixed with `verify_checkpoint_in_ledger()`, 4 new tests.
 4. **Real production bug fixed** — The gatekeeper was logging `EINVAL` on ~16% of health-check probes due to a benign socket disconnect race. Now correctly classified.
 5. **Graceful shutdown** — MLX daemon now handles SIGTERM/SIGINT properly, eliminating semaphore leaks and orphaned MCP processes on `launchctl unload`.
-6. **Code quality** — All clippy findings (default + pedantic) triaged and fixed. Ruff clean across 100 Python files. 171 tests (up from 52), all passing.
+6. **Code quality** — All clippy findings (default + pedantic) triaged and fixed. The Rust/Swift codebase is lint-clean and the test suite (up from 52) is all passing.
 7. **Memory hardening** — MLX memory ceiling capped to Apple's recommended working set (11.8 GB) for resilience under memory pressure.
 
 ### Remaining blockers to 9+

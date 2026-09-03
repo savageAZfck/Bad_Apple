@@ -11,7 +11,8 @@ when the numbers are unflattering.
 ollama pull qwen2.5:7b-instruct-q4_0
 
 cargo build --release
-.venv/bin/python tools/benchmark_vs_ollama.py
+# The Ollama comparison harness is being ported to Rust and is not currently
+# available from the command line.
 ```
 
 Results are written to `benchmarks/results/bad_apple_vs_ollama_<timestamp>.{json,md}`.
@@ -97,7 +98,7 @@ fixed one real (if unrelated) memory-safety issue along the way:
   `set_memory_limit` is 1.5x the GPU's own recommended working set size --
   on this 16 GB Mac, that let the daemon claim up to ~15.2 GB, leaving under
   1 GB of *guaranteed* headroom for literally everything else running.
-  `badapple_mlx_server.py` now caps this to `mx.device_info()`'s
+  `badapple-engine` now caps this to `mx.device_info()`'s
   `max_recommended_working_set_size` (Apple's own guidance, ~11.8 GB here) at
   startup. This did not measurably change decode tok/s in testing (the
   daemon's actual peak usage, ~5.2-5.7 GB, was already well under both the

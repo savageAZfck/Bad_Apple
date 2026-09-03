@@ -16,7 +16,7 @@ The runtime now uses a single Qwen 3.5 9B 4-bit brain for both text and voice. T
 | Fast tier / tiny brain | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Instant answers for greetings, identity, time, simple math, and deterministic queries |
 | MLX-LM speculative draft (optional) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional small draft for the 9B brain; set `BADAPPLE_SPECULATIVE_DRAFT=auto` to enable |
 | RAG embeddings | `BAAI/bge-small-en-v1.5` | small | Local sentence-transformer on CPU |
-| TTS voice | `en_US-amy-medium` (default) | small | Piper neural TTS server (`badapple_tts_server.py`) |
+| TTS voice | `en_US-amy-medium` (default) | small | Piper neural TTS server (`badapple-tts`) |
 
 All models are downloaded and cached on the Mac. At runtime, **no prompt, response, or action leaves the machine**.
 
@@ -132,15 +132,15 @@ The current build covers the following roadmap phases:
 - **Phase 2 — Persistent workspace mode** ✅: `workspace_status` reports build system, git branch, last commit, README summary, and recent files. The active workspace is set via `set workspace to <path>`.
 - **Phase 3 — Local email / calendar / reminders** ✅: `today_events`, `upcoming_events`, `list_reminders`, `add_reminder`, `unread_emails`, and `search_mail` talk to the local macOS Calendar, Reminders, and Mail apps via AppleScript.
 - **Phase 4 — Working memory dashboard** ✅: read/write/clear working memory directly with natural-language commands.
-- **Phase 5 — Plugin / signed tool registry** ✅: `PluginRegistry` in `badapple_plugins.py` loads signed plugin manifests and exposes their tools as first-class `run_tool`/`_run_approved_tool` actions.
+- **Phase 5 — Plugin / signed tool registry** ✅: `PluginRegistry` loads signed plugin manifests and exposes their tools as first-class `run_tool`/`_run_approved_tool` actions.
 - **Phase 6 — Long-horizon episodic memory graph** ✅: `MemoryGraph` stores facts, entities, relations, episodes, and workflows, and recalls them via semantic search.
-- **Phase 7 — MCP server expansion** ✅: `badapple_mcp_server.py` exposes a Unix-socket MCP transport at `/var/run/badapple/mcp.sock`, hardened with request size limits, tool allowlists, and per-call timeouts. The MCP marketplace runs as a supervised actor.
-- **Phase 8 — Encrypted P2P sync** ✅: `badapple_p2p.py` is implemented with AES-256-GCM link-local sync and Secure Enclave–signed origin authentication. It is off by default for the air-gap `cert_suite`; enable with `BADAPPLE_P2P=1`.
+- **Phase 7 — MCP server expansion** ✅: A Unix-socket MCP transport at `/var/run/badapple/mcp.sock` exposes tools and resources to MCP clients, with request size limits, tool allowlists, and per-call timeouts. The MCP marketplace runs as a supervised actor.
+- **Phase 8 — Encrypted P2P sync** ✅: P2P sync is implemented with AES-256-GCM link-local sync and Secure Enclave–signed origin authentication. It is off by default for the air-gap certification suite; enable with `BADAPPLE_P2P=1`.
 - **Phase 9 — Local image generation** ✅: `generate_image` uses the cached local `mflux` FLUX.2-klein-4B model.
 - **Phase 10 — Streaming first-token preview** ✅: token streaming is live via `--json` and the `stream_queue` in `generate_with_tools`.
 - **Phase 11 — Personal on-device LoRA fine-tuning** ✅: `lora_add_example`, `lora_train`, `lora_adapters`, and `lora_generate` use `mlx-lm` on local datasets.
 - **Phase 12 — Dream / offline consolidation** ✅: `consolidate_memory` runs a memory-graph deduplication and re-embedding pass.
-- **Phase 13 — Policy language for the cage** ✅: `Policy` in `badapple_extras.py` declares which tools are allowed, require approval, and how arguments are validated; loaded from `policy.yaml`.
+- **Phase 13 — Policy language for the cage** ✅: `Policy` in `policy.yaml` declares which tools are allowed, require approval, and how arguments are validated.
 - **Phase 14 — Adversarial output classifier** ✅: `StreamingFirewall` blocks PII, secrets, and custom blocklist patterns in generated output with a streaming Aho-Corasick automaton.
 - **Phase 15 — Self-hosting model registry** ✅: `badapple model <list|scan|info|use|verify|add|remove|recommend>` manages the local cache, records SHA-256 provenance, and signs manifests with the Secure Enclave.
 - **Phase 16 — P2P model manifest gossip + file transfer** ✅: the link-local mesh shares signed model manifests and streams the actual model weight files between peers. `badapple p2p <peers|sync|models|pull|send|receive>` discovers neighbors, syncs memory, pulls a manifest, and sends/receives the full model over encrypted local TCP.
@@ -184,10 +184,10 @@ Built-in persona packs (in `personas.json`) include Wicket (witty Londoner), Gen
 
 | Layer | Mechanism | Where it lives |
 |---|---|---|
-| Output firewall | Streaming Aho-Corasick blocklist on generated text | `badapple_extras.py` |
+| Output firewall | Streaming Aho-Corasick blocklist on generated text | `badapple-engine` |
 | Audit | Append-only SHA-256–chained JSONL with secret/PII redaction | `/var/lib/bad_apple/ledger.jsonl` |
-| Approvals | Proposal/approve workflow for `run_shell`, `run_applescript`, `write_file`, `index_documents` | `badapple_extras.py` + `badapple_mlx_server.py` |
-| Cache | Persona-scoped semantic cache; no cache for tool queries or voice | `badapple_extras.py` |
+| Approvals | Proposal/approve workflow for `run_shell`, `run_applescript`, `write_file`, `index_documents` | `badapple-engine` |
+| Cache | Persona-scoped semantic cache; no cache for tool queries or voice | `badapple-engine` |
 
 ---
 
@@ -250,7 +250,7 @@ New flags:
             ▼
 ┌───────────────────────────────────────┐
 │  com.badapple.mlx                     │
-│  badapple_mlx_server.py               │
+│  badapple-engine (Swift MLX)          │
 │  - loads single 9B target + optional small draft │
 │  - actor-ized subsystems              │
 │  - runs tools, memory, RAG, TTS, P2P, │
@@ -260,7 +260,7 @@ New flags:
             ▼
 ┌───────────────────────────────────────┐
 │  com.badapple.tts                     │
-│  badapple_tts_server.py (Piper)       │
+│  badapple-tts (Piper)                 │
 └───────────────────────────────────────┘
 ```
 

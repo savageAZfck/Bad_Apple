@@ -181,6 +181,7 @@ fi
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBarUIResponder.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleControlCenter.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleAquaHelper.swift" \
     ${LOGIC_SOURCES} \
     ${MLX_SOURCES} \
     -lBadAppleBridge -ldl \
@@ -242,12 +243,22 @@ install -m 755 "${SCRATCH_DIR}/native/BadAppleScreenCapture" "${CONTENTS_DIR}/He
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
     -framework Foundation
 install -m 755 "${SCRATCH_DIR}/native/BadAppleUI" "${CONTENTS_DIR}/Helpers/BadAppleUI"
+
+# Native TTS server (replaces the Python badapple_tts_server.py).
+echo "Building badapple-tts..."
+"${SWIFTC}" \
+    -parse-as-library -swift-version 5 -O \
+    -target "${TARGET}" -sdk "${SDK_PATH}" \
+    -o "${BUILD_DIR}/badapple-tts" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleTTS.swift" \
+    -framework AVFoundation -framework Foundation
+
+echo "Installed badapple-tts into ${BUILD_DIR}."
 install -d "${CONTENTS_DIR}/Resources"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/update_bad_apple.sh" "${CONTENTS_DIR}/Resources/update_bad_apple.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${CONTENTS_DIR}/Resources/strip_quarantine.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/install_badapple.sh" "${CONTENTS_DIR}/Resources/install_badapple.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_bridge/install_badapple_platform.sh" "${CONTENTS_DIR}/Resources/install_badapple_platform.sh"
-install -m 644 "${REPO_ROOT}/badapple_aqua_helper.py" "${CONTENTS_DIR}/Resources/badapple_aqua_helper.py"
 
 if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
     install -m 755 "${BUILD_DIR}/libbad_apple.dylib" "${FRAMEWORKS_DIR}/libbad_apple.dylib"

@@ -130,7 +130,7 @@ When asked, it should say:
 6. Output firewall with blocklist patterns
 7. Hash-chained audit ledger with secret/PII redaction
 8. SLICKS v2 Unix socket authentication with Secure Enclave ECDSA (HMAC fallback)
-9. Air-gap certification suite (`cert_suite.py`) that verifies local-only sockets, model provenance, and SE identity
+9. Air-gap certification suite that verifies local-only sockets, model provenance, and SE identity
 
 ### 6. Mesh and networking
 1. P2P encrypted LAN sync (off by default)

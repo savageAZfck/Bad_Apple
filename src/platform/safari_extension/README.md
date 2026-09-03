@@ -8,19 +8,10 @@ SLICKS Unix socket.
 
 - `BadAppleCompanion/Resources/` — Safari web extension bundle (manifest, content
   script, popup, background worker).
-- `NativeHost/` — `com.badapple.companion.json` manifest and `badapple_companion_host.py`
-  native messaging bridge.
+- `BadAppleCompanion/Resources/` — Safari web extension bundle.
 
-## Install (macOS)
+## Status
 
-1. Open `src/platform/apple_bridge/BadAppleBridge.xcodeproj` or create a new
-   Safari Extension App target that embeds `BadAppleCompanion`.
-2. Copy `NativeHost/com.badapple.companion.json` to
-   `~/Library/Application Support/com.apple.Safari/NativeMessagingHosts/`.
-3. Symlink `NativeHost/badapple_companion_host.py` into the same directory.
-4. Enable the extension in Safari → Settings → Extensions.
-
-## Security
-
-The content script only runs on user interaction. The native host talks only to
-`/var/run/badapple/substrate.sock`. No data leaves the device.
+The Safari companion native messaging host has been removed as part of the
+Python-free migration. A native `badapple-companion-host` binary may be added
+later. The web extension bundle remains for a future port.

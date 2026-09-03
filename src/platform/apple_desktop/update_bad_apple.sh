@@ -35,7 +35,8 @@ resolve_latest() {
     local url="https://api.github.com/repos/${REPO}/releases/latest"
     local json
     json=$(curl -fsSL "${url}") || fail "could not fetch release info from ${url}"
-    echo "${json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))' 2>/dev/null || true
+    # Extract tag_name using only shell tools (no Python).
+    echo "${json}" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
 download_asset() {

@@ -6,24 +6,16 @@
 	<dict>
 		<key>BADAPPLE_TTS_SOCKET</key>
 		<string>/tmp/badapple_tts.sock</string>
-		<key>BADAPPLE_TTS_VOICES_DIR</key>
-		<string>__REPO_ROOT__/voices</string>
 		<key>BADAPPLE_TTS_VOICE</key>
-		<string>en_US-amy-medium</string>
+		<string>Samantha</string>
 		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
-		<string>0.78</string>
-		<key>BADAPPLE_TTS_NOISE_SCALE</key>
-		<string>0.80</string>
-		<key>BADAPPLE_TTS_NOISE_W_SCALE</key>
-		<string>0.75</string>
+		<string>1.0</string>
 		<key>BADAPPLE_TTS_VOLUME</key>
 		<string>1.0</string>
 		<key>HOME</key>
 		<string>__HOME__</string>
 		<key>PATH</key>
-		<string>__REPO_ROOT__/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
-		<key>PYTHONUNBUFFERED</key>
-		<string>1</string>
+		<string>/usr/local/bin:/usr/bin:/bin</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
@@ -33,8 +25,7 @@
 	<string>Background</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>__REPO_ROOT__/.venv/bin/python</string>
-		<string>__REPO_ROOT__/badapple_tts_server.py</string>
+		<string>__REPO_ROOT__/target/release/badapple-tts</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

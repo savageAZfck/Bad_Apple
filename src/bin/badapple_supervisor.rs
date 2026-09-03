@@ -213,7 +213,7 @@ fn check_once(repair: bool) -> serde_json::Value {
         let entry = state
             .services
             .entry(svc.name.clone())
-            .or_insert_with(ServiceEntry::default);
+            .or_default();
 
         let running = launchd_running(&svc.domain);
         if running {
