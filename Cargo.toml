@@ -28,6 +28,10 @@ path = "src/bin/gatekeeper.rs"
 name = "badapple-supervisor"
 path = "src/bin/badapple_supervisor.rs"
 
+[[bin]]
+name = "badapple-fetch-metallib"
+path = "src/bin/badapple_fetch_metallib.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -70,6 +74,8 @@ metal = "0.29.0"
 safetensors = "0.7.0"
 objc2-metal = "0.3.2"
 hf-chat-template = "1.0.0"
+ureq = "3.4"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 cbindgen = "0.29"

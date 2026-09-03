@@ -27,8 +27,7 @@ cp -R "${REPO_ROOT}/target/release/Bad Apple.app" "${PKG_DIR}/Bad Apple.app"
 
 echo "Copying platform files..."
 rsync -a \
-  --exclude='.git' --exclude='.venv' --exclude='.mypy_cache' \
-  --exclude='.ruff_cache' --exclude='.DS_Store' --exclude='.github' \
+  --exclude='.git' --exclude='.DS_Store' --exclude='.github' \
   --exclude='.cargo' --exclude='target' --exclude='__pycache__' --exclude='*.pyc' --exclude='*.py' \
   --exclude='data' --exclude='strategy_db' --exclude='voices' \
   --exclude='tests/ane_brain_perf' --exclude='qwen1.7b_*' --exclude='curriculum' \

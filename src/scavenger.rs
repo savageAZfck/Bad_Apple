@@ -45,7 +45,6 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "build",
     "state-backup",
     "wild_workspace",
-    ".venv",
     "sapient_agi_soul",
 ];
 const METADATA_PREFIX: &[u8] = b"scavenger:meta:";

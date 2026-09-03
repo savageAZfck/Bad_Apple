@@ -1151,7 +1151,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             "-r", "-n", "-i", "--max-count=1",
             "--binary-files=without-match",
             "--exclude-dir=.git", "--exclude-dir=target", "--exclude-dir=.build",
-            "--exclude-dir=.venv", "--exclude-dir=node_modules", "--exclude-dir=Pods",
+            "--exclude-dir=node_modules", "--exclude-dir=Pods",
             "--", pattern, resolvedPath,
         ]
 

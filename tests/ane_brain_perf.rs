@@ -110,7 +110,7 @@ fn ane_brain_perf() {
 
     let Some((model, tokenizer)) = chosen else {
         println!("ANE artifacts not present; skipping benchmark.");
-        println!("Run: python3 tests/ane_brain_perf/download_models.py");
+        println!("See tests/ane_brain_perf/README.md for artifact setup instructions.");
         return;
     };
 

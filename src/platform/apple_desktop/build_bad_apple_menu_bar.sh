@@ -74,15 +74,8 @@ if [[ -f "${MLX_METAL_CACHE}" ]] && [[ "$(shasum -a 256 "${MLX_METAL_CACHE}" | a
 fi
 
 if [[ ! -f "${MLX_METAL_CACHE}" ]]; then
-    PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
-    [[ -x "${PYTHON_BIN}" ]] || PYTHON_BIN="$(command -v python3)"
-    TMP_METAL_DIR="$(mktemp -d)"
-    "${PYTHON_BIN}" -m pip download --no-deps "mlx-metal==${MLX_METAL_VERSION}" -d "${TMP_METAL_DIR}"
-    METAL_WHEEL=("${TMP_METAL_DIR}"/mlx_metal-*.whl)
-    mkdir -p "${TMP_METAL_DIR}/extracted" "$(dirname "${MLX_METAL_CACHE}")"
-    "${PYTHON_BIN}" -m zipfile -e "${METAL_WHEEL[0]}" "${TMP_METAL_DIR}/extracted"
-    install -m 644 "${TMP_METAL_DIR}/extracted/mlx/lib/mlx.metallib" "${MLX_METAL_CACHE}"
-    rm -rf "${TMP_METAL_DIR}"
+    mkdir -p "$(dirname "${MLX_METAL_CACHE}")"
+    "${BUILD_DIR}/badapple-fetch-metallib" "${MLX_METAL_VERSION}" "${MLX_METAL_SHA256}" "${MLX_METAL_CACHE}"
 fi
 
 [[ "$(shasum -a 256 "${MLX_METAL_CACHE}" | awk '{print $1}')" == "${MLX_METAL_SHA256}" ]] || {
@@ -224,7 +217,7 @@ install -d "${CONTENTS_DIR}/Helpers"
 install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev/null || true
 
 # Screen capture helper runs as a child of the Bad Apple bundle so it uses
-# Bad Apple's Screen Recording permission instead of the Python Aqua helper.
+# Bad Apple's Screen Recording permission instead of the Aqua helper.
 "${SWIFTC}" \
     -parse-as-library -swift-version 5 -O \
     -target "${TARGET}" -sdk "${SDK_PATH}" \
