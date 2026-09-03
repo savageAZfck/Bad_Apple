@@ -4,7 +4,7 @@ This file captures the project-specific commands and conventions learned while w
 
 ## Project layout
 
-- `badapple_mlx_server.py` — MLX daemon (Python). Loads the 9B Qwen 3.5 model, DFlash draft, and serves the SLICKS Unix socket.
+- `target/release/badapple-engine` — Native Swift MLX daemon. Loads the 9B Qwen 3.5 model and serves the SLICKS Unix socket. Replaces the previous `badapple_mlx_server.py`.
 - `src/bin/badapple.rs` + `src/` — Rust CLI client that talks to the daemon.
 - `src/platform/apple_bridge/com.badapple.mlx.plist` — launchd daemon config.
 - `prompt.txt` — Hot-reloadable system prompt. Edits take effect on the next query without restarting the model.
@@ -24,21 +24,23 @@ cargo build --release
 ```bash
 cargo fmt --check
 cargo build --release
-.venv/bin/python -m ruff check .
-.venv/bin/python tests/test_smoke.py
 ```
+
+The platform no longer depends on a Python venv for core installation. Swift unit tests can be run with `BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh` (which runs `BadAppleMLXSelfTest`).
 
 ## Full platform install
 
-The installer replaces `/Applications/Bad Apple.app`, installs system LaunchDaemons, migrates `/var/lib/bad_apple` ownership, and loads the health supervisor:
+The installer replaces `/Applications/Bad Apple.app`, installs system LaunchDaemons, migrates `/var/lib/bad_apple` ownership, and loads the health supervisor. The install is now Python-free by default (no `.venv` is created):
 
 ```bash
 cargo build --release
-src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
 ```
 
 It creates a rollback snapshot under `/var/lib/bad_apple/install_backups/` and restores the previous launchd configuration if readiness does not pass.
+
+To add the optional Python TTS agent back, create a `.venv` and run the installer with `BADAPPLE_TTS=1`.
 
 ## Unsigned build and install
 
@@ -246,21 +248,28 @@ Look for log lines like:
 [perf] 31 tokens @ 20.1 decode t/s (5.4 total t/s), draft_accept_ratio=58%, block_tokens=6, peak_memory=5.72 GB
 ```
 
-## Python venv
+## Python venv (optional, TTS only)
 
-The venv must live on persistent storage. Do not place it on a RAM disk because macOS updates and reboots clear the disk and leave both MLX and TTS launch jobs failing with `EX_CONFIG`.
+A Python venv is no longer required for the core platform. It is only needed if you want the optional Piper TTS agent (`BADAPPLE_TTS=1`).
 
-The live setup uses:
+If TTS is enabled, the venv must live on persistent storage. Do not place it on a RAM disk because macOS updates and reboots clear the disk and leave the TTS launch job failing with `EX_CONFIG`.
+
+The optional TTS setup uses:
 
 ```bash
 /opt/homebrew/bin/python3.12 -m venv ~/.local/share/badapple/venv
 ln -s ~/.local/share/badapple/venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Core packages include `mlx-lm`, `dflash-mlx`, `mlx-vlm`, `mlx-audio`, `mflux`, `piper-tts`, `langdetect`, `cryptography`, `psutil`, `PyYAML`, `pdfplumber`, and `EbookLib`.
+Then install with TTS enabled:
 
-The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`, `__CONSOLE_HOME__`, and `__CONSOLE_GROUP__` placeholders. `install_badapple_platform.sh` renders them at install time, so the same release can be installed from any path and any user. It also creates the `.venv` from `requirements.txt` if one is not present.
+```bash
+BADAPPLE_TTS=1 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install" with administrator privileges'
+```
+
+The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`, `__CONSOLE_HOME__`, and `__CONSOLE_GROUP__` placeholders. `install_badapple_platform.sh` renders them at install time, so the same release can be installed from any path and any user.
 
 ## Current generation settings
 
@@ -270,10 +279,11 @@ Set in `src/platform/apple_bridge/com.badapple.mlx.plist`:
 - `BADAPPLE_SPECULATIVE_DRAFT=auto` — set to a cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft.
 - `BADAPPLE_NUM_DRAFT_TOKENS=2` — number of tokens the draft model generates per verification step. Runtime command: `set draft tokens to 4`.
 
-In `badapple_mlx_server.py`:
+In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple-engine` daemon):
 
 - `prefill_step_size=4096` and `max_kv_size=4096` keep prefill in one shot and bound the KV cache.
 - System prompt is hot-reloaded from `prompt.txt`; keep it compact to minimize TTFT.
+- `badapple_mlx_server.py` has been replaced by the native Swift `badapple-engine`.
 
 ## Common gotchas
 

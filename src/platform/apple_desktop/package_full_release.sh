@@ -44,7 +44,7 @@ rsync -a \
 
 # Copy only the release binaries we need for the platform.
 install -d "${PKG_DIR}/bad_apple/target/release"
-for bin in badapple gatekeeper badapple-identity; do
+for bin in badapple gatekeeper badapple-identity badapple-identity-agent badapple-supervisor badapple-engine; do
     if [[ -x "${REPO_ROOT}/target/release/${bin}" ]]; then
         install -m 755 "${REPO_ROOT}/target/release/${bin}" "${PKG_DIR}/bad_apple/target/release/${bin}"
     fi
@@ -68,10 +68,9 @@ Quick install:
 
     sudo ./install.sh
 
-This copies Bad Apple.app into /Applications, creates a local Python
-environment, installs the system daemons, and starts the menu bar. The
-first launch will download model weights (several GB) if they are not
-cached.
+This copies Bad Apple.app into /Applications, installs the native system
+daemons (no Python venv required), and starts the menu bar. The first
+launch will download model weights (several GB) if they are not cached.
 
 For the manual path, copy Bad Apple.app to /Applications, then run the
 platform installer from a checkout as documented in INSTALL.md.

@@ -496,6 +496,55 @@ final class BadAppleToolRouter: @unchecked Sendable {
         return lines.joined(separator: "\n")
     }
 
+    /// Return tool schemas in the chat-template format expected by
+    /// `BadAppleInference.generateWithTools`.
+    func toolSchemasForPrompt(text: String) -> [[String: Any]]? {
+        let low = text.lowercased()
+        var selectedNames = Set<String>()
+
+        for (keywords, toolNames) in keywordToolMap {
+            if keywords.contains(where: { low.contains($0) }) {
+                selectedNames.formUnion(toolNames)
+            }
+        }
+
+        guard !selectedNames.isEmpty else { return nil }
+
+        let selected = tools.filter { selectedNames.contains($0.name) }
+        guard !selected.isEmpty else { return nil }
+
+        return selected.map { tool in
+            var properties: [String: Any] = [:]
+            var required: [String] = []
+            for param in tool.parameters {
+                properties[param.name] = [
+                    "type": "string",
+                    "description": param.description,
+                ]
+                if param.required {
+                    required.append(param.name)
+                }
+            }
+
+            let parameters: [String: Any] = [
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            ]
+
+            let function: [String: Any] = [
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": parameters,
+            ]
+
+            return [
+                "type": "function",
+                "function": function,
+            ]
+        }
+    }
+
     /// Heuristic: should the model be offered tools for this prompt?
     func shouldUseTools(prompt: String) -> Bool {
         let low = prompt.lowercased()

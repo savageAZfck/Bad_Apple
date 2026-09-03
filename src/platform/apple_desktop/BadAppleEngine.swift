@@ -463,6 +463,7 @@ final class BadAppleEngine: @unchecked Sendable {
         prompt: String,
         systemPrompt: String,
         history: [BadAppleInference.ChatMessage],
+        tools: [[String: Any]]?,
         maxTokens: Int,
         persona: String
     ) async throws -> BadAppleInference.GenerationResult {
@@ -475,10 +476,17 @@ final class BadAppleEngine: @unchecked Sendable {
                 prompt: currentPrompt,
                 systemPrompt: systemPrompt,
                 history: currentHistory,
+                tools: tools,
                 maxTokens: maxTokens,
                 temperature: 0.6
             )
-            let calls = toolRouter.extractToolCalls(text: lastResult.text)
+
+            let calls: [(name: String, args: [String: String])]
+            if lastResult.toolCalls.isEmpty {
+                calls = toolRouter.extractToolCalls(text: lastResult.text)
+            } else {
+                calls = lastResult.toolCalls.map { (name: $0.name, args: $0.arguments) }
+            }
             guard !calls.isEmpty else { return lastResult }
 
             var outputs: [String] = []
@@ -652,13 +660,14 @@ final class BadAppleEngine: @unchecked Sendable {
             }
 
             let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
-            if let tools = toolRouter.toolsForPrompt(text: prompt) {
-                sysPrompt += "\n\n\(tools)\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
+            if let tools = toolRouter.toolSchemasForPrompt(text: prompt) {
+                sysPrompt += "\n\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
                 do {
                     let result = try await toolAwareGeneration(
                         prompt: prompt,
                         systemPrompt: sysPrompt,
                         history: history,
+                        tools: tools,
                         maxTokens: effectiveMaxTokens,
                         persona: persona
                     )
@@ -824,12 +833,13 @@ final class BadAppleEngine: @unchecked Sendable {
         let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
 
         let result: BadAppleInference.GenerationResult
-        if let tools = toolRouter.toolsForPrompt(text: prompt) {
-            sysPrompt += "\n\n\(tools)\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
+        if let tools = toolRouter.toolSchemasForPrompt(text: prompt) {
+            sysPrompt += "\n\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
             result = try await toolAwareGeneration(
                 prompt: prompt,
                 systemPrompt: sysPrompt,
                 history: history,
+                tools: tools,
                 maxTokens: effectiveMaxTokens,
                 persona: persona
             )

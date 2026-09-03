@@ -6,8 +6,8 @@ set -euo pipefail
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 # Resolve the script's real path so this works regardless of $0 or cwd.
-SCRIPT_PATH="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${SCRIPT_SOURCE}")"
-REPO_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/../../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 PLIST_SRC="${REPO_ROOT}/src/platform/apple_bridge/com.badapple.identity_agent.plist"
 PLIST_DST="${HOME}/Library/LaunchAgents/com.badapple.identity_agent.plist"
 
@@ -22,16 +22,13 @@ CONSOLE_USER="${USER}"
 CONSOLE_HOME="${HOME}"
 CONSOLE_GROUP="$(id -gn)"
 
-/usr/bin/python3 - "${PLIST_SRC}" "${PLIST_DST}" "${REPO_ROOT}" "${CONSOLE_USER}" "${CONSOLE_HOME}" "${CONSOLE_GROUP}" <<'PY'
-import sys
-src, dst, root, user, home, group = sys.argv[1:7]
-text = open(src).read()
-text = text.replace("__BADAPPLE_ROOT__", root)
-text = text.replace("__CONSOLE_USER__", user)
-text = text.replace("__CONSOLE_HOME__", home)
-text = text.replace("__CONSOLE_GROUP__", group)
-open(dst, "w").write(text)
-PY
+# Render the plist by replacing placeholder tokens. Using '|' as the sed
+# delimiter avoids escaping path characters.
+sed -e "s|__BADAPPLE_ROOT__|${REPO_ROOT}|g" \
+    -e "s|__CONSOLE_USER__|${CONSOLE_USER}|g" \
+    -e "s|__CONSOLE_HOME__|${CONSOLE_HOME}|g" \
+    -e "s|__CONSOLE_GROUP__|${CONSOLE_GROUP}|g" \
+    "${PLIST_SRC}" > "${PLIST_DST}"
 
 plutil -lint "${PLIST_DST}"
 

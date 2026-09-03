@@ -22,8 +22,6 @@
     <dict>
         <key>BADAPPLE_DATA_DIR</key>
         <string>/var/lib/bad_apple</string>
-        <key>PYTHONUNBUFFERED</key>
-        <string>1</string>
     </dict>
     <key>StandardOutPath</key>
     <string>/var/log/bad_apple_supervisor.log</string>

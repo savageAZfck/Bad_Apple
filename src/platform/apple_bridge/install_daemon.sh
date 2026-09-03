@@ -75,12 +75,8 @@ install -o root -g wheel -m 755 "${AUTOMATION_SOURCE}" "${AUTOMATION_TARGET}"
 install -o root -g wheel -m 755 "${BRIDGE_SOURCE}" "${INSTALL_DIR}/libBadAppleBridge.dylib"
 
 if [[ ! -f "${KEY_FILE}" ]]; then
-    python3 - "${KEY_FILE}" <<'PY'
-import secrets
-import sys
-with open(sys.argv[1], "x", encoding="ascii") as f:
-    f.write(secrets.token_hex(32) + "\n")
-PY
+    install -d -o root -g staff -m 750 "$(dirname "${KEY_FILE}")"
+    openssl rand -hex 32 > "${KEY_FILE}"
 fi
 chown root:staff "${KEY_FILE}"
 chmod 640 "${KEY_FILE}"
@@ -92,18 +88,9 @@ chmod 640 "${LOG_FILE}"
 cp "${PLIST_SOURCE}" "${PLIST_TARGET}"
 # Resolve placeholder tokens so the plist points at the right checkout.
 sed -i '' -e "s|__REPO_ROOT__|${REPO_ROOT}|g" -e "s|__HOME__|${HOME}|g" "${PLIST_TARGET}"
-python3 - "${PLIST_TARGET}" "${MODEL_PATH}" "${TOKENIZER_PATH}" <<'PY'
-import plistlib
-import sys
-plist_path, model_path, tokenizer_path = sys.argv[1:]
-with open(plist_path, "rb") as f:
-    plist = plistlib.load(f)
-env = plist.setdefault("EnvironmentVariables", {})
-env["BADAPPLE_ANE_MODEL"] = model_path
-env["BADAPPLE_ANE_TOKENIZER"] = tokenizer_path
-with open(plist_path, "wb") as f:
-    plistlib.dump(plist, f, sort_keys=False)
-PY
+# Update the ANE model and tokenizer paths without Python.
+plutil -replace EnvironmentVariables.BADAPPLE_ANE_MODEL -string "${MODEL_PATH}" "${PLIST_TARGET}"
+plutil -replace EnvironmentVariables.BADAPPLE_ANE_TOKENIZER -string "${TOKENIZER_PATH}" "${PLIST_TARGET}"
 chown root:wheel "${PLIST_TARGET}"
 chmod 644 "${PLIST_TARGET}"
 plutil -lint "${PLIST_TARGET}"

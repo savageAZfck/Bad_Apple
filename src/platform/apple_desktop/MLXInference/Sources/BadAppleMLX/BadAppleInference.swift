@@ -149,17 +149,51 @@ public final class BadAppleInference: @unchecked Sendable {
         public let tokensPerSecond: Float
         public let tokenCount: Int
         public let tier: String
+        public let toolCalls: [ToolCall]
 
         public init(
             text: String,
             tokensPerSecond: Float = 0,
             tokenCount: Int = 0,
-            tier: String = "main"
+            tier: String = "main",
+            toolCalls: [ToolCall] = []
         ) {
             self.text = text
             self.tokensPerSecond = tokensPerSecond
             self.tokenCount = tokenCount
             self.tier = tier
+            self.toolCalls = toolCalls
+        }
+    }
+
+    /// A tool definition for chat-template based tool calling.
+    public struct ToolDefinition: Sendable {
+        public let type: String
+        public let function: [String: any Sendable]
+
+        public init(type: String = "function", function: [String: any Sendable]) {
+            self.type = type
+            self.function = function
+        }
+
+        public init(type: String = "function", function: [String: Any]) {
+            self.type = type
+            self.function = function.mapValues { BadAppleInference.sendableValue(from: $0) }
+        }
+
+        public var toolSpec: [String: any Sendable] {
+            ["type": type, "function": function]
+        }
+    }
+
+    /// A parsed tool call.
+    public struct ToolCall: Sendable {
+        public let name: String
+        public let arguments: [String: String]
+
+        public init(name: String, arguments: [String: String]) {
+            self.name = name
+            self.arguments = arguments
         }
     }
 
@@ -259,10 +293,176 @@ public final class BadAppleInference: @unchecked Sendable {
 
     // MARK: - Generation (callback-based streaming)
 
+    private func buildChatMessages(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = []
+    ) -> [Chat.Message] {
+        var messages: [Chat.Message] = []
+        if let systemPrompt = systemPrompt {
+            messages.append(.system(systemPrompt))
+        }
+        for message in history.suffix(12) {
+            switch message.role.lowercased() {
+            case "assistant":
+                messages.append(.assistant(message.content))
+            case "system":
+                messages.append(.system(message.content))
+            case "tool":
+                messages.append(.tool(message.content))
+            default:
+                messages.append(.user(message.content))
+            }
+        }
+        messages.append(.user(prompt))
+        return messages
+    }
+
+    private func buildRawMessages(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = []
+    ) -> [[String: any Sendable]] {
+        var messages: [[String: any Sendable]] = []
+        if let systemPrompt = systemPrompt {
+            messages.append(["role": "system", "content": systemPrompt])
+        }
+        for message in history.suffix(12) {
+            messages.append(["role": message.role, "content": message.content])
+        }
+        messages.append(["role": "user", "content": prompt])
+        return messages
+    }
+
+    private static func sendableValue(from value: Any) -> any Sendable {
+        if let string = value as? String { return string }
+        if let int = value as? Int { return int }
+        if let double = value as? Double { return double }
+        if let bool = value as? Bool { return bool }
+        if let array = value as? [Any] { return array.map { Self.sendableValue(from: $0) } }
+        if let dict = value as? [String: Any] { return dict.mapValues { Self.sendableValue(from: $0) } }
+        return String(describing: value)
+    }
+
+    private func prepareInput(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [[String: any Sendable]]? = nil,
+        container: ModelContainer
+    ) async throws -> LMInput {
+        let chatMessages = buildChatMessages(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history
+        )
+
+        if let tools = tools, !tools.isEmpty {
+            let tokenizer = await container.tokenizer
+            let messages = buildRawMessages(
+                prompt: prompt,
+                systemPrompt: systemPrompt,
+                history: history
+            )
+            do {
+                let tokenIds = try tokenizer.applyChatTemplate(
+                    messages: messages,
+                    tools: tools,
+                    additionalContext: ["enable_thinking": false]
+                )
+                return LMInput(tokens: MLXArray(tokenIds))
+            } catch MLXLMCommon.TokenizerError.missingChatTemplate {
+                // Fall through to the UserInput path below.
+            }
+        }
+
+        let userInput = UserInput(
+            chat: chatMessages,
+            additionalContext: ["enable_thinking": false]
+        )
+        return try await container.prepare(input: userInput)
+    }
+
+    private func jsonValueToString(_ value: MLXLMCommon.JSONValue) -> String {
+        switch value {
+        case .string(let s):
+            return s
+        case .bool(let b):
+            return b ? "true" : "false"
+        case .int(let i):
+            return String(i)
+        case .double(let d):
+            return String(d)
+        case .null:
+            return ""
+        case .array(let a):
+            return a.map { jsonValueToString($0) }.joined(separator: ", ")
+        case .object(let o):
+            return o.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+        }
+    }
+
+    private func toolCallText(from call: MLXLMCommon.ToolCall) -> String? {
+        let args = call.function.arguments.mapValues { jsonValueToString($0) }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["name": call.function.name, "arguments": args],
+            options: []
+        ),
+        let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return "<tool_call>\(json)</tool_call>"
+    }
+
+    private func convertToolCall(_ call: MLXLMCommon.ToolCall) -> BadAppleInference.ToolCall? {
+        let args = call.function.arguments.mapValues { jsonValueToString($0) }
+        return BadAppleInference.ToolCall(name: call.function.name, arguments: args)
+    }
+
+    public func parseToolCalls(_ text: String) -> [BadAppleInference.ToolCall] {
+        var calls: [BadAppleInference.ToolCall] = []
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<tool_call>(.*?)</tool_call>"#,
+            options: [.dotMatchesLineSeparators]
+        ) else {
+            return []
+        }
+        let range = NSRange(text.startIndex..., in: text)
+        let matches = regex.matches(in: text, options: [], range: range)
+        for match in matches {
+            guard match.numberOfRanges >= 2,
+                  let jsonRange = Range(match.range(at: 1), in: text) else { continue }
+            let jsonStr = String(text[jsonRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let data = jsonStr.data(using: .utf8) else { continue }
+
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let effective = (object["function"] as? [String: Any]) ?? object
+                guard let name = (effective["name"] as? String) ?? (object["name"] as? String) else { continue }
+
+                var rawArgs = effective["arguments"] as? [String: Any]
+                if rawArgs == nil, let stringArgs = effective["arguments"] as? String,
+                   let argData = stringArgs.data(using: .utf8) {
+                    rawArgs = try? JSONSerialization.jsonObject(with: argData) as? [String: Any]
+                }
+                if rawArgs == nil, let paramData = effective["parameters"] as? [String: Any] {
+                    rawArgs = paramData
+                }
+
+                let args: [String: String] = (rawArgs ?? [:]).mapValues {
+                    if let string = $0 as? String { return string }
+                    return String(describing: $0)
+                }
+                calls.append(BadAppleInference.ToolCall(name: name, arguments: args))
+            }
+        }
+        return calls
+    }
+
     public func generateStreamingTokens(
         prompt: String,
         systemPrompt: String? = nil,
         history: [ChatMessage] = [],
+        tools: [[String: any Sendable]]?,
         maxTokens: Int? = nil,
         temperature: Float? = nil,
         onToken: @escaping @Sendable (String) -> Void,
@@ -276,27 +476,13 @@ public final class BadAppleInference: @unchecked Sendable {
                     return
                 }
 
-                var messages: [Chat.Message] = []
-                if let systemPrompt = systemPrompt {
-                    messages.append(.system(systemPrompt))
-                }
-                for message in history.suffix(12) {
-                    switch message.role.lowercased() {
-                    case "assistant":
-                        messages.append(.assistant(message.content))
-                    case "system":
-                        messages.append(.system(message.content))
-                    default:
-                        messages.append(.user(message.content))
-                    }
-                }
-                messages.append(.user(prompt))
-
-                let userInput = UserInput(
-                    chat: messages,
-                    additionalContext: ["enable_thinking": false]
+                let lmInput = try await prepareInput(
+                    prompt: prompt,
+                    systemPrompt: systemPrompt,
+                    history: history,
+                    tools: tools,
+                    container: container
                 )
-                let lmInput = try await container.prepare(input: userInput)
                 let params = GenerateParameters(
                     maxTokens: maxTokens ?? config.maxTokens,
                     maxKVSize: 4096,
@@ -310,6 +496,8 @@ public final class BadAppleInference: @unchecked Sendable {
                 var fullText = ""
                 var tps: Float = 0
                 var tokenCount = 0
+                var detectedToolCalls: [BadAppleInference.ToolCall] = []
+                var stop = false
 
                 for await event in stream {
                     switch event {
@@ -319,16 +507,31 @@ public final class BadAppleInference: @unchecked Sendable {
                     case .info(let info):
                         tps = Float(info.tokensPerSecond)
                         tokenCount = info.generationTokenCount
-                    case .toolCall:
+                    case .toolCall(let call):
+                        if let text = toolCallText(from: call),
+                           let toolCall = convertToolCall(call) {
+                            fullText += text
+                            detectedToolCalls.append(toolCall)
+                        }
+                        stop = true
+                    }
+
+                    if tools != nil, fullText.contains("</tool_call>") {
+                        stop = true
+                    }
+
+                    if stop {
                         break
                     }
                 }
 
+                let finalToolCalls = detectedToolCalls.isEmpty ? parseToolCalls(fullText) : detectedToolCalls
                 onComplete(GenerationResult(
                     text: fullText,
                     tokensPerSecond: tps,
                     tokenCount: tokenCount,
-                    tier: "main"
+                    tier: "main",
+                    toolCalls: finalToolCalls
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))
@@ -336,11 +539,64 @@ public final class BadAppleInference: @unchecked Sendable {
         }
     }
 
+    public func generateStreamingTokens(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [ToolDefinition]? = nil,
+        maxTokens: Int? = nil,
+        temperature: Float? = nil,
+        onToken: @escaping @Sendable (String) -> Void,
+        onComplete: @escaping @Sendable (GenerationResult) -> Void,
+        onError: @escaping @Sendable (Error) -> Void
+    ) {
+        let toolSchemas: [[String: any Sendable]]? = tools?.map { $0.toolSpec }
+        generateStreamingTokens(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history,
+            tools: toolSchemas,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            onToken: onToken,
+            onComplete: onComplete,
+            onError: onError
+        )
+    }
+
+    public func generateStreamingTokens(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [[String: Any]]?,
+        maxTokens: Int? = nil,
+        temperature: Float? = nil,
+        onToken: @escaping @Sendable (String) -> Void,
+        onComplete: @escaping @Sendable (GenerationResult) -> Void,
+        onError: @escaping @Sendable (Error) -> Void
+    ) {
+        let toolSchemas: [[String: any Sendable]]? = tools?.map { dict in
+            dict.mapValues { Self.sendableValue(from: $0) }
+        }
+        generateStreamingTokens(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history,
+            tools: toolSchemas,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            onToken: onToken,
+            onComplete: onComplete,
+            onError: onError
+        )
+    }
+
     /// Generate a complete response (non-streaming).
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
         history: [ChatMessage] = [],
+        tools: [[String: any Sendable]]?,
         maxTokens: Int? = nil,
         temperature: Float? = nil
     ) async throws -> GenerationResult {
@@ -349,6 +605,7 @@ public final class BadAppleInference: @unchecked Sendable {
                 prompt: prompt,
                 systemPrompt: systemPrompt,
                 history: history,
+                tools: tools,
                 maxTokens: maxTokens,
                 temperature: temperature,
                 onToken: { _ in },
@@ -360,6 +617,106 @@ public final class BadAppleInference: @unchecked Sendable {
                 }
             )
         }
+    }
+
+    public func generate(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [ToolDefinition]? = nil,
+        maxTokens: Int? = nil,
+        temperature: Float? = nil
+    ) async throws -> GenerationResult {
+        let toolSchemas: [[String: any Sendable]]? = tools?.map { $0.toolSpec }
+        return try await generate(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history,
+            tools: toolSchemas,
+            maxTokens: maxTokens,
+            temperature: temperature
+        )
+    }
+
+    public func generate(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [[String: Any]]?,
+        maxTokens: Int? = nil,
+        temperature: Float? = nil
+    ) async throws -> GenerationResult {
+        let toolSchemas: [[String: any Sendable]]? = tools?.map { dict in
+            dict.mapValues { Self.sendableValue(from: $0) }
+        }
+        return try await generate(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history,
+            tools: toolSchemas,
+            maxTokens: maxTokens,
+            temperature: temperature
+        )
+    }
+
+    /// Generate with tool-call parsing, returning both text and any tool calls.
+    public func generateWithTools(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [[String: any Sendable]]?,
+        maxTokens: Int? = nil,
+        temperature: Float? = nil
+    ) async throws -> (text: String, toolCalls: [BadAppleInference.ToolCall]) {
+        let result = try await generate(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history,
+            tools: tools,
+            maxTokens: maxTokens,
+            temperature: temperature
+        )
+        return (result.text, result.toolCalls)
+    }
+
+    public func generateWithTools(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [ToolDefinition]? = nil,
+        maxTokens: Int? = nil,
+        temperature: Float? = nil
+    ) async throws -> (text: String, toolCalls: [BadAppleInference.ToolCall]) {
+        let toolSchemas: [[String: any Sendable]]? = tools?.map { $0.toolSpec }
+        return try await generateWithTools(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history,
+            tools: toolSchemas,
+            maxTokens: maxTokens,
+            temperature: temperature
+        )
+    }
+
+    public func generateWithTools(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        tools: [[String: Any]]?,
+        maxTokens: Int? = nil,
+        temperature: Float? = nil
+    ) async throws -> (text: String, toolCalls: [BadAppleInference.ToolCall]) {
+        let toolSchemas: [[String: any Sendable]]? = tools?.map { dict in
+            dict.mapValues { Self.sendableValue(from: $0) }
+        }
+        return try await generateWithTools(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            history: history,
+            tools: toolSchemas,
+            maxTokens: maxTokens,
+            temperature: temperature
+        )
     }
 
     // MARK: - Speculative Decoding

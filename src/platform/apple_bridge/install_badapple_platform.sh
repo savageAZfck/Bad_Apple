@@ -44,19 +44,10 @@ BACKUP_DIR="${BACKUP_ROOT}/${RELEASE_ID}"
 [[ -x "${REPO_ROOT}/target/release/badapple-identity" ]] || fail "Secure Enclave helper is missing"
 [[ -x "${REPO_ROOT}/target/release/badapple-identity-agent" ]] || fail "Secure Enclave identity agent is missing"
 [[ -x "${REPO_ROOT}/target/release/badapple-supervisor" ]] || fail "release supervisor is missing"
+[[ -x "${REPO_ROOT}/target/release/badapple-engine" ]] || fail "native engine daemon is missing"
+[[ -f "${REPO_ROOT}/target/release/libBadAppleMLX.dylib" ]] || fail "MLX runtime dylib is missing"
+[[ -f "${REPO_ROOT}/target/release/mlx.metallib" ]] || fail "MLX metallib is missing"
 [[ -x "/Applications/Bad Apple.app/Contents/MacOS/BadApple" ]] || fail "menu bar app is not installed"
-
-ensure_venv() {
-    if [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
-        return 0
-    fi
-    local req="${REPO_ROOT}/requirements.txt"
-    [[ -f "${req}" ]] || fail "missing requirements.txt; cannot create .venv"
-    echo "Creating Python venv at ${REPO_ROOT}/.venv..."
-    python3 -m venv "${REPO_ROOT}/.venv"
-    "${REPO_ROOT}/.venv/bin/pip" install -q --upgrade pip
-    "${REPO_ROOT}/.venv/bin/pip" install --require-hashes -r "${req}"
-}
 
 render_plist() {
     local src="$1" dst="$2"
@@ -66,8 +57,6 @@ render_plist() {
         -e "s|__CONSOLE_GROUP__|${CONSOLE_GROUP}|g" \
         "${src}" > "${dst}"
 }
-
-ensure_venv
 
 for plist in com.badapple.gatekeeper.plist com.badapple.mlx.plist com.badapple.supervisor.plist; do
     rendered="/tmp/${plist}.rendered.$$"
@@ -81,8 +70,11 @@ if [[ "${UNSIGNED}" -eq 0 ]]; then
     codesign --verify --strict "${REPO_ROOT}/target/release/badapple-identity"
     codesign --verify --deep --strict "/Applications/Bad Apple.app"
 fi
-"${REPO_ROOT}/.venv/bin/python" -m pip check
-"${REPO_ROOT}/.venv/bin/python" -m unittest tests.test_badapple_runtime
+if [[ "${BADAPPLE_TTS:-0}" == "1" && -x "${REPO_ROOT}/.venv/bin/python" && -f "${REPO_ROOT}/badapple_tts_server.py" ]]; then
+    echo "TTS enabled and Python TTS agent is available."
+else
+    echo "Python TTS not enabled/available; continuing with native-only installation (no TTS support)."
+fi
 
 if [[ "${MODE}" == "--dry-run" ]]; then
     echo "Dry run passed. Re-run with --install to stage, promote, and health-check services."
@@ -160,7 +152,16 @@ done
 trap - ERR
 
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_bridge/install_identity_agent.sh"
-launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_tts_agent.sh"
+
+# The TTS agent is the only remaining Python component. Install it only when
+# explicitly enabled and the required venv and server script are present;
+# otherwise the platform runs Python-free and voice output is unavailable.
+if [[ "${BADAPPLE_TTS:-0}" == "1" && -x "${REPO_ROOT}/.venv/bin/python" && -f "${REPO_ROOT}/badapple_tts_server.py" ]]; then
+    launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_tts_agent.sh"
+else
+    echo "Skipping Python TTS agent."
+fi
+
 launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
 
 echo "Bad Apple platform ${RELEASE_ID} installed and verified."
