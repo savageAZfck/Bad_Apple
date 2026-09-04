@@ -1098,4 +1098,42 @@ mod tests {
         // One ms beyond the boundary (30001ms in the past) should not be fresh.
         assert!(!timestamp_is_fresh(now - skew - 1));
     }
+
+    /// Reusing a server nonce with a different client nonce must produce a
+    /// fresh, distinct proof and still verify.
+    #[test]
+    fn v1_client_proof_is_distinct_per_client_nonce() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let timestamp = 1_700_000_000_000;
+        let client_nonce = random_nonce();
+        let server_nonce = random_nonce();
+        let prompt = "hello";
+
+        let proof1 = client_proof(secret, timestamp, &client_nonce, &server_nonce, prompt, 64);
+        assert!(verify_client_proof(
+            secret,
+            timestamp,
+            &client_nonce,
+            &server_nonce,
+            prompt,
+            64,
+            &proof1
+        ));
+
+        let client_nonce2 = random_nonce();
+        let proof2 = client_proof(secret, timestamp, &client_nonce2, &server_nonce, prompt, 64);
+        assert!(verify_client_proof(
+            secret,
+            timestamp,
+            &client_nonce2,
+            &server_nonce,
+            prompt,
+            64,
+            &proof2
+        ));
+        assert_ne!(
+            proof1, proof2,
+            "different client nonce must produce different proof"
+        );
+    }
 }

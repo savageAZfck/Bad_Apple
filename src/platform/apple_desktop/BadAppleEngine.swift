@@ -32,6 +32,18 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     private var inference: BadAppleInference
+    private lazy var fastInference: BadAppleInference? = {
+        let fastModelId = BadAppleInference.envFastModelId
+        let config = BadAppleInference.ModelConfig(
+            modelId: fastModelId,
+            revision: "main",
+            maxTokens: 150,
+            temperature: 0.6,
+            topP: 0.9
+        )
+        return BadAppleInference(config: config)
+    }()
+    private var fastModelLoaded = false
     private let personaManager = BadApplePersonaManager()
     private let auditLedger = BadAppleAuditLedger()
     private let outputFirewall = BadAppleOutputFirewall()
@@ -53,6 +65,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private let rag = BadAppleRAG()
     private let runtime = BadAppleNativeRuntime()
     private let conversation = BadAppleConversation()
+    let modelManager = BadAppleModelManager.shared
     private let conversationSessionId = "default"
     private let approvalLock = NSLock()
     private var pendingApprovals: [String: (name: String, args: [String: String])] = [:]
@@ -125,46 +138,38 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _workspacePath: String?
     private var _airgapEnabled = false
     private var _privateModeEnabled = false
+    private var _fastTierEnabled = false
 
     var isLoaded: Bool {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return _isLoaded
+        return stateLock.withLock { _isLoaded }
     }
 
     var isLoading: Bool {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return _isLoading
+        return stateLock.withLock { _isLoading }
     }
 
     var modelId: String {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return _modelId
+        return stateLock.withLock { _modelId }
     }
 
     var lastTokensPerSecond: Float {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return _lastTokensPerSecond
+        return stateLock.withLock { _lastTokensPerSecond }
     }
 
     var lastTokenCount: Int {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return _lastTokenCount
+        return stateLock.withLock { _lastTokenCount }
     }
 
     var lastCacheHit: Bool {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return _lastCacheHit
+        return stateLock.withLock { _lastCacheHit }
     }
 
     var workspacePath: String? {
         get {
-            stateLock.lock(); defer { stateLock.unlock() }
-            return _workspacePath
+            return stateLock.withLock { _workspacePath }
         }
         set {
-            stateLock.lock()
-            _workspacePath = newValue
-            stateLock.unlock()
+            stateLock.withLock { _workspacePath = newValue }
             toolExecutor.workspace = newValue
         }
     }
@@ -173,25 +178,37 @@ final class BadAppleEngine: @unchecked Sendable {
 
     var airgap: Bool {
         get {
-            stateLock.lock(); defer { stateLock.unlock() }
-            return _airgapEnabled
+            return stateLock.withLock { _airgapEnabled }
         }
         set {
-            stateLock.lock()
-            _airgapEnabled = newValue
-            stateLock.unlock()
+            stateLock.withLock { _airgapEnabled = newValue }
         }
+    }
+
+    // MARK: - Fast Tier
+
+    /// When enabled, simple queries (math, time, greetings, identity) route to
+    /// the 0.5B fast model instead of the deterministic regex path or the 9B.
+    var fastTierEnabled: Bool {
+        get {
+            return stateLock.withLock { _fastTierEnabled }
+        }
+        set {
+            stateLock.withLock { _fastTierEnabled = newValue }
+        }
+    }
+
+    /// Set the VRAM budget in GB.
+    func setVRAMBudgetGB(_ gb: UInt64) async {
+        await runtime.setVRAMBudget(gb * 1_073_741_824)
     }
 
     var privateMode: Bool {
         get {
-            stateLock.lock(); defer { stateLock.unlock() }
-            return _privateModeEnabled
+            return stateLock.withLock { _privateModeEnabled }
         }
         set {
-            stateLock.lock()
-            _privateModeEnabled = newValue
-            stateLock.unlock()
+            stateLock.withLock { _privateModeEnabled = newValue }
             auditLedger.paused = newValue
         }
     }
@@ -241,18 +258,14 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private init() {
         inference = BadAppleInference.createDefault()
-        stateLock.lock()
-        _modelId = BadAppleInference.defaultConfig.modelId
-        stateLock.unlock()
+        stateLock.withLock { _modelId = BadAppleInference.defaultConfig.modelId }
     }
 
     /// Replace the default main-model configuration before any load. No-op if
     /// a model is already loaded or loading. Used by the native daemon to honour
     /// `BADAPPLE_MODEL` / `BADAPPLE_MAIN_MODEL`.
     func configureMainModel(modelId: String, revision: String = "main") {
-        stateLock.lock()
-        let canConfigure = !(_isLoaded || _isLoading)
-        stateLock.unlock()
+        let canConfigure = stateLock.withLock { !(_isLoaded || _isLoading) }
         guard canConfigure else { return }
 
         let rev = revision.isEmpty ? "main" : revision
@@ -264,9 +277,7 @@ final class BadAppleEngine: @unchecked Sendable {
             topP: BadAppleInference.defaultConfig.topP
         )
         inference = BadAppleInference(config: config)
-        stateLock.lock()
-        _modelId = modelId
-        stateLock.unlock()
+        stateLock.withLock { _modelId = modelId }
     }
 
     // MARK: - Persona Management
@@ -301,18 +312,44 @@ final class BadAppleEngine: @unchecked Sendable {
 
     // MARK: - Model Loading
 
+    /// Estimate the memory footprint of a model from its ID.
+    /// 4-bit quantized models use roughly 0.5 bytes per parameter.
+    private func estimateModelBytes(_ modelId: String) -> UInt64 {
+        let lower = modelId.lowercased()
+        // Extract parameter count from common naming patterns.
+        if lower.contains("70b") { return 40 * 1_073_741_824 }   // ~40 GB
+        if lower.contains("32b") { return 18 * 1_073_741_824 }   // ~18 GB
+        if lower.contains("9b") || lower.contains("8b") || lower.contains("7b") { return 6 * 1_073_741_824 }  // ~6 GB
+        if lower.contains("4b") || lower.contains("3b") { return 3 * 1_073_741_824 }   // ~3 GB
+        if lower.contains("1.5b") { return 1 * 1_073_741_824 }    // ~1 GB
+        if lower.contains("0.5b") || lower.contains("500m") { return 350 * 1_048_576 } // ~350 MB
+        // Default: assume 9B-class.
+        return 6 * 1_073_741_824
+    }
+
     /// Load the model. Call this at startup or when the model changes.
     func loadModel() async {
-        stateLock.lock()
-        if _isLoaded || _isLoading { stateLock.unlock(); return }
-        _isLoading = true
-        let mid = _modelId
-        stateLock.unlock()
+        let (alreadyLoaded, mid) = stateLock.withLock { () -> (Bool, String) in
+            let loaded = _isLoaded || _isLoading
+            if !loaded { _isLoading = true }
+            return (loaded, _modelId)
+        }
+        if alreadyLoaded { return }
         await runtime.markModelLoading(mid)
+
+        // VRAM admission check: refuse to load if the model won't fit.
+        let estimatedBytes = estimateModelBytes(mid)
+        if let reason = await runtime.canFitModel(estimatedBytes: estimatedBytes) {
+            print("[BadAppleEngine] VRAM admission denied for \(mid): \(reason)")
+            stateLock.withLock { _isLoaded = false; _isLoading = false }
+            await runtime.markModelFailed(mid, error: "VRAM admission denied: \(reason)")
+            return
+        }
 
         do {
             try await inference.loadModel()
-            stateLock.lock(); _isLoaded = true; stateLock.unlock()
+            await runtime.trackModelMemory(mid, bytes: estimatedBytes)
+            stateLock.withLock { _isLoaded = true }
             await runtime.markModelReady(mid)
             Task {
                 await runtime.markModelLoading(embeddingEngine.configuration.modelId)
@@ -330,31 +367,32 @@ final class BadAppleEngine: @unchecked Sendable {
             }
         } catch {
             print("[BadAppleEngine] Failed to load model: \(error.localizedDescription)")
-            stateLock.lock(); _isLoaded = false; stateLock.unlock()
+            stateLock.withLock { _isLoaded = false }
             await runtime.markModelFailed(mid, error: error.localizedDescription)
         }
-        stateLock.lock(); _isLoading = false; stateLock.unlock()
+        stateLock.withLock { _isLoading = false }
     }
 
     /// Load from a local directory (e.g., HuggingFace cache).
     func loadModel(from directory: URL) async {
-        stateLock.lock()
-        if _isLoaded || _isLoading { stateLock.unlock(); return }
-        _isLoading = true
-        let mid = _modelId
-        stateLock.unlock()
+        let (alreadyLoaded, mid) = stateLock.withLock { () -> (Bool, String) in
+            let loaded = _isLoaded || _isLoading
+            if !loaded { _isLoading = true }
+            return (loaded, _modelId)
+        }
+        if alreadyLoaded { return }
         await runtime.markModelLoading(mid)
 
         do {
             try await inference.loadModel(from: directory)
-            stateLock.lock(); _isLoaded = true; stateLock.unlock()
+            stateLock.withLock { _isLoaded = true }
             await runtime.markModelReady(mid)
         } catch {
             print("[BadAppleEngine] Failed to load model from \(directory): \(error.localizedDescription)")
-            stateLock.lock(); _isLoaded = false; stateLock.unlock()
+            stateLock.withLock { _isLoaded = false }
             await runtime.markModelFailed(mid, error: error.localizedDescription)
         }
-        stateLock.lock(); _isLoading = false; stateLock.unlock()
+        stateLock.withLock { _isLoading = false }
     }
 
     // MARK: - Generation
@@ -573,7 +611,7 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         let persona = activePersona
-        stateLock.lock(); _lastCacheHit = false; stateLock.unlock()
+        stateLock.withLock { _lastCacheHit = false }
 
         auditLedger.append(
             eventType: "query",
@@ -629,10 +667,62 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
 
+        // Fast tier: route simple queries to the 0.5B model when enabled.
+        if fastTierEnabled && isSimpleQuery(prompt) && toolRouter.toolSchemasForPrompt(text: prompt) == nil {
+            Task {
+                await ensureFastModelLoaded()
+                guard let fastInf = fastInference, fastModelLoaded else { return }
+                let fastSys = systemPrompt(voiceMode: voiceMode)
+                let streamState = StreamState()
+                fastInf.generateStreamingTokens(
+                    prompt: prompt,
+                    systemPrompt: fastSys,
+                    history: [],
+                    tools: nil as [[String: any Sendable]]?,
+                    maxTokens: min(maxTokens, 150),
+                    temperature: 0.6,
+                    onToken: { token in
+                        let filteredToken = streamState.filter(token, with: self.outputFirewall)
+                        guard !filteredToken.isEmpty else { return }
+                        DispatchQueue.main.async { onToken(filteredToken) }
+                    },
+                    onComplete: { result in
+                        let polished = postprocessOutput(result.text)
+                        let filtered = self.outputFirewall.check(polished)
+                        self.saveTurn(prompt: prompt, response: filtered)
+                        Task {
+                            await self.semanticCache.store(prompt: prompt, response: filtered, persona: persona)
+                        }
+                        self.stateLock.withLock {
+                            self._lastTokensPerSecond = result.tokensPerSecond
+                            self._lastTokenCount = result.tokenCount
+                        }
+                        self.auditLedger.append(
+                            eventType: "response",
+                            data: ["text": filtered, "tps": result.tokensPerSecond, "tier": "fast"],
+                            persona: persona
+                        )
+                        DispatchQueue.main.async { onComplete(filtered) }
+                    },
+                    onError: { error in
+                        // Fast tier failed — fall through to the main model below.
+                        DispatchQueue.main.async {
+                            self.auditLedger.append(
+                                eventType: "error",
+                                data: ["error": "fast tier failed: \(error.localizedDescription)"],
+                                persona: persona
+                            )
+                        }
+                    }
+                )
+            }
+            return
+        }
+
         Task {
             let history = inferenceHistory()
             if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
-                stateLock.lock(); _lastCacheHit = true; stateLock.unlock()
+                stateLock.withLock { _lastCacheHit = true }
                 auditLedger.append(
                     eventType: "cache_hit",
                     data: ["prompt": prompt],
@@ -680,10 +770,10 @@ final class BadAppleEngine: @unchecked Sendable {
                         persona: persona
                     )
                     DispatchQueue.main.async {
-                        self.stateLock.lock()
-                        self._lastTokensPerSecond = result.tokensPerSecond
-                        self._lastTokenCount = result.tokenCount
-                        self.stateLock.unlock()
+                        self.stateLock.withLock {
+                            self._lastTokensPerSecond = result.tokensPerSecond
+                            self._lastTokenCount = result.tokenCount
+                        }
                         onToken(filtered)
                         onComplete(filtered)
                     }
@@ -699,53 +789,72 @@ final class BadAppleEngine: @unchecked Sendable {
             }
 
             let streamState = StreamState()
-
-            inference.generateStreamingTokens(
-                prompt: prompt,
-                systemPrompt: sysPrompt,
-                history: history,
-                maxTokens: effectiveMaxTokens,
-                temperature: 0.6,
-                onToken: { token in
-                    let filteredToken = streamState.filter(token, with: self.outputFirewall)
-                    guard !filteredToken.isEmpty else { return }
-                    DispatchQueue.main.async { onToken(filteredToken) }
-                },
-                onComplete: { result in
-                    let polished = postprocessOutput(result.text)
-                    let filtered = self.outputFirewall.check(polished)
-                    self.saveTurn(prompt: prompt, response: filtered)
-                    Task {
-                        await self.semanticCache.store(
-                            prompt: prompt,
-                            response: filtered,
-                            persona: persona
-                        )
-                    }
-                    DispatchQueue.main.async {
-                        self.stateLock.lock()
+            let onTokenCb: @Sendable (String) -> Void = { token in
+                let filteredToken = streamState.filter(token, with: self.outputFirewall)
+                guard !filteredToken.isEmpty else { return }
+                DispatchQueue.main.async { onToken(filteredToken) }
+            }
+            let onCompleteCb: @Sendable (BadAppleInference.GenerationResult) -> Void = { result in
+                let polished = postprocessOutput(result.text)
+                let filtered = self.outputFirewall.check(polished)
+                self.saveTurn(prompt: prompt, response: filtered)
+                Task {
+                    await self.semanticCache.store(
+                        prompt: prompt,
+                        response: filtered,
+                        persona: persona
+                    )
+                }
+                DispatchQueue.main.async {
+                    self.stateLock.withLock {
                         self._lastTokensPerSecond = result.tokensPerSecond
                         self._lastTokenCount = result.tokenCount
-                        self.stateLock.unlock()
-                        self.auditLedger.append(
-                            eventType: "response",
-                            data: ["text": filtered, "tps": result.tokensPerSecond],
-                            persona: persona
-                        )
-                        onComplete(filtered)
                     }
-                },
-                onError: { error in
-                    DispatchQueue.main.async {
-                        self.auditLedger.append(
-                            eventType: "error",
-                            data: ["error": error.localizedDescription],
-                            persona: persona
-                        )
-                        onError(error.localizedDescription)
-                    }
+                    self.auditLedger.append(
+                        eventType: "response",
+                        data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
+                        persona: persona
+                    )
+                    onComplete(filtered)
                 }
-            )
+            }
+            let onErrorCb: @Sendable (Error) -> Void = { error in
+                DispatchQueue.main.async {
+                    self.auditLedger.append(
+                        eventType: "error",
+                        data: ["error": error.localizedDescription],
+                        persona: persona
+                    )
+                    onError(error.localizedDescription)
+                }
+            }
+
+            // Speculative decoding: use the draft model if configured.
+            if let draftModelId = BadAppleInference.envSpeculativeDraftModel {
+                inference.generateWithSpeculativeDecoding(
+                    prompt: prompt,
+                    systemPrompt: sysPrompt,
+                    history: history,
+                    draftModelId: draftModelId,
+                    numDraftTokens: BadAppleInference.envNumDraftTokens,
+                    maxTokens: effectiveMaxTokens,
+                    temperature: 0.6,
+                    onToken: onTokenCb,
+                    onComplete: onCompleteCb,
+                    onError: onErrorCb
+                )
+            } else {
+                inference.generateStreamingTokens(
+                    prompt: prompt,
+                    systemPrompt: sysPrompt,
+                    history: history,
+                    maxTokens: effectiveMaxTokens,
+                    temperature: 0.6,
+                    onToken: onTokenCb,
+                    onComplete: onCompleteCb,
+                    onError: onErrorCb
+                )
+            }
         }
     }
 
@@ -776,7 +885,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         let persona = activePersona
         let history = inferenceHistory()
-        stateLock.lock(); _lastCacheHit = false; stateLock.unlock()
+        stateLock.withLock { _lastCacheHit = false }
 
         // Check prompt hot-reload before generation.
         checkPromptReload()
@@ -806,7 +915,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         // Check semantic cache for a matching response.
         if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
-            stateLock.lock(); _lastCacheHit = true; stateLock.unlock()
+            stateLock.withLock { _lastCacheHit = true }
             auditLedger.append(
                 eventType: "cache_hit",
                 data: ["prompt": prompt],
@@ -852,10 +961,10 @@ final class BadAppleEngine: @unchecked Sendable {
                 temperature: 0.6
             )
         }
-        stateLock.lock()
-        _lastTokensPerSecond = result.tokensPerSecond
-        _lastTokenCount = result.tokenCount
-        stateLock.unlock()
+        stateLock.withLock {
+            _lastTokensPerSecond = result.tokensPerSecond
+            _lastTokenCount = result.tokenCount
+        }
 
         // Postprocess and filter.
         let polished = postprocessOutput(result.text)
@@ -1051,8 +1160,43 @@ final class BadAppleEngine: @unchecked Sendable {
 
     func unload() async {
         await inference.unload()
-        stateLock.lock(); _isLoaded = false; let mid = _modelId; stateLock.unlock()
+        let mid = stateLock.withLock { () -> String in
+            _isLoaded = false
+            return _modelId
+        }
+        await runtime.releaseModelMemory(estimateModelBytes(mid))
         await runtime.markModelUnloaded(mid)
+        // Also unload the fast tier model if it was loaded.
+        if fastModelLoaded, let fastInf = fastInference {
+            await fastInf.unload()
+            fastModelLoaded = false
+            await runtime.releaseModelMemory(estimateModelBytes(BadAppleInference.envFastModelId))
+            await runtime.markModelUnloaded(BadAppleInference.envFastModelId)
+        }
+    }
+
+    /// Lazily load the 0.5B fast tier model on first use.
+    private func ensureFastModelLoaded() async {
+        guard !fastModelLoaded, let fastInf = fastInference else { return }
+        let fastId = BadAppleInference.envFastModelId
+        let estimatedBytes = estimateModelBytes(fastId)
+        if let reason = await runtime.canFitModel(estimatedBytes: estimatedBytes) {
+            print("[BadAppleEngine] VRAM admission denied for fast tier \(fastId): \(reason)")
+            await runtime.markModelFailed(fastId, error: "VRAM admission denied: \(reason)")
+            return
+        }
+        await runtime.markModelLoading(fastId)
+        do {
+            try await fastInf.loadModel()
+            fastModelLoaded = true
+            await runtime.trackModelMemory(fastId, bytes: estimatedBytes)
+            await runtime.markModelReady(fastId)
+            print("[BadAppleEngine] Fast tier model loaded: \(fastId)")
+        } catch {
+            fastModelLoaded = false
+            await runtime.markModelFailed(fastId, error: error.localizedDescription)
+            print("[BadAppleEngine] Fast tier model failed: \(error.localizedDescription)")
+        }
     }
 
     func runtimeStatus() async -> [String: Any] {
@@ -1061,6 +1205,9 @@ final class BadAppleEngine: @unchecked Sendable {
         status["private_mode"] = privateMode
         status["workspace"] = workspacePath ?? NSNull()
         status["ambient_context"] = ambientContext ?? NSNull()
+        status["fast_tier"] = fastTierEnabled
+        status["fast_model_loaded"] = fastModelLoaded
+        status["vram"] = await runtime.vramStatus()
         return status
     }
 
@@ -1235,13 +1382,12 @@ final class BadAppleEngine: @unchecked Sendable {
 
     /// Find cached MLX models in the HuggingFace cache directory.
     static func findCachedModels() -> [String] {
-        let cacheDir = NSHomeDirectory() + "/.cache/huggingface/hub"
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: cacheDir) else {
-            return []
-        }
-        return entries
-            .filter { $0.hasPrefix("models--") && $0.contains("Qwen") }
-            .map { $0.replacingOccurrences(of: "models--", with: "").replacingOccurrences(of: "--", with: "/") }
+        BadAppleModelManager.shared.listProfiles()
+            .map { $0.repoId }
+            .filter { repoId in
+                BadAppleModelManager.shared.modelStatus(modelId: repoId)?["status"] as? String == "cached"
+                    || BadAppleModelManager.shared.modelStatus(modelId: repoId)?["status"] as? String == "loaded"
+            }
             .sorted()
     }
 }

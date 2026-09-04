@@ -9,6 +9,7 @@ import Dispatch
 import CryptoKit
 import Security
 import Darwin
+import BadAppleMLX
 
 @main
 struct BadAppleEngineDaemon {
@@ -478,6 +479,11 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
     }
 
     let lower = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    if lower.hasPrefix("generate an image of") {
+        let imagePrompt = String(prompt.dropFirst("generate an image of".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return await BadAppleEngine.shared.executeTool(name: "image_generation", args: ["prompt": imagePrompt])
+    }
     switch lower {
     case "enable private mode", "private mode on":
         BadAppleEngine.shared.privateMode = true
@@ -495,6 +501,24 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
             return "{}"
         }
         return json
+    case "fast tier on", "enable fast tier":
+        BadAppleEngine.shared.fastTierEnabled = true
+        return "Fast tier enabled. Simple queries will route to the 0.5B model when possible."
+    case "fast tier off", "disable fast tier":
+        BadAppleEngine.shared.fastTierEnabled = false
+        return "Fast tier disabled. All queries route through the main model."
+    case "flush vram", "purge vram", "clear metal cache":
+        BadAppleEngine.shared.clearCache()
+        return "VRAM cache cleared."
+    case "unload all models":
+        await BadAppleEngine.shared.unload()
+        return "All models unloaded."
+    case "autopilot on", "enable autopilot":
+        BadAppleEngine.shared.autopilot = true
+        return "Autopilot enabled. Destructive tools run without approval."
+    case "autopilot off", "disable autopilot":
+        BadAppleEngine.shared.autopilot = false
+        return "Autopilot disabled. Destructive tools require approval."
     default:
         return nil
     }
@@ -503,17 +527,23 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
 // MARK: - Metrics
 
 private func makeMetrics() -> [String: Any] {
+    let speculativeActive = BadAppleInference.envSpeculativeDraftModel != nil
     var metrics: [String: Any] = [
         "tokens": BadAppleEngine.shared.lastTokenCount,
         "decode_tps": Double(BadAppleEngine.shared.lastTokensPerSecond),
         "total_tps": Double(BadAppleEngine.shared.lastTokensPerSecond),
-        "draft_accept_pct": 0.0,
-        "peak_memory_gb": Double(BadAppleEngine.shared.memoryUsageGB)
+        "draft_accept_pct": speculativeActive ? 0.0 : 0.0,  // TODO: extract from MLX stream info
+        "peak_memory_gb": Double(BadAppleEngine.shared.memoryUsageGB),
+        "speculative": speculativeActive
     ]
     if BadAppleEngine.shared.lastCacheHit {
         metrics["tier"] = "cache"
     } else if BadAppleEngine.shared.lastTokenCount == 0 {
         metrics["tier"] = "deterministic"
+    } else if BadAppleEngine.shared.fastTierEnabled {
+        metrics["tier"] = "fast"
+    } else if speculativeActive {
+        metrics["tier"] = "speculative"
     } else {
         metrics["tier"] = "main"
     }
@@ -548,6 +578,333 @@ private func ensureModelLoaded() async -> Bool {
         try? await Task.sleep(nanoseconds: 100_000_000)
     }
     return BadAppleEngine.shared.isLoaded
+}
+
+// MARK: - Agent Protocol (LAP)
+
+private func agentRespond(_ fd: Int32, writeQueue: DispatchQueue, reqId: String?, result: Any?, error: String?) {
+    var frame: [String: Any] = ["id": reqId ?? NSNull()]
+    if let error = error {
+        frame["type"] = "error"
+        frame["message"] = error
+    } else {
+        frame["type"] = "response"
+        frame["result"] = result ?? NSNull()
+    }
+    writeQueue.sync {
+        _ = writeJSON(fd, frame)
+    }
+}
+
+private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQueue) async {
+    let jsonStr = String(raw.dropFirst("__BADAPPLE_AGENT__ ".count))
+    guard let jsonData = jsonStr.data(using: .utf8),
+          let req = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+        agentRespond(fd, writeQueue: writeQueue, reqId: nil, result: nil, error: "invalid agent JSON")
+        return
+    }
+
+    let reqId = req["id"] as? String
+    let method = req["method"] as? String ?? ""
+    let params = req["params"] as? [String: Any] ?? [:]
+
+    switch method {
+    case "list_models":
+        let statuses = BadAppleEngine.shared.modelManager.status()
+        let current = BadAppleEngine.shared.modelId
+        let models: [[String: Any]] = statuses.map { s in
+            var m = s
+            let mid = s["id"] as? String ?? ""
+            m["loaded"] = (mid == current)
+            m["active"] = (mid == current)
+            return m
+        }
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
+            "text": models.isEmpty ? "No models tracked" : "Found \(models.count) model(s)",
+            "models": models,
+        ], error: nil)
+
+    case "scan_models":
+        BadAppleEngine.shared.modelManager.backgroundRefreshAll()
+        let statuses = BadAppleEngine.shared.modelManager.status()
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
+            "text": "Scanned HuggingFace cache. Found \(statuses.count) tracked model(s).",
+            "models": statuses,
+        ], error: nil)
+
+    case "model_info":
+        let modelId = params["model_id"] as? String ?? ""
+        if modelId.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "model_id is required")
+            return
+        }
+        if let status = BadAppleEngine.shared.modelManager.modelStatus(modelId: modelId) {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: status, error: nil)
+        } else {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "unknown or invalid model_id: \(modelId)")
+        }
+
+    case "switch_main_model":
+        let modelRef = params["model_ref"] as? String ?? ""
+        if modelRef.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "model_ref is required")
+            return
+        }
+        // Resolve model_id -> repo_id if a built-in id was passed.
+        let repoId: String
+        if let profile = BadAppleEngine.shared.modelManager.listProfiles().first(where: { $0.id == modelRef || $0.repoId == modelRef }) {
+            repoId = profile.repoId
+        } else {
+            repoId = modelRef
+        }
+        await BadAppleEngine.shared.unload()
+        BadAppleEngine.shared.configureMainModel(modelId: repoId)
+        await BadAppleEngine.shared.loadModel()
+        let loaded = BadAppleEngine.shared.isLoaded
+        let matched = BadAppleEngine.shared.modelManager.listProfiles().first { $0.repoId == repoId }
+        BadAppleEngine.shared.modelManager.markLoaded(modelId: matched?.id ?? repoId, localPath: nil)
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
+            "result": loaded ? "Switched to \(repoId)" : "Failed to load \(repoId)",
+            "model": repoId,
+            "loaded": loaded,
+        ], error: nil)
+
+    case "verify_models":
+        var results: [[String: Any]] = []
+        for profile in BadAppleEngine.shared.modelManager.listProfiles() {
+            var result = BadAppleEngine.shared.modelManager.verifyProvenance(modelId: profile.id)
+            result["id"] = profile.id
+            result["repo_id"] = profile.repoId
+            results.append(result)
+        }
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
+            "text": "Verified \(results.count) model(s)",
+            "results": results,
+        ], error: nil)
+
+    case "add_model":
+        let localPath = params["path"] as? String ?? ""
+        let modelId = params["model_id"] as? String ?? ""
+        let repoId = params["repo_id"] as? String ?? modelId
+        if localPath.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "path is required")
+            return
+        }
+        let result = BadAppleEngine.shared.modelManager.addModel(
+            modelId: modelId.isEmpty ? repoId : modelId,
+            repoId: repoId,
+            localPath: localPath
+        )
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: result, error: result["error"] as? String)
+
+    case "remove_model":
+        let modelId = params["model_id"] as? String ?? ""
+        if modelId.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "model_id is required")
+            return
+        }
+        let result = BadAppleEngine.shared.modelManager.removeModel(modelId: modelId)
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: result, error: result["error"] as? String)
+
+    case "recommend_model":
+        let query = (params["query"] as? String) ?? ""
+        let result = query.isEmpty
+            ? BadAppleEngine.shared.modelManager.recommendForMemory()
+            : BadAppleEngine.shared.modelManager.recommendForQuery(query)
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: result, error: nil)
+
+    case "runtime_status":
+        let status = await BadAppleEngine.shared.runtimeStatus()
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: status, error: nil)
+
+    case "discover_tools":
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
+            "tools": ["get_current_time", "read_file", "list_directory", "search_content",
+                       "run_shell", "write_file", "screen_capture", "run_applescript",
+                       "list_shortcuts", "run_shortcut", "index_documents", "search_notes",
+                       "read_working_memory", "write_working_memory", "clear_working_memory",
+                       "runtime_status", "describe_image", "translate_text",
+                       "consolidate_memory", "workspace_status", "read_document",
+                       "search_local_files", "set_session_seed", "get_session_seed"],
+        ], error: nil)
+
+    case "invoke_tool":
+        let toolName = params["name"] as? String ?? ""
+        let toolArgs = (params["args"] as? [String: Any] ?? [:]).mapValues { "\($0)" }
+        let result = await BadAppleEngine.shared.executeTool(name: toolName, args: toolArgs)
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["tool": toolName, "result": result], error: nil)
+
+    case "inference":
+        let inferencePrompt = params["prompt"] as? String ?? ""
+        let maxTokens = params["max_new_tokens"] as? Int ?? 120
+        if inferencePrompt.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "inference requires prompt")
+            return
+        }
+        do {
+            let text = try await BadAppleEngine.shared.generate(prompt: inferencePrompt, maxTokens: maxTokens)
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["text": text], error: nil)
+        } catch {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "inference failed: \(error.localizedDescription)")
+        }
+
+    case "run_agent_task":
+        let goal = params["goal"] as? String ?? ""
+        let maxSteps = params["max_steps"] as? Int ?? 10
+        if goal.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "goal is required")
+            return
+        }
+        do {
+            let task = try await BadAppleEngine.shared.submitAgentTask(goal: goal, maxSteps: maxSteps)
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
+                "task_id": task.id, "status": task.status.rawValue, "goal": task.goal,
+            ], error: nil)
+        } catch {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "agent task failed: \(error.localizedDescription)")
+        }
+
+    case "list_agent_tasks":
+        let tasks = await BadAppleEngine.shared.listAgentTasks()
+        let taskList: [[String: Any]] = tasks.map { t in
+            ["id": t.id, "status": t.status.rawValue, "goal": t.goal, "steps": t.steps.count, "max_steps": t.maxSteps]
+        }
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["tasks": taskList], error: nil)
+
+    case "cancel_agent_task":
+        let taskId = params["task_id"] as? String ?? ""
+        let ok = (try? await BadAppleEngine.shared.cancelAgentTask(taskId)) ?? false
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["cancelled": ok], error: nil)
+
+    case "pause_agent_task":
+        let taskId = params["task_id"] as? String ?? ""
+        let ok = (try? await BadAppleEngine.shared.pauseAgentTask(taskId)) ?? false
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["paused": ok], error: nil)
+
+    case "resume_agent_task":
+        let taskId = params["task_id"] as? String ?? ""
+        let ok = (try? await BadAppleEngine.shared.resumeAgentTask(taskId)) ?? false
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["resumed": ok], error: nil)
+
+    case "set_fast_tier":
+        let enabled = params["enabled"] as? Bool ?? true
+        BadAppleEngine.shared.fastTierEnabled = enabled
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["fast_tier": enabled], error: nil)
+
+    case "set_autopilot":
+        let enabled = params["enabled"] as? Bool ?? false
+        BadAppleEngine.shared.autopilot = enabled
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["autopilot": enabled], error: nil)
+
+    case "switch_persona":
+        let name = params["name"] as? String ?? ""
+        let ok = BadAppleEngine.shared.switchPersona(name)
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId,
+                     result: ok ? ["active_persona": BadAppleEngine.shared.activePersona] : nil,
+                     error: ok ? nil : "unknown persona '\(name)'")
+
+    case "set_workspace":
+        let path = params["path"] as? String ?? ""
+        if path.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "set_workspace requires path")
+            return
+        }
+        BadAppleEngine.shared.workspacePath = path
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["status": "workspace set to \(path)"], error: nil)
+
+    case "get_workspace":
+        let ws = BadAppleEngine.shared.workspacePath
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["workspace": ws as Any? ?? NSNull()], error: nil)
+
+    case "flush_vram":
+        BadAppleEngine.shared.clearCache()
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["result": "VRAM cache cleared"], error: nil)
+
+    case "unload_model":
+        await BadAppleEngine.shared.unload()
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["result": "model unloaded"], error: nil)
+
+    case "get_pending_approvals":
+        let pending = BadAppleEngine.shared.listPendingApprovals()
+        let summary: [[String: Any]] = pending.map { p in
+            ["id": p.id, "name": p.name, "arguments": p.args]
+        }
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["pending": summary], error: nil)
+
+    case "audit_tail":
+        let ledgerPath = "/var/lib/bad_apple/ledger.jsonl"
+        var entries: [Any] = []
+        if let lines = try? String(contentsOfFile: ledgerPath, encoding: .utf8) {
+            let allLines = lines.split(separator: "\n").suffix(20)
+            for line in allLines {
+                if let data = line.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    entries.append(json)
+                }
+            }
+        }
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["entries": entries], error: nil)
+
+    case "p2p_peers", "p2p_sync", "p2p_models", "p2p_pull_model", "p2p_send_model", "p2p_receive_model":
+        let env = ProcessInfo.processInfo.environment
+        guard env["BADAPPLE_P2P"] == "1" || env["BADAPPLE_P2P_ENABLED"] == "1" else {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil,
+                         error: "P2P is off. Set BADAPPLE_P2P=1 or enable it from the menu bar Mesh > P2P Sync.")
+            return
+        }
+        let p2pArgs = p2pCommandArgs(method: method, params: params)
+        let output = runP2PHelper(arguments: p2pArgs)
+        if let data = output.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let err = json["error"] as? String
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: err == nil ? json : nil, error: err)
+        } else if !output.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["text": output], error: nil)
+        } else {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil,
+                         error: "P2P helper produced no output")
+        }
+
+    case "identity_status":
+        let helper = IdentityAgentClient.shared
+        let available = helper.isAvailable
+        let pubKey = helper.publicKey()
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
+            "status": available ? "online" : "offline",
+            "public_key": pubKey as Any? ?? NSNull(),
+        ], error: nil)
+
+    case "identity_sign":
+        let challenge = params["challenge"] as? String ?? ""
+        if challenge.isEmpty || challenge.count > 4096 {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil,
+                         error: "identity_sign requires a challenge up to 4096 characters")
+            return
+        }
+        let sig = IdentityAgentClient.shared.sign(message: Data(challenge.utf8))
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId,
+                     result: sig.map { ["signature": $0] } ?? nil,
+                     error: sig == nil ? "identity agent unavailable" : nil)
+
+    case "kill_switch":
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["runtime": ["mode": "normal"]], error: nil)
+
+    case "private_mode":
+        let enabled = params["enabled"] as? Bool ?? true
+        BadAppleEngine.shared.privateMode = enabled
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["private_mode": enabled], error: nil)
+
+    case "set_airgap":
+        let enabled = params["enabled"] as? Bool ?? false
+        BadAppleEngine.shared.airgap = enabled
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["airgap": enabled], error: nil)
+
+    case "airgap_status":
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["airgap": BadAppleEngine.shared.airgap], error: nil)
+
+    default:
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "unknown agent method: \(method)")
+    }
 }
 
 private func handleConnection(_ fd: Int32, secret: Data?) async {
@@ -587,7 +944,7 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
         }
         serverPubkey = serverPubkeyString
         serverProofValue = helper.sign(message: Data(serverMaterial(version: version, timestampMs: timestampMs, clientNonce: clientNonce, serverNonce: serverNonce).utf8))
-        guard let serverProofValue = serverProofValue else {
+        guard serverProofValue != nil else {
             _ = writeJSON(fd, ["type": "error", "message": "SLICKS v2 server signing failed"])
             return
         }
@@ -600,8 +957,8 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
         "type": "challenge",
         "version": version,
         "server_nonce": serverNonce,
-        "server_pubkey": serverPubkey,
-        "proof": serverProofValue
+        "server_pubkey": serverPubkey as Any,
+        "proof": serverProofValue as Any
     ]
     guard writeJSON(fd, challenge) else { return }
 
@@ -643,9 +1000,13 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
         return
     }
 
-    // 3) Agent protocol is not yet implemented in the native daemon.
+    // 3) Agent protocol: JSON-RPC style request over the SLICKS channel.
     if prompt.hasPrefix("__BADAPPLE_AGENT__ ") {
-        _ = writeJSON(fd, ["type": "error", "message": "Agent protocol is not supported by badapple-engine"])
+        let writeQueue = DispatchQueue(label: "badapple-engine.write.\(fd)")
+        writeQueue.sync {
+            _ = writeJSON(fd, ["type": "accepted"])
+        }
+        await handleAgentRequest(prompt, fd: fd, writeQueue: writeQueue)
         return
     }
 
@@ -771,14 +1132,85 @@ private func printUsage() {
       badapple-engine [--help]
 
     Environment:
-      BADAPPLE_SOCKET_PATH        Unix socket path (default: \(DEFAULT_SOCKET_PATH))
-      BADAPPLE_MODEL              Main model id (default: \(DEFAULT_FAST_MODEL))
-      BADAPPLE_MAIN_MODEL         Alias for BADAPPLE_MODEL if the former is unset
-      BADAPPLE_MODEL_REVISION     Model revision or branch (default: main)
-      BADAPPLE_LAZY_MAIN_MODEL    1 to load on first request (default: 1)
-      BADAPPLE_SLICKS_KEY_PATH    Path to SLICKS HMAC key (default: /var/lib/bad_apple/slicks.key)
-      BADAPPLE_WORKSPACE_DIR      Optional workspace for RAG context
+      BADAPPLE_SOCKET_PATH          Unix socket path (default: \(DEFAULT_SOCKET_PATH))
+      BADAPPLE_MODEL                Main model id (default: \(DEFAULT_FAST_MODEL))
+      BADAPPLE_MAIN_MODEL           Alias for BADAPPLE_MODEL if the former is unset
+      BADAPPLE_MODEL_REVISION       Model revision or branch (default: main)
+      BADAPPLE_LAZY_MAIN_MODEL      1 to load on first request (default: 1)
+      BADAPPLE_SLICKS_KEY_PATH      Path to SLICKS HMAC key (default: /var/lib/bad_apple/slicks.key)
+      BADAPPLE_WORKSPACE_DIR        Optional workspace for RAG context
+      BADAPPLE_FAST_TIER            1 to enable 0.5B fast tier for simple queries
+      BADAPPLE_FAST_MODEL           Fast tier model id (default: mlx-community/Qwen2.5-0.5B-Instruct-4bit)
+      BADAPPLE_SPECULATIVE_DRAFT    Draft model id for speculative decoding (empty = disabled)
+      BADAPPLE_NUM_DRAFT_TOKENS     Draft tokens per step (default: 2)
+      BADAPPLE_MAX_KV_SIZE          Max KV cache size (default: 4096)
+      BADAPPLE_PREFILL_STEP_SIZE    Prefill step size (default: 4096)
+      BADAPPLE_VRAM_BUDGET_GB       VRAM budget in GB (default: 80% of physical memory)
     """)
+}
+
+private func p2pCommandArgs(method: String, params: [String: Any]) -> [String] {
+    switch method {
+    case "p2p_peers": return ["peers"]
+    case "p2p_sync": return ["sync"]
+    case "p2p_models": return ["models"]
+    case "p2p_pull_model":
+        return ["pull", params["peer_id"] as? String ?? "", params["model_id"] as? String ?? ""]
+    case "p2p_send_model":
+        return ["send", params["peer_id"] as? String ?? "", params["model_id"] as? String ?? ""]
+    case "p2p_receive_model":
+        var args = ["receive"]
+        if let peerId = params["peer_id"] as? String, !peerId.isEmpty { args.append(peerId) }
+        if let modelId = params["model_id"] as? String, !modelId.isEmpty { args.append(modelId) }
+        return args
+    default: return []
+    }
+}
+
+private func findP2PHelper() -> String? {
+    let fm = FileManager.default
+    // Try the running executable's directory first (release build).
+    if let exe = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("badapple-p2p").path,
+       fm.fileExists(atPath: exe) { return exe }
+    let candidates = [
+        "target/release/badapple-p2p",
+        "../target/release/badapple-p2p",
+        "../../target/release/badapple-p2p",
+    ]
+    let env = ProcessInfo.processInfo.environment
+    if let custom = env["BADAPPLE_P2P_HELPER"], fm.fileExists(atPath: custom) { return custom }
+    for c in candidates {
+        if fm.fileExists(atPath: c) { return c }
+        if let home = NSHomeDirectory() as String? {
+            let abs = (home as NSString).appendingPathComponent(c)
+            if fm.fileExists(atPath: abs) { return abs }
+        }
+    }
+    return nil
+}
+
+private func runP2PHelper(arguments: [String]) -> String {
+    guard let helper = findP2PHelper() else {
+        return "{\"error\": \"badapple-p2p helper not found; build with cargo build --release --bin badapple-p2p\"}"
+    }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: helper)
+    task.arguments = arguments
+    var env = ProcessInfo.processInfo.environment
+    env["BADAPPLE_ORIGIN_INSTANCE"] = "badapple-engine"
+    env["BADAPPLE_P2P_SECRET"] = env["BADAPPLE_P2P_SECRET"] ?? env["BADAPPLE_SLICKS_SECRET"]
+    task.environment = env
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = pipe
+    do {
+        try task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    } catch {
+        return "{\"error\": \"failed to run badapple-p2p: \(error.localizedDescription)\"}"
+    }
 }
 
 private func resolveMainModel() -> String {
@@ -817,6 +1249,20 @@ func runDaemonMain() {
     let revision = resolveRevision()
     BadAppleEngine.shared.configureMainModel(modelId: modelId, revision: revision)
     log("Configured main model: \(modelId)@\(revision)")
+
+    // Enable fast tier if requested by the environment.
+    if let fastTier = ProcessInfo.processInfo.environment["BADAPPLE_FAST_TIER"],
+       (fastTier == "1" || fastTier.lowercased() == "true" || fastTier.lowercased() == "on") {
+        BadAppleEngine.shared.fastTierEnabled = true
+        log("Fast tier enabled (BADAPPLE_FAST_TIER=1). Simple queries will route to \(BadAppleInference.envFastModelId).")
+    }
+
+    // Override VRAM budget if provided (in GB).
+    if let budgetGB = ProcessInfo.processInfo.environment["BADAPPLE_VRAM_BUDGET_GB"],
+       let gb = UInt64(budgetGB), gb > 0 {
+        Task { await BadAppleEngine.shared.setVRAMBudgetGB(gb) }
+        log("VRAM budget set to \(gb) GB (BADAPPLE_VRAM_BUDGET_GB)")
+    }
 
     let lazy = ProcessInfo.processInfo.environment["BADAPPLE_LAZY_MAIN_MODEL"]?.trimmingCharacters(in: .whitespacesAndNewlines) != "0"
     if !lazy {

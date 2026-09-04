@@ -275,6 +275,9 @@ In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple
 - `BAD_APPLE_BUYERS.md` is the buyer-facing doc; commit it when the numbers change.
 - The 4B voice bundle has been removed in favor of the unified 9B brain; do not reintroduce it.
 - `cargo fmt --check` is now clean; run `cargo fmt` and `cargo build --release` after Rust changes.
+- Verification: `cargo fmt --check && cargo clippy --release --tests && cargo test --release` must all pass before committing. There are 102+ Rust library tests and 10 cert-suite integration tests.
+- `cargo build --release` may emit a future-incompatibility warning from `block v0.1.6` (a transitive dep of `metal 0.29`). It cannot be fixed without migrating `metal` to `objc2-metal`.
+- The Swift menu-bar build (`build_bad_apple_menu_bar.sh`) requires a full Xcode SDK with linkable `CoreAudioTypes` and `SwiftUICore` clients. On the stripped CLT `MacOSX26.5.sdk`, linking may fail with `ld: warning: Could not find or use auto-linked framework 'CoreAudioTypes'`. If this happens, install the matching Xcode and `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`.
 - Natural-language tool invocation (e.g. "run shell ls /tmp") is driven by the explicit `<tool_call>` XML instructions and few-shot examples in `prompt.txt`. The model emits the block, the CLI prompts for approval, and the user replies `approve <id>` to execute.
 
 ## Phase 3 Resource Governor
@@ -309,7 +312,7 @@ cargo clippy --release
   run without approval prompts.
 - Workspace / project mode: the menu bar `Mesh > Set Workspace...`/`Open Workspace`.
   Adds workspace context to prompts.
-- P2P encrypted sync: `target/release/badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>`. Link-local UDP/TCP, AES-256-GCM, off by default for air-gap certification.
+- P2P encrypted sync: `target/release/badapple-p2p <peers|sync|models|send <peer_addr:port> <model_id>|receive|pull <peer_addr:port> <model_id>>`. Link-local UDP/TCP and dedicated AES-256-GCM model transfer stream, off by default for air-gap certification.
 - macOS Shortcuts: the menu-bar Aqua helper runs in the Aqua session and serves
   `/var/run/badapple/aqua_helper.sock`. `list_shortcuts` and `run_shortcut` proxy
   through the helper, so they work even though the daemon is not in a GUI session.
@@ -324,9 +327,12 @@ cargo clippy --release
 - The model registry records SHA-256 fingerprints, signs manifests with the Secure Enclave, and verifies on demand.
 - The MLX server reads `BADAPPLE_MAX_KV_SIZE` and `BADAPPLE_PREFILL_STEP_SIZE` (default 4096). Lower `BADAPPLE_MAX_KV_SIZE` to 1024-2048 before loading 32B+ models to stay within unified memory.
 - The model registry includes 9B, 32B, 70B, and 1.5B options with memory guidance.
-- P2P model manifest gossip and chunked file transfer with Rust CLI:
-  - `badapple p2p peers`, `badapple p2p sync`, `badapple p2p models`, `badapple p2p pull <peer_id> <model_id>`
-  - `badapple p2p send <peer_id> <model_id>`, `badapple p2p receive [peer_id] [model_id]`
+- P2P model manifest and encrypted chunked file transfer with Rust CLI:
+  - `badapple-p2p peers`, `badapple-p2p sync`, `badapple-p2p models`
+  - `badapple-p2p send <peer_addr:port> <model_id>` serves a model and prints the pull address
+  - `badapple-p2p receive` starts a transfer server on `BADAPPLE_P2P_TRANSFER_PORT` (default 9878)
+  - `badapple-p2p pull <peer_addr:port> <model_id>` pulls the model from a listening peer
+  - Transfers use AES-256-GCM over a dedicated TCP stream with per-chunk ACKs, resume support, and SHA-256 verification.
 - P2P is off by default. Enable with the menu bar `Mesh > P2P Sync`.
 - Consumer install: double-click `Install Bad Apple` from the release zip, or run `src/platform/apple_desktop/install_badapple.sh`.
 - First-run onboarding and plain-English Status window in `BadAppleMenuBar.swift`.
@@ -334,7 +340,12 @@ cargo clippy --release
 ## Latest features (new)
 
 - Streaming chat: POST /api/chat with `{"prompt": "...", "stream": true}` returns Server-Sent Events (tokens, tool calls, done, error).
-- Automatic fact extraction, workspace file watching, ocular/screen-stream, and MCP marketplace features are being ported to Rust/Swift and are not currently available.
+- Workspace file watching is now available via `badapple workspace watch [path]`. It monitors the workspace and calls `index_documents` on changes.
+- Vault CLI is now available: `badapple vault get|set|remove|list|import`.
+- MCP marketplace is now available via `badapple mcp list|add|remove|install|uninstall|start|stop|status|init`. The catalog is stored at `BADAPPLE_MCP_CATALOG_PATH`.
+- The full unsigned release package builds successfully with `src/platform/apple_desktop/package_full_release.sh` (output `target/release/Bad_Apple-<version>-full-unsigned.zip`).
+- Signed packaging is supported via `src/platform/apple_desktop/package_signed_release.sh` with `CODESIGN_ID`. Self-signed dev certificates can be created with `src/platform/apple_desktop/create_dev_signing_cert.sh`. Notarization requires an Apple Developer ID.
+- Workspace file watching, MCP marketplace, dashboard ambient context, and ocular screen-stream endpoints are now available. Automatic fact extraction is being ported to Rust/Swift and is not currently available.
 - Persona editor, dashboard, and control-center UI are being ported to the Swift menu bar and are not currently available from the web.
 
 ## New web UI (SPA) and native splash

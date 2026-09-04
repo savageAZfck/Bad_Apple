@@ -485,10 +485,10 @@ public final class BadAppleInference: @unchecked Sendable {
                 )
                 let params = GenerateParameters(
                     maxTokens: maxTokens ?? config.maxTokens,
-                    maxKVSize: 4096,
+                    maxKVSize: BadAppleInference.envKVSize,
                     temperature: temperature ?? config.temperature,
                     topP: config.topP,
-                    prefillStepSize: 4096
+                    prefillStepSize: BadAppleInference.envPrefillStepSize
                 )
 
                 let stream = try await container.generate(input: lmInput, parameters: params)
@@ -771,10 +771,10 @@ public final class BadAppleInference: @unchecked Sendable {
 
                 let params = GenerateParameters(
                     maxTokens: maxTokens ?? config.maxTokens,
-                    maxKVSize: 4096,
+                    maxKVSize: BadAppleInference.envKVSize,
                     temperature: temperature ?? config.temperature,
                     topP: config.topP,
-                    prefillStepSize: 4096
+                    prefillStepSize: BadAppleInference.envPrefillStepSize
                 )
 
                 let stream: AsyncStream<Generation> = try await container.perform(
@@ -840,7 +840,7 @@ public final class BadAppleInference: @unchecked Sendable {
 // MARK: - Convenience
 
 public extension BadAppleInference {
-    static let defaultConfig = ModelConfig(
+    public static let defaultConfig = ModelConfig(
         modelId: "caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit",
         revision: "5ae9734004d530171fd52f89e660c059b6e36efc",
         maxTokens: 300,
@@ -848,7 +848,56 @@ public extension BadAppleInference {
         topP: 0.9
     )
 
+    /// Default 0.5B fast-tier model for simple queries.
+    public static let fastTierConfig = ModelConfig(
+        modelId: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        revision: "main",
+        maxTokens: 150,
+        temperature: 0.6,
+        topP: 0.9
+    )
+
     static func createDefault() -> BadAppleInference {
         BadAppleInference(config: defaultConfig)
+    }
+
+    /// Read `BADAPPLE_MAX_KV_SIZE` from the environment (default 4096).
+    public static var envKVSize: Int {
+        if let raw = ProcessInfo.processInfo.environment["BADAPPLE_MAX_KV_SIZE"],
+           let val = Int(raw), val > 0 {
+            return val
+        }
+        return 4096
+    }
+
+    /// Read `BADAPPLE_PREFILL_STEP_SIZE` from the environment (default 4096).
+    public static var envPrefillStepSize: Int {
+        if let raw = ProcessInfo.processInfo.environment["BADAPPLE_PREFILL_STEP_SIZE"],
+           let val = Int(raw), val > 0 {
+            return val
+        }
+        return 4096
+    }
+
+    /// Read `BADAPPLE_FAST_MODEL` from the environment, falling back to the default 0.5B.
+    public static var envFastModelId: String {
+        ProcessInfo.processInfo.environment["BADAPPLE_FAST_MODEL"]
+            ?? fastTierConfig.modelId
+    }
+
+    /// Read `BADAPPLE_SPECULATIVE_DRAFT` from the environment (empty = disabled).
+    public static var envSpeculativeDraftModel: String? {
+        guard let raw = ProcessInfo.processInfo.environment["BADAPPLE_SPECULATIVE_DRAFT"],
+              !raw.isEmpty, raw != "0" else { return nil }
+        return raw
+    }
+
+    /// Read `BADAPPLE_NUM_DRAFT_TOKENS` from the environment (default 2).
+    public static var envNumDraftTokens: Int {
+        if let raw = ProcessInfo.processInfo.environment["BADAPPLE_NUM_DRAFT_TOKENS"],
+           let val = Int(raw), val > 0 {
+            return val
+        }
+        return 2
     }
 }

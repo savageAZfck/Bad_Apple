@@ -4444,10 +4444,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         imagePlayground.onGenerate = { [weak self] prompt, completion in
             guard let self = self else { completion("Cancelled", nil); return }
-            // NOTE: Image generation (mflux) is not supported by the native
-            // Swift engine — it always requires the Python daemon and its
-            // image model.  Even when BadAppleEngine.shared.isLoaded is true we
-            // keep the daemon path below so images can still be generated.
+            // Image generation is handled natively by the daemon through the
+            // `image_generation` tool, which invokes the local `mflux-generate-flux2`
+            // binary when mflux is installed.
             let fullPrompt = "generate an image of \(prompt)"
             let before = Date().timeIntervalSince1970
             Task {

@@ -1,4 +1,5 @@
 use crate::metrics::CacheLinePadded;
+use crate::p2p_crypto;
 use crate::simd::{dot_f64_f32, magnitude_f64_f32};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use crossbeam_queue::ArrayQueue;
@@ -86,6 +87,17 @@ pub struct SignedUdpPacket {
 
 /// Transport-agnostic alias for the signed envelope.
 pub type SignedPacket = SignedUdpPacket;
+
+/// Encrypted and signed envelope for P2P mesh sync.
+///
+/// The inner payload is first serialized, then signed (HMAC-SHA256), then
+/// encrypted with AES-256-GCM.  The `nonce` is prepended by the cipher and
+/// included in `ciphertext_b64`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EncryptedPacket {
+    pub sender: String,
+    pub ciphertext_b64: String,
+}
 
 /// Fixed-size, cache-aligned, lock-free MPMC ring buffer for wide-area
 /// ingestion hot paths. Uses `crossbeam_queue::ArrayQueue` for the lock-free
@@ -414,9 +426,11 @@ impl PeerHandle {
 /// * Outbound connections use an exponential backoff retry state machine.
 /// * Incoming connections are accepted on dedicated TCP and WebSocket ports.
 /// * Verified engrams are forwarded to the lock-free `incoming` ring buffer.
+/// * All payloads are encrypted with AES-256-GCM and signed with HMAC-SHA256.
 #[derive(Clone)]
 pub struct ConnectionManager {
     secret: Arc<Vec<u8>>,
+    cipher: Arc<p2p_crypto::P2PCipher>,
     peers: Arc<DashMap<PeerId, PeerHandle>>,
     incoming: Arc<LockFreeRing<CompactEngramPacket>>,
     /// Lock-free outgoing ring for wild-workspace and other fire-and-forget
@@ -444,8 +458,12 @@ impl ConnectionManager {
         retry_base: Duration,
         retry_max: Duration,
     ) -> Self {
+        let aes_key = p2p_crypto::derive_key_from_bytes(&secret);
+        let cipher = p2p_crypto::P2PCipher::new(&aes_key)
+            .expect("AES-256-GCM key derived from secret is 32 bytes");
         Self {
             secret: Arc::new(secret),
+            cipher: Arc::new(cipher),
             peers: Arc::new(DashMap::with_capacity(max_peers)),
             incoming,
             // Fire-and-forget outbound broadcast queue.  Capacity is sized to
@@ -511,14 +529,33 @@ impl ConnectionManager {
     }
 
     /// Broadcast a compact engram to every connected peer. The engram is signed
-    /// with `origin_instance` as the sender identity.
+    /// with `origin_instance` as the sender identity and then encrypted with
+    /// AES-256-GCM using the derived session key.
     pub async fn broadcast(&self, packet: &CompactEngramPacket) {
         let payload = match serde_json::to_vec(packet) {
             Ok(v) => v,
             Err(_) => return,
         };
         let signed = sign_packet(&packet.origin_instance, &payload, &self.secret);
-        let frame = match serde_json::to_vec(&signed) {
+        let signed_json = match serde_json::to_vec(&signed) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        // Encrypt the signed JSON payload.
+        let encrypted = match self.cipher.encrypt(&signed_json) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("P2P broadcast encryption failed: {}", e);
+                return;
+            }
+        };
+
+        let envelope = EncryptedPacket {
+            sender: packet.origin_instance.clone(),
+            ciphertext_b64: STANDARD.encode(&encrypted),
+        };
+        let frame = match serde_json::to_vec(&envelope) {
             Ok(v) => v,
             Err(_) => return,
         };
@@ -859,7 +896,26 @@ impl ConnectionManager {
 
     async fn handle_frame(&self, peer_id: &PeerId, frame: &[u8]) {
         let start = Instant::now();
-        let Ok(packet) = serde_json::from_slice::<SignedPacket>(frame) else {
+
+        // First try the encrypted envelope. If that fails, fall back to the
+        // legacy signed-only format for backward compatibility.
+        let signed_json = if let Ok(envelope) = serde_json::from_slice::<EncryptedPacket>(frame) {
+            let encrypted = match STANDARD.decode(&envelope.ciphertext_b64) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            match self.cipher.decrypt(&encrypted) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::info!("🔒 Dropped undecryptable P2P packet: {}", e);
+                    return;
+                }
+            }
+        } else {
+            frame.to_vec()
+        };
+
+        let Ok(packet) = serde_json::from_slice::<SignedPacket>(&signed_json) else {
             return;
         };
         if !verify_packet(&packet, &self.secret) {
@@ -993,7 +1049,7 @@ impl ConnectionManager {
 }
 
 impl PeerHandle {
-    fn transport_label(&self) -> &'static str {
+    pub fn transport_label(&self) -> &'static str {
         match self.transport {
             PeerTransport::Tcp => "TCP",
             PeerTransport::WebSocket => "WebSocket",

@@ -131,7 +131,7 @@ plutil -lint "${EMBED_PLIST}"
 # are pure Foundation and always included. BadAppleEngine requires the MLX
 # dylib, so it's only included when MLX is available.
 LOGIC_SOURCES=""
-for src in BadAppleSecurity.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift; do
+for src in BadAppleSecurity.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift BadAppleModelManager.swift; do
     [[ -f "${REPO_ROOT}/src/platform/apple_desktop/${src}" ]] && LOGIC_SOURCES="${LOGIC_SOURCES} ${REPO_ROOT}/src/platform/apple_desktop/${src}"
 done
 
@@ -156,12 +156,20 @@ if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
         } | sort -u | tr '\n' ':'
     )
     MLX_FLAGS=""
-    IFS=':' read -ra MLX_DIRS <<< "${MLX_INCLUDE_DIRS}"
-    for dir in "${MLX_DIRS[@]}"; do
-        [[ -n "$dir" ]] && MLX_FLAGS="${MLX_FLAGS} -I ${dir}"
-    done
-    MLX_FLAGS="${MLX_FLAGS} -L ${MLX_BUILD_DIR} -lBadAppleMLX -Xlinker -rpath -Xlinker @executable_path/../Libraries"
-    echo "Building with native MLX inference support."
+    # Save the shell field separator in a subshell; we need word splitting on ':'
+    # only for the include directory list, but 'swiftc' below must receive each
+    # flag as a separate argument.
+    MLX_FLAGS=$(
+        OLD_IFS="${IFS}"
+        IFS=':' read -ra MLX_DIRS <<< "${MLX_INCLUDE_DIRS}"
+        out=""
+        for dir in "${MLX_DIRS[@]}"; do
+            [[ -n "$dir" ]] && out="${out} -I ${dir}"
+        done
+        IFS="${OLD_IFS}"
+        echo "${out}"
+    )
+    MLX_FLAGS="${MLX_FLAGS} ${MLX_DYLIB} -Xlinker -rpath -Xlinker @executable_path/../Libraries"
 fi
 
 "${SWIFTC}" \
@@ -225,6 +233,17 @@ install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleScreenCapture.swift" \
     -framework AppKit -framework Foundation -framework ScreenCaptureKit
 install -m 755 "${SCRATCH_DIR}/native/BadAppleScreenCapture" "${CONTENTS_DIR}/Helpers/BadAppleScreenCapture"
+install -m 755 "${SCRATCH_DIR}/native/BadAppleScreenCapture" "${BUILD_DIR}/BadAppleScreenCapture"
+
+# Ambient context helper reads the frontmost application and focused window.
+"${SWIFTC}" \
+    -parse-as-library -swift-version 5 -O \
+    -target "${TARGET}" -sdk "${SDK_PATH}" \
+    -o "${SCRATCH_DIR}/native/BadAppleAmbient" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleAmbient.swift" \
+    -framework AppKit -framework ApplicationServices -framework Foundation
+install -m 755 "${SCRATCH_DIR}/native/BadAppleAmbient" "${CONTENTS_DIR}/Helpers/BadAppleAmbient"
+install -m 755 "${SCRATCH_DIR}/native/BadAppleAmbient" "${BUILD_DIR}/BadAppleAmbient"
 
 # UI automation helper runs as a child of the Bad Apple bundle so it uses
 # Bad Apple's Accessibility permission to drive other apps via System Events.

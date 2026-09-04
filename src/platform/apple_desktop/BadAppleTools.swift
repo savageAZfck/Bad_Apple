@@ -351,6 +351,17 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: false
         ),
         BadAppleTool(
+            name: "image_generation",
+            description: "Generate an image from a text prompt using the local mflux FLUX.2-klein 4B model. Returns the path to the generated PNG.",
+            parameters: [
+                .init(name: "prompt", description: "Text description of the image to generate.", required: true),
+                .init(name: "width", description: "Image width in pixels (default 512).", required: false),
+                .init(name: "height", description: "Image height in pixels (default 512).", required: false),
+                .init(name: "steps", description: "Number of diffusion steps (default 4).", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
             name: "translate_text",
             description: "Translate text between languages. The model handles translation natively.",
             parameters: [
@@ -403,6 +414,22 @@ final class BadAppleToolRouter: @unchecked Sendable {
             description: "Get the current session seed.",
             parameters: [],
             requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "git_status",
+            description: "Run `git status` in the active workspace or a given path and return the output.",
+            parameters: [
+                .init(name: "path", description: "Optional directory to run git status in. Defaults to the active workspace.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "undo_last",
+            description: "Undo the most recent user action by removing the last appended note or generated image.",
+            parameters: [
+                .init(name: "kind", description: "What to undo: 'note' or 'image'. Default is 'note'.", required: false),
+            ],
+            requiresApproval: true
         ),
     ]
 
@@ -457,12 +484,15 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["runtime status", "health status", "system status", "process", "memory"], ["runtime_status"]),
         (["code", "coding", "program", "programming", "developer", "refactor", "debug", "build project", "run tests"], ["read_file", "search_content", "write_file", "run_shell", "index_documents", "workspace_status"]),
         (["describe image", "image description", "what's in this image", "analyze image"], ["describe_image"]),
+        (["generate image", "make an image", "create image", "draw", "image of"], ["image_generation"]),
         (["translate", "translation", "translate text"], ["translate_text"]),
         (["consolidate memory", "deduplicate memory", "summarize memory"], ["consolidate_memory"]),
         (["workspace status", "current workspace", "workspace path"], ["workspace_status"]),
         (["read document", "open document", "document content"], ["read_document"]),
         (["search files", "find files", "file search", "search local files"], ["search_local_files"]),
         (["session seed", "set seed", "deterministic seed"], ["set_session_seed", "get_session_seed"]),
+        (["git status", "git diff", "what changed"], ["git_status"]),
+        (["undo", "delete last", "remove last"], ["undo_last"]),
     ]
 
     // MARK: - Prompt Routing
@@ -948,6 +978,13 @@ final class BadAppleToolExecutor: @unchecked Sendable {
                 path: args["path"] ?? "",
                 prompt: args["prompt"] ?? "Describe this image."
             )
+        case "image_generation":
+            return generateImage(
+                prompt: args["prompt"] ?? "",
+                width: Int(args["width"] ?? "") ?? 512,
+                height: Int(args["height"] ?? "") ?? 512,
+                steps: Int(args["steps"] ?? "") ?? 4
+            )
         case "translate_text":
             return translateText(
                 text: args["text"] ?? "",
@@ -972,6 +1009,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return setSessionSeed(seed: args["seed"] ?? "")
         case "get_session_seed":
             return getSessionSeed()
+        case "git_status":
+            return gitStatus(path: args["path"] ?? "")
+        case "undo_last":
+            return undoLast(kind: args["kind"] ?? "note")
         default:
             return "Unknown tool: \(name)"
         }
@@ -1507,6 +1548,66 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         return "Vision engine is not available. Install or enable the vision model to describe images."
     }
 
+    /// Generate an image from a prompt using the local `mflux-generate-flux2`
+    /// binary. Returns the path to the generated PNG or an error string.
+    func generateImage(prompt: String, width: Int, height: Int, steps: Int) -> String {
+        guard !prompt.isEmpty else { return "Error: prompt is required" }
+        let dataDir = ProcessInfo.processInfo.environment["BADAPPLE_DATA_DIR"] ?? "/var/lib/bad_apple"
+        let outDir = (dataDir as NSString).appendingPathComponent("generated_images")
+        try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+
+        let model = ProcessInfo.processInfo.environment["BADAPPLE_IMAGE_MODEL"] ?? "flux2-klein-4b"
+        let seed = Int.random(in: 0...1_000_000_000)
+        let output = (outDir as NSString).appendingPathComponent("badapple_gen_\(seed).png")
+
+        // Search for the mflux binary.
+        let env = ProcessInfo.processInfo.environment
+        let candidates = [
+            (env["BADAPPLE_MFLUX_PATH"] ?? ""),
+            "mflux-generate-flux2",
+            "/opt/homebrew/bin/mflux-generate-flux2",
+            "/usr/local/bin/mflux-generate-flux2",
+            (env["HOME"] ?? "/") + "/.local/bin/mflux-generate-flux2",
+        ]
+        let fm = FileManager.default
+        guard let exe = candidates.first(where: { !$0.isEmpty && fm.fileExists(atPath: $0) }) else {
+            return "Error: mflux-generate-flux2 not found. Install mflux with `pip install mflux` to enable image generation."
+        }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: exe)
+        task.arguments = [
+            "--model", model,
+            "--prompt", prompt,
+            "--output", output,
+            "--width", String(width),
+            "--height", String(height),
+            "--steps", String(steps),
+            "--quantize", "4",
+            "--no-metadata",
+            "--low-ram",
+            "--seed", String(seed),
+        ]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        do {
+            try task.run()
+            task.waitUntilExit()
+            if task.terminationStatus != 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let err = String(data: data, encoding: .utf8) ?? "unknown error"
+                return "Image generation failed:\n\(err)"
+            }
+            if fm.fileExists(atPath: output) {
+                return "Generated image: \(output)"
+            }
+            return "Image generation completed but output file was not found."
+        } catch {
+            return "Image generation error: \(error.localizedDescription)"
+        }
+    }
+
     /// Translate text between languages. The LLM handles translation natively,
     /// so this returns a placeholder directing the model to perform it.
     func translateText(text: String, targetLanguage: String, sourceLanguage: String) -> String {
@@ -1578,20 +1679,147 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
 
         let ext = (jailed as NSString).pathExtension.lowercased()
-        if ext == "pdf" || ext == "docx" {
-            return "PDF and DOCX parsing requires the Python daemon."
+        var text: String
+
+        switch ext {
+        case "pdf":
+            text = extractPDFText(path: jailed)
+        case "docx":
+            text = extractDOCXText(path: jailed)
+        case "rtf":
+            text = extractRTFText(path: jailed)
+        case "txt", "md", "markdown", "json", "xml", "csv", "yaml", "yml", "log", "swift", "rs", "py", "sh", "js", "ts", "html", "css":
+            guard let data = FileManager.default.contents(atPath: jailed) else {
+                return "Error: could not read \(jailed)"
+            }
+            text = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1)
+                ?? ""
+        default:
+            guard let data = FileManager.default.contents(atPath: jailed) else {
+                return "Error: could not read \(jailed)"
+            }
+            text = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1)
+                ?? ""
         }
 
-        guard let data = FileManager.default.contents(atPath: jailed) else {
-            return "Error: could not read \(jailed)"
+        if text.isEmpty {
+            return "Error: could not extract text from \(jailed)"
         }
-        let text = String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .isoLatin1)
-            ?? ""
         if text.count > maxChars {
             return String(text.prefix(maxChars)) + "\n... (\(text.count) characters total)"
         }
         return text
+    }
+
+    /// Extract text from a PDF using PDFKit (built into macOS).
+    private func extractPDFText(path: String) -> String {
+        // Use NSClassFromString to avoid a hard import dependency at build time;
+        // PDFKit is always available on macOS but not all build contexts link it.
+        guard let pdfDocClass = NSClassFromString("PDFDocument") as? NSObject.Type else {
+            return "Error: PDFKit is not available on this system"
+        }
+        let url = URL(fileURLWithPath: path)
+        let selector = NSSelectorFromString("initWithURL:")
+        guard pdfDocClass.responds(to: selector) else {
+            return "Error: PDFDocument does not respond to initWithURL:"
+        }
+        let doc = pdfDocClass.perform(selector, with: url)?.takeUnretainedValue() as? NSObject
+        guard let doc = doc else { return "Error: could not open PDF at \(path)" }
+        // Check page count to verify it loaded.
+        let countSel = NSSelectorFromString("pageCount")
+        guard doc.responds(to: countSel) else {
+            return "Error: PDFDocument does not respond to pageCount"
+        }
+        let pageCount = doc.perform(countSel)?.takeUnretainedValue() as? Int ?? 0
+        if pageCount == 0 { return "Error: PDF has 0 pages or failed to load" }
+        // Extract full text via `string` property.
+        let stringSel = NSSelectorFromString("string")
+        guard doc.responds(to: stringSel) else {
+            return "Error: PDFDocument does not respond to string"
+        }
+        let text = doc.perform(stringSel)?.takeUnretainedValue() as? String ?? ""
+        return text
+    }
+
+    /// Extract text from a .docx file by unzipping word/document.xml and
+    /// stripping XML tags. Uses Foundation's NSData compression helpers.
+    private func extractDOCXText(path: String) -> String {
+        guard let data = FileManager.default.contents(atPath: path) else {
+            return "Error: could not read \(path)"
+        }
+        // .docx is a ZIP archive. We need to extract word/document.xml.
+        // Use Process with `unzip` as a fallback since Foundation doesn't
+        // have a built-in ZIP reader on macOS without importing Compression.
+        let tmpDir = NSTemporaryDirectory() + "badapple_docx_\(UUID().uuidString)"
+        do {
+            try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        } catch {
+            return "Error: could not create temp dir for DOCX extraction"
+        }
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        // Write the docx to a temp file and unzip it.
+        let zipPath = tmpDir + "/input.docx"
+        do {
+            try data.write(to: URL(fileURLWithPath: zipPath))
+        } catch {
+            return "Error: could not write temp docx file"
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-o", "-q", zipPath, "word/document.xml", "-d", tmpDir]
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return "Error: unzip failed: \(error.localizedDescription)"
+        }
+
+        let xmlPath = tmpDir + "/word/document.xml"
+        guard let xmlData = FileManager.default.contents(atPath: xmlPath),
+              let xml = String(data: xmlData, encoding: .utf8) else {
+            return "Error: could not extract word/document.xml from DOCX"
+        }
+
+        // Strip XML tags, preserving paragraph breaks.
+        var text = xml
+        // Convert paragraph and break tags to newlines.
+        text = text.replacingOccurrences(of: "</w:p>", with: "\n")
+        text = text.replacingOccurrences(of: "<w:br/>", with: "\n")
+        text = text.replacingOccurrences(of: "<w:tab/>", with: "\t")
+        // Remove all remaining XML tags.
+        while let range = text.range(of: "<[^>]+>", options: .regularExpression) {
+            text.removeSubrange(range)
+        }
+        // Decode XML entities.
+        text = text.replacingOccurrences(of: "&amp;", with: "&")
+        text = text.replacingOccurrences(of: "&lt;", with: "<")
+        text = text.replacingOccurrences(of: "&gt;", with: ">")
+        text = text.replacingOccurrences(of: "&quot;", with: "\"")
+        text = text.replacingOccurrences(of: "&apos;", with: "'")
+        // Collapse excessive blank lines.
+        while text.contains("\n\n\n") {
+            text = text.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Extract text from an RTF file using NSAttributedString.
+    private func extractRTFText(path: String) -> String {
+        guard let data = FileManager.default.contents(atPath: path) else {
+            return "Error: could not read \(path)"
+        }
+        guard let attrStr = try? NSAttributedString(
+            data: data,
+            options: [.documentType: NSAttributedString.DocumentType.rtf],
+            documentAttributes: nil
+        ) else {
+            return "Error: could not parse RTF at \(path)"
+        }
+        return attrStr.string
     }
 
     /// Search for files by name pattern in a directory using FileManager.
@@ -1654,6 +1882,78 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return "Session seed: \(seed)"
         }
         return "No session seed set."
+    }
+
+    /// Run `git status` in the active workspace or the given path.
+    func gitStatus(path: String) -> String {
+        let dir: String
+        if path.isEmpty {
+            if let ws = workspace, !ws.isEmpty { dir = ws } else { return "No workspace set." }
+        } else if let jailed = jailPath(path) {
+            dir = jailed
+        } else {
+            return "Error: path '\(path)' is outside allowed roots"
+        }
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: (dir as NSString).appendingPathComponent(".git")) {
+            return "No git repository found at \(dir)"
+        }
+        let result = runProcess(launchPath: "/usr/bin/git", arguments: ["-C", dir, "status", "--short"], timeout: 30)
+        if result.exitCode == 0 {
+            let out = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            return out.isEmpty ? "Working tree clean." : out
+        }
+        return "Error: git status failed: \(result.stderr)"
+    }
+
+    /// Undo the most recent note or image generation.
+    func undoLast(kind: String) -> String {
+        let kind = kind.lowercased()
+        if kind == "image" {
+            let dir = "/var/lib/bad_apple/generated_images"
+            let fm = FileManager.default
+            guard let files = try? fm.contentsOfDirectory(atPath: dir) else {
+                return "No generated images to undo."
+            }
+            let pngs = files
+                .filter { $0.hasSuffix(".png") }
+                .map { (dir as NSString).appendingPathComponent($0) }
+                .compactMap { path -> (String, TimeInterval)? in
+                    guard let attrs = try? fm.attributesOfItem(atPath: path),
+                          let date = attrs[.modificationDate] as? Date else { return nil }
+                    return (path, date.timeIntervalSince1970)
+                }
+                .sorted { $0.1 > $1.1 }
+            guard let last = pngs.first?.0 else { return "No generated images to undo." }
+            do {
+                try fm.removeItem(atPath: last)
+                return "Removed generated image: \(last)"
+            } catch {
+                return "Error removing image: \(error.localizedDescription)"
+            }
+        } else {
+            let notesDir = NSHomeDirectory() + "/.bad_apple/notes"
+            let fm = FileManager.default
+            try? fm.createDirectory(atPath: notesDir, withIntermediateDirectories: true)
+            guard let files = try? fm.contentsOfDirectory(atPath: notesDir) else {
+                return "No notes to undo."
+            }
+            let candidates = files
+                .map { (notesDir as NSString).appendingPathComponent($0) }
+                .compactMap { path -> (String, TimeInterval)? in
+                    guard let attrs = try? fm.attributesOfItem(atPath: path),
+                          let date = attrs[.modificationDate] as? Date else { return nil }
+                    return (path, date.timeIntervalSince1970)
+                }
+                .sorted { $0.1 > $1.1 }
+            guard let last = candidates.first?.0 else { return "No notes to undo." }
+            do {
+                try fm.removeItem(atPath: last)
+                return "Removed note: \(last)"
+            } catch {
+                return "Error removing note: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - Private Helpers

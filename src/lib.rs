@@ -23,15 +23,21 @@ pub mod benchmark;
 pub mod config;
 pub mod connectome_mmap;
 pub mod hyperdimensional_core;
+pub mod mcp;
+pub mod mcp_marketplace;
 pub mod metal_uma;
 pub mod metrics;
+pub mod p2p_crypto;
+pub mod p2p_model;
 pub mod production_blueprint;
 pub mod protocol;
 pub mod scavenger;
 pub mod simd;
 pub mod strategy_library;
 pub mod tensor_brain;
+pub mod vault;
 pub mod wasm_cage;
+pub mod workspace_watcher;
 
 /// A node in the associative memory graph.  This lightweight struct is the
 /// common currency between the tensor brain, the connectome mmap persistence

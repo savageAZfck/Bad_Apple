@@ -1,0 +1,3 @@
+language = "C"
+no_includes = true
+exclude = ["mcp_marketplace", "p2p_model"]

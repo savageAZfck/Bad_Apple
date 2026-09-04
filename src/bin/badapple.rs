@@ -83,8 +83,20 @@ fn main() -> Result<()> {
         return run_p2p_subcommand(&prompt_parts[1..]);
     }
 
+    if prompt_parts.first().map(std::string::String::as_str) == Some("vault") {
+        return run_vault_subcommand(&prompt_parts[1..]);
+    }
+
+    if prompt_parts.first().map(std::string::String::as_str) == Some("workspace") {
+        return run_workspace_subcommand(&prompt_parts[1..]);
+    }
+
+    if prompt_parts.first().map(std::string::String::as_str) == Some("mcp") {
+        return run_mcp_subcommand(&prompt_parts[1..]);
+    }
+
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>");
     } else {
         prompt_parts.join(" ")
     };
@@ -976,11 +988,349 @@ fn run_p2p_subcommand(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_vault_subcommand(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("usage: badapple vault <get|set|remove|list|import> [args]");
+    }
+    let sub = args[0].as_str();
+    let vault = bad_apple::vault::BadAppleVault::open_default()
+        .context("failed to open vault; set BADAPPLE_VAULT_KEY, BADAPPLE_SLICKS_KEY_PATH, or BADAPPLE_SLICKS_SECRET")?;
+    match sub {
+        "list" => {
+            let keys = vault.list()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "keys": keys }))?
+            );
+        }
+        "get" => {
+            if args.len() < 2 {
+                bail!("usage: badapple vault get <key>");
+            }
+            match vault.get(&args[1])? {
+                Some(value) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({ "key": args[1], "value": value })
+                        )?
+                    );
+                }
+                None => {
+                    println!("{{\"key\": \"{}\", \"error\": \"not found\"}}", args[1]);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "set" => {
+            if args.len() < 3 {
+                bail!("usage: badapple vault set <key> <value>");
+            }
+            vault.set(&args[1], &args[2])?;
+            println!("{{\"status\": \"ok\", \"key\": \"{}\"}}", args[1]);
+        }
+        "remove" => {
+            if args.len() < 2 {
+                bail!("usage: badapple vault remove <key>");
+            }
+            vault.remove(&args[1])?;
+            println!("{{\"status\": \"removed\", \"key\": \"{}\"}}", args[1]);
+        }
+        "import" => {
+            if args.len() < 2 {
+                bail!("usage: badapple vault import <dotenv-file>");
+            }
+            let content = std::fs::read_to_string(&args[1])
+                .with_context(|| format!("failed to read {}", args[1]))?;
+            let mut count = 0;
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    let k = k.trim();
+                    let v = v.trim().trim_matches('"').trim_matches('\'');
+                    if !k.is_empty() {
+                        vault.set(k, v)?;
+                        count += 1;
+                    }
+                }
+            }
+            println!("{{\"status\": \"ok\", \"imported\": {count}}}");
+        }
+        _ => bail!("unknown vault subcommand: {sub}"),
+    }
+    Ok(())
+}
+
+fn run_workspace_subcommand(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("usage: badapple workspace <get|set <path>|index|watch [path]>");
+    }
+    let sub = args[0].as_str();
+    match sub {
+        "get" => {
+            let result = call_agent("get_workspace", None, 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "set" => {
+            if args.len() < 2 {
+                bail!("usage: badapple workspace set <path>");
+            }
+            let mut params = serde_json::Map::new();
+            params.insert("path".to_string(), Value::String(args[1].clone()));
+            let result = call_agent("set_workspace", Some(Value::Object(params)), 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "index" => {
+            let path = if args.len() >= 2 {
+                Some(args[1].clone())
+            } else {
+                None
+            };
+            let mut params = serde_json::Map::new();
+            if let Some(p) = path {
+                params.insert("path".to_string(), Value::String(p));
+            }
+            let result = call_agent(
+                "index_documents",
+                if params.is_empty() {
+                    None
+                } else {
+                    Some(Value::Object(params))
+                },
+                512,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "watch" => {
+            let path = if args.len() >= 2 {
+                std::path::PathBuf::from(&args[1])
+            } else {
+                // Try the current workspace from the daemon.
+                let result = call_agent("get_workspace", None, 32)?;
+                if let Some(p) = result["workspace"].as_str() {
+                    std::path::PathBuf::from(p)
+                } else {
+                    bail!("no workspace set; provide a path or run `badapple workspace set <path>` first");
+                }
+            };
+            if !path.is_dir() {
+                bail!("workspace path is not a directory: {}", path.display());
+            }
+
+            // Set workspace on the daemon if different.
+            let current = call_agent("get_workspace", None, 32)?;
+            if current["workspace"].as_str() != Some(path.to_str().unwrap_or("")) {
+                let mut params = serde_json::Map::new();
+                params.insert(
+                    "path".to_string(),
+                    Value::String(path.to_string_lossy().to_string()),
+                );
+                call_agent("set_workspace", Some(Value::Object(params)), 32)?;
+            }
+
+            println!(
+                "{{\"status\": \"watching\", \"workspace\": \"{}\"}}",
+                path.display()
+            );
+
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let r = running.clone();
+            let mut signals = signal_hook::iterator::Signals::new([
+                signal_hook::consts::SIGINT,
+                signal_hook::consts::SIGTERM,
+            ])?;
+            std::thread::spawn(move || {
+                if signals.forever().next().is_some() {
+                    r.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+
+            let watcher = bad_apple::workspace_watcher::WorkspaceWatcher::watch(
+                &path,
+                std::time::Duration::from_secs(2),
+                Some(bad_apple::workspace_watcher::default_file_filter),
+                move |root, changed| {
+                    eprintln!("[workspace] re-indexing after changes: {:?}", changed);
+                    let mut params = serde_json::Map::new();
+                    params.insert(
+                        "path".to_string(),
+                        Value::String(root.to_string_lossy().to_string()),
+                    );
+                    match call_agent("index_documents", Some(Value::Object(params)), 512) {
+                        Ok(_) => eprintln!("[workspace] indexed"),
+                        Err(e) => eprintln!("[workspace] index failed: {e}"),
+                    }
+                },
+            )
+            .context("failed to start workspace watcher")?;
+
+            while running.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            watcher.stop();
+            println!("{{\"status\": \"stopped\"}}");
+        }
+        _ => bail!("unknown workspace subcommand: {sub}"),
+    }
+    Ok(())
+}
+
+fn run_mcp_subcommand(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("usage: badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>");
+    }
+    let sub = args[0].as_str();
+
+    let catalog_path = mcp_catalog_path();
+    let rt = tokio::runtime::Runtime::new()?;
+    let market = bad_apple::mcp_marketplace::McpMarketplace::new(catalog_path, 100);
+
+    rt.block_on(async {
+        market.load().await?;
+        match sub {
+            "list" => {
+                let mut servers = market.list().await;
+                for s in &mut servers {
+                    let status = market.status(&s.id).await.ok();
+                    if let Some(st) = status {
+                        s.installed = st.installed;
+                        s.enabled = st.enabled;
+                    }
+                }
+                let result = serde_json::json!({ "servers": servers });
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            "add" => {
+                if args.len() < 3 {
+                    bail!("usage: badapple mcp add <id> <command> [args...]");
+                }
+                let id = args[1].clone();
+                let command = args[2].clone();
+                let rest = args[3..].to_vec();
+                market
+                    .upsert(bad_apple::mcp_marketplace::McpServer {
+                        id,
+                        name: args[1].clone(),
+                        command,
+                        args: rest,
+                        env: std::collections::HashMap::new(),
+                        transport: bad_apple::mcp_marketplace::McpTransport::Stdio,
+                        installed: true,
+                        enabled: true,
+                        description: "".to_string(),
+                    })
+                    .await?;
+                market.save().await?;
+                println!("{{\"status\": \"ok\", \"action\": \"added\"}}");
+            }
+            "remove" => {
+                if args.len() < 2 {
+                    bail!("usage: badapple mcp remove <id>");
+                }
+                market.remove(&args[1]).await?;
+                market.save().await?;
+                println!("{{\"status\": \"ok\", \"action\": \"removed\"}}");
+            }
+            "install" => {
+                if args.len() < 2 {
+                    bail!("usage: badapple mcp install <id>");
+                }
+                market.install(&args[1]).await?;
+                market.save().await?;
+                println!("{{\"status\": \"ok\", \"action\": \"installed\"}}");
+            }
+            "uninstall" => {
+                if args.len() < 2 {
+                    bail!("usage: badapple mcp uninstall <id>");
+                }
+                market.uninstall(&args[1]).await?;
+                market.save().await?;
+                println!("{{\"status\": \"ok\", \"action\": \"uninstalled\"}}");
+            }
+            "start" => {
+                if args.len() < 2 {
+                    bail!("usage: badapple mcp start <id>");
+                }
+                market.start(&args[1]).await?;
+                println!("{{\"status\": \"ok\", \"action\": \"started\"}}");
+            }
+            "stop" => {
+                if args.len() < 2 {
+                    bail!("usage: badapple mcp stop <id>");
+                }
+                market.stop(&args[1]).await?;
+                println!("{{\"status\": \"ok\", \"action\": \"stopped\"}}");
+            }
+            "status" => {
+                if args.len() < 2 {
+                    bail!("usage: badapple mcp status <id>");
+                }
+                let status = market.status(&args[1]).await?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+            "init" => {
+                market
+                    .upsert(bad_apple::mcp_marketplace::McpServer {
+                        id: "filesystem".to_string(),
+                        name: "Filesystem MCP".to_string(),
+                        command: "npx".to_string(),
+                        args: vec![
+                            "-y".to_string(),
+                            "@modelcontextprotocol/server-filesystem".to_string(),
+                            "/".to_string(),
+                        ],
+                        env: std::collections::HashMap::new(),
+                        transport: bad_apple::mcp_marketplace::McpTransport::Stdio,
+                        installed: false,
+                        enabled: false,
+                        description: "Read and write files under a configured root.".to_string(),
+                    })
+                    .await?;
+                market
+                    .upsert(bad_apple::mcp_marketplace::McpServer {
+                        id: "fetch".to_string(),
+                        name: "Fetch MCP".to_string(),
+                        command: "npx".to_string(),
+                        args: vec![
+                            "-y".to_string(),
+                            "@modelcontextprotocol/server-fetch".to_string(),
+                        ],
+                        env: std::collections::HashMap::new(),
+                        transport: bad_apple::mcp_marketplace::McpTransport::Stdio,
+                        installed: false,
+                        enabled: false,
+                        description: "Fetch web content. Disabled by default in air-gapped mode."
+                            .to_string(),
+                    })
+                    .await?;
+                market.save().await?;
+                println!("{{\"status\": \"ok\", \"action\": \"initialized\"}}");
+            }
+            _ => bail!("unknown mcp subcommand: {sub}"),
+        }
+        Ok(())
+    })
+}
+
+fn mcp_catalog_path() -> std::path::PathBuf {
+    std::env::var("BADAPPLE_MCP_CATALOG_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/bad_apple"))
+                .join("bad_apple")
+                .join("mcp_catalog.json")
+        })
+}
+
 fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
-         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n\n\
+         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n\n\
          Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
-         Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)"
+         Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
     );
 }
