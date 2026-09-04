@@ -1,27 +1,26 @@
 # Bad Apple
 
-> **A baremetal AI OS layer for Apple Silicon — runs directly on the Neural Engine, Secure Enclave, and Metal GPU. Provably air-gapped. Audited. Fuzzed. Now with native Swift MLX inference.**
+> **A local-first AI operating system layer for macOS. On-device inference, hardware-rooted identity, fail-closed security, and a native Swift menu bar.**
 
-Bad Apple is not an app. It's not a model wrapper. It's a system-level AI runtime that manages hardware, security, and IPC for on-device AI workloads on macOS. It runs as three launchd daemons with root privileges, authenticates every interaction with a custom protocol backed by the Secure Enclave, and can prove — with a 12-test certification suite — that zero network listeners are active.
+Bad Apple is not a chat app. It is a system-level AI runtime for Apple Silicon that keeps prompts, memory, and tools on the machine. It runs as a set of launchd daemons, authenticates every interaction through a custom IPC protocol, and includes an air-gap certification suite that asserts the runtime holds zero network listeners by default.
 
 ## What It Does
 
-- **Runs a 9B Qwen 3.5 model via native Swift MLX inference** — the menu bar app loads the model directly via mlx-swift-lm, with no subprocess or daemon overhead.
-- **Provable air-gap privacy** — a toggle that turns off all network access, verified by a 12-test certification suite. Not a trust claim. A proof.
-- **Hash-chained audit ledger** with SHA-256 chaining — every query, tool call, and response is logged and tamper-evident (now in Swift via CryptoKit)
-- **Fail-closed filesystem cage** using openat-based fd operations with O_NOFOLLOW — structurally eliminates TOCTOU race conditions
-- **WASM sandbox** with fuel metering, StoreLimits, and output caps for untrusted tool synthesis
-- **Streaming output firewall** with real-time secret redaction (now in Swift)
-- **Semantic cache** with cosine similarity lookup — repeated questions return instantly (now in Swift)
-- **RAG context builder** — retrieves from memory graph and workspace documents (now in Swift)
-- **Tool router + policy engine** — 6 tools with path jailing and approval gates (now in Swift)
-- **Persona system** with hot-reload, custom banter, and roast bank (now in Swift)
-- **Fast tier** — simple queries get fewer tokens for faster response
-- **10,000-dimensional hyperdimensional computing substrate** (vector symbolic architecture) for script profiling
-- **Memory-mapped connectome** with 2048-D embeddings, zero-copy persistence
-- **P2P encrypted mesh sync** (AES-256-GCM, link-local, off by default)
-- **Voice mode** with Piper TTS, on-device speech recognition, wake word detection, and streaming TTS during generation
-- **Swift menu bar app** with onboarding wizard, chat window (markdown rendering, message bubbles, code blocks), settings UI, model selector, and image drag-and-drop
+- **On-device inference with native Swift MLX** — 9B Qwen 3.5 4-bit, optional 0.5B fast tier, and optional speculative decoding via `mlx-lm`.
+- **SLICKS authenticated IPC** — HMAC-SHA256 (v1) and Secure Enclave ECDSA P-256 (v2) challenge-response over Unix domain sockets.
+- **Hardware-rooted identity** — Secure Enclave key storage for signing, key pinning, and model provenance.
+- **Hash-chained audit ledger** — SHA-256 chained, secret-redacted logs of every query, tool call, and response.
+- **Fail-closed automation cage** — `openat`-based file operations with `O_NOFOLLOW`, path allowlisting, and symlink/hardlink rejection.
+- **WASM sandbox** — fuel-metered, store-limited, output-capped execution for untrusted code synthesis.
+- **Streaming output firewall** — Aho-Corasick pattern matching with real-time secret redaction.
+- **Semantic cache** — `bge-small-en-v1.5` embeddings with cosine-similarity lookup, scoped by persona.
+- **RAG context** — workspace file watching, ambient context, and optional ocular screen-stream summarization.
+- **Tool router + policy engine** — 60-rule declarative policy in `policy.yaml` with human-in-the-loop approvals for destructive tools.
+- **P2P encrypted mesh** — AES-256-GCM link-local peer sync for models and messages, off by default for air-gap certification.
+- **MCP marketplace** — local tool-server catalog with lifecycle management.
+- **Persona system** — hot-reloadable `prompt.txt`, runtime persona packs, and voice-specific prompts.
+- **Voice mode** — on-device speech recognition, wake phrase, and native `AVSpeechSynthesizer` TTS.
+- **Native menu bar app** — onboarding wizard, streaming chat window, dashboard, model selector, settings, and image drag-and-drop.
 
 ## Architecture
 
@@ -29,11 +28,11 @@ Bad Apple is not an app. It's not a model wrapper. It's a system-level AI runtim
 badapple CLI / menu bar / voice host
               │
               ▼
-   /var/run/badapple/substrate.sock  (SLICKS)
+   /var/run/badapple/substrate.sock  (SLICKS v1/v2)
               │
               ▼
-     gatekeeper (Rust, launchd, root)
-     ├─ Semantic router (576-D CandleBrain)
+     gatekeeper (Rust, launchd)
+     ├─ CandleBrain semantic router
      ├─ Fast action resolver
      ├─ Replay cache (nonce dedup)
      └─ Automation cage (openat, O_NOFOLLOW)
@@ -41,47 +40,35 @@ badapple CLI / menu bar / voice host
               ▼
    badapple-engine  (Swift MLX)
    ├─ 9B Qwen 3.5 + 0.5B fast tier
-   ├─ Speculative decoding (DFlash + MTP)
-   ├─ RAG / embeddings / semantic cache
-   ├─ Audit ledger (SE-signed checkpoints)
+   ├─ Optional speculative decoding
+   ├─ Embeddings / semantic cache
+   ├─ Audit ledger (CryptoKit checkpoints)
    ├─ Output firewall (Aho-Corasick)
    ├─ Tool router + approval policy
    └─ MCP server
               │
               ▼
-    badapple-tts  (Piper TTS)
-    
-    ANE Bridge (Swift FFI)
-    ├─ Multi-shard CoreML execution
-    ├─ KV cache scatter
-    ├─ Placement measurement
-    └─ QoS elevation
+    badapple-tts  (native AVSpeechSynthesizer)
+
+    BadAppleAmbient / screen capture (opt-in)
 ```
 
 ## Security
 
-Bad Apple has been through **two full security audit passes**. 69 vulnerabilities were found and fixed across the Rust, Swift, Shell, and Metal code layers. Four fuzzing targets were built with cargo-fuzz and run for 2 hours each — **127 million iterations, zero crashes**.
+Bad Apple is designed around a fail-closed, local-first security model. The current verification surface includes:
 
-| Attack Surface | Fuzzer | Iterations | Crashes |
-|---|---|---|---|
-| SLICKS IPC frame parsing | fuzz_ipc_frame | 423K | 0 |
-| WASM cage compilation + execution | fuzz_wasm_cage | 638K | 0 |
-| P2P protocol frame parsing | fuzz_protocol_frame | 694K | 0 |
-| Scavenger path handling | fuzz_scavenger_path | 760K | 0 |
+| Property | Implementation | Tests |
+|---|---|---|
+| IPC authentication | SLICKS v1 HMAC-SHA256, v2 Secure Enclave P-256 | `bad_apple_ipc.rs` + `tests/cert_suite.rs` |
+| Replay protection | Nonce-pair replay cache | `replay_cache_rejects_replayed_slicks_proofs` |
+| Filesystem isolation | `openat` + `O_NOFOLLOW` automation cage | `tool_cage_rejects_path_traversal`, `tool_cage_rejects_symlink_escape` |
+| Untrusted code | WASM sandbox with fuel, memory, and output caps | `wasm_cage::tests::*` |
+| Output safety | Streaming Aho-Corasick firewall | `output_firewall_patterns_present` |
+| Audit integrity | SHA-256 chained, secret-redacted ledger | `ledger_hash_chain_is_valid`, `ledger_redacts_secrets` |
+| Network posture | Air-gap certification, P2P/MCP off by default | `no_external_network_sockets`, `p2p_and_mcp_off_by_default` |
+| Policy coverage | 60-rule declarative policy in `policy.yaml` | `policy_yaml_present`, `policy_yaml_covers_dangerous_tools` |
 
-**Security architecture:**
-- SLICKS v1 (HMAC-SHA256) and v2 (Secure Enclave ECDSA P-256) IPC authentication
-- Server key pinning (TOFU trust store)
-- Replay cache with nonce deduplication
-- Fail-closed filesystem cage with openat operations
-- WASM sandbox with StoreLimits, fuel metering, output caps
-- Hash-chained audit ledger with SE-signed checkpoints
-- Air-gap certification suite (12 tests, zero network listeners)
-- Streaming output firewall (Aho-Corasick secret redaction)
-- Human-in-the-loop approval policy engine (37 rules)
-- P2P encrypted mesh (AES-256-GCM, off by default)
-
-See [THREAT_MODEL.md](THREAT_MODEL.md) for the full threat model and [docs/SLICKS_PROTOCOL.md](docs/SLICKS_PROTOCOL.md) for the IPC protocol specification.
+See `AGENTS.md` for build and verification conventions, and `Bad_Apple_Ranking.md` for the current consumer-readiness score and remaining blockers.
 
 ## Build
 
@@ -93,14 +80,11 @@ BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 ## Test
 
 ```bash
-# Rust tests (78 tests)
+# Rust unit tests and integration tests
 cargo test --release
 
-# Clean install test (32 checks)
-tests/test_clean_install.sh
-
-# Fuzzing (requires nightly)
-cargo +nightly fuzz run fuzz_ipc_frame -- -max_total_time=300
+# Cert suite (network isolation, tool cage, SLICKS replay, ledger, policy)
+cargo test --release --test cert_suite
 ```
 
 ## Install
@@ -112,6 +96,8 @@ BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 sudo src/platform/apple_desktop/strip_quarantine.sh
 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
+
+For release packaging and signing see `package_signed_release.sh` and `package_unsigned.sh`.
 
 ## Use
 
@@ -131,9 +117,6 @@ target/release/badapple --benchmark
 # Diagnostics
 target/release/badapple --doctor
 
-# Crash report
-target/release/badapple --crash-report
-
 # Persona switch
 target/release/badapple "switch to wicket"
 target/release/badapple --roast "Tell me about cloud AI"
@@ -143,28 +126,28 @@ target/release/badapple --roast "Tell me about cloud AI"
 
 | Metric | Value |
 |---|---|
-| Lines of code | ~72,000 (Rust 18,864, Swift 15,480, Shell 2,315) |
-| Swift logic modules | BadAppleEngine, BadAppleMLX, BadAppleSecurity, BadAppleTools, BadAppleConversation, BadAppleRAG |
-| Build time | 35 days + Swift migration |
-| Security audits | 2 passes, 69 bugs found and fixed |
-| Fuzzer iterations | 127 million, zero crashes |
-| Tests | 78 Rust + 32 install + 4 fuzz targets |
-| Model | 9B Qwen 3.5 4-bit (pinned to commit hash) |
-| Native inference | mlx-swift-lm (streaming, speculative decoding, KV cache) |
+| Lines of code | ~56,000 (Rust ~20,000, Swift ~25,300, Shell ~2,500, plus web/docs) |
+| Rust tests | 103 passing |
+| Cert suite | 15 integration tests passing |
+| Model | 9B Qwen 3.5 4-bit, optional 0.5B fast tier |
+| Native inference | `mlx-swift-lm` with streaming, optional speculative decoding, KV cache |
 | Security | SLICKS v1+v2, openat cage, WASM sandbox, audit ledger, air-gap cert |
 
 ## Documentation
 
-- [CHANGELOG.md](CHANGELOG.md) — Full changelog with all 69 security fixes
-- [THREAT_MODEL.md](THREAT_MODEL.md) — Trust boundaries, threat agents, security properties
-- [docs/SLICKS_PROTOCOL.md](docs/SLICKS_PROTOCOL.md) — IPC protocol specification
-- [AGENTS.md](AGENTS.md) — Project conventions, build commands, architecture notes
-- [fuzz/README.md](fuzz/README.md) — Fuzzing guide and target descriptions
+- [Bad_Apple_Ranking.md](Bad_Apple_Ranking.md) — Consumer readiness score, what is done, what remains.
+- [AGENTS.md](AGENTS.md) — Build commands, project conventions, architecture notes.
+- [CHANGELOG.md](CHANGELOG.md) — Development history.
+- [PRIVACY.md](PRIVACY.md) — Privacy and data posture.
+
+## Current Status
+
+Bad Apple is **working, tested, and running 24/7 on the author's Mac**. It is intended for technical early adopters and researchers. The remaining blockers to a general consumer release are:
+
+- Apple notarization for the release artifact.
+- A clean-machine VM install / smoke test.
+- Final visual polish of the first-launch onboarding.
 
 ## License
 
 LicenseRef-Proprietary. See `LICENSE.txt`.
-
-## Notarization Stance
-
-Bad Apple will not be submitted to Apple's notarization pipeline. Notarization requires uploading binaries to Apple's servers — a violation of the product's "nothing leaves your machine" promise. This is a deliberate philosophical choice. The Homebrew Cask is the recommended install path.
