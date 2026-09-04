@@ -330,15 +330,21 @@ open -a "Bad Apple"
 
 ## Consumer Readiness Ranking
 
-**Current score: 9.5/10**
+**Current score: 9.7 / 10**
 
 | Category | Score | Rationale |
 |---|---|---|
 | Packaging & distribution | 2.75 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, Homebrew Cask, and a signed release path (`package_signed_release.sh` with `CODESIGN_ID`) are all working. CI runs on every push/PR. A notarized default artifact would close the last 0.25. |
 | Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. Signed-but-not-notarized zip is available for CI/enterprise. |
 | First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A 5-step native onboarding wizard (welcome, privacy, model status, permissions, first query) is wired into the menu bar and shown on first launch; an install prompt is shown first if the platform has not been installed. A purchase-grade, fully polished first-launch flow still needs screen-recording permission guidance and a workspace-selection step. |
-| QA & reliability | 1.85 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings), and 103+ Rust tests and 15 cert-suite integration tests all pass. Air-gap certification integration tests assert zero network sockets and now cover SLICKS replay, automation-cage path traversal, automation-cage symlink escape, and policy rule coverage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. Smoke tests still require a running daemon; no clean-machine VM install test yet. |
-| Security & trust posture | 1.55 / 2 | Strong internal controls: SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Local vault, MCP marketplace, and workspace watcher are wired. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
+| QA & reliability | 1.9 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy --all-targets --all-features --release -- -D warnings`, and `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings) all pass. 103 Rust unit tests, 15 cert-suite integration tests, 6 red-team tests, and 4 mesh-sync tests pass. Air-gap certification tests assert zero network sockets and cover SLICKS replay, automation-cage traversal/symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. A clean-machine VM install + smoke test is still the last reliability gap. |
+| Security & trust posture | 1.7 / 2 | Strong internal controls plus an adversarial self-red-teaming harness (`src/red_team/`) with 12 built-in probes and a continuous `redteam watch` loop, encrypted cross-device document sync over the P2P mesh (personas, prompt, settings, model manifests), SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, and air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
+
+### What moved the needle this pass (9.5 → 9.7)
+
+1. **Adversarial self-red teaming harness** — `src/red_team/` adds 12 probes across cage, SLICKS, P2P, WASM, policy, and audit. `badapple redteam <run|watch|status|category|probe>` runs the suite, and `RedTeamLoop` supports continuous monitoring with a JSON report. `tests/red_team.rs` passes all probes.
+2. **Cross-device private AI mesh sync** — `src/mesh_sync.rs` lets Bad Apple sync personas, prompt, settings, and model manifests across peers over the existing AES-256-GCM/HMAC-SHA256 P2P engram mesh. `badapple p2p sync-personas|sync-prompt|sync-settings|sync-models` and `badapple p2p receive-mesh` are wired to the `badapple-p2p` helper. `tests/mesh_sync.rs` covers store conflict resolution, packet round-trips, and live P2P ring sync.
+3. **Clippy hardened at `-D warnings`** — the full `cargo clippy --all-targets --all-features --release -- -D warnings` matrix now passes, raising the bar for new code.
 
 ### What moved the needle this pass (8.5 → 9.25)
 
@@ -389,7 +395,7 @@ open -a "Bad Apple"
 - **First-run onboarding** — The 5-step native onboarding wizard is the primary first-launch flow; the compact install panel is shown first if the platform has not been installed.
 - **MCP marketplace** — `mcp_marketplace.rs`, `badapple-mcp`, and the dashboard `/api/mcp/servers` endpoints provide a full catalog with add/remove/install/uninstall/start/stop/status.
 
-### Remaining blockers to 9.75/10
+### Remaining blockers to 10/10
 
 - Notarized `.dmg` and `.zip` as the default release artifact (eliminates Gatekeeper warning for direct-download users; signed-but-not-notarized zips already work with a `CODESIGN_ID`).
 
@@ -444,7 +450,7 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **Bounded health supervisor** with restart budgets and safe mode
 - **Gatekeeper proxy** with Candle classifier brain, automation cage, and WASM sandbox
 - **APFS file scavenger** module with tokenized chunking
-- **103 Rust tests plus 15 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
+- **128 Rust/cert/mesh/red-team tests (103 unit + 15 cert-suite + 4 mesh-sync + 6 red-team)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 OpenAGI has none of these. It's a proactive agent daemon; Bad Apple is an AI operating system layer.
 
@@ -488,7 +494,7 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **WebAssembly sandbox** in the gatekeeper for untrusted code execution
 - **Fail-closed filesystem automation cage** (allowlisted roots only)
 - **APFS file scavenger** module with tokenized chunking and Sled persistence
-- **103 Rust tests plus 15 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
+- **128 Rust/cert/mesh/red-team tests (103 unit + 15 cert-suite + 4 mesh-sync + 6 red-team)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 ### Notarization stance
 
