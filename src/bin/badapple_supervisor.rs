@@ -164,7 +164,7 @@ fn save_state(state: &SupervisorState) {
     }
 }
 
-fn enter_safe_mode(reason: &str) {
+fn write_runtime_state(mode: &str, safe_mode_reason: Option<&str>) {
     let dir = data_dir();
     let _ = fs::create_dir_all(&dir);
     let path = dir.join(RUNTIME_FILE);
@@ -174,13 +174,28 @@ fn enter_safe_mode(reason: &str) {
         Err(_) => json!({}),
     };
     if let Some(obj) = state.as_object_mut() {
-        obj.insert("mode".into(), json!("SAFE_MODE"));
-        obj.insert("safe_mode_reason".into(), json!(reason));
+        obj.insert("mode".into(), json!(mode));
+        if let Some(reason) = safe_mode_reason {
+            obj.insert("safe_mode_reason".into(), json!(reason));
+        } else {
+            obj.remove("safe_mode_reason");
+        }
         obj.insert(
             "revision".into(),
             json!(obj.get("revision").and_then(|v| v.as_i64()).unwrap_or(0) + 1),
         );
         obj.insert("updated_at".into(), json!(now_secs()));
+    } else {
+        state = json!({
+            "mode": mode,
+            "safe_mode_reason": safe_mode_reason,
+            "revision": 1,
+            "updated_at": now_secs(),
+            "killed": false,
+            "kill_reason": null,
+            "private_mode": false,
+            "schema_version": 1,
+        });
     }
     let tmp = dir.join(format!(".{}.{}.tmp", RUNTIME_FILE, std::process::id()));
     if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -254,7 +269,7 @@ fn check_once(repair: bool) -> serde_json::Value {
                     }
                 } else {
                     let reason = format!("{} exceeded restart budget", svc.name);
-                    enter_safe_mode(&reason);
+                    write_runtime_state("SAFE_MODE", Some(&reason));
                     action = "safe_mode";
                     if let Some(obj) = report.as_object_mut() {
                         obj.insert("safe_mode".into(), json!(true));
@@ -287,6 +302,18 @@ fn check_once(repair: bool) -> serde_json::Value {
 
     state.last_report = Some(report.clone());
     save_state(&state);
+
+    // Keep runtime_state.json current so the menu bar doesn't show a stale
+    // safe-mode message after the supervisor has recovered.
+    let all_healthy = state.services.values().all(|e| e.healthy);
+    let in_safe_mode = report
+        .get("safe_mode")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !in_safe_mode && all_healthy {
+        write_runtime_state("READY", None);
+    }
+
     report
 }
 
