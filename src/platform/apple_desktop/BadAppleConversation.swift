@@ -279,6 +279,9 @@ final class BadApplePersonaManager: @unchecked Sendable {
 
         if let promptFile {
             self.promptFile = promptFile
+        } else if let env = ProcessInfo.processInfo.environment["BADAPPLE_PROMPT_FILE"],
+                  !env.isEmpty {
+            self.promptFile = URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
         } else {
             self.promptFile = self.dataDirectory.appendingPathComponent("prompt.txt")
         }

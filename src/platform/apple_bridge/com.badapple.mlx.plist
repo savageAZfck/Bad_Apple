@@ -50,6 +50,8 @@
         <string>4096</string>
         <key>BADAPPLE_PROMPT_FILE</key>
         <string>__BADAPPLE_ROOT__/prompt.txt</string>
+        <key>BADAPPLE_PERSONAS_FILE</key>
+        <string>__BADAPPLE_ROOT__/personas.json</string>
         <key>BADAPPLE_NOTES_DIR</key>
         <string>__CONSOLE_HOME__/.bad_apple/notes</string>
         <key>BADAPPLE_IDENTITY_BLOB</key>
