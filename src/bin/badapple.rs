@@ -321,8 +321,7 @@ fn tts_binary_path() -> Option<std::path::PathBuf> {
 /// Send a chunk to the local native TTS server and play it with afplay.
 /// If the server is not running, attempt to start it once.
 fn speak_chunk(text: &str) {
-    let voice =
-        std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "en_US-amy-medium".to_string());
+    let voice = std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "Best".to_string());
     let socket = std::env::var("BADAPPLE_TTS_SOCKET")
         .unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());
 
@@ -1545,6 +1544,6 @@ fn print_help() {
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
          Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n\n\
          Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
-         Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
+         Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: Best; use say -v '?' to list installed voices)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
     );
 }

@@ -77,7 +77,7 @@ private final class TTSServer {
 
     init() {
         socketPath = ProcessInfo.processInfo.environment["BADAPPLE_TTS_SOCKET"] ?? "/tmp/badapple_tts.sock"
-        defaultVoiceName = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Samantha"
+        defaultVoiceName = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Best"
         defaultLengthScale = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_LENGTH_SCALE"] ?? "1.0") ?? 1.0
         defaultVolume = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOLUME"] ?? "1.0") ?? 1.0
         gTTSShouldStop = 0
@@ -421,15 +421,81 @@ private final class TTSServer {
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func voiceScore(_ voice: AVSpeechSynthesisVoice) -> (Int, Int) {
+        let quality: Int
+        switch voice.quality {
+        case .premium:
+            quality = 4
+        case .enhanced:
+            quality = 3
+        case .default:
+            quality = 2
+        @unknown default:
+            quality = 1
+        }
+
+        let identifier = voice.identifier.lowercased()
+        let identifierRank: Int
+        if identifier.contains("premium") {
+            identifierRank = 5
+        } else if identifier.contains("enhanced") {
+            identifierRank = 4
+        } else if identifier.contains("eloquence") {
+            identifierRank = 3
+        } else if identifier.contains("compact") {
+            identifierRank = 2
+        } else if identifier.contains("com.apple.speech.synthesis.voice") {
+            // Legacy novelty voices (Bahh, Bells, Boing, ...).
+            identifierRank = 1
+        } else {
+            identifierRank = 0
+        }
+
+        return (quality, identifierRank)
+    }
+
+    private func bestVoice(for language: String, matching name: String? = nil) -> AVSpeechSynthesisVoice? {
+        let allVoices = AVSpeechSynthesisVoice.speechVoices()
+        let byLanguage = allVoices.filter { $0.language == language }
+        guard !byLanguage.isEmpty else { return nil }
+
+        if let name = name, !name.isEmpty {
+            let lower = name.lowercased()
+            let named = byLanguage.filter {
+                $0.name.lowercased().contains(lower) ||
+                $0.identifier.lowercased().contains(lower)
+            }
+            if !named.isEmpty {
+                return named.sorted { voiceScore($0) > voiceScore($1) }.first
+            }
+        }
+
+        return byLanguage.sorted { voiceScore($0) > voiceScore($1) }.first
+    }
+
     private func resolveVoice(_ name: String) -> AVSpeechSynthesisVoice? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // If the caller passed a real AVFoundation voice identifier, use it.
         if let voice = AVSpeechSynthesisVoice(identifier: trimmed) {
             return voice
         }
 
-        if trimmed == "Samantha" {
-            if let voice = AVSpeechSynthesisVoice(identifier: "com.apple.voice.compact.en-US.Samantha") {
+        // Special names meaning "use the best available voice for this language".
+        if trimmed == "Best" || trimmed == "Default" || trimmed == "en_US-amy-medium" {
+            // `en_US-amy-medium` is a legacy Piper-style identifier. The native
+            // AVFoundation synthesizer has no such voice; treat it as a request
+            // for the highest-quality installed US English voice.
+            if let voice = bestVoice(for: "en-US") {
+                return voice
+            }
+        }
+
+        // Common explicit names. Use the best available quality for that name
+        // (premium/enhanced if the user has downloaded it, otherwise compact).
+        let explicitNames = ["Samantha", "Samantha (Enhanced)", "Samantha (Premium)"]
+        if explicitNames.contains(trimmed) {
+            if let voice = bestVoice(for: "en-US", matching: "Samantha") {
                 return voice
             }
         }
@@ -437,12 +503,18 @@ private final class TTSServer {
         // Try to derive a BCP-47 language tag from names like en_US-amy-medium.
         let dashPattern = trimmed.replacingOccurrences(of: "_", with: "-")
         let localePrefix = dashPattern.prefix { $0 != "-" }
-        if !localePrefix.isEmpty, let voice = AVSpeechSynthesisVoice(language: String(localePrefix)) {
-            return voice
+        if !localePrefix.isEmpty {
+            let lang = String(localePrefix)
+            if let voice = bestVoice(for: lang, matching: trimmed) {
+                return voice
+            }
+            if let voice = AVSpeechSynthesisVoice(language: lang) {
+                return voice
+            }
         }
 
-        // Fallback to the built-in US English voice.
-        if let voice = AVSpeechSynthesisVoice(identifier: "com.apple.voice.compact.en-US.Samantha") {
+        // Fallback to the best available US English voice.
+        if let voice = bestVoice(for: "en-US") {
             return voice
         }
         if let voice = AVSpeechSynthesisVoice(language: "en-US") {
@@ -458,6 +530,9 @@ private final class TTSServer {
         utterance.voice = voice
         utterance.rate = rate
         utterance.volume = volume
+        utterance.pitchMultiplier = 1.0
+        utterance.preUtteranceDelay = 0.0
+        utterance.postUtteranceDelay = 0.0
 
         let synthesizer = self.synthesizer
 
