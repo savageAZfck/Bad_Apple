@@ -2,7 +2,7 @@
 
 > **A local-first AI operating system layer for macOS. On-device inference, hardware-rooted identity, fail-closed security, and a native Swift menu bar.**
 
-Bad Apple is not a chat app. It is a system-level AI runtime for Apple Silicon that keeps prompts, memory, and tools on the machine. It runs as a set of launchd daemons, authenticates every interaction through a custom IPC protocol, and includes an air-gap certification suite that proves the runtime opens zero non-loopback network sockets when P2P and MCP are disabled.
+Bad Apple is not a chat app. It is a system-level AI runtime for Apple Silicon that keeps prompts, memory, and tools on the machine. It runs as three launchd daemons, authenticates every interaction through a custom IPC protocol, and includes an air-gap certification suite that proves the runtime opens zero non-loopback network sockets when P2P and MCP are disabled.
 
 ## What It Does
 
@@ -15,7 +15,7 @@ Bad Apple is not a chat app. It is a system-level AI runtime for Apple Silicon t
 - **Streaming output firewall** — Aho-Corasick pattern matching with real-time secret redaction.
 - **Semantic cache** — `bge-small-en-v1.5` embeddings with cosine-similarity lookup, scoped by persona.
 - **RAG context** — workspace file watching, ambient context, and optional ocular screen-stream summarization.
-- **Tool router + policy engine** — 60-rule declarative policy in `policy.yaml` with human-in-the-loop approvals for destructive tools.
+- **Tool router + policy engine** — declarative policy in `policy.yaml` with tool-specific rules, path allowlists, denied patterns, and human-in-the-loop approvals for destructive tools.
 - **P2P encrypted mesh** — AES-256-GCM link-local peer sync for models and messages, off by default for air-gap certification.
 - **MCP marketplace** — local tool-server catalog with lifecycle management.
 - **Persona system** — hot-reloadable `prompt.txt`, runtime persona packs, and voice-specific prompts.
@@ -66,7 +66,7 @@ Bad Apple is designed around a fail-closed, local-first security model. The curr
 | Output safety | Streaming Aho-Corasick firewall | `output_firewall_patterns_present` |
 | Audit integrity | SHA-256 chained, secret-redacted ledger | `ledger_hash_chain_is_valid`, `ledger_redacts_secrets` |
 | Network posture | Air-gap certification suite proves zero external sockets; P2P/MCP are off by default | `no_external_network_sockets`, `p2p_and_mcp_off_by_default` |
-| Policy coverage | 60-rule declarative policy in `policy.yaml` | `policy_yaml_present`, `policy_yaml_covers_dangerous_tools` |
+| Policy coverage | Declarative policy in `policy.yaml` covering destructive tools, path traversal, and shell allowlists | `policy_yaml_present`, `policy_yaml_covers_dangerous_tools` |
 
 See `AGENTS.md` for build and verification conventions, and `Bad_Apple_Ranking.md` for the current consumer-readiness score and remaining blockers.
 
