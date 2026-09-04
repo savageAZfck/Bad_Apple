@@ -20,6 +20,8 @@
         <string>/Users/savag3/bad_apple/prompt.txt</string>
         <key>BADAPPLE_PERSONAS_FILE</key>
         <string>/Users/savag3/bad_apple/personas.json</string>
+        <key>BADAPPLE_SOCKET_PATH</key>
+        <string>/var/run/badapple/substrate_mlx.sock</string>
     </dict>
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>

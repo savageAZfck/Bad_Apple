@@ -2387,8 +2387,8 @@ struct BadAppleMenuBarApp {
 }
 
 private enum BadAppleBrain {
-    static let fastSocket = "/var/run/badapple/substrate_fast.sock"
-    static let deepSocket = "/var/run/badapple/substrate.sock"
+    static let fastSocket = "/var/run/badapple/substrate_mlx.sock"
+    static let deepSocket = "/var/run/badapple/substrate_mlx.sock"
     static let directSocket = "/var/run/badapple/substrate_mlx.sock"
     static let keyPath = "/var/lib/bad_apple/slicks.key"
     static let generatedImagesDir = "/var/lib/bad_apple/generated_images"
@@ -2948,8 +2948,7 @@ private final class BadAppleFirstRunOnboarding {
         UserDefaults.standard.bool(forKey: "BadApplePlatformInstalled")
             || (FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.mlx.plist")
                 && FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.gatekeeper.plist")
-                && FileManager.default.fileExists(atPath: "/var/run/badapple/substrate.sock")
-                && FileManager.default.fileExists(atPath: BadAppleBrain.directSocket))
+                && FileManager.default.fileExists(atPath: BadAppleBrain.deepSocket))
     }
 
     func showIfNeeded() {
@@ -4591,8 +4590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         let installed = FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.mlx.plist")
             && FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.gatekeeper.plist")
-            && FileManager.default.fileExists(atPath: "/var/run/badapple/substrate.sock")
-            && FileManager.default.fileExists(atPath: BadAppleBrain.directSocket)
+            && FileManager.default.fileExists(atPath: BadAppleBrain.deepSocket)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self = self else { return }
