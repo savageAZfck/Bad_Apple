@@ -6,10 +6,15 @@
 //! - No non-loopback network sockets on any badapple process.
 //! - The daemon listens only on Unix domain sockets.
 //! - The audit ledger redacts secrets and preserves hash chaining.
-//! - The local security policy file is present.
+//! - The local security policy file is present and covers dangerous tools.
+//! - The automation cage rejects path traversal and symlink escapes.
+//! - SLICKS replay protection rejects reused nonce pairs.
 //! - Model provenance manifests can be recorded and verified.
 //! - The MCP and P2P helpers are off by default and do not open TCP sockets.
 
+use bad_apple::automation_cage::{Action, AutomationCage};
+use bad_apple::bad_apple_ipc::{client_proof, verify_client_proof, ReplayCache};
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Find badapple-related processes by matching on the command line.
@@ -322,4 +327,131 @@ fn vault_cli_round_trip() {
     assert!(json["keys"].as_array().unwrap().is_empty());
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn replay_cache_rejects_replayed_slicks_proofs() {
+    let secret = b"0123456789abcdef0123456789abcdef";
+    let timestamp = 1_700_000_000_000;
+    let client_nonce = bad_apple::bad_apple_ipc::random_nonce();
+    let server_nonce = bad_apple::bad_apple_ipc::random_nonce();
+    let prompt = "hello";
+    let max_tokens = 32;
+
+    let proof = client_proof(
+        secret,
+        timestamp,
+        &client_nonce,
+        &server_nonce,
+        prompt,
+        max_tokens,
+    );
+    assert!(verify_client_proof(
+        secret,
+        timestamp,
+        &client_nonce,
+        &server_nonce,
+        prompt,
+        max_tokens,
+        &proof
+    ));
+
+    let cache = ReplayCache::new(4096);
+    assert!(
+        cache.check_and_insert(&client_nonce, &server_nonce),
+        "fresh nonce pair must be accepted"
+    );
+    assert!(
+        !cache.check_and_insert(&client_nonce, &server_nonce),
+        "replayed nonce pair must be rejected by the gatekeeper replay cache"
+    );
+}
+
+#[test]
+fn tool_cage_rejects_path_traversal() {
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join(format!("cert_cage_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let cage = AutomationCage::new(vec![root.clone()]).unwrap();
+    let bad_actions = [
+        Action::CreateFile {
+            path: PathBuf::from("../etc/passwd"),
+        },
+        Action::CreateFile {
+            path: PathBuf::from("/tmp/../../etc/passwd"),
+        },
+    ];
+    for action in &bad_actions {
+        assert!(
+            cage.validate(action).is_err(),
+            "path traversal must be rejected: {:?}",
+            action
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn tool_cage_rejects_symlink_escape() {
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join(format!("cert_cage_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let allowed = root.join("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let outside = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join(format!("cert_cage_outside_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("target.txt");
+    std::fs::write(&target, "outside").unwrap();
+
+    // Create a symlink inside the allowed root pointing outside.
+    let link = allowed.join("escape.txt");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let cage = AutomationCage::new(vec![allowed.clone()]).unwrap();
+    let action = Action::CreateFile { path: link };
+    assert!(
+        cage.validate(&action).is_err(),
+        "symlink escape outside the allowlisted root must be rejected"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn policy_yaml_covers_dangerous_tools() {
+    let policy = std::fs::read_to_string("policy.yaml")
+        .or_else(|_| std::fs::read_to_string("src/policy.yaml"))
+        .or_else(|_| std::fs::read_to_string("/var/lib/bad_apple/policy.yaml"))
+        .unwrap_or_else(|_| {
+            std::fs::read_to_string(
+                std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into())
+                    + "/src/policy.yaml",
+            )
+            .unwrap_or_default()
+        });
+
+    let required = [
+        "run_shell",
+        "run_applescript",
+        "write_file",
+        "read_file",
+        "index_documents",
+    ];
+    for tool in &required {
+        assert!(policy.contains(tool), "policy.yaml must cover {tool}");
+    }
 }

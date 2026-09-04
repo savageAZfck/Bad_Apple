@@ -5,14 +5,13 @@ use bad_apple::automation_cage::{
 use bad_apple::bad_apple_ipc::{
     client_proof, load_slicks_secret, now_unix_ms, random_nonce, read_frame, server_proof,
     socket_path, validate_request, verify_client_proof, verify_server_proof, ClientFrame,
-    ServerFrame, MAX_FRAME_BYTES, SLICKS_VERSION, SLICKS_VERSION_2,
+    ReplayCache, ServerFrame, MAX_FRAME_BYTES, SLICKS_VERSION, SLICKS_VERSION_2,
 };
 use bad_apple::tensor_brain::{text_to_grounded_embedding, CandleBrain};
 use bad_apple::wasm_cage::WasmCage;
 use base64::{engine::general_purpose, Engine as _};
 use rand::Rng;
 use regex::Regex;
-use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, Write};
 use std::os::unix::fs::{chown, MetadataExt, PermissionsExt};
@@ -20,42 +19,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MLX_SOCKET_PATH: &str = "/var/run/badapple/substrate_mlx.sock";
 const LOW_COMPLEXITY_THRESHOLD: f64 = 0.62;
 const REPLAY_CACHE_MAX: usize = 4096;
-
-/// Thread-safe replay cache: stores consumed (client_nonce, server_nonce) pairs
-/// to reject replayed Execute frames within the freshness window.
-struct ReplayCache {
-    seen: Mutex<HashSet<(String, String)>>,
-}
-
-impl ReplayCache {
-    fn new() -> Self {
-        Self {
-            seen: Mutex::new(HashSet::new()),
-        }
-    }
-
-    /// Check if a nonce pair has been used, and insert it if not.
-    /// Returns `true` if the pair is fresh (not a replay).
-    fn check_and_insert(&self, client_nonce: &str, server_nonce: &str) -> bool {
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        let key = (client_nonce.to_string(), server_nonce.to_string());
-        if seen.contains(&key) {
-            return false; // replay
-        }
-        // Evict oldest entries if cache is full (simple cap, not LRU)
-        if seen.len() >= REPLAY_CACHE_MAX {
-            seen.clear();
-        }
-        seen.insert(key);
-        true
-    }
-}
 
 /// One classification request sent to the brain worker thread.
 struct ClassifyRequest {
@@ -1027,7 +996,7 @@ fn main() -> Result<()> {
     let cage = AutomationCage::from_env().context("cannot initialize automation cage")?;
     eprintln!("[gatekeeper] automation cage roots: {:?}", cage.roots());
 
-    let replay_cache = Arc::new(ReplayCache::new());
+    let replay_cache = Arc::new(ReplayCache::new(REPLAY_CACHE_MAX));
 
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("cannot bind Bad Apple socket at {path:?}"))?;

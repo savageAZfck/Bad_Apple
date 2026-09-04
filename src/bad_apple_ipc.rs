@@ -5,10 +5,12 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -234,6 +236,39 @@ pub fn validate_request(prompt: &str, max_new_tokens: usize) -> Result<()> {
         bail!("max_new_tokens must be between 1 and {MAX_NEW_TOKENS}");
     }
     Ok(())
+}
+
+/// Thread-safe replay cache: stores consumed (client_nonce, server_nonce) pairs
+/// to reject replayed Execute frames within the freshness window.
+pub struct ReplayCache {
+    seen: Mutex<HashSet<(String, String)>>,
+    max: usize,
+}
+
+impl ReplayCache {
+    /// Create a new cache with the given bound on stored nonce pairs.
+    pub fn new(max: usize) -> Self {
+        Self {
+            seen: Mutex::new(HashSet::new()),
+            max,
+        }
+    }
+
+    /// Check if a nonce pair has been used, and insert it if not.
+    /// Returns `true` if the pair is fresh (not a replay).
+    pub fn check_and_insert(&self, client_nonce: &str, server_nonce: &str) -> bool {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (client_nonce.to_string(), server_nonce.to_string());
+        if seen.contains(&key) {
+            return false; // replay
+        }
+        // Evict oldest entries if cache is full (simple cap, not LRU).
+        if seen.len() >= self.max {
+            seen.clear();
+        }
+        seen.insert(key);
+        true
+    }
 }
 
 fn v2_server_material(timestamp_ms: u64, client_nonce: &str, server_nonce: &str) -> String {
@@ -1097,6 +1132,43 @@ mod tests {
 
         // One ms beyond the boundary (30001ms in the past) should not be fresh.
         assert!(!timestamp_is_fresh(now - skew - 1));
+    }
+
+    /// The replay cache must accept a fresh nonce pair and then reject a
+    /// verbatim replay of the same pair.
+    #[test]
+    fn replay_cache_rejects_repeated_nonce_pair() {
+        let cache = ReplayCache::new(100);
+        let client_nonce = random_nonce();
+        let server_nonce = random_nonce();
+
+        assert!(
+            cache.check_and_insert(&client_nonce, &server_nonce),
+            "first use of a nonce pair must be accepted"
+        );
+        assert!(
+            !cache.check_and_insert(&client_nonce, &server_nonce),
+            "verbatim replay of the same pair must be rejected"
+        );
+
+        // A different pair is still accepted.
+        let other_client = random_nonce();
+        assert!(cache.check_and_insert(&other_client, &server_nonce));
+    }
+
+    /// When the replay cache hits its configured bound it must reset and
+    /// continue accepting fresh pairs without panicking.
+    #[test]
+    fn replay_cache_resets_at_capacity() {
+        let cache = ReplayCache::new(2);
+        let n1 = random_nonce();
+        let n2 = random_nonce();
+        let n3 = random_nonce();
+
+        assert!(cache.check_and_insert(&n1, &n2));
+        assert!(cache.check_and_insert(&n2, &n3));
+        // Third insert should reset and still succeed because the cache is full.
+        assert!(cache.check_and_insert(&n3, &n1));
     }
 
     /// Reusing a server nonce with a different client nonce must produce a
