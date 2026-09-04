@@ -51,6 +51,11 @@ pub struct CompactEngramPacket {
     pub embedding: Vec<f64>,
     #[serde(default = "default_priority")]
     pub priority: u8,
+    /// Optional mesh-sync payload. When present, the packet is treated as a
+    /// control-plane sync message and bypasses the engram similarity gate.
+    /// The value is a base64-encoded `MeshPacket`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
 }
 
 const fn default_priority() -> u8 {
@@ -432,7 +437,7 @@ pub struct ConnectionManager {
     secret: Arc<Vec<u8>>,
     cipher: Arc<p2p_crypto::P2PCipher>,
     peers: Arc<DashMap<PeerId, PeerHandle>>,
-    incoming: Arc<LockFreeRing<CompactEngramPacket>>,
+    pub incoming: Arc<LockFreeRing<CompactEngramPacket>>,
     /// Lock-free outgoing ring for wild-workspace and other fire-and-forget
     /// broadcast producers.  Producers push synchronously; a single background
     /// sweeper drains the ring and calls `broadcast`.
@@ -970,6 +975,14 @@ impl ConnectionManager {
                 now_secs.saturating_sub(compact.timestamp),
                 ENGRAM_MAX_AGE_SECS
             );
+            return;
+        }
+
+        // Mesh-sync packets carry an encrypted control payload and bypass the
+        // engram similarity gate. They are still authenticated by HMAC and
+        // encrypted by the P2P cipher, so the gate bypass is safe.
+        if compact.payload.is_some() {
+            self.incoming.push(compact);
             return;
         }
 

@@ -5,12 +5,14 @@
 //! traffic with AES-256-GCM derived from the SLICKS secret.
 //!
 //! Subcommands:
-//!   peers    - list connected peers
-//!   sync     - broadcast a sync pulse and return peer count
-//!   models   - list known models advertised by peers
-//!   pull     - pull a model from a peer (placeholder)
-//!   send     - send a model to a peer (placeholder)
-//!   receive  - wait for an incoming model transfer (placeholder)
+//!   peers         - list connected peers
+//!   sync          - broadcast a sync pulse and return peer count
+//!   sync-doc      - broadcast a document kind (personas, prompt, settings, models)
+//!   receive-mesh  - listen for incoming mesh sync packets and persist them
+//!   models        - list known models advertised by peers
+//!   pull          - pull a model from a peer
+//!   send          - send a model to a peer
+//!   receive       - wait for an incoming model transfer
 //!
 //! Environment:
 //!   BADAPPLE_P2P_SECRET      - 32+ byte pre-shared key (defaults to SLICKS secret)
@@ -20,6 +22,9 @@
 //!   BADAPPLE_P2P_MAX_PEERS   - maximum concurrent peers (default 8)
 
 use anyhow::{Context, Result};
+use bad_apple::mesh_sync::{
+    build_engram, handle_incoming, read_local_doc, MeshDocKind, MeshPacket, MeshStore,
+};
 use bad_apple::protocol::{CompactEngramPacket, ConnectionManager, LockFreeRing, SwarmMetrics};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,12 +40,22 @@ fn main() {
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        anyhow::bail!("usage: badapple-p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
+        anyhow::bail!("usage: badapple-p2p <peers|sync|sync-doc <kind>|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
     }
 
     match args[0].as_str() {
         "peers" => list_peers(),
         "sync" => do_sync(),
+        "sync-doc" => {
+            if args.len() < 2 {
+                anyhow::bail!("usage: badapple-p2p sync-doc <personas|prompt|settings|models>");
+            }
+            sync_doc(&args[1])
+        }
+        "receive-mesh" => {
+            let timeout_ms = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5000);
+            receive_mesh(timeout_ms)
+        }
         "models" => list_models(),
         "pull" => {
             if args.len() < 3 {
@@ -172,6 +187,7 @@ fn do_sync() -> Result<()> {
                 brain_state: vec![0.0; bad_apple::protocol::ENGRAM_DIM],
                 embedding: vec![0.0; bad_apple::protocol::EMBEDDING_DIM],
                 priority: u8::MAX,
+                payload: None,
             };
             cm.push_outgoing(packet);
 
@@ -182,6 +198,97 @@ fn do_sync() -> Result<()> {
             Ok(())
         })
     })
+}
+
+fn sync_doc(kind: &str) -> Result<()> {
+    let kind: MeshDocKind = kind.parse()?;
+    with_runtime(move || {
+        let rt = Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let cm = build_manager().context("failed to build connection manager")?;
+            let tcp_port = p2p_tcp_port();
+            let ws_port = p2p_ws_port();
+            let _ = cm.start_server(tcp_port, ws_port).await;
+            cm.start_outbound_sweeper();
+            connect_to_peers(&cm);
+
+            // Wait a moment for outbound peers to connect.
+            tokio::time::sleep(Duration::from_millis(400)).await;
+
+            let doc = read_local_doc(kind).context("failed to read local document")?;
+            let packet = MeshPacket::Push {
+                doc_id: doc.doc_id(),
+                doc,
+            };
+            let engram = build_engram(&packet, &hostname())?;
+            cm.push_outgoing(engram);
+
+            // Give peers time to receive and ack.
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+
+            let count = cm.peer_count();
+            println!(
+                "{{\"status\": \"ok\", \"kind\": \"{}\", \"peers\": {}}}",
+                kind, count
+            );
+            Ok(())
+        })
+    })
+}
+
+fn receive_mesh(timeout_ms: u64) -> Result<()> {
+    with_runtime(move || {
+        let rt = Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let cm = build_manager().context("failed to build connection manager")?;
+            let tcp_port = p2p_tcp_port();
+            let ws_port = p2p_ws_port();
+            let _ = cm.start_server(tcp_port, ws_port).await;
+            cm.start_outbound_sweeper();
+            connect_to_peers(&cm);
+
+            let store = MeshStore::new(MeshStore::default_root())?;
+            let incoming = cm.incoming.clone();
+            let mut received = 0usize;
+            let mut acks = 0usize;
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+            while let Ok(Some(packet)) =
+                tokio::time::timeout_at(deadline, incoming.pop_async()).await
+            {
+                if packet.payload.is_some() {
+                    received += 1;
+                    if let Some(reply) = handle_incoming(&packet, &store) {
+                        let reply_engram = build_engram(&reply, &hostname())?;
+                        cm.push_outgoing(reply_engram);
+                        if matches!(reply, MeshPacket::Ack { .. }) {
+                            acks += 1;
+                        }
+                    }
+                }
+            }
+
+            println!(
+                "{{\"status\": \"ok\", \"received\": {}, \"acks_sent\": {}}}",
+                received, acks
+            );
+            Ok(())
+        })
+    })
+}
+
+fn p2p_tcp_port() -> u16 {
+    std::env::var("BADAPPLE_P2P_TCP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9876)
+}
+
+fn p2p_ws_port() -> u16 {
+    std::env::var("BADAPPLE_P2P_WS_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9877)
 }
 
 fn model_dir() -> std::path::PathBuf {

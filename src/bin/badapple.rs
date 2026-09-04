@@ -100,7 +100,7 @@ fn main() -> Result<()> {
     }
 
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>");
     } else {
         prompt_parts.join(" ")
     };
@@ -1000,9 +1000,42 @@ fn run_model_subcommand(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn p2p_binary_path() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .context("badapple executable has no parent directory")?;
+    Ok(dir.join("badapple-p2p"))
+}
+
+fn run_p2p_helper(extra_args: &[String]) -> Result<()> {
+    let binary = p2p_binary_path()?;
+    let mut cmd = std::process::Command::new(&binary);
+    cmd.args(extra_args);
+    cmd.stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to spawn badapple-p2p at {}", binary.display()))?;
+    if !status.success() {
+        anyhow::bail!("badapple-p2p exited with status: {status}");
+    }
+    Ok(())
+}
+
+fn p2p_sync_kind_alias(sub: &str) -> Option<&'static str> {
+    match sub {
+        "sync-personas" | "sync-persona" => Some("personas"),
+        "sync-prompt" | "sync-prompts" => Some("prompt"),
+        "sync-settings" => Some("settings"),
+        "sync-models" | "sync-model-manifests" => Some("models"),
+        _ => None,
+    }
+}
+
 fn run_p2p_subcommand(args: &[String]) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
+        bail!("usage: badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
     }
     let sub = args[0].as_str();
     let mut params = serde_json::Map::new();
@@ -1015,6 +1048,29 @@ fn run_p2p_subcommand(args: &[String]) -> Result<()> {
         "sync" => {
             let result = call_agent("p2p_sync", None, MAX_TOKENS)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "sync-doc" => {
+            if args.len() < 2 {
+                bail!("usage: badapple p2p sync-doc <personas|prompt|settings|models>");
+            }
+            run_p2p_helper(&["sync-doc".to_string(), args[1].clone()])?;
+        }
+        "sync-personas"
+        | "sync-persona"
+        | "sync-prompt"
+        | "sync-prompts"
+        | "sync-settings"
+        | "sync-models"
+        | "sync-model-manifests" => {
+            let kind = p2p_sync_kind_alias(sub).unwrap_or(sub);
+            run_p2p_helper(&["sync-doc".to_string(), kind.to_string()])?;
+        }
+        "receive-mesh" => {
+            let mut argv = vec!["receive-mesh".to_string()];
+            if args.len() >= 2 {
+                argv.push(args[1].clone());
+            }
+            run_p2p_helper(&argv)?;
         }
         "models" => {
             let result = call_agent("p2p_models", None, MAX_TOKENS)?;
@@ -1487,7 +1543,7 @@ fn run_redteam_subcommand(args: &[String]) -> Result<()> {
 fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
-         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n\n\
+         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n\n\
          Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
     );
