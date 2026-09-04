@@ -95,8 +95,12 @@ fn main() -> Result<()> {
         return run_mcp_subcommand(&prompt_parts[1..]);
     }
 
+    if prompt_parts.first().map(std::string::String::as_str) == Some("redteam") {
+        return run_redteam_subcommand(&prompt_parts[1..]);
+    }
+
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>");
     } else {
         prompt_parts.join(" ")
     };
@@ -1395,10 +1399,95 @@ fn mcp_catalog_path() -> std::path::PathBuf {
         })
 }
 
+fn run_redteam_subcommand(args: &[String]) -> Result<()> {
+    use bad_apple::red_team::{RedTeamLoop, RedTeamRunner};
+    use std::time::Duration;
+
+    let sub = args.first().map(String::as_str).unwrap_or("run");
+    match sub {
+        "run" => {
+            let runner = RedTeamRunner::default();
+            let report = runner.run_once();
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.findings().is_empty() {
+                std::process::exit(1);
+            }
+        }
+        "watch" => {
+            let interval = args
+                .get(1)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(30);
+            let rt = RedTeamLoop::new(Duration::from_secs(interval));
+            println!("{{\"status\": \"running\", \"interval_sec\": {interval}}}");
+            let _handle = rt.start();
+            // The handle runs until the process is killed.
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let report = rt.last_report();
+                if let Some(r) = report {
+                    let findings = r.findings();
+                    println!(
+                        "{{\"score\": {:.4}, \"total\": {}, \"findings\": {}}}",
+                        r.score,
+                        r.total,
+                        findings.len()
+                    );
+                    if !findings.is_empty() {
+                        eprintln!("{}", serde_json::to_string_pretty(&findings)?);
+                    }
+                }
+            }
+        }
+        "status" => {
+            let runner = RedTeamRunner::default();
+            let report = runner.run_once();
+            let findings = report.findings();
+            println!(
+                "{{\"status\": \"ok\", \"score\": {:.4}, \"total\": {}, \"findings\": {}}}",
+                report.score,
+                report.total,
+                findings.len()
+            );
+            for finding in &findings {
+                eprintln!("{}", serde_json::to_string_pretty(finding)?);
+            }
+        }
+        "category" => {
+            let category = args.get(1).map(String::as_str).unwrap_or("");
+            if category.is_empty() {
+                bail!("usage: badapple redteam category <cage|slicks|p2p|wasm|policy|audit>");
+            }
+            let runner = RedTeamRunner::default();
+            let report = runner.run_category(category);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.findings().is_empty() {
+                std::process::exit(1);
+            }
+        }
+        "probe" => {
+            let id = args.get(1).map(String::as_str).unwrap_or("");
+            if id.is_empty() {
+                bail!("usage: badapple redteam probe <id>");
+            }
+            let runner = RedTeamRunner::default();
+            let report = runner
+                .run_probe(id)
+                .ok_or_else(|| anyhow::anyhow!("unknown probe: {id}"))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.findings().is_empty() {
+                std::process::exit(1);
+            }
+        }
+        _ => bail!("unknown redteam subcommand: {sub}\nusage: badapple redteam <run|watch|status|category <category>|probe <id>>"),
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
-         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n\n\
+         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n\n\
          Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 240)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: en_US-amy-medium)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
     );
