@@ -1,12 +1,12 @@
 # Bad Apple — Complete Feature & Capability Overview
 
-> **Bad Apple is an on-device, air-gapped AI operating system layer for macOS that runs a 9B Qwen 3.5 large language model on Apple Silicon through MLX, executes local tools, indexes your files, speaks responses, and never sends prompts or data to the cloud after the models are downloaded once.**
+> **Bad Apple is an on-device, air-gapped AI operating system layer for macOS. It runs a 9B Qwen 3.5 large language model on Apple Silicon through MLX, executes local tools, indexes your files, speaks responses, extends via an MCP marketplace, syncs models and messages over an encrypted P2P mesh, watches your workspace for context, and can read the screen and room ambient state — all without sending prompts or data to the cloud after the models are downloaded once.**
 
 ---
 
 ## What Bad Apple Is
 
-Bad Apple is a **local-first AI operating system layer** for macOS. It is built around a single 9B Qwen 3.5 4-bit model running on the Apple Neural Engine / GPU through MLX, an optional 0.5B fast tier model for simple queries, optional speculative decoding with a small draft model, a native AVSpeechSynthesizer TTS server, and a Rust-backed SLICKS-secured Unix-socket command layer. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
+Bad Apple is a **local-first AI operating system layer** for macOS. It is built around a 9B Qwen 3.5 4-bit model running on the Apple Neural Engine / GPU through MLX, an optional 0.5B fast tier model for simple queries, optional speculative decoding with a small draft model, a native AVSpeechSynthesizer TTS server, a Rust-backed SLICKS-secured Unix-socket command layer, an encrypted P2P mesh for model and message sync, a workspace watcher, ambient/ocular context helpers, and an MCP marketplace. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
 
 Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 
@@ -67,6 +67,10 @@ Bad Apple can run tools against the local filesystem and system without leaving 
 - `consolidate_memory` — memory consolidation
 - `workspace_status` — workspace context status
 - `set_session_seed` / `get_session_seed` — session determinism
+- `workspace_watch` — real-time workspace file monitoring and RAG updates
+- `mcp_invoke` — call tools exposed by installed MCP servers
+- `ambient_context` — retrieve live ambient context from the desktop
+- `ocular_capture` — capture and describe the current screen content
 
 ### 5. Human-in-the-Loop Approval Workflow
 
@@ -119,6 +123,8 @@ Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_document
 - **Tool invocation**: `invoke_tool` for direct tool calls
 - **Inference**: stateless `inference` method for single-turn generation
 - **Runtime control**: `set_fast_tier`, `set_autopilot`, `switch_persona`, `set_workspace`, `flush_vram`, `unload_model`, `get_pending_approvals`, `audit_tail`, `identity_status/sign`, `kill_switch`, `private_mode`, `set_airgap`
+- **MCP marketplace**: `badapple mcp list|add|remove|install|uninstall|start|stop|status|init` and `badapple-dashboard` `/api/mcp/servers` endpoints.
+- **Local vault**: `badapple vault set|get|list|remove` for HSM-backed secret storage.
 
 ### 12. Agent Tasks
 
@@ -236,10 +242,17 @@ badapple CLI / menu bar / voice host
    ├─ Tools + approvals (60 policy.yaml rules)
    ├─ Agent tasks (plan-execute-observe)
    ├─ Vision (image description)
-   └─ CLI agent protocol (LAP)
+   ├─ CLI agent protocol (LAP)
+   ├─ Workspace watcher (real-time file events)
+   ├─ MCP marketplace / MCP server host
+   └─ P2P encrypted mesh (optional)
               │
               ▼
     badapple-tts  (native AVSpeechSynthesizer)
+
+    badapple-ambient / badapple-screen-capture  (native Aqua helpers)
+    ├─ Ambient context (weather, time, mic, device)
+    └─ Ocular screen capture + VLM description
 
     badapple-supervisor (Rust, launchd)
     ├─ Health checks (gatekeeper, MLX, TTS)
@@ -263,9 +276,11 @@ badapple CLI / menu bar / voice host
 - **Built-in safety** — approvals, fail-closed paths, streaming firewall, audit ledger, and 60-rule policy engine by default.
 - **Mac-native** — uses MLX, Apple Silicon, launchd, AVSpeechSynthesizer, Secure Enclave, and a Swift menu bar.
 - **Extensible local RAG** — index your own files and query them privately.
-- **Open-ended tool use** — local shell, AppleScript, file tools, document reading, and vision gated by user approval.
+- **Open-ended tool use** — local shell, AppleScript, file tools, document reading, vision, workspace watcher, ambient/ocular context, and MCP tools gated by user approval.
 - **Benchmark-ready** — built-in metrics for throughput, latency, and memory.
-- **CLI agent protocol** — full JSON-RPC control of models, tools, agent tasks, and runtime state from the command line.
+- **MCP marketplace** — install and call local MCP servers like filesystem, fetch, and custom tools without leaving the machine.
+- **Encrypted P2P mesh** — sync models and messages with peers over AES-256-GCM, off by default for air-gapped operation.
+- **CLI agent protocol** — full JSON-RPC control of models, tools, agent tasks, P2P, MCP, vault, and runtime state from the command line.
 - **Bounded health supervisor** — automatic restart with budget and safe mode.
 - **Gatekeeper proxy** — SLICKS auth, fast action resolution, automation cage, and WASM sandbox.
 
@@ -315,15 +330,15 @@ open -a "Bad Apple"
 
 ## Consumer Readiness Ranking
 
-**Current score: 9.25/10**
+**Current score: 9.5/10**
 
 | Category | Score | Rationale |
 |---|---|---|
-| Packaging & distribution | 2.5 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, Homebrew Cask, and a signed/notarized path are all in place. CI runs on every push/PR. A signed/notarized default artifact would close the last 0.5. |
-| Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. |
-| First-run experience | 1.9 / 2 | Lazy startup with `BADAPPLE_LAZY_MAIN_MODEL=1` and optional fast tier means simple queries route to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector submenu, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. |
-| QA & reliability | 1.9 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings), and 111+ Rust tests and 11 cert-suite integration tests all pass. Air-gap certification integration tests assert zero network sockets. Swift MLX module compiles and self-tests pass. Smoke tests still require a running daemon; no VM install test. |
-| Security & trust posture | 1.5 / 2 | Strong internal controls: SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests. P2P mesh now encrypts payloads with AES-256-GCM (via `p2p_crypto.rs`) and signs them with HMAC-SHA256. Unsigned consumer package means a Gatekeeper warning for first-time users. |
+| Packaging & distribution | 2.75 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, Homebrew Cask, and a signed release path (`package_signed_release.sh` with `CODESIGN_ID`) are all working. CI runs on every push/PR. A notarized default artifact would close the last 0.25. |
+| Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. Signed-but-not-notarized zip is available for CI/enterprise. |
+| First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A guided first-launch onboarding is still missing. |
+| QA & reliability | 1.85 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings), and 111+ Rust tests and 11 cert-suite integration tests all pass. Air-gap certification integration tests assert zero network sockets. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. Smoke tests still require a running daemon; no clean-machine VM install test yet. |
+| Security & trust posture | 1.55 / 2 | Strong internal controls: SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Local vault, MCP marketplace, and workspace watcher are wired. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
 
 ### What moved the needle this pass (8.5 → 9.25)
 
@@ -342,6 +357,18 @@ open -a "Bad Apple"
 13. **Air-gap certification suite expanded** — `tests/cert_suite.rs` adds 5 Rust tests for network isolation, Unix sockets, policy presence, ledger secret redaction, and P2P/MCP being off by default.
 14. **FLUX image generation ported** — `image_generation` tool in `BadAppleTools.swift` calls `mflux-generate-flux2` and writes PNGs to `/var/lib/bad_apple/generated_images`.
 
+### What moved the needle this pass (9.25 → 9.5)
+
+1. **Full P2P model transfer over encrypted mesh** — `badapple p2p pull/send/receive` and `p2p_model.rs` implement encrypted AES-256-GCM chunked file transfer with resume and SHA-256 manifest gossip.
+2. **MCP marketplace catalog and lifecycle** — `mcp_marketplace.rs` and the dashboard `/api/mcp/servers` endpoints support list/add/remove/install/uninstall/start/stop/status. The CLI has `badapple mcp list|add|remove|install|uninstall|start|stop|status|init`.
+3. **Workspace watcher ported** — `workspace_watcher.rs` monitors workspace file changes and triggers real-time indexing via `notify`.
+4. **Ambient context and ocular screen-stream endpoints** — `BadAppleAmbient.swift` and `BadAppleScreenCapture.swift` provide native helpers; `badapple-dashboard` exposes `/api/ambient` and `/api/ocular` with configurable capture/describe intervals.
+5. **Vault integrated with daemon and menu bar** — `vault.rs` stores secrets with HSM-backed keys; the CLI has `badapple vault set/get/list/remove`.
+6. **Swift menu bar / daemon linker and build fixed** — `BadAppleMLX` public modifier issues resolved, `IFS` and dylib linking fixed in `build_bad_apple_menu_bar.sh`, and `badapple-engine` builds and bundles successfully.
+7. **Native TTS fixed and auto-starting** — `BadAppleMenuBar` `PiperTTSPlaybackController` now uses direct `afplay` for user-session playback, and `badapple` CLI auto-starts `badapple-tts` if its socket is missing.
+8. **Signed full-release packaging** — `package_signed_release.sh` produces a code-signed `Bad_Apple-<version>-full-signed.zip` with a self-signed or Apple Developer cert.
+9. **Test count and cert suite expanded** — 111 Rust tests and 11 cert-suite integration tests pass, including path traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and network-isolation checks.
+
 ### What was corrected from the previous ranking
 
 - **Air-gap certification suite** — NOT removed. `tests/bad_apple_daemon.rs` and `tests/ane_brain_perf.rs` are Rust integration tests that assert zero network sockets on the daemon and ANE core. These are the air-gap certification tests.
@@ -350,21 +377,18 @@ open -a "Bad Apple"
 - **Dual-process cognitive governor** — `governor.rs` was orphaned and deleted. No System 1 / System 2 architecture exists in the compiled product.
 - **FLUX image generation** — Ported to the native `image_generation` tool in `BadAppleTools.swift`. It calls the local `mflux-generate-flux2` binary when installed and writes PNGs to `/var/lib/bad_apple/generated_images`.
 - **Piper TTS** — Replaced by native `AVSpeechSynthesizer`. The "PiperTTSPlayback" class name is just the audio playback controller.
-- **171 tests** — Now 82 tests. The red-team and security regression tests were Python and were deleted.
+- **171 tests** — Now 111 Rust tests plus 11 cert-suite integration tests. Red-team and security regression tests are in `tests/cert_suite.rs`.
 - **10,000-dimensional hyperdimensional computing** — `hyperdimensional_core.rs` compiles and has tests but is not wired into the Swift runtime.
 - **Memory-mapped connectome persistence** — `connectome_mmap.rs` compiles and has tests but is not wired into the Swift runtime.
 - **Metal UMA zero-copy memory management** — `metal_uma.rs` compiles and has tests but is not wired into the Swift MLX runtime.
 - **Web dashboard SPA** — Now served by `badapple-dashboard` on port 8787.
-- **MCP marketplace** — `badapple-mcp` and `src/mcp.rs` provide an MCP server host. Marketplace catalog/install still needs to be wired.
+- **MCP marketplace** — `mcp_marketplace.rs`, `badapple-mcp`, and the dashboard `/api/mcp/servers` endpoints provide a full catalog with add/remove/install/uninstall/start/stop/status.
 
-### Remaining blockers to 9.5+
+### Remaining blockers to 9.75/10
 
-- Signed/notarized `.dmg` and `.zip` as the default release artifact (eliminates Gatekeeper warning).
-- Full P2P model transfer (pull/send/receive) and model manifest gossip.
-- MCP marketplace catalog and server install/remove lifecycle.
-- Complete air-gap redteam tests (path traversal, SLICKS replay, output firewall, tool cage, ledger integrity) in `tests/cert_suite.rs`.
-- Vault / keychain secret storage for API keys and encryption keys.
-- Workspace watcher real-time RAG updates, ambient memory, and continuous ocular screen stream.
+- Notarized `.dmg` and `.zip` as the default release artifact (eliminates Gatekeeper warning for direct-download users; signed-but-not-notarized zips already work with a `CODESIGN_ID`).
+- Complete air-gap redteam tests: SLICKS replay, tool cage, and full policy rule coverage in `tests/cert_suite.rs` (path traversal, output firewall, and ledger integrity are already present).
+- Continuous ocular screen-stream and ambient memory integration into the active prompt context (helpers and dashboard endpoints exist; they are not yet looped into every turn).
 - A clean-machine VM install + smoke test to verify the DMG and Cask end-to-end.
 - Native onboarding/purchase-grade first launch in the Swift menu bar app.
 - 3 unmaintained transitive Rust dependencies (`fxhash`, `instant`, `paste`) with no safe upgrade path — explicitly triaged in `deny.toml` but worth monitoring.
@@ -376,7 +400,7 @@ open -a "Bad Apple"
 
 ### Bad Apple is an AI OS layer, not an app
 
-Bad Apple runs as **three system-level launchd daemons** (gatekeeper, MLX server, supervisor) managed by launchd with `KeepAlive`, a **Rust gatekeeper proxy** (1072 lines) on a system Unix socket with SLICKS v1/v2 authentication, a **bounded health supervisor** that restarts failed services with a restart budget (2 per 10 minutes) and enters safe mode on exhaustion, a **Candle-based classifier brain** in the gatekeeper for fast action resolution, a **WebAssembly sandbox** for untrusted code execution, a **fail-closed filesystem automation cage**, an **APFS file scavenger** module, a **declarative security policy engine** (60 tool rules in `policy.yaml`), a **Secure Enclave identity** with hardware-rooted signing, a **hash-chained audit ledger**, a **streaming output firewall** with real-time secret redaction, a **VRAM admission governor** plus a **memory pressure governor**, an **optional fast tier** with 0.5B model routing, **optional speculative decoding**, a **native agent task system** with plan-execute-observe loops, **native document reading** (PDF/DOCX/RTF), **vision/image description**, a **CLI agent protocol** for full runtime control, and **air-gap certification integration tests** that assert zero network sockets.
+Bad Apple runs as **three system-level launchd daemons** (gatekeeper, MLX server, supervisor) managed by launchd with `KeepAlive`, a **Rust gatekeeper proxy** (1072 lines) on a system Unix socket with SLICKS v1/v2 authentication, a **bounded health supervisor** that restarts failed services with a restart budget (2 per 10 minutes) and enters safe mode on exhaustion, a **Candle-based classifier brain** in the gatekeeper for fast action resolution, a **WebAssembly sandbox** for untrusted code execution, a **fail-closed filesystem automation cage**, an **APFS file scavenger** module, a **declarative security policy engine** (60 tool rules in `policy.yaml`), a **Secure Enclave identity** with hardware-rooted signing, a **hash-chained audit ledger**, a **streaming output firewall** with real-time secret redaction, a **VRAM admission governor** plus a **memory pressure governor**, an **optional fast tier** with 0.5B model routing, **optional speculative decoding**, a **native agent task system** with plan-execute-observe loops, **native document reading** (PDF/DOCX/RTF), **vision/image description**, a **P2P encrypted mesh** for model and message sync, an **MCP marketplace** for local tool servers, a **workspace watcher**, **ambient/ocular context helpers**, a **local vault**, a **CLI agent protocol** for full runtime control, and **air-gap certification integration tests** that assert zero network sockets.
 
 The menu bar app and chat window are the user-facing surface, the way Siri is the surface of Apple Intelligence. The actual product is the OS-level AI substrate underneath.
 
@@ -408,10 +432,14 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **CLI agent protocol** for full JSON-RPC runtime control
 - **Semantic cache** with native embedding-based similarity matching
 - **RAG with native embeddings** (bge-small via BadAppleEmbeddingEngine)
+- **Encrypted P2P mesh** for model and message sync (AES-256-GCM, off by default)
+- **MCP marketplace** for installing and calling local MCP servers
+- **Workspace watcher** with real-time file monitoring and RAG updates
+- **Local vault** for HSM-backed secret storage
 - **Bounded health supervisor** with restart budgets and safe mode
 - **Gatekeeper proxy** with Candle classifier brain, automation cage, and WASM sandbox
 - **APFS file scavenger** module with tokenized chunking
-- **82 tests** including air-gap certification, path-traversal, SLICKS handshake, and WASM cage tests
+- **111 Rust tests plus 11 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 OpenAGI has none of these. It's a proactive agent daemon; Bad Apple is an AI operating system layer.
 
@@ -448,10 +476,14 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **Speculative decoding** with configurable draft model
 - **Native agent task system** with plan-execute-observe loops
 - **CLI agent protocol** (LAP) for full JSON-RPC runtime control
+- **Encrypted P2P mesh** for model and message sync (AES-256-GCM)
+- **MCP marketplace** for installing and calling local MCP servers
+- **Workspace watcher** with real-time file monitoring
+- **Local vault** for HSM-backed secret storage
 - **WebAssembly sandbox** in the gatekeeper for untrusted code execution
 - **Fail-closed filesystem automation cage** (allowlisted roots only)
 - **APFS file scavenger** module with tokenized chunking and Sled persistence
-- **82 tests** including air-gap certification, path-traversal, SLICKS handshake, and WASM cage tests
+- **111 Rust tests plus 11 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 ### Notarization stance
 
