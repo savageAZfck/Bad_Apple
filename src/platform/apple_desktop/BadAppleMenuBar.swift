@@ -4207,20 +4207,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         startAquaHelper()
         BadAppleMenuBarUIResponder.shared.start()
         registerSMAppService()
-        // Start loading the native Swift MLX engine in the background.
-        // When loaded, text/voice queries bypass the Python daemon entirely.
         let nativeEngine = BadAppleEngine.shared
         nativeEngine.autopilot = autopilotEnabled
         nativeEngine.workspacePath = UserDefaults.standard.string(forKey: "BadAppleSettingsWorkspace")
         _ = nativeEngine.switchPersona(roastEnabled ? "drill" : selectedPersona)
-        Task.detached(priority: .background) {
-            await nativeEngine.loadModel()
-            await MainActor.run {
-                if BadAppleEngine.shared.isLoaded {
-                    badAppleVoiceLog("Native Swift MLX engine loaded — queries will bypass the daemon")
-                    self.rebuildMenu()
-                } else {
-                    badAppleVoiceLog("Native MLX engine not loaded — falling back to daemon")
+        // If the daemon is already running, the menu bar should not load a
+        // second copy of the 9B model into the same 16 GB machine. Route
+        // through the daemon instead and let the status dot go green.
+        let daemonAlreadyRunning = FileManager.default.fileExists(atPath: BadAppleBrain.deepSocket)
+        if daemonAlreadyRunning {
+            badAppleVoiceLog("daemon already running on \(BadAppleBrain.deepSocket) — not loading in-process engine")
+        } else {
+            Task.detached(priority: .background) {
+                await nativeEngine.loadModel()
+                await MainActor.run {
+                    if BadAppleEngine.shared.isLoaded {
+                        badAppleVoiceLog("Native Swift MLX engine loaded — queries will bypass the daemon")
+                        self.rebuildMenu()
+                    } else {
+                        badAppleVoiceLog("Native MLX engine not loaded — falling back to daemon")
+                    }
                 }
             }
         }
@@ -4737,7 +4743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     private func refreshTelemetry() {
-        if BadAppleEngine.shared.isLoaded || BadAppleEngine.shared.isLoading {
+        if BadAppleEngine.shared.isLoaded {
             let ready = BadAppleEngine.shared.isLoaded
             let status: [String: Any] = [
                 "mode": ready ? "READY" : "LOADING",
@@ -4772,7 +4778,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                         if let active = json["active_models"] as? [String] {
                             self.activeModels = active
                         }
-                        self.lastRuntimeStatus = json
+                        var status = json
+                        if let modelStatus = json["model_status"] as? [String: [String: Any]] {
+                            let allReady = modelStatus.values.allSatisfy { $0["status"] as? String == "ready" }
+                            let hasModels = !(json["active_model_ids"] as? [String] ?? []).isEmpty
+                            status["mode"] = (allReady && hasModels) ? "READY" : "STARTING"
+                        } else if !(json["active_model_ids"] as? [String] ?? []).isEmpty {
+                            status["mode"] = "READY"
+                        } else {
+                            status["mode"] = "STARTING"
+                        }
+                        self.lastRuntimeStatus = status
                         self.lastRuntimeReachable = true
                         self.updateStatusIcon()
                         self.rebuildMenu()
