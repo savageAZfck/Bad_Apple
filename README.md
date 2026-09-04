@@ -2,7 +2,7 @@
 
 > **A local-first AI operating system layer for macOS. On-device inference, hardware-rooted identity, fail-closed security, and a native Swift menu bar.**
 
-Bad Apple is not a chat app. It is a system-level AI runtime for Apple Silicon that keeps prompts, memory, and tools on the machine. It runs as a set of launchd daemons, authenticates every interaction through a custom IPC protocol, and includes an air-gap certification suite that asserts the runtime holds zero network listeners by default.
+Bad Apple is not a chat app. It is a system-level AI runtime for Apple Silicon that keeps prompts, memory, and tools on the machine. It runs as a set of launchd daemons, authenticates every interaction through a custom IPC protocol, and includes integration tests that verify the runtime opens no non-loopback network sockets when P2P and MCP are disabled.
 
 ## What It Does
 
@@ -65,7 +65,7 @@ Bad Apple is designed around a fail-closed, local-first security model. The curr
 | Untrusted code | WASM sandbox with fuel, memory, and output caps | `wasm_cage::tests::*` |
 | Output safety | Streaming Aho-Corasick firewall | `output_firewall_patterns_present` |
 | Audit integrity | SHA-256 chained, secret-redacted ledger | `ledger_hash_chain_is_valid`, `ledger_redacts_secrets` |
-| Network posture | Air-gap certification, P2P/MCP off by default | `no_external_network_sockets`, `p2p_and_mcp_off_by_default` |
+| Network posture | Integration tests verify no external sockets; P2P/MCP are off by default | `no_external_network_sockets`, `p2p_and_mcp_off_by_default` |
 | Policy coverage | 60-rule declarative policy in `policy.yaml` | `policy_yaml_present`, `policy_yaml_covers_dangerous_tools` |
 
 See `AGENTS.md` for build and verification conventions, and `Bad_Apple_Ranking.md` for the current consumer-readiness score and remaining blockers.
@@ -131,7 +131,7 @@ target/release/badapple --roast "Tell me about cloud AI"
 | Cert suite | 15 integration tests passing |
 | Model | 9B Qwen 3.5 4-bit, optional 0.5B fast tier |
 | Native inference | `mlx-swift-lm` with streaming, optional speculative decoding, KV cache |
-| Security | SLICKS v1+v2, openat cage, WASM sandbox, audit ledger, air-gap cert |
+| Security | SLICKS v1+v2, openat cage, WASM sandbox, audit ledger, air-gap integration tests |
 
 ## Documentation
 
