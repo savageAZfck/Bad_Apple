@@ -282,21 +282,75 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
     }
 }
 
+/// Locate the native `badapple-tts` binary.  It may be next to the current
+/// executable (release build), in the Cargo target directory (dev build), or
+/// in the bundled app.
+fn tts_binary_path() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        let next_to_exe = exe.parent()?.join("badapple-tts");
+        if next_to_exe.is_file() {
+            return Some(next_to_exe);
+        }
+    }
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let from_manifest = std::path::PathBuf::from(manifest)
+            .join("target")
+            .join("release")
+            .join("badapple-tts");
+        if from_manifest.is_file() {
+            return Some(from_manifest);
+        }
+    }
+    let from_cwd = std::path::PathBuf::from("target/release/badapple-tts");
+    if from_cwd.is_file() {
+        return Some(from_cwd);
+    }
+    // Bundled app helper location.
+    let from_app =
+        std::path::PathBuf::from("/Applications/Bad Apple.app/Contents/Helpers/badapple-tts");
+    if from_app.is_file() {
+        return Some(from_app);
+    }
+    None
+}
+
 /// Send a chunk to the local native TTS server and play it with afplay.
+/// If the server is not running, attempt to start it once.
 fn speak_chunk(text: &str) {
     let voice =
         std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "en_US-amy-medium".to_string());
     let socket = std::env::var("BADAPPLE_TTS_SOCKET")
         .unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());
+
+    // Make sure the TTS server socket is reachable.  The platform install loads
+    // the LaunchAgent, but a bare `cargo build --release` run needs to start it.
+    let stream = match UnixStream::connect(&socket) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            if let Some(bin) = tts_binary_path() {
+                let _ = start_tts_server(&bin, &socket);
+                // Give the server a moment to bind.
+                for _ in 0..20 {
+                    if UnixStream::connect(&socket).is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            UnixStream::connect(&socket).ok()
+        }
+    };
+
+    let mut stream = match stream {
+        Some(s) => s,
+        None => return,
+    };
+
     let request = format!(
         "{{\"text\":{},\"voice\":{}}}\n",
         serde_json::to_string(text).unwrap_or_default(),
         serde_json::to_string(&voice).unwrap_or_default()
     );
-    let mut stream = match UnixStream::connect(&socket) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
     if stream.write_all(request.as_bytes()).is_err() {
         return;
     }
@@ -306,9 +360,24 @@ fn speak_chunk(text: &str) {
     }
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) {
         if let Some(wav) = json.get("wav_path").and_then(|v| v.as_str()) {
-            let _ = std::process::Command::new("afplay").arg(wav).status();
+            let _ = std::process::Command::new("/usr/bin/afplay")
+                .arg(wav)
+                .status();
         }
     }
+}
+
+fn start_tts_server(bin: &std::path::Path, socket: &str) -> Result<()> {
+    use std::process::Stdio;
+    std::fs::remove_file(socket).ok();
+    std::process::Command::new(bin)
+        .env("BADAPPLE_TTS_SOCKET", socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to start badapple-tts")?;
+    Ok(())
 }
 
 fn run_benchmark(single_prompt: Option<&str>, max_new_tokens: usize) -> Result<()> {

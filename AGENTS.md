@@ -104,7 +104,7 @@ target/release/badapple "What is 2+2?"
 # voice (text output only, no audio)
 BADAPPLE_VOICE=1 target/release/badapple "What do you think of Siri?"
 
-# voice with TTS (badapple-tts server must be running)
+# voice with TTS (auto-starts badapple-tts if it is not running)
 target/release/badapple --speak "What do you think of Siri?"
 
 # set max tokens

@@ -328,9 +328,16 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
 
     private func makeAfplayTask(_ item: PlayItem) -> Process {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        let uid = getuid()
-        task.arguments = ["asuser", "\(uid)", "/usr/bin/afplay", item.url.path]
+        // The menu bar is a user LaunchAgent in the Aqua session, so it can
+        // play audio directly.  Only use launchctl asuser when running as root.
+        if getuid() == 0 {
+            task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            let uid = getuid()
+            task.arguments = ["asuser", "\(uid)", "/usr/bin/afplay", item.url.path]
+        } else {
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+            task.arguments = [item.url.path]
+        }
         task.terminationHandler = { [weak self, weak item] task in
             guard let self = self, let item = item else { return }
             let code = task.terminationStatus
@@ -537,8 +544,12 @@ final class PiperTTSClient {
         return result
     }
 
-    static let defaultVoice = "en_US-amy-medium"
+    static let defaultVoice = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Samantha"
     static let availableVoices = [
+        "Samantha",
+        "com.apple.voice.compact.en-US.Samantha",
+        "com.apple.voice.compact.en-GB.Daniel",
+        "com.apple.voice.compact.en-AU.Karen",
         "en_US-amy-medium",
     ]
 
@@ -680,10 +691,9 @@ final class PiperTTSClient {
     }
 
     private func synthesize(_ text: String, voice: String) throws -> URL {
-        guard !PiperTTSClient.availableVoices.isEmpty else {
-            throw NSError(domain: "PiperTTS", code: 1, userInfo: [NSLocalizedDescriptionKey: "no voices configured"])
-        }
-        let safeVoice = PiperTTSClient.availableVoices.contains(voice) ? voice : PiperTTSClient.defaultVoice
+        let safeVoice = voice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? PiperTTSClient.defaultVoice
+            : voice
         let request: [String: Any] = ["text": text, "voice": safeVoice]
         let data = try JSONSerialization.data(withJSONObject: request, options: [])
         let response = try unixSocketRequest(data)
@@ -1396,7 +1406,9 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     private var selectedPiperVoice: String {
         let raw = UserDefaults.standard.string(forKey: "BadAppleTTSVoice") ?? PiperTTSClient.defaultVoice
-        return PiperTTSClient.availableVoices.contains(raw) ? raw : PiperTTSClient.defaultVoice
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? PiperTTSClient.defaultVoice
+            : raw
     }
 
     /// Stop any in-flight audio so a new request does not stack on old output.
@@ -6033,8 +6045,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         voiceMenu.addItem(logItem)
         voiceMenu.addItem(NSMenuItem.separator())
 
-        let usePiper = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
-        let engineToggle = NSMenuItem(title: "Use Piper TTS (experimental)", action: #selector(togglePiperTTS), keyEquivalent: "")
+        let usePiper = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? true
+        let engineToggle = NSMenuItem(title: "Use Native TTS", action: #selector(togglePiperTTS), keyEquivalent: "")
         engineToggle.state = usePiper ? .on : .off
         voiceMenu.addItem(engineToggle)
         voiceMenu.addItem(NSMenuItem.separator())
@@ -6054,7 +6066,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             item.isEnabled = usePiper
             voiceMenu.addItem(item)
         }
-        let voiceParent = NSMenuItem(title: usePiper ? "Voice (Piper)" : "Voice (Apple)", action: nil, keyEquivalent: "")
+        let voiceParent = NSMenuItem(title: usePiper ? "Voice (Native TTS)" : "Voice (Apple)", action: nil, keyEquivalent: "")
         voiceParent.submenu = voiceMenu
         menu.addItem(voiceParent)
 
@@ -6341,7 +6353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let current = UserDefaults.standard.object(forKey: "BadAppleUsePiperTTS") as? Bool ?? false
         let next = !current
         UserDefaults.standard.set(next, forKey: "BadAppleUsePiperTTS")
-        badAppleVoiceLog("Piper TTS enabled: \(next)")
+        badAppleVoiceLog("Native TTS enabled: \(next)")
         if next {
             PiperTTSClient.shared.warmup()
         }
