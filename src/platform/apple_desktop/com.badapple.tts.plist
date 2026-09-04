@@ -9,7 +9,7 @@
 		<key>BADAPPLE_TTS_VOICE</key>
 		<string>Best</string>
 		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
-		<string>1.0</string>
+		<string>0.98</string>
 		<key>BADAPPLE_TTS_VOLUME</key>
 		<string>1.0</string>
 		<key>HOME</key>
