@@ -7,7 +7,7 @@
 		<key>BADAPPLE_TTS_SOCKET</key>
 		<string>/tmp/badapple_tts.sock</string>
 		<key>BADAPPLE_TTS_VOICE</key>
-		<string>Samantha</string>
+		<string>Best</string>
 		<key>BADAPPLE_TTS_LENGTH_SCALE</key>
 		<string>1.0</string>
 		<key>BADAPPLE_TTS_VOLUME</key>

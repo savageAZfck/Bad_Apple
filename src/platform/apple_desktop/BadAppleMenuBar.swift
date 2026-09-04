@@ -544,13 +544,14 @@ final class PiperTTSClient {
         return result
     }
 
-    static let defaultVoice = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Samantha"
+    static let defaultVoice = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Best"
     static let availableVoices = [
+        "Best",
+        "en_US-amy-medium",
         "Samantha",
         "com.apple.voice.compact.en-US.Samantha",
         "com.apple.voice.compact.en-GB.Daniel",
         "com.apple.voice.compact.en-AU.Karen",
-        "en_US-amy-medium",
     ]
 
     /// Pre-warm Piper by synthesizing a short silent phrase. This loads the voice model

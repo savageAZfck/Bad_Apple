@@ -1,8 +1,8 @@
 // Bad Apple native TTS server.
 //
-// Replaces the Python badapple_tts_server.py with an on-device AVSpeechSynthesizer
-// server that writes synthesized speech to a .caf file and returns its path over
-// a Unix socket.
+// Replaces the Python badapple_tts_server.py. It first tries a local Piper ONNX
+// voice (e.g. en_US-amy-medium) for neural-quality speech, then falls back to
+// on-device AVSpeechSynthesizer. It returns a .wav or .caf path over a Unix socket.
 //
 // Socket protocol (line-delimited JSON):
 //   request : {"text": "hello", "voice": "Samantha", "rate": 0.5, "volume": 1.0}
@@ -353,9 +353,6 @@ private final class TTSServer {
         }
 
         let voiceName = request["voice"] as? String ?? defaultVoiceName
-        guard let voice = resolveVoice(voiceName) else {
-            throw TTSError.voiceNotFound(voiceName)
-        }
 
         let lengthScale: Double
         if let raw = request["length_scale"] as? Double {
@@ -389,10 +386,22 @@ private final class TTSServer {
             }
         }
 
-        let outputURL = URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).caf")
-        lastOutputURL = outputURL
+        // Prefer a local Piper ONNX model (neural TTS). Fall back to the native
+        // AVFoundation synthesizer only when no Piper voice is available.
+        let outputURL: URL
+        let result: SynthesisResult
+        if let piperResult = synthesizeWithPiperIfAvailable(text: cleanText, voice: voiceName, lengthScale: lengthScale, outputURL: URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).wav")), piperResult.error == nil {
+            outputURL = piperResult.url
+            result = piperResult
+        } else {
+            guard let voice = resolveVoice(voiceName) else {
+                throw TTSError.voiceNotFound(voiceName)
+            }
+            outputURL = URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).caf")
+            result = synthesizeToFile(text: cleanText, voice: voice, rate: rate, volume: volume, outputURL: outputURL)
+        }
 
-        let result = synthesizeToFile(text: cleanText, voice: voice, rate: rate, volume: volume, outputURL: outputURL)
+        lastOutputURL = outputURL
 
         if result.error == nil {
             // Schedule cleanup after a short TTL so /tmp does not fill up.
@@ -523,6 +532,186 @@ private final class TTSServer {
 
         // Last resort: the default system voice.
         return AVSpeechSynthesisVoice(language: "en")
+    }
+
+    private func piperBinaryPath() -> URL? {
+        if let env = ProcessInfo.processInfo.environment["BADAPPLE_PIPER_BINARY"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+
+        // Bundled/known venv location from the original Bad Apple install.
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? "/Users/savag3"
+        let knownPaths = [
+            URL(fileURLWithPath: home).appendingPathComponent(".local/share/badapple/venv/bin/piper"),
+            URL(fileURLWithPath: "/usr/local/bin/piper"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/piper"),
+        ]
+        for known in knownPaths {
+            if fileManager.isExecutableFile(atPath: known.path) {
+                return known
+            }
+        }
+
+        // Fall back to PATH lookup.
+        let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"
+        for dir in pathEnv.split(separator: ":") {
+            let candidate = URL(fileURLWithPath: String(dir)).appendingPathComponent("piper")
+            if fileManager.isExecutableFile(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        return nil
+    }
+
+    private func piperVoiceSearchDirectories() -> [URL] {
+        var dirs: [URL] = []
+
+        if let env = ProcessInfo.processInfo.environment["BADAPPLE_VOICES_DIR"], !env.isEmpty {
+            dirs.append(URL(fileURLWithPath: env))
+        }
+
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? "/Users/savag3"
+        dirs.append(URL(fileURLWithPath: home).appendingPathComponent(".local/share/badapple/voices"))
+        dirs.append(URL(fileURLWithPath: home).appendingPathComponent(".bad_apple/voices"))
+
+        // Try to locate the repo root from the binary's path.
+        let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            .resolvingSymlinksInPath()
+        var dir = exe.deletingLastPathComponent()
+        for _ in 0..<8 {
+            let voices = dir.appendingPathComponent("voices")
+            if fileManager.fileExists(atPath: voices.path) {
+                dirs.append(voices)
+            }
+            let parent = dir.deletingLastPathComponent()
+            guard parent != dir else { break }
+            dir = parent
+        }
+
+        // Sibling to the binary (e.g. app bundle Contents/Helpers/../Resources/voices).
+        let sibling = exe.deletingLastPathComponent().appendingPathComponent("voices")
+        if fileManager.fileExists(atPath: sibling.path) {
+            dirs.append(sibling)
+        }
+        let resourcesSibling = exe.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources/voices")
+        if fileManager.fileExists(atPath: resourcesSibling.path) {
+            dirs.append(resourcesSibling)
+        }
+
+        return dirs
+    }
+
+    private func piperVoiceNames() -> [String] {
+        var names = Set<String>()
+        for voicesDir in piperVoiceSearchDirectories() {
+            if let files = try? fileManager.contentsOfDirectory(atPath: voicesDir.path) {
+                for file in files {
+                    if file.hasSuffix(".onnx") {
+                        names.insert((file as NSString).deletingPathExtension)
+                    }
+                }
+            }
+        }
+        return Array(names).sorted()
+    }
+
+    private func piperModelURL(for voice: String) -> URL? {
+        for voicesDir in piperVoiceSearchDirectories() {
+            let model = voicesDir.appendingPathComponent("\(voice).onnx")
+            if fileManager.fileExists(atPath: model.path) {
+                return model
+            }
+        }
+        return nil
+    }
+
+    private func synthesizeWithPiperIfAvailable(text: String, voice: String, lengthScale: Double, outputURL: URL) -> SynthesisResult? {
+        let normalized = voice.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Resolve the actual model name. "Best" and "Default" mean the first
+        // available Piper voice (which is higher quality than AVFoundation).
+        let modelName: String
+        if normalized == "Best" || normalized == "Default" || normalized == "en_US-amy-medium" {
+            if let first = piperVoiceNames().first {
+                modelName = first
+            } else {
+                return nil
+            }
+        } else {
+            guard piperModelURL(for: normalized) != nil else { return nil }
+            modelName = normalized
+        }
+
+        guard let binary = piperBinaryPath(),
+              let model = piperModelURL(for: modelName) else {
+            return nil
+        }
+
+        // The config file is named <model>.onnx.json.
+        let config = URL(fileURLWithPath: model.path + ".json")
+        guard fileManager.fileExists(atPath: config.path) else { return nil }
+
+        // Piper writes its own output file if we pass -f. We can then move it
+        // to our chosen outputURL, or just pass outputURL directly. Use a temp
+        // input file because passing text with special chars on the command
+        // line is fragile.
+        let inputURL = URL(fileURLWithPath: "/tmp/badapple_tts_input_\(UUID().uuidString).txt")
+        do {
+            try text.write(toFile: inputURL.path, atomically: true, encoding: .utf8)
+        } catch {
+            return SynthesisResult(url: outputURL, sampleRate: 0, durationMs: 0, error: error)
+        }
+
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = [
+            "-m", model.path,
+            "-c", config.path,
+            "-i", inputURL.path,
+            "-f", outputURL.path,
+            "--length-scale", "\(lengthScale)",
+            "--sentence-silence", "0.1",
+        ]
+
+        // Piper expects to find its espeak-ng data and libonnxruntime. Set a
+        // reasonable working directory and PATH.
+        let venvBin = binary.deletingLastPathComponent()
+        let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        process.environment = ["PATH": "\(venvBin.path):\(pathEnv)"]
+        process.currentDirectoryURL = binary.deletingLastPathComponent()
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            try? fileManager.removeItem(at: inputURL)
+            return SynthesisResult(url: outputURL, sampleRate: 0, durationMs: 0, error: error)
+        }
+
+        try? fileManager.removeItem(at: inputURL)
+
+        if process.terminationStatus != 0 {
+            let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return SynthesisResult(url: outputURL, sampleRate: 0, durationMs: 0,
+                                   error: TTSError.synthesisFailed("piper exited \(process.terminationStatus): \(stderr)"))
+        }
+
+        // Derive the sample rate and duration from the generated WAV.
+        var sampleRate: Double = 0
+        var totalFrames: AVAudioFramePosition = 0
+        if let file = try? AVAudioFile(forReading: outputURL) {
+            sampleRate = file.fileFormat.sampleRate
+            totalFrames = file.length
+        }
+
+        let durationMs = sampleRate > 0 ? Int(Double(totalFrames) / sampleRate * 1000.0) : 0
+        return SynthesisResult(url: outputURL, sampleRate: sampleRate, durationMs: durationMs, error: nil)
     }
 
     private func synthesizeToFile(text: String, voice: AVSpeechSynthesisVoice, rate: Float, volume: Float, outputURL: URL) -> SynthesisResult {

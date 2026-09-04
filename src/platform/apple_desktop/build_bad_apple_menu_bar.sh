@@ -267,6 +267,11 @@ echo "Building badapple-tts..."
 
 echo "Installed badapple-tts into ${BUILD_DIR}."
 install -d "${CONTENTS_DIR}/Resources"
+# Bundle Piper voices for the native TTS server so the app is self-contained.
+if [[ -d "${REPO_ROOT}/voices" ]]; then
+    install -d "${CONTENTS_DIR}/Resources/voices"
+    install -m 644 "${REPO_ROOT}/voices"/*.onnx* "${CONTENTS_DIR}/Resources/voices/" 2>/dev/null || true
+fi
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/update_bad_apple.sh" "${CONTENTS_DIR}/Resources/update_bad_apple.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${CONTENTS_DIR}/Resources/strip_quarantine.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/install_badapple.sh" "${CONTENTS_DIR}/Resources/install_badapple.sh"
