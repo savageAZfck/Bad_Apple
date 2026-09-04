@@ -378,9 +378,9 @@ open -a "Bad Apple"
 - **FLUX image generation** — Ported to the native `image_generation` tool in `BadAppleTools.swift`. It calls the local `mflux-generate-flux2` binary when installed and writes PNGs to `/var/lib/bad_apple/generated_images`.
 - **Piper TTS** — Replaced by native `AVSpeechSynthesizer`. The "PiperTTSPlayback" class name is just the audio playback controller.
 - **171 tests** — Now 111 Rust tests plus 11 cert-suite integration tests. Red-team and security regression tests are in `tests/cert_suite.rs`.
-- **10,000-dimensional hyperdimensional computing** — `hyperdimensional_core.rs` compiles and has tests but is not wired into the Swift runtime.
-- **Memory-mapped connectome persistence** — `connectome_mmap.rs` compiles and has tests but is not wired into the Swift runtime.
-- **Metal UMA zero-copy memory management** — `metal_uma.rs` compiles and has tests but is not wired into the Swift MLX runtime.
+- **10,000-dimensional hyperdimensional computing** — `hyperdimensional_core.rs` compiles and has tests but is only used by a dead FFI path and the `RustSynthesizer` template map. Recommend removing it.
+- **Memory-mapped connectome persistence** — `connectome_mmap.rs` compiles and has tests but has no runtime consumer; `MemoryGraphNode` is only used by this module. Recommend removing it.
+- **Metal UMA zero-copy memory management** — `metal_uma.rs` is wired into the gatekeeper's `CandleBrain` classifier through `tensor_brain.rs`; it is not used by the Swift MLX runtime, but it is not dead code.
 - **Web dashboard SPA** — Now served by `badapple-dashboard` on port 8787.
 - **MCP marketplace** — `mcp_marketplace.rs`, `badapple-mcp`, and the dashboard `/api/mcp/servers` endpoints provide a full catalog with add/remove/install/uninstall/start/stop/status.
 
@@ -392,7 +392,7 @@ open -a "Bad Apple"
 - A clean-machine VM install + smoke test to verify the DMG and Cask end-to-end.
 - Native onboarding/purchase-grade first launch in the Swift menu bar app.
 - 3 unmaintained transitive Rust dependencies (`fxhash`, `instant`, `paste`) with no safe upgrade path — explicitly triaged in `deny.toml` but worth monitoring.
-- Wire `hyperdimensional_core`, `connectome_mmap`, and `metal_uma` into the Swift runtime, or remove them.
+- Remove dead core modules: `hyperdimensional_core` (only used by a dead FFI path and an over-engineered Rust synthesizer template map) and `connectome_mmap` (only used by its own tests; `MemoryGraphNode` has no runtime consumer). `metal_uma` should stay — it already backs the gatekeeper's Candle `CandleBrain` classifier via `tensor_brain.rs`.
 
 ---
 
