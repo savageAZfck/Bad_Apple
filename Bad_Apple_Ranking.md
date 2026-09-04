@@ -337,7 +337,7 @@ open -a "Bad Apple"
 | Packaging & distribution | 2.75 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, Homebrew Cask, and a signed release path (`package_signed_release.sh` with `CODESIGN_ID`) are all working. CI runs on every push/PR. A notarized default artifact would close the last 0.25. |
 | Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. Signed-but-not-notarized zip is available for CI/enterprise. |
 | First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A guided first-launch onboarding is still missing. |
-| QA & reliability | 1.85 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings), and 111+ Rust tests and 11 cert-suite integration tests all pass. Air-gap certification integration tests assert zero network sockets. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. Smoke tests still require a running daemon; no clean-machine VM install test yet. |
+| QA & reliability | 1.85 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings), and 101+ Rust tests and 11 cert-suite integration tests all pass. Air-gap certification integration tests assert zero network sockets. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. Smoke tests still require a running daemon; no clean-machine VM install test yet. |
 | Security & trust posture | 1.55 / 2 | Strong internal controls: SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Local vault, MCP marketplace, and workspace watcher are wired. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
 
 ### What moved the needle this pass (8.5 → 9.25)
@@ -377,9 +377,9 @@ open -a "Bad Apple"
 - **Dual-process cognitive governor** — `governor.rs` was orphaned and deleted. No System 1 / System 2 architecture exists in the compiled product.
 - **FLUX image generation** — Ported to the native `image_generation` tool in `BadAppleTools.swift`. It calls the local `mflux-generate-flux2` binary when installed and writes PNGs to `/var/lib/bad_apple/generated_images`.
 - **Piper TTS** — Replaced by native `AVSpeechSynthesizer`. The "PiperTTSPlayback" class name is just the audio playback controller.
-- **171 tests** — Now 111 Rust tests plus 11 cert-suite integration tests. Red-team and security regression tests are in `tests/cert_suite.rs`.
-- **10,000-dimensional hyperdimensional computing** — `hyperdimensional_core.rs` compiles and has tests but is only used by a dead FFI path and the `RustSynthesizer` template map. Recommend removing it.
-- **Memory-mapped connectome persistence** — `connectome_mmap.rs` compiles and has tests but has no runtime consumer; `MemoryGraphNode` is only used by this module. Recommend removing it.
+- **171 tests** — Now 101 Rust tests plus 11 cert-suite integration tests. Red-team and security regression tests are in `tests/cert_suite.rs`.
+- **10,000-dimensional hyperdimensional computing** — `hyperdimensional_core.rs` has been removed. It was only used by a dead FFI path and the `RustSynthesizer` template map; `RustSynthesizer` is now a simple repair helper.
+- **Memory-mapped connectome persistence** — `connectome_mmap.rs` and the `MemoryGraphNode` struct have been removed. There was no runtime consumer.
 - **Metal UMA zero-copy memory management** — `metal_uma.rs` is wired into the gatekeeper's `CandleBrain` classifier through `tensor_brain.rs`; it is not used by the Swift MLX runtime, but it is not dead code.
 - **Web dashboard SPA** — Now served by `badapple-dashboard` on port 8787.
 - **MCP marketplace** — `mcp_marketplace.rs`, `badapple-mcp`, and the dashboard `/api/mcp/servers` endpoints provide a full catalog with add/remove/install/uninstall/start/stop/status.
@@ -392,7 +392,7 @@ open -a "Bad Apple"
 - A clean-machine VM install + smoke test to verify the DMG and Cask end-to-end.
 - Native onboarding/purchase-grade first launch in the Swift menu bar app.
 - 3 unmaintained transitive Rust dependencies (`fxhash`, `instant`, `paste`) with no safe upgrade path — explicitly triaged in `deny.toml` but worth monitoring.
-- Remove dead core modules: `hyperdimensional_core` (only used by a dead FFI path and an over-engineered Rust synthesizer template map) and `connectome_mmap` (only used by its own tests; `MemoryGraphNode` has no runtime consumer). `metal_uma` should stay — it already backs the gatekeeper's Candle `CandleBrain` classifier via `tensor_brain.rs`.
+
 
 ---
 
@@ -439,7 +439,7 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **Bounded health supervisor** with restart budgets and safe mode
 - **Gatekeeper proxy** with Candle classifier brain, automation cage, and WASM sandbox
 - **APFS file scavenger** module with tokenized chunking
-- **111 Rust tests plus 11 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
+- **101 Rust tests plus 11 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 OpenAGI has none of these. It's a proactive agent daemon; Bad Apple is an AI operating system layer.
 
@@ -483,7 +483,7 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **WebAssembly sandbox** in the gatekeeper for untrusted code execution
 - **Fail-closed filesystem automation cage** (allowlisted roots only)
 - **APFS file scavenger** module with tokenized chunking and Sled persistence
-- **111 Rust tests plus 11 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
+- **101 Rust tests plus 11 cert-suite integration tests** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 ### Notarization stance
 

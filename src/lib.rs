@@ -21,8 +21,7 @@ pub mod automation_cage;
 pub mod bad_apple_ipc;
 pub mod benchmark;
 pub mod config;
-pub mod connectome_mmap;
-pub mod hyperdimensional_core;
+
 pub mod mcp;
 pub mod mcp_marketplace;
 pub mod metal_uma;
@@ -39,21 +38,6 @@ pub mod vault;
 pub mod wasm_cage;
 pub mod workspace_watcher;
 
-/// A node in the associative memory graph.  This lightweight struct is the
-/// common currency between the tensor brain, the connectome mmap persistence
-/// layer, and the state saver.  It carries the grounded 2048-D embedding and
-/// a 576-D brain-state snapshot alongside the experiential text.
-#[derive(Clone, Debug)]
-pub struct MemoryGraphNode {
-    pub id: u64,
-    pub timestamp: u64,
-    pub experiential_text: String,
-    pub emotional_state_snapshot: String,
-    pub embedding: Vec<f64>,
-    pub associated_edge_ids: Vec<u64>,
-    pub origin_instance: String,
-    pub brain_state: Vec<f64>,
-}
 
 pub use apple_intelligence::{
     call as apple_intelligence_call, call_sync as apple_intelligence_call_sync,
@@ -61,7 +45,7 @@ pub use apple_intelligence::{
 };
 
 use config::Config;
-use hyperdimensional_core::{OverheadAnalyzer, ScriptEncoder, ThermodynamicMinimizer};
+
 
 /// Opaque handle to an initialized Bad Apple evaluation context.
 ///
@@ -155,27 +139,7 @@ pub unsafe extern "C" fn bad_apple_process_stream(
         Err(_) => return bad_apple_cstring("invalid utf-8"),
     };
 
-    let (profile, diagnosis) = {
-        let mut encoder = ScriptEncoder::new();
-        let mut profile = encoder.encode(text);
-        ThermodynamicMinimizer::reduce_entropy(&mut profile);
-        let (diagnosis, _) = OverheadAnalyzer::analyze(&profile);
-        (profile, diagnosis)
-    };
-
-    // Update a coarse mastery index based on how clean the profile is.
-    {
-        let ctx = &*context;
-        let state = &*(ctx._private as *const Mutex<BadAppleState>);
-        if let Ok(mut guard) = state.lock() {
-            guard.mastery_index = (1.0 - profile.overhead_score) as f32;
-        }
-    }
-
-    let summary = format!(
-        "diagnosis: {}; overhead: {:.3}",
-        diagnosis, profile.overhead_score
-    );
+    let summary = format!("received {} bytes; no overhead analysis available", text.len());
     bad_apple_cstring(&summary)
 }
 
