@@ -38,14 +38,12 @@ pub mod vault;
 pub mod wasm_cage;
 pub mod workspace_watcher;
 
-
 pub use apple_intelligence::{
     call as apple_intelligence_call, call_sync as apple_intelligence_call_sync,
     is_available as apple_intelligence_is_available, register_apple_intelligence_oracle,
 };
 
 use config::Config;
-
 
 /// Opaque handle to an initialized Bad Apple evaluation context.
 ///
@@ -139,7 +137,10 @@ pub unsafe extern "C" fn bad_apple_process_stream(
         Err(_) => return bad_apple_cstring("invalid utf-8"),
     };
 
-    let summary = format!("received {} bytes; no overhead analysis available", text.len());
+    let summary = format!(
+        "received {} bytes; no overhead analysis available",
+        text.len()
+    );
     bad_apple_cstring(&summary)
 }
 

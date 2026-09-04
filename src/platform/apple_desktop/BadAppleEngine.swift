@@ -229,29 +229,184 @@ final class BadAppleEngine: @unchecked Sendable {
 
     // MARK: - Ambient Context
 
-    /// The latest ambient context snapshot (active app, window title).
+    /// The latest ambient context snapshot (active app, window title, optional screen description).
     private(set) var ambientContext: String?
 
-    /// Update the ambient context from the frontmost application.
-    func updateAmbientContext() {
-        let script = """
-        tell application "System Events"
-            set frontApp to name of first application process whose frontmost is true
-            set frontWindow to ""
-            try
-                set frontWindow to title of front window of (first application process whose frontmost is true)
-            end try
-            return frontApp & "|" & frontWindow
-        end tell
-        """
-        var errorInfo: NSDictionary?
-        if let result = NSAppleScript(source: script)?.executeAndReturnError(&errorInfo) {
-            let value = result.stringValue ?? ""
-            let parts = value.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
-            let app = parts.first.map(String.init) ?? "Unknown"
-            let window = parts.count > 1 ? String(parts[1]) : ""
-            ambientContext = "Active app: \(app)\nWindow: \(window)"
+    /// Minimum seconds between ambient context refreshes.
+    private let ambientRefreshInterval: TimeInterval = 5
+    private var lastAmbientUpdate: Date?
+
+    /// Minimum seconds between ocular screen descriptions.
+    private let ocularRefreshInterval: TimeInterval = {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_OCULAR_INTERVAL"] ?? "0"
+        return TimeInterval(env) ?? 0
+    }()
+
+    private var lastOcularUpdate: Date?
+
+    /// Whether ambient updates are allowed. Off by default for air-gap / privacy.
+    var ambientEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_AMBIENT"] ?? "0"
+        return env == "1" || env.lowercased() == "true" || env.lowercased() == "on"
+    }
+
+    /// Whether ocular screen capture is allowed. Off by default.
+    var ocularEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_OCULAR"] ?? "0"
+        return env == "1" || env.lowercased() == "true" || env.lowercased() == "on"
+    }
+
+    /// Resolve a helper binary next to the executable, inside the app bundle, or in target/release.
+    private func helperURL(named: String) -> URL? {
+        let fm = FileManager.default
+        // 1. Next to the current executable.
+        if let exe = ProcessInfo.processInfo.arguments.first.map(URL.init(fileURLWithPath:)) {
+            let candidate = exe.deletingLastPathComponent().appendingPathComponent(named)
+            if fm.isExecutableFile(atPath: candidate.path) {
+                return candidate
+            }
         }
+        // 2. Inside the app bundle (engine may be installed as a helper or the bundle may be next to it).
+        if let exe = ProcessInfo.processInfo.arguments.first.map(URL.init(fileURLWithPath:)) {
+            var bundle = exe
+            while bundle.pathComponents.count > 2 {
+                if bundle.lastPathComponent.hasSuffix(".app") {
+                    let candidate = bundle.appendingPathComponent("Contents/Helpers/").appendingPathComponent(named)
+                    if fm.isExecutableFile(atPath: candidate.path) {
+                        return candidate
+                    }
+                    break
+                }
+                bundle = bundle.deletingLastPathComponent()
+            }
+        }
+        // 3. Hard-coded release and app paths.
+        let candidates = [
+            "/Applications/Bad Apple.app/Contents/Helpers/\(named)",
+            "/usr/local/lib/bad_apple/\(named)",
+            "\(NSHomeDirectory())/bad_apple/\(named)",
+        ]
+        for path in candidates {
+            if fm.isExecutableFile(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return nil
+    }
+
+    /// Run a helper and return its stdout as a string.
+    private func runHelper(_ url: URL, arguments: [String], timeout: TimeInterval = 10) -> String? {
+        let task = Process()
+        task.executableURL = url
+        task.arguments = arguments
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while task.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if task.isRunning {
+            task.terminate()
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Update the ambient context from the `BadAppleAmbient` helper or AppleScript fallback.
+    /// Returns the captured context even if ocular capture is still running.
+    func updateAmbientContext() {
+        guard ambientEnabled else { return }
+        if let last = lastAmbientUpdate, Date().timeIntervalSince(last) < ambientRefreshInterval { return }
+        lastAmbientUpdate = Date()
+
+        var parts: [String] = []
+
+        // Prefer the native helper for richer, reliable context.
+        if let helper = helperURL(named: "BadAppleAmbient") {
+            if let output = runHelper(helper, arguments: []),
+               let data = output.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                let app = json["app"] ?? "Unknown"
+                let window = json["window"] ?? ""
+                parts.append("Active app: \(app)")
+                if !window.isEmpty {
+                    parts.append("Window: \(window)")
+                }
+            }
+        }
+
+        // AppleScript fallback if the helper is not available.
+        if parts.isEmpty {
+            let script = """
+            tell application "System Events"
+                set frontApp to name of first application process whose frontmost is true
+                set frontWindow to ""
+                try
+                    set frontWindow to title of front window of (first application process whose frontmost is true)
+                end try
+                return frontApp & "|" & frontWindow
+            end tell
+            """
+            var errorInfo: NSDictionary?
+            if let result = NSAppleScript(source: script)?.executeAndReturnError(&errorInfo) {
+                let value = result.stringValue ?? ""
+                let split = value.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+                let app = split.first.map(String.init) ?? "Unknown"
+                let window = split.count > 1 ? String(split[1]) : ""
+                parts.append("Active app: \(app)")
+                if !window.isEmpty {
+                    parts.append("Window: \(window)")
+                }
+            }
+        }
+
+        // Reuse any existing ocular description without losing it.
+        if let existing = ambientContext {
+            for line in existing.components(separatedBy: .newlines) {
+                if line.starts(with: "Screen:") {
+                    parts.append(line)
+                }
+            }
+        }
+
+        if !parts.isEmpty {
+            ambientContext = parts.joined(separator: "\n")
+        }
+    }
+
+    /// Refresh both ambient and ocular context for the next prompt.
+    func refreshAmbientContext() async {
+        updateAmbientContext()
+        await updateOcularContext()
+    }
+
+    /// Capture the screen and describe it with the vision model, appending the
+    /// result to `ambientContext` when ready. This is off by default; set
+    /// `BADAPPLE_OCULAR=1` and an optional `BADAPPLE_OCULAR_INTERVAL` in seconds.
+    func updateOcularContext() async {
+        guard ocularEnabled else { return }
+        if let last = lastOcularUpdate, ocularRefreshInterval > 0, Date().timeIntervalSince(last) < ocularRefreshInterval { return }
+
+        let capturePath = "/var/tmp/badapple_ocular.png"
+        guard let helper = helperURL(named: "BadAppleScreenCapture") else { return }
+        let output = runHelper(helper, arguments: ["--output", capturePath], timeout: 15)
+        guard output == capturePath, FileManager.default.fileExists(atPath: capturePath) else { return }
+
+        let description = await describeImageInternal(at: capturePath, prompt: "Describe what is on screen in one concise sentence.")
+        lastOcularUpdate = Date()
+
+        var parts = ambientContext?.components(separatedBy: .newlines) ?? []
+        // Replace any existing screen line.
+        parts.removeAll { $0.starts(with: "Screen:") }
+        parts.append("Screen: \(description)")
+        ambientContext = parts.joined(separator: "\n")
     }
 
     // MARK: - Init
@@ -720,6 +875,8 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         Task {
+            await refreshAmbientContext()
+
             let history = inferenceHistory()
             if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
                 stateLock.withLock { _lastCacheHit = true }
@@ -884,6 +1041,7 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         let persona = activePersona
+        await refreshAmbientContext()
         let history = inferenceHistory()
         stateLock.withLock { _lastCacheHit = false }
 

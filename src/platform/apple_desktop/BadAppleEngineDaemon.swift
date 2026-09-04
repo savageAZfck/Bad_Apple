@@ -1291,5 +1291,15 @@ func runDaemonMain() {
         acceptLoop(fd: fd, secret: secret)
     }
 
+    // Refresh ambient / ocular context in the background so it is ready for prompts.
+    let contextTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+    contextTimer.schedule(deadline: .now() + 5, repeating: 30)
+    contextTimer.setEventHandler {
+        Task {
+            await BadAppleEngine.shared.refreshAmbientContext()
+        }
+    }
+    contextTimer.resume()
+
     dispatchMain()
 }
