@@ -14,6 +14,13 @@
     <true/>
     <key>ProcessType</key>
     <string>Interactive</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BADAPPLE_PROMPT_FILE</key>
+        <string>/Users/savag3/bad_apple/prompt.txt</string>
+        <key>BADAPPLE_PERSONAS_FILE</key>
+        <string>/Users/savag3/bad_apple/personas.json</string>
+    </dict>
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>
     <key>ThrottleInterval</key>
