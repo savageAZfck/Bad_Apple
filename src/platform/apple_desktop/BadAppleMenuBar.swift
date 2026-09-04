@@ -4522,11 +4522,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         firstRunOnboarding.onDismiss = { [weak self] in
             self?.rebuildMenu()
         }
-        if !UserDefaults.standard.bool(forKey: "BadAppleFirstRunOnboarded") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.firstRunOnboarding.showIfNeeded()
-            }
-        }
 
         memoryGovernor.autoPurge = autoPurgeEnabled
         memoryGovernor.onUpdate = { [weak self] used, total, pressure in
@@ -4586,11 +4581,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     /// Shows the guided first-run onboarding wizard if the user has not
     /// completed it yet. Uses a short delay so the boot splash can dismiss
-    /// first.
+    /// first. If the platform has never been installed, the compact install
+    /// panel is shown first so the user can run the installer; the full
+    /// wizard is shown on the next launch once the platform is installed.
     func showOnboardingIfNeeded() {
-        if !UserDefaults.standard.bool(forKey: "BadAppleOnboarded") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.onboardingWindow.show()
+        if UserDefaults.standard.bool(forKey: "BadAppleOnboarded") {
+            return
+        }
+        let installed = FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.mlx.plist")
+            && FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.gatekeeper.plist")
+            && FileManager.default.fileExists(atPath: "/var/run/badapple/substrate.sock")
+            && FileManager.default.fileExists(atPath: BadAppleBrain.directSocket)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self else { return }
+            if installed {
+                self.onboardingWindow.show()
+            } else {
+                self.firstRunOnboarding.showIfNeeded()
             }
         }
     }

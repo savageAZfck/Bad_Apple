@@ -336,7 +336,7 @@ open -a "Bad Apple"
 |---|---|---|
 | Packaging & distribution | 2.75 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, Homebrew Cask, and a signed release path (`package_signed_release.sh` with `CODESIGN_ID`) are all working. CI runs on every push/PR. A notarized default artifact would close the last 0.25. |
 | Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. Signed-but-not-notarized zip is available for CI/enterprise. |
-| First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A guided first-launch onboarding is still missing. |
+| First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A 5-step native onboarding wizard (welcome, privacy, model status, permissions, first query) is wired into the menu bar and shown on first launch; an install prompt is shown first if the platform has not been installed. A purchase-grade, fully polished first-launch flow still needs screen-recording permission guidance and a workspace-selection step. |
 | QA & reliability | 1.85 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy`, `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings), and 103+ Rust tests and 15 cert-suite integration tests all pass. Air-gap certification integration tests assert zero network sockets and now cover SLICKS replay, automation-cage path traversal, automation-cage symlink escape, and policy rule coverage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. Smoke tests still require a running daemon; no clean-machine VM install test yet. |
 | Security & trust posture | 1.55 / 2 | Strong internal controls: SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Local vault, MCP marketplace, and workspace watcher are wired. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
 
@@ -368,6 +368,9 @@ open -a "Bad Apple"
 7. **Native TTS fixed and auto-starting** — `BadAppleMenuBar` `PiperTTSPlaybackController` now uses direct `afplay` for user-session playback, and `badapple` CLI auto-starts `badapple-tts` if its socket is missing.
 8. **Signed full-release packaging** — `package_signed_release.sh` produces a code-signed `Bad_Apple-<version>-full-signed.zip` with a self-signed or Apple Developer cert.
 9. **Test count and cert suite expanded** — 103 Rust tests and 15 cert-suite integration tests pass, including SLICKS replay, tool cage, path traversal, symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and network-isolation checks.
+10. **Dead core modules removed** — `hyperdimensional_core.rs` and `connectome_mmap.rs` are deleted; `RustSynthesizer` is now a pure repair helper; `ReplayCache` moved into `bad_apple_ipc.rs`.
+11. **Ambient and ocular context wired into active prompts** — `BadAppleEngine` now refreshes app/window context and optional screen-capture + VLM description before every turn, with a 30-second background timer keeping it warm.
+12. **First-run onboarding flow fixed** — The compact install panel is shown first when the platform is not yet installed; the 5-step `BadAppleOnboardingWindow` runs once the platform is ready.
 
 ### What was corrected from the previous ranking
 
@@ -382,6 +385,8 @@ open -a "Bad Apple"
 - **Memory-mapped connectome persistence** — `connectome_mmap.rs` and the `MemoryGraphNode` struct have been removed. There was no runtime consumer.
 - **Metal UMA zero-copy memory management** — `metal_uma.rs` is wired into the gatekeeper's `CandleBrain` classifier through `tensor_brain.rs`; it is not used by the Swift MLX runtime, but it is not dead code.
 - **Web dashboard SPA** — Now served by `badapple-dashboard` on port 8787.
+- **Ambient + ocular context** — No longer just dashboard endpoints; `BadAppleEngine` now injects context into the active system prompt on each turn.
+- **First-run onboarding** — The 5-step native onboarding wizard is the primary first-launch flow; the compact install panel is shown first if the platform has not been installed.
 - **MCP marketplace** — `mcp_marketplace.rs`, `badapple-mcp`, and the dashboard `/api/mcp/servers` endpoints provide a full catalog with add/remove/install/uninstall/start/stop/status.
 
 ### Remaining blockers to 9.75/10
@@ -390,7 +395,7 @@ open -a "Bad Apple"
 
 
 - A clean-machine VM install + smoke test to verify the DMG and Cask end-to-end.
-- Native onboarding/purchase-grade first launch in the Swift menu bar app.
+
 - 3 unmaintained transitive Rust dependencies (`fxhash`, `instant`, `paste`) with no safe upgrade path — explicitly triaged in `deny.toml` but worth monitoring.
 
 
