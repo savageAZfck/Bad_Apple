@@ -879,10 +879,17 @@ public extension BadAppleInference {
         return 4096
     }
 
-    /// Read `BADAPPLE_FAST_MODEL` from the environment, falling back to the default 0.5B.
-    public static var envFastModelId: String {
-        ProcessInfo.processInfo.environment["BADAPPLE_FAST_MODEL"]
-            ?? fastTierConfig.modelId
+    /// Read `BADAPPLE_FAST_MODEL` from the environment.
+    /// - If the variable is unset, the default 0.5B fast-tier model is used.
+    /// - If the variable is empty or "0", fast tier is treated as disabled (nil).
+    public static var envFastModelId: String? {
+        guard let raw = ProcessInfo.processInfo.environment["BADAPPLE_FAST_MODEL"] else {
+            return fastTierConfig.modelId
+        }
+        if raw.isEmpty || raw == "0" {
+            return nil
+        }
+        return raw
     }
 
     /// Read `BADAPPLE_SPECULATIVE_DRAFT` from the environment (empty = disabled).

@@ -1250,11 +1250,16 @@ func runDaemonMain() {
     BadAppleEngine.shared.configureMainModel(modelId: modelId, revision: revision)
     log("Configured main model: \(modelId)@\(revision)")
 
-    // Enable fast tier if requested by the environment.
+    // Enable fast tier if requested by the environment and a fast model is configured.
     if let fastTier = ProcessInfo.processInfo.environment["BADAPPLE_FAST_TIER"],
        (fastTier == "1" || fastTier.lowercased() == "true" || fastTier.lowercased() == "on") {
-        BadAppleEngine.shared.fastTierEnabled = true
-        log("Fast tier enabled (BADAPPLE_FAST_TIER=1). Simple queries will route to \(BadAppleInference.envFastModelId).")
+        if let fastId = BadAppleInference.envFastModelId {
+            BadAppleEngine.shared.fastTierEnabled = true
+            log("Fast tier enabled (BADAPPLE_FAST_TIER=1). Simple queries will route to \(fastId).")
+        } else {
+            BadAppleEngine.shared.fastTierEnabled = false
+            log("Fast tier requested (BADAPPLE_FAST_TIER=1) but BADAPPLE_FAST_MODEL is empty/disabled; falling through to main model.")
+        }
     }
 
     // Override VRAM budget if provided (in GB).

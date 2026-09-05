@@ -33,7 +33,10 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private var inference: BadAppleInference
     private lazy var fastInference: BadAppleInference? = {
-        let fastModelId = BadAppleInference.envFastModelId
+        guard let fastModelId = BadAppleInference.envFastModelId, !fastModelId.isEmpty else {
+            print("[BadAppleEngine] Fast tier disabled: BADAPPLE_FAST_MODEL is empty or unset.")
+            return nil
+        }
         let config = BadAppleInference.ModelConfig(
             modelId: fastModelId,
             revision: "main",
@@ -822,11 +825,22 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
 
-        // Fast tier: route simple queries to the 0.5B model when enabled.
-        if fastTierEnabled && isSimpleQuery(prompt) && toolRouter.toolSchemasForPrompt(text: prompt) == nil {
+        // Fast tier: route simple queries to the 0.5B model when enabled and configured.
+        if fastTierEnabled, let fastInf = fastInference, isSimpleQuery(prompt), toolRouter.toolSchemasForPrompt(text: prompt) == nil {
             Task {
                 await ensureFastModelLoaded()
-                guard let fastInf = fastInference, fastModelLoaded else { return }
+                guard fastModelLoaded else {
+                    // Fast tier not available — fall through to the main model.
+                    self.generateWithMainModel(
+                        prompt: prompt,
+                        voiceMode: voiceMode,
+                        maxTokens: maxTokens,
+                        onToken: onToken,
+                        onComplete: onComplete,
+                        onError: onError
+                    )
+                    return
+                }
                 let fastSys = systemPrompt(voiceMode: voiceMode)
                 let streamState = StreamState()
                 fastInf.generateStreamingTokens(
@@ -860,7 +874,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         DispatchQueue.main.async { onComplete(filtered) }
                     },
                     onError: { error in
-                        // Fast tier failed — fall through to the main model below.
+                        // Fast tier failed at runtime — fall through to the main model.
                         DispatchQueue.main.async {
                             self.auditLedger.append(
                                 eventType: "error",
@@ -868,11 +882,41 @@ final class BadAppleEngine: @unchecked Sendable {
                                 persona: persona
                             )
                         }
+                        self.generateWithMainModel(
+                            prompt: prompt,
+                            voiceMode: voiceMode,
+                            maxTokens: maxTokens,
+                            onToken: onToken,
+                            onComplete: onComplete,
+                            onError: onError
+                        )
                     }
                 )
             }
             return
         }
+
+        generateWithMainModel(
+            prompt: prompt,
+            voiceMode: voiceMode,
+            maxTokens: maxTokens,
+            onToken: onToken,
+            onComplete: onComplete,
+            onError: onError
+        )
+    }
+
+    /// Streamed main-model generation path, used by `generateStreaming` and as a fast-tier fallback.
+    private func generateWithMainModel(
+        prompt: String,
+        voiceMode: Bool,
+        maxTokens: Int,
+        onToken: @escaping (String) -> Void,
+        onComplete: @escaping (String) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        let persona = activePersona
+        stateLock.withLock { _lastCacheHit = false }
 
         Task {
             await refreshAmbientContext()
@@ -1325,18 +1369,17 @@ final class BadAppleEngine: @unchecked Sendable {
         await runtime.releaseModelMemory(estimateModelBytes(mid))
         await runtime.markModelUnloaded(mid)
         // Also unload the fast tier model if it was loaded.
-        if fastModelLoaded, let fastInf = fastInference {
+        if fastModelLoaded, let fastInf = fastInference, let fastId = BadAppleInference.envFastModelId {
             await fastInf.unload()
             fastModelLoaded = false
-            await runtime.releaseModelMemory(estimateModelBytes(BadAppleInference.envFastModelId))
-            await runtime.markModelUnloaded(BadAppleInference.envFastModelId)
+            await runtime.releaseModelMemory(estimateModelBytes(fastId))
+            await runtime.markModelUnloaded(fastId)
         }
     }
 
-    /// Lazily load the 0.5B fast tier model on first use.
+    /// Lazily load the fast tier model on first use.
     private func ensureFastModelLoaded() async {
-        guard !fastModelLoaded, let fastInf = fastInference else { return }
-        let fastId = BadAppleInference.envFastModelId
+        guard !fastModelLoaded, let fastInf = fastInference, let fastId = BadAppleInference.envFastModelId, !fastId.isEmpty else { return }
         let estimatedBytes = estimateModelBytes(fastId)
         if let reason = await runtime.canFitModel(estimatedBytes: estimatedBytes) {
             print("[BadAppleEngine] VRAM admission denied for fast tier \(fastId): \(reason)")
