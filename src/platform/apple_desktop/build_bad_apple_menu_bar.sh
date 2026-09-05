@@ -131,7 +131,7 @@ plutil -lint "${EMBED_PLIST}"
 # are pure Foundation and always included. BadAppleEngine requires the MLX
 # dylib, so it's only included when MLX is available.
 LOGIC_SOURCES=""
-for src in BadAppleSecurity.swift BadAppleIdentityClient.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift BadAppleModelManager.swift; do
+for src in BadAppleSecurity.swift BadAppleIdentityClient.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift BadAppleModelManager.swift BadAppleWorkspaceWatcher.swift; do
     [[ -f "${REPO_ROOT}/src/platform/apple_desktop/${src}" ]] && LOGIC_SOURCES="${LOGIC_SOURCES} ${REPO_ROOT}/src/platform/apple_desktop/${src}"
 done
 

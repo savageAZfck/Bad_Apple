@@ -144,6 +144,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _airgapEnabled = false
     private var _privateModeEnabled = false
     private var _fastTierEnabled = false
+    private var _workspaceWatcher: BadAppleWorkspaceWatcher?
 
     var isLoaded: Bool {
         return stateLock.withLock { _isLoaded }
@@ -180,7 +181,24 @@ final class BadAppleEngine: @unchecked Sendable {
         set {
             stateLock.withLock { _workspacePath = newValue }
             toolExecutor.workspace = newValue
+            restartWorkspaceWatcher()
         }
+    }
+
+    private func restartWorkspaceWatcher() {
+        _workspaceWatcher?.stop()
+        _workspaceWatcher = nil
+        guard let path = _workspacePath else { return }
+        let resolved = (path as NSString).standardizingPath
+        guard FileManager.default.fileExists(atPath: resolved) else { return }
+        let watcher = BadAppleWorkspaceWatcher(path: resolved)
+        watcher.start { [weak self] workspace in
+            guard let self else { return }
+            Task {
+                _ = self.toolExecutor.indexDocuments(path: workspace)
+            }
+        }
+        _workspaceWatcher = watcher
     }
 
     // MARK: - Air-gap / Private Mode
