@@ -294,7 +294,7 @@ fn execute_fast(action: FastAction, cage: &AutomationCage) -> Result<String> {
             let time = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let tails = [
                 format!("It's {time}, babe."),
-                format!("{time}, bestie."),
+                format!("{time}, homie."),
                 format!("{time}, hun."),
             ];
             let idx = rand::thread_rng().gen_range(0..tails.len());

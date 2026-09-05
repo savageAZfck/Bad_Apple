@@ -78,7 +78,7 @@ private final class TTSServer {
     init() {
         socketPath = ProcessInfo.processInfo.environment["BADAPPLE_TTS_SOCKET"] ?? "/tmp/badapple_tts.sock"
         defaultVoiceName = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Best"
-        defaultLengthScale = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_LENGTH_SCALE"] ?? "0.931") ?? 0.931
+        defaultLengthScale = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_LENGTH_SCALE"] ?? "0.8043") ?? 0.8043
         defaultVolume = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOLUME"] ?? "1.0") ?? 1.0
         gTTSShouldStop = 0
         gTTSListenFd = -1
@@ -416,9 +416,13 @@ private final class TTSServer {
     private func sanitizeText(_ text: String) -> String {
         let withoutURLs = text.replacingOccurrences(of: "https?://\\S+", with: "", options: .regularExpression)
         let withoutAsterisks = withoutURLs.replacingOccurrences(of: "*", with: "")
+        // Ellipses and em-dashes read as 1-2 s of dead air with the current TTS,
+        // so fold them into a brief comma pause that sounds like a breath.
+        let withoutEllipses = withoutAsterisks.replacingOccurrences(of: "\\.\\.\\.+", with: ", ", options: .regularExpression)
+        let withoutEmDashes = withoutEllipses.replacingOccurrences(of: "—", with: ", ").replacingOccurrences(of: "–", with: ", ")
 
         var cleaned = ""
-        for scalar in withoutAsterisks.unicodeScalars {
+        for scalar in withoutEmDashes.unicodeScalars {
             let value = scalar.value
             if value == 0x09 || value == 0x0A || value == 0x0D || (value >= 0x20 && value <= 0x7E) {
                 cleaned.append(Character(scalar))

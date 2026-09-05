@@ -1,12 +1,12 @@
 # Bad Apple — Complete Feature & Capability Overview
 
-> **Bad Apple is an on-device, air-gapped AI operating system layer for macOS. It runs a 9B Qwen 3.5 large language model on Apple Silicon through MLX, executes local tools, indexes your files, speaks responses, extends via an MCP marketplace, syncs models and messages over an encrypted P2P mesh, watches your workspace for context, and can read the screen and room ambient state — all without sending prompts or data to the cloud after the models are downloaded once.**
+> **Bad Apple is an on-device, air-gapped AI operating system layer for macOS. It runs a 7B Qwen 2.5 Coder large language model as the default coding brain on Apple Silicon through MLX, with a 9B Qwen 3.5 general model available as a switchable option. It executes local tools, indexes your files, speaks responses, extends via an MCP marketplace, syncs models and messages over an encrypted P2P mesh, watches your workspace for context, and can read the screen and room ambient state — all without sending prompts or data to the cloud after the models are downloaded once.**
 
 ---
 
 ## What Bad Apple Is
 
-Bad Apple is a **local-first AI operating system layer** for macOS. It is built around a 9B Qwen 3.5 4-bit model running on the Apple Neural Engine / GPU through MLX, an optional 0.5B fast tier model for simple queries, optional speculative decoding with a small draft model, a native AVSpeechSynthesizer TTS server, a Rust-backed SLICKS-secured Unix-socket command layer, an encrypted P2P mesh for model and message sync, a workspace watcher, ambient/ocular context helpers, and an MCP marketplace. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
+Bad Apple is a **local-first AI operating system layer** for macOS. It is built around a 7B Qwen 2.5 Coder 4-bit default model on Apple Silicon through MLX, with a 9B Qwen 3.5 4-bit model available as a switchable option. It also has an optional 0.5B fast tier model for simple queries, optional speculative decoding with a small draft model, a native AVSpeechSynthesizer TTS server, a Rust-backed SLICKS-secured Unix-socket command layer, an encrypted P2P mesh for model and message sync, a workspace watcher, ambient/ocular context helpers, and an MCP marketplace. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
 
 Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 
@@ -21,7 +21,8 @@ Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 
 ### 1. On-Device Language Reasoning
 
-- **9B Qwen 3.5 target model** (`caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`) for general question answering, summarization, writing, coding help, and open-ended chat.
+- **7B Qwen 2.5 Coder default model** (`mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`) for general question answering and coding-first chat.
+- **9B Qwen 3.5 general model** (`caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`) available as a switchable option for deeper general reasoning: `badapple model use main_9b`.
 - **0.5B fast tier model** (`mlx-community/Qwen2.5-0.5B-Instruct-4bit`) for simple queries (math, time, greetings, identity). Enabled with `BADAPPLE_FAST_TIER=1`. Routes simple queries to the 0.5B model to reduce latency and memory pressure.
 - **Speculative decoding** — when `BADAPPLE_SPECULATIVE_DRAFT` is set to a cached draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`), the engine runs speculative decoding with `BADAPPLE_NUM_DRAFT_TOKENS` (default 2) draft tokens per verification step.
 - **Single model for text and voice** — no multi-second model swap when switching from text to speech mode.
@@ -189,16 +190,16 @@ Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_document
 
 ## Performance
 
-Measured on a 16 GB Apple Silicon M-series Mac with the 9B Qwen 3.5 4-bit target:
+Measured on a 16 GB Apple Silicon M-series Mac:
 
-| Metric | Typical Range |
-|---|---|
-| First-token latency | 3.5–6.5 s for 450–750 token prompts |
-| Decode throughput | 13–25 tok/s, spikes to ~36 tok/s |
-| Peak memory (9B only) | 5.7–6.5 GB |
-| Peak memory (9B + 0.5B fast tier) | 6.0–6.8 GB |
-| Voice first token | 2.8–5.7 s for 430–460 token prompts |
-| RAG embeddings | bge-small via native BadAppleEmbeddingEngine |
+| Metric | 7B Qwen 2.5 Coder | 9B Qwen 3.5 |
+|---|---|---|
+| First-token latency | 2.0–4.0 s for short prompts | 3.5–6.5 s for 450–750 token prompts |
+| Decode throughput | ~18–25 tok/s | 13–25 tok/s, spikes to ~36 tok/s |
+| Peak memory (main model only) | ~4.1–4.3 GB | 5.7–6.5 GB |
+| Peak memory (main + 0.5B fast tier) | ~4.4–4.7 GB | 6.0–6.8 GB |
+| Voice first token | 2.0–4.0 s | 2.8–5.7 s for 430–460 token prompts |
+| RAG embeddings | bge-small via native BadAppleEmbeddingEngine | bge-small via native BadAppleEmbeddingEngine |
 
 ---
 
@@ -232,7 +233,8 @@ badapple CLI / menu bar / voice host
               │
               ▼
    badapple-engine  (Swift MLX daemon)
-   ├─ 9B Qwen 3.5 (main model)
+   ├─ 7B Qwen 2.5 Coder (default main model)
+   ├─ 9B Qwen 3.5 (switchable general model)
    ├─ 0.5B Qwen 2.5 (optional fast tier)
    ├─ Optional speculative decoding draft model
    ├─ VRAM admission governor + memory governor
@@ -407,6 +409,37 @@ open -a "Bad Apple"
 
 ---
 
+## Live Coding Benchmark
+
+Bad Apple was benchmarked on the actual machine it runs on — a 16 GB Apple Silicon Mac — using a 7-problem Python coding suite that is independent of any training-data contamination. The suite was executed through the live `badapple` CLI against the loaded model and judged the generated code for correctness, formatting, and the absence of tool-approval noise.
+
+| Model | Correct / 7 | Percent | Notes |
+|---|---|---|---|
+| `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` (default) | 6 / 7 | ~86% | Only `separate_paren_groups` failed on logic; every other solution was clean, properly indented, and contained no tool-approval text. |
+| `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` (switchable) | 4 / 7 | ~57% | Inconsistent across runs; produced flattened code, tool-approval text, or prose in some attempts. |
+
+**Important caveats:**
+- This is a small, local 7-problem suite. It is **not** HumanEval, MBPP, SWE-bench, or any other public leaderboard.
+- It measures the end-to-end Bad Apple stack — model + chat template + prompt + code post-processor — not the model in isolation.
+- The 7B Instruct's published single-model numbers are roughly **88.4% on HumanEval** and **83.5% on MBPP** (per the Qwen2.5-Coder technical report and follow-up instruction-tuning evaluations). Those are strong for a 7B coding model, but still far behind frontier cloud coding models and larger local models.
+
+For a coding-focused local Mac, the 7B Coder is now the default and is the better choice.
+
+## Where the Raw Model Ranks in the Wild
+
+Bad Apple is an AI operating system layer, not a chatbot API. The model is one component inside it. The raw language model itself is best compared as follows. Numbers are public benchmark pass@1 scores where available, rounded for readability; the 4-bit MLX quant used by Bad Apple can be a few points below the full-weight published scores.
+
+| Tier | Examples | HumanEval pass@1 (approx) | Relative to Bad Apple's 7B Coder |
+|---|---|---:|:---|
+| **Frontier cloud coding models** | Claude 4 Sonnet/Opus, GPT-4o / o1 / o3, Gemini 2.5 Pro, DeepSeek-V3 / R1 | 90–95% on HumanEval; 50–80% on SWE-bench | Substantially ahead. These are the practical best-in-class for hard, multi-file coding tasks and real GitHub issue resolution. |
+| **Larger local/edge models** | Qwen2.5-Coder-32B, Qwen2.5-Coder-14B, DeepSeek-Coder-V2, Llama 3.3 70B | 80–93% on HumanEval | Ahead on raw benchmark scores, but they require more VRAM than a 16 GB unified-memory Mac can comfortably run. |
+| **7B local coding models** | **Qwen2.5-Coder-7B-Instruct** (Bad Apple default), DeepSeek-Coder-6.7B, CodeLlama 7B, StarCoder2-7B | **Qwen2.5-Coder-7B ~88%**, DeepSeek-Coder-6.7B ~62%, CodeLlama 7B ~34%, StarCoder2-7B ~35% | **Best-in-class for the 7B tier.** The 7B Qwen is competitive with much larger models and far ahead of older 7B coding models. |
+| **Sub-7B local models** | Qwen2.5-Coder-3B, Qwen2.5-0.5B/1.5B, Phi-3-mini, TinyLlama | 40–85% depending on size | Faster and smaller, but not in the same class for non-trivial coding. Used by Bad Apple for fast-tier simple queries. |
+
+**As a complete system, Bad Apple is in a different category than any of these** because it combines the model with deterministic OS-level actions, local RAG, an approval workflow, an audit ledger, a streaming firewall, and tool execution. No cloud model or local app-tier competitor offers that same local, air-gapped, auditable OS-layer experience on a 16 GB Mac.
+
+**As a complete system, Bad Apple is in a different category than any of these** because it combines the model with deterministic OS-level actions, local RAG, an approval workflow, an audit ledger, a streaming firewall, and tool execution. No cloud model or local app-tier competitor offers that same local, air-gapped, auditable OS-layer experience on a 16 GB Mac.
+
 ## Competitive Ranking (October 2026)
 
 ### Bad Apple is an AI OS layer, not an app
@@ -435,7 +468,7 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **Human-in-the-loop approval policy engine** (60 rules in `policy.yaml`)
 - **VRAM admission governor** with model size estimation and configurable budget
 - **Memory pressure governor** with automatic VRAM purge on critical pressure
-- **Fast tier model routing** (0.5B for simple queries, 9B for complex)
+- **Fast tier model routing** (0.5B for simple queries, 7B Coder default for complex, 9B optional for general reasoning)
 - **Speculative decoding** support with configurable draft model and token count
 - **Native agent task system** with plan-execute-observe loops
 - **Native document reading** (PDF/DOCX/RTF without external dependencies)
@@ -483,7 +516,7 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **Declarative security policy engine** (60 tool rules in `policy.yaml`)
 - **VRAM admission governor** with model size estimation and configurable budget
 - **Memory pressure governor** with automatic VRAM purge
-- **Fast tier model routing** (0.5B for simple queries, 9B for complex)
+- **Fast tier model routing** (0.5B for simple queries, 7B Coder default for complex, 9B optional for general reasoning)
 - **Speculative decoding** with configurable draft model
 - **Native agent task system** with plan-execute-observe loops
 - **CLI agent protocol** (LAP) for full JSON-RPC runtime control

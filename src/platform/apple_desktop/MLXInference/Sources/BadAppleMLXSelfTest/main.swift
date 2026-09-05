@@ -6,14 +6,14 @@ struct BadAppleMLXSelfTest {
     static func main() async {
         let inference = BadAppleInference.defaultConfig
         check(
-            inference.modelId == "caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit",
+            inference.modelId == "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
             "unexpected inference model id"
         )
         check(
-            inference.revision == "5ae9734004d530171fd52f89e660c059b6e36efc",
+            inference.revision == "main",
             "unexpected inference model revision"
         )
-        check(inference.maxTokens == 300, "unexpected inference token limit")
+        check(inference.maxTokens == 2048, "unexpected inference token limit")
         check(
             BadAppleInference.InferenceError.modelNotLoaded.errorDescription?
                 .contains("not loaded yet") == true,

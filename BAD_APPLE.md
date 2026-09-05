@@ -1,6 +1,6 @@
 # Bad Apple — Bare-Metal AI Operating System for macOS
 
-Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs Qwen 3.5 on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
+Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 7B Qwen 2.5 Coder as the default model on Apple Silicon using MLX, with a 9B Qwen 3.5 model as a switchable option. It answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
 
 Internally it is built as a supervised **actor OS**: every major subsystem — resources, circuit breakers, workspace, persona, P2P, MCP, health, audit, cache, and model registry — runs as a dedicated actor. The Rust CLI, the menu bar, and any MCP client authenticate to the daemon through **SLICKS v2**, a hardware-bound challenge/response protocol signed by the Apple Secure Enclave.
 
@@ -8,13 +8,14 @@ Internally it is built as a supervised **actor OS**: every major subsystem — r
 
 ## Brains / Models
 
-The runtime now uses a single Qwen 3.5 9B 4-bit brain for both text and voice. There is no separate voice bundle to swap in and out, which removes the old multi-second mode-switching lag.
+The runtime now uses a 7B Qwen 2.5 Coder 4-bit brain as the default for both text and voice, with a 9B Qwen 3.5 4-bit brain available as a switchable option. There is no separate voice bundle to swap in and out, which removes the old multi-second mode-switching lag.
 
 | Component | Model | Size | Role |
 |---|---|---|---|
-| Target LLM | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | All text and voice reasoning |
+| Target LLM (default) | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | ~4.2 GB | Coding, general chat, and tool reasoning |
+| Target LLM (switchable) | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | Heavier general reasoning: `badapple model use main_9b` |
 | Fast tier / tiny brain | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Instant answers for greetings, identity, time, simple math, and deterministic queries |
-| MLX-LM speculative draft (optional) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional small draft for the 9B brain; set `BADAPPLE_SPECULATIVE_DRAFT=auto` to enable |
+| MLX-LM speculative draft (optional) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional small draft for the main brain; set `BADAPPLE_SPECULATIVE_DRAFT=auto` to enable |
 | RAG embeddings | `BAAI/bge-small-en-v1.5` | small | Local sentence-transformer on CPU |
 | TTS voice | `en_US-amy-medium` (default) | small | Native AVFoundation TTS server (`badapple-tts`) |
 
@@ -24,9 +25,26 @@ All models are downloaded and cached on the Mac. At runtime, **no prompt, respon
 
 ## Speed / Token Throughput
 
-Live numbers from the daemon log on a 16 GB Apple Silicon M-series Mac with the single 9B brain loaded.
+Live numbers from the daemon log on a 16 GB Apple Silicon M-series Mac. The default is the 7B brain; the 9B numbers are from the optional `main_9b` profile.
 
-### Text mode (9B)
+### Text mode (7B, default)
+
+Observed ranges on a 16 GB Apple Silicon Mac with the 7B Coder brain loaded:
+
+| Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
+|---|---|---|---:|---:|---:|---:|
+| `Who are you?` | ~1800 | 0.00 s | 0 | — | 4.15 GB |
+| `What is the capital of France?` | ~1800 | 2.0–3.0 s | 20 | 18–25 | 4.15 GB |
+| `Tell me about Rome.` | ~1800 | 2.0–3.0 s | 20 | 18–25 | 4.15 GB |
+| `What do you think of Siri?` | ~1800 | 2.0–3.5 s | 66 | 18–25 | 4.15 GB |
+| `How does a car engine work?` | ~1800 | 2.5–3.5 s | 95 | 18–25 | 4.15 GB |
+
+- Typical first-token latency: **~2.0–4.0 s** for ~1800 token prompts once the system-prompt KV cache is loaded.
+- The `Who are you?` prompt is handled by fast meta-response logic, so it does not run the 7B brain and reports 0 output tokens.
+- Typical decode throughput: **~18–25 tok/s** on this quant.
+- Peak memory stays **~4.1–4.3 GB**.
+
+### Text mode (9B, switchable)
 
 | Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
 |---|---|---:|---:|---:|---:|
@@ -59,11 +77,11 @@ When `BADAPPLE_FAST_TIER=1`, simple queries route through `mlx-community/Qwen2.5
 - Typical decode throughput: **~90–235 tok/s**.
 - Peak memory: **~0.33 GB**.
 
-Fast tier handles greetings, identity, time, simple math, and other deterministic/patterned queries. Non-trivial reasoning falls through to the 9B brain.
+Fast tier handles greetings, identity, time, simple math, and other deterministic/patterned queries. Non-trivial reasoning falls through to the 7B Coder brain by default, or to the 9B brain if it is active.
 
 ### Voice mode
 
-Voice uses the 9B brain by default. When fast tier is on, short voice greetings and commands can also hit the 0.5B model.
+Voice uses the 7B brain by default. When fast tier is on, short voice greetings and commands can also hit the 0.5B model. Switch to the 9B brain with `badapple model use main_9b`.
 
 ### Inference tuning
 
@@ -71,13 +89,13 @@ Voice uses the 9B brain by default. When fast tier is on, short voice greetings 
 - `BADAPPLE_SPECULATIVE_DRAFT=auto` — when set, Bad Apple scans the HF cache for a small compatible draft model and uses it with `mlx-lm` speculative decoding.
 - `BADAPPLE_FAST_TIER=1` — the 0.5B fast model is enabled for appropriate queries.
 - `prefill_step_size=4096` and `max_kv_size=4096` keep prompt encoding in a single shot and bound KV-cache growth.
-- `prompt.txt` is hot-reloaded and kept compact; the 9B chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
+- `prompt.txt` is hot-reloaded and kept compact; the 7B/9B chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
 
 ---
 
 ## What Bad Apple can do
 
-Bad Apple is a private, on-device AI assistant for macOS. It runs the Qwen 3.5 9B brain and a 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes files, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
+Bad Apple is a private, on-device AI assistant for macOS. It runs a 7B Qwen 2.5 Coder brain and a 0.5B fast tier on Apple Silicon using MLX, with a 9B Qwen 3.5 brain as a switchable option. It answers questions, runs local tools, indexes files, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
 
 When asked, it can say:
 
@@ -87,9 +105,9 @@ When asked, it can say:
 
 ### Core
 
-- **Local Qwen 3.5 9B inference** on Apple Silicon GPU (MLX)
+- **Local Qwen 2.5 Coder 7B inference** on Apple Silicon GPU (MLX); 9B Qwen 3.5 switchable
 - **0.5B fast tier** for instant greetings, identity, time, simple math, and deterministic queries
-- **Single 9B brain** for both text and voice, no dual-model swap
+- **Single main brain** for both text and voice, no dual-model swap
 - **Streaming token output** to terminal or TTS
 - **SLICKS v2 authenticated Unix socket** (Secure Enclave–signed challenge/response, with HMAC-SHA256 v1 fallback)
 - **launchd-managed daemon** (`com.badapple.mlx`) that runs as root and auto-restarts
@@ -99,7 +117,7 @@ When asked, it can say:
 - **Multi-turn conversation history** saved to local JSONL
 - **Persistent user memory**: records user facts and recalls them in future turns
 - **RAG / local document search**: indexes your text files with `BAAI/bge-small-en-v1.5` and retrieves relevant chunks
-- **Hot-reloadable system prompt** via `prompt.txt` without restarting the 9B model
+- **Hot-reloadable system prompt** via `prompt.txt` without restarting the main brain
 - **Persona packs** (`personas.json`): switch at runtime with `switch to <persona>`
 - **Teachable quips** with `teach <line>`
 - **Streaming output firewall** (Aho-Corasick blocklist) for PII, secrets, and custom patterns
@@ -172,7 +190,7 @@ Voice queries respect the selected persona and roast mode by passing `--persona 
 
 Default persona is a sassy, flirty California beach girl. She:
 
-- Uses English-only slang and endearments (`babe`, `hun`, `bestie`, `dude`, `stoked`, `chill`)
+- Uses English-only slang and endearments (`babe`, `hun`, `homie`, `dude`, `stoked`, `chill`)
 - Stays short: 1–2 punchy paragraphs
 - **Roasts cloud AI and Siri** when bragging about bare metal or when asked directly. She varies the target (Siri, Alexa, Google, ChatGPT, Gemini, Cortana, Bixby, "the cloud", server farms, data centers, "some rented GPU in Nevada") and the insult ("ratchet old bitch", "washed-up cloud snitch", "data-hungry narc", "internet junkie", "corporate eavesdropper", etc.)
 

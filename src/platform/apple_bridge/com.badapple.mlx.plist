@@ -29,7 +29,7 @@
         <key>BADAPPLE_SOCKET_PATH</key>
         <string>/var/run/badapple/substrate_mlx.sock</string>
         <key>BADAPPLE_MAIN_MODEL</key>
-        <string>caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit</string>
+        <string>mlx-community/Qwen2.5-Coder-7B-Instruct-4bit</string>
         <key>BADAPPLE_MODEL_REVISION</key>
         <string></string>
         <key>BADAPPLE_DRAFT_MODEL</key>
@@ -52,6 +52,8 @@
         <string>__BADAPPLE_ROOT__/prompt.txt</string>
         <key>BADAPPLE_PERSONAS_FILE</key>
         <string>__BADAPPLE_ROOT__/personas.json</string>
+        <key>BADAPPLE_PERSONA</key>
+        <string>cali</string>
         <key>BADAPPLE_NOTES_DIR</key>
         <string>__CONSOLE_HOME__/.bad_apple/notes</string>
         <key>BADAPPLE_IDENTITY_BLOB</key>

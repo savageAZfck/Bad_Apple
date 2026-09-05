@@ -5358,7 +5358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             return model
         }
         // 4. Fallback to the known default
-        return "caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit"
+        return "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
     }
 
     /// Opens the model management dashboard at http://127.0.0.1:8787/models

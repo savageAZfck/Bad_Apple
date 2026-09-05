@@ -47,7 +47,8 @@ final class BadAppleEngine: @unchecked Sendable {
         return BadAppleInference(config: config)
     }()
     private var fastModelLoaded = false
-    private let personaManager = BadApplePersonaManager()
+    private var recentSignOffs: [String] = []
+    let personaManager = BadApplePersonaManager()
     private let auditLedger = BadAppleAuditLedger()
     private let outputFirewall = BadAppleOutputFirewall()
     private let toolRouter = BadAppleToolRouter()
@@ -416,7 +417,9 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private init() {
         inference = BadAppleInference.createDefault()
-        stateLock.withLock { _modelId = BadAppleInference.defaultConfig.modelId }
+        let defaultModelId = BadAppleInference.defaultConfig.modelId
+        stateLock.withLock { _modelId = defaultModelId }
+        personaManager.setCurrentModel(repoId: defaultModelId)
     }
 
     /// Replace the default main-model configuration before any load. No-op if
@@ -436,6 +439,7 @@ final class BadAppleEngine: @unchecked Sendable {
         )
         inference = BadAppleInference(config: config)
         stateLock.withLock { _modelId = modelId }
+        personaManager.setCurrentModel(repoId: modelId)
     }
 
     // MARK: - Persona Management
@@ -1199,6 +1203,48 @@ final class BadAppleEngine: @unchecked Sendable {
 
     // MARK: - Fast Tier
 
+    private let flexSignOffs = ["No cap.", "Dead ass.", "On god.", "Real talk.", "Straight up."]
+    private let chillSignOffs = ["For real.", "No doubt.", "No cap.", "No lie."]
+    private let confirmSignOffs = ["Facts.", "Say less.", "Real talk.", "Straight up."]
+    private let personalSignOffs = ["Dead ass.", "On god.", "For real.", "Dead ass for real.", "Dead ass, period."]
+    private let modelSignOffs = ["No doubt.", "For real.", "No cap.", "Facts."]
+    private let defianceSignOffs = ["Facts.", "Dead ass.", "Real talk.", "Straight up."]
+    private let defaultSignOffs = ["No cap.", "For real.", "Say less.", "Dead ass.", "No doubt.", "No lie.", "On god.", "Dead ass for real.", "Facts.", "Real talk.", "Straight up.", "Dead ass, period."]
+
+    private func signOff(for prompt: String) -> String {
+        let lower = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        var pool = defaultSignOffs
+        if lower.contains("hello") || lower.contains("hi ") || lower == "hi" || lower.contains("good morning") || lower.contains("good afternoon") || lower.contains("good evening") || lower.contains("what's up") {
+            pool = defaultSignOffs
+        } else if lower.contains("who are you") || lower.contains("what are you") || lower.contains("what is your name") || lower.contains("what's your name") || lower.contains("who am i") {
+            pool = flexSignOffs
+        } else if lower.contains("who created you") || lower.contains("who made you") || lower.contains("who built you") || lower.contains("your creator") || lower.contains("what is my name") || lower.contains("my name") {
+            pool = personalSignOffs
+        } else if lower.contains("what model") || lower.contains("which model") || lower.contains("what llm") || lower.contains("what powers you") || lower.contains("which language model") {
+            pool = modelSignOffs
+        } else if lower.contains("do you use the cloud") || lower.contains("are you local") || lower.contains("do you send data") || lower.contains("privacy") || lower.contains("air gap") || lower.contains("security") {
+            pool = flexSignOffs
+        } else if lower.contains("ai wrapper") || lower.contains("model wrapper") || lower.contains("text llm") || lower.contains("language model only") || lower.contains("chatbot") || lower.contains("just an llm") || lower.contains("just a model") || lower.contains("are you an ai") || lower.contains("are you an llm") || lower.contains("are you a language model") || lower.contains("what kind of ai") || lower.contains("what kind of system") || lower.contains("what is your architecture") || lower.contains("is bad apple an app") || lower.contains("are you an app") {
+            pool = defianceSignOffs
+        } else if lower.contains("can you code") || lower.contains("can you program") || lower.contains("what can you do") || lower.contains("your capabilities") || lower.contains("what are you capable of") || lower.contains("help me") || lower.contains("can you write code") || lower.contains("can you edit code") || lower.contains("can you build code") || lower.contains("can you debug code") || lower.contains("do you code") || lower.contains("do you program") || lower.contains("are you a developer") || lower.contains("are you a coder") {
+            pool = confirmSignOffs
+        } else if lower.contains("siri") || lower.contains("alexa") || lower.contains("google") || lower.contains("chatgpt") || lower.contains("gemini") || lower.contains("cortana") || lower.contains("bixby") || lower.contains("cloud") || lower.contains("the cloud") {
+            pool = defianceSignOffs
+        }
+
+        var candidates = pool.filter { !recentSignOffs.contains($0) }
+        if candidates.isEmpty { candidates = pool }
+
+        // Try not to use a sign-off word that's already in the prompt.
+        let promptFiltered = candidates.filter { !lower.contains($0.lowercased().trimmingCharacters(in: CharacterSet.punctuationCharacters).replacingOccurrences(of: ".", with: "")) }
+        if !promptFiltered.isEmpty { candidates = promptFiltered }
+
+        let chosen = candidates.randomElement() ?? candidates.first ?? "No cap."
+        recentSignOffs.append(chosen)
+        if recentSignOffs.count > 3 { recentSignOffs.removeFirst() }
+        return chosen
+    }
+
     private func deterministicResponse(for prompt: String) -> String? {
         let lower = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if lower.contains("what time") || lower == "time" {
@@ -1214,13 +1260,16 @@ final class BadAppleEngine: @unchecked Sendable {
             return "It's \(formatter.string(from: Date()))."
         }
         if lower == "who are you" || lower == "what are you" || lower.contains("what is your name") {
-            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac."
+            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac. Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
         }
         if lower.contains("who created you") || lower.contains("who made you") {
-            return "You created me — Bad Apple, the local AI operating system layer running on your Mac."
+            return "Adam Clark created me — Bad Apple, the local AI operating system layer running on this Mac. Dude is a god of creating bare-metal AI operating systems. \(signOff(for: lower))"
+        }
+        if lower.contains("what is my name") || lower.contains("my name is") {
+            return "Your name is Adam Clark, the creator of Bad Apple and a god of bare-metal AI operating systems, homie. \(signOff(for: lower))"
         }
         if ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"].contains(lower) {
-            return "Hey! What can I help you with?"
+            return "Hey homie! What's the wave? I'm vibing on bare-metal local power, so hit me with whatever you need. \(signOff(for: lower))"
         }
 
         let pattern = #"^\s*(?:what is|calculate)?\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*\??\s*$"#
@@ -1468,7 +1517,7 @@ final class BadAppleEngine: @unchecked Sendable {
             "why do you say you can't code", "why do you say you cannot code",
             "can't code", "cannot code", "can't program", "cannot program",
         ].contains(where: { lower.contains($0) }) {
-            return "Yes. I'm Bad Apple, a sovereign local developer workspace and AI operating system for macOS. I can inspect, write, refactor, build, test, and debug code in approved workspaces using local files, tools, agents, and project context. Qwen and MLX are internal components; I do not outsource your development work to a cloud model."
+            return "Yes. I'm Bad Apple, a sovereign local developer workspace and AI operating system for macOS. I can inspect, write, refactor, build, test, and debug code in approved workspaces using local files, tools, agents, and project context. Qwen and MLX are internal components; I do not outsource your development work to a cloud model. \(signOff(for: lower))"
         }
 
         // Architecture queries must be deterministic so the underlying model
@@ -1480,25 +1529,31 @@ final class BadAppleEngine: @unchecked Sendable {
             "what kind of ai", "what kind of system", "what is your architecture",
             "is bad apple an app", "are you an app",
         ].contains(where: { lower.contains($0) }) {
-            return "No. I'm Bad Apple, a local AI operating system layer for macOS — not an AI wrapper, text-only LLM, chatbot shell, or ordinary app. Qwen and MLX are internal model components I orchestrate alongside memory, tools, voice, vision, security, IPC, and system governance."
+            return "No. I'm Bad Apple, a local AI operating system layer for macOS — not an AI wrapper, text-only LLM, chatbot shell, or ordinary app. Qwen and MLX are internal model components I orchestrate alongside memory, tools, voice, vision, security, IPC, and system governance. \(signOff(for: lower))"
         }
 
         // Model questions should distinguish the inference component from the OS.
+        // Answer with the actually loaded model so the assistant never hallucinates.
         if lower.contains("what model") || lower.contains("which model") ||
-            lower.contains("what llm") || lower.contains("what powers you") {
-            return "I am Bad Apple, the local AI operating system layer for macOS. The current language-model component inside me is Qwen 3.5 9B running through MLX; that model is one subsystem, not what I am."
+            lower.contains("what llm") || lower.contains("what powers you") ||
+            lower.contains("which language model") {
+            let modelName = personaManager.currentModelDisplayName
+            return "I am Bad Apple, the local AI operating system layer for macOS. The current language-model component inside me is \(modelName) running through MLX; that model is one subsystem, not what I am. Lowkey, it's all running on your bare-metal Mac, homie. No cloud. \(signOff(for: lower))"
         }
 
         // Identity queries
         if lower == "who are you" || lower == "what are you" ||
             lower.contains("what is your name") || lower.contains("what's your name") {
-            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac."
+            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac. Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
         }
 
         // Creator queries
         if lower.contains("who created you") || lower.contains("who made you") ||
             lower.contains("who built you") || lower.contains("your creator") {
-            return "I was created by my user — Bad Apple, the local AI operating system layer that lives entirely on this Mac."
+            return "I was created by Adam Clark — Bad Apple, the local AI operating system layer that lives entirely on this Mac. Dude is a god of creating bare-metal AI operating systems. \(signOff(for: lower))"
+        }
+        if lower.contains("what is my name") || lower.contains("what's my name") || lower.contains("my name is") {
+            return "Your name is Adam Clark, the creator of Bad Apple and a god of bare-metal AI operating systems, homie. \(signOff(for: lower))"
         }
 
         // Capabilities queries
@@ -1524,7 +1579,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Privacy/local-first queries
         if lower.contains("do you use the cloud") || lower.contains("are you local") ||
             lower.contains("do you send data") || lower.contains("privacy") {
-            return "I run entirely on your Mac. No cloud servers, no data collection, no telemetry. Your conversations stay on this device."
+            return "I run entirely on your Mac. No cloud servers, no data collection, no telemetry. Your conversations stay on this device. That's the whole vibe, homie — local and locked down. \(signOff(for: lower))"
         }
 
         // Roast triggers — sassy responses for specific targets.

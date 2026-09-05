@@ -840,10 +840,12 @@ public final class BadAppleInference: @unchecked Sendable {
 // MARK: - Convenience
 
 public extension BadAppleInference {
+    /// Default launchd model: Qwen2.5-Coder-7B 4-bit. The 9B is a switchable
+    /// option via `badapple model use` or `BADAPPLE_MAIN_MODEL`.
     public static let defaultConfig = ModelConfig(
-        modelId: "caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit",
-        revision: "5ae9734004d530171fd52f89e660c059b6e36efc",
-        maxTokens: 300,
+        modelId: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+        revision: "main",
+        maxTokens: 2048,
         temperature: 0.6,
         topP: 0.9
     )

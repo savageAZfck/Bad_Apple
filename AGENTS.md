@@ -10,7 +10,7 @@ This file captures the project-specific commands and conventions learned while w
 - `prompt.txt` — Hot-reloadable system prompt. Edits take effect on the next query without restarting the model.
 - `BAD_APPLE.md` — Technical overview and live performance numbers.
 - `BAD_APPLE_BUYERS.md` — Buyer-facing pitch doc.
-- `personas.json` — Runtime persona packs (default, wicket, genz, drill, midwest).
+- `personas.json` — Runtime persona packs (cali, wicket, genz, drill, midwest).
 
 ## Build
 
@@ -132,6 +132,7 @@ Edit `prompt.txt`. The daemon hot-reloads it on the next query. The default voic
 
 ```bash
 # Switch persona at runtime
+target/release/badapple "switch to cali"
 target/release/badapple "switch to wicket"
 target/release/badapple "switch to drill"
 target/release/badapple "switch to midwest"

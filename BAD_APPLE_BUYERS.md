@@ -2,7 +2,7 @@
 
 ## What it is
 
-Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a Qwen 3.5 9B brain and a Qwen 2.5 0.5B fast tier on Apple Silicon using MLX, answers questions, runs local tools, indexes your files, speaks responses through a native AVFoundation TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
+Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 7B Qwen 2.5 Coder brain as the default reasoning and coding model, with a 9B Qwen 3.5 general model as a switchable option and a 0.5B Qwen 2.5 fast tier for instant simple queries — all on Apple Silicon using MLX. It answers questions, runs local tools, indexes your files, speaks responses through a native TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
 
 ## How to install (consumer)
 
@@ -16,26 +16,37 @@ Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 
 - **Air-gapped by default**: no prompt, no action, no memory leaves your Mac.
 - **Hardware-bound identity**: SLICKS v2 signs every client–daemon connection and P2P frame with the Apple Secure Enclave.
 - **Actor-ized OS**: resources, circuit breakers, persona, workspace, P2P, MCP, cache, audit, model, and health run as supervised actors.
-- **Two brains, one daemon**: the 0.5B fast tier handles instant greetings/time/math; the 9B brain handles reasoning.
+- **Two brains, one daemon**: the 0.5B fast tier handles instant greetings/time/math; the 7B Coder brain handles reasoning and coding; the 9B brain is available for heavier general reasoning (`badapple model use main_9b`).
 - **Local tooling**: search files, run AppleScript, run Shortcuts, get the time, write notes, index documents, git helpers, and more.
 - **Persistent memory + RAG**: remembers user facts and searches indexed local documents.
-- **Hot-reloadable persona**: edit `prompt.txt` without restarting the 9B model.
+- **Hot-reloadable persona**: edit `prompt.txt` without restarting the 7B/9B model.
 - **MCP + local marketplace**: exposes tools to MCP clients and can run local stdio MCP servers under the same policy gate.
 
 ## Models loaded
 
 | Component | Model | Size | Role |
 |---|---|---|---|
-| Target LLM | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | All text and voice reasoning |
+| Target LLM (default) | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | ~4.2 GB | Coding, general chat, and tool reasoning |
+| Target LLM (switchable) | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | Heavier general reasoning: `badapple model use main_9b` |
 | Fast tier | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Greetings, identity, time, simple math, deterministic queries |
 | Embeddings | `BAAI/bge-small-en-v1.5` | small | Local document / memory retrieval on CPU |
-| TTS voice | `en_US-amy-medium` (default) | small | Native AVFoundation speech on a local socket |
+| TTS voice | `en_US-amy-medium` (default) | small | Native neural speech on a local socket |
 
 All models are cached on disk after the first download. Nothing is re-downloaded at runtime.
 
 ## Performance (live M-series Apple Silicon, 16 GB unified memory)
 
-### 9B brain
+### 7B Qwen 2.5 Coder (default)
+
+Live 7B numbers on a 16 GB Apple Silicon Mac are in progress. Observed ranges so far:
+
+- Typical first-token latency: **~2.0–4.0 s** once the system-prompt KV cache is loaded.
+- Typical decode throughput: **~18–25 tok/s**.
+- Peak memory: **~4.1–4.3 GB**.
+
+A full 5-prompt table will be measured and committed in the next benchmark run.
+
+### 9B Qwen 3.5 (switchable)
 
 | Prompt | Prompt tokens | First token | Tokens out | Decode tok/s | Peak memory |
 |---|---|---:|---:|---:|---:|
@@ -86,8 +97,8 @@ When asked, it should say:
 
 ### 1. Core AI
 1. Answer questions, explain, summarize, brainstorm, and write short notes
-2. Run a local 9B Qwen 3.5 brain and a 0.5B fast tier on Apple Silicon
-3. Switch persona at runtime: `switch to default`, `wicket`, `genz`, `drill`, `midwest`
+2. Run a local 7B Qwen 2.5 Coder brain and a 0.5B fast tier on Apple Silicon; 9B Qwen 3.5 is switchable
+3. Switch persona at runtime: `switch to cali`, `wicket`, `genz`, `drill`, `midwest`
 4. `switch to roast` or `--roast` for the drill persona
 5. `teach <line>` to store a custom quip
 6. Multi-turn conversation with local JSONL history

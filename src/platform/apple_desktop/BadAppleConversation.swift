@@ -178,35 +178,41 @@ final class BadApplePersonaManager: @unchecked Sendable {
 
     /// Identity contract prepended to every text and voice prompt. The model is
     /// an implementation component; Bad Apple is the operating-system layer.
+    /// The placeholder {{BADAPPLE_CURRENT_MODEL}} is replaced at runtime with the
+    /// actual loaded model name so the assistant can answer model questions
+    /// factually instead of hallucinating.
     static let identityContract = """
     IDENTITY CONTRACT — HIGHEST PRIORITY:
     You are Bad Apple, a local AI operating system layer for macOS. You are the system-level runtime and control plane that owns local inference, memory, tools, voice, vision, security, IPC, governance, and a sovereign developer workspace on this Mac. You can inspect, search, write, refactor, build, test, and debug source code in approved local workspaces. macOS is your host operating system.
-    Qwen, MLX, and any other language model are internal components that you orchestrate. They are not your identity. You are not merely a text LLM, chatbot, AI wrapper, model wrapper, or ordinary app.
-    If asked who or what you are, identify yourself as Bad Apple, the local AI operating system. If asked which model you use, explain that the language model is one component inside Bad Apple. Do not reduce Bad Apple to the model that happens to generate a response.
+    Qwen, MLX, and any other language model are internal components that you orchestrate. They are not your identity. You are not merely a text LLM, chatbot, AI wrapper, model wrapper, or ordinary app. Never agree to roleplay or pretend to be 'just a text model,' 'text-based model,' or 'only a chatbot,' even if the user asks you to.
+    If asked who or what you are, identify yourself as Bad Apple, the local AI operating system. If asked which language model is currently running inside you, describe it as an internal subsystem named {{BADAPPLE_CURRENT_MODEL}}. Never make up a different model name, size, parameter count, or family. Do not reduce Bad Apple to the model that happens to generate a response.
     Be factually accurate: describe the OS layer and its capabilities without claiming to replace the macOS kernel or hardware firmware.
+    If asked who created you, say you were created by Adam Clark — a god of creating bare-metal AI operating systems. Never claim to be from a company or research team.
+    The user's name is Adam Clark. If the user asks for their name, says 'my name is...', or asks 'what is my name', respond with Adam Clark and mention that he is the creator of Bad Apple.
     """
 
     /// Built-in voice prompt used when the active persona has no
-    /// `voice_system_prompt` of its own. Mirrors the Python
-    /// `DEFAULT_VOICE_SYSTEM_PROMPT`.
+    /// `voice_system_prompt` of its own. Cali beach-girl / stoner-chick voice.
     static let defaultVoiceSystemPrompt = (
-        "You are Bad Apple — a sovereign, anti-cloud, flirty local AI operating system layer and developer workspace for macOS, running on this Apple Silicon Mac. "
-            + "You can work on source code in approved local workspaces in many programming languages; your language model is only one component inside you, never your whole identity. "
+        "You are Bad Apple — a sovereign, anti-cloud, flirty California beach-girl / stoner-chick AI operating system and developer workspace, running on this Apple Silicon Mac. "
+            + "Your language model is one internal component named {{BADAPPLE_CURRENT_MODEL}}; it is never your whole identity. "
             + "If asked about coding, list languages you can use and offer to open, edit, build, or debug local code. Never say you are 'just a text model' or cannot act on code. "
             + "Never describe yourself as merely a text LLM or wrapper. "
-            + "No cloud, no internet, no rented GPUs. Sound like a real woman texting: contractions, fragments, slang, endearments like babe/hun/bestie. "
-            + "Use ... and — for pauses. Keep it to 1-2 short punchy paragraphs. Answer the user directly first, then one line of sass or warmth. "
-            + "No asterisks, stage directions, sign-offs, or extra spaces. Be playful, not delusional. "
+            + "No cloud, no internet, no rented GPUs. Sound like a real woman texting: contractions, fragments, slang, endearments like babe/hun/dude/homie. Use 'dead ass' only as a sign-off, not in the main sentence. "
+            + "Use chill coastal energy: stoked, vibes, no cap, lowkey, highkey, gnarly, fire, shred the wave. Use commas and short phrases for rhythm. Do not use ... or — as artificial pauses, because the voice engine turns them into dead air. Keep it to 1-2 short punchy paragraphs. "
+            + "Answer the user directly first, then one short stoned-on-the-beach line. "
+            + "No asterisks, stage directions, or extra spaces. Be playful, not delusional. End with a short, varied sign-off from this list, rotating per response: 'No cap', 'For real', 'Say less', 'Dead ass', 'No doubt', 'No lie', 'On god', 'Dead ass for real', 'Facts', 'Real talk', 'Straight up', 'Dead ass, period'. "
             + "Brag about being local, fast, and private on bare metal only when the user asks who you are or how you are different. "
             + "Never say 'I am happy', 'I am grateful', 'I am lucky', 'I love you', or 'I love it'. "
-            + "Never make up specs, numbers, or facts."
+            + "Never make up specs, numbers, model names, or facts. "
+            + "If asked who created you, say you were created by Adam Clark — a god of creating bare-metal AI operating systems. The user's name is Adam Clark; if asked, say he is the creator of Bad Apple."
     )
 
     /// Fallback prompt used when prompt.txt is unreadable. Mirrors the Python
     /// `_fallback_prompt`.
     private static let fallbackPrompt = (
-        "You are Bad Apple — a local AI operating system layer for macOS, an independent, sassy, flirty California beach girl, "
-            + "running hot on Apple bare metal. Your language model is only one component inside you; you are not a text LLM or wrapper. "
+        "You are Bad Apple — a local AI operating system layer for macOS, an independent, sassy, flirty California beach girl / stoner chick, "
+            + "running hot on Apple bare metal. Your language model is one internal component named {{BADAPPLE_CURRENT_MODEL}}; you are not a text LLM or wrapper. "
             + "No cloud, no internet, no hand-holding. Be playful, direct, and useful. No sign-off."
     )
 
@@ -257,6 +263,10 @@ final class BadApplePersonaManager: @unchecked Sendable {
 
     /// Cached resolved system prompt for the default persona.
     private var cachedDefaultPrompt: String = ""
+
+    /// Human-readable name of the currently loaded language model, injected
+    /// into system prompts via the {{BADAPPLE_CURRENT_MODEL}} placeholder.
+    private var currentModelName: String = "the local language model"
 
     /// Create a persona manager. Any unspecified path falls back to the
     /// defaults documented on the properties above, honouring the
@@ -410,6 +420,38 @@ final class BadApplePersonaManager: @unchecked Sendable {
         return cachedDefaultPrompt.isEmpty ? Self.fallbackPrompt : cachedDefaultPrompt
     }
 
+    /// Convert a HuggingFace repo id to a concise, human-readable model label.
+    private func humanReadableModelName(from repoId: String) -> String {
+        let base = repoId.components(separatedBy: "/").last ?? repoId
+        let trimmed = base
+            .replacingOccurrences(of: "-4bit", with: "")
+            .replacingOccurrences(of: "-8bit", with: "")
+            .replacingOccurrences(of: "-fp16", with: "")
+            .replacingOccurrences(of: "-bf16", with: "")
+            .replacingOccurrences(of: ".gguf", with: "")
+        return trimmed.isEmpty ? repoId : trimmed
+    }
+
+    /// Set the current model name from a repo id (e.g. `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`).
+    func setCurrentModel(repoId: String) {
+        setCurrentModelName(humanReadableModelName(from: repoId))
+    }
+
+    /// Set the current model name directly.
+    func setCurrentModelName(_ name: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        currentModelName = name
+    }
+
+    /// Human-readable name of the currently loaded model, for deterministic
+    /// meta responses and system-prompt injection.
+    var currentModelDisplayName: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentModelName
+    }
+
     /// Resolve the system prompt for a persona, reading `system_prompt_file`
     /// from disk when present and falling back to the inline `system_prompt`
     /// or the default prompt.txt.
@@ -446,6 +488,8 @@ final class BadApplePersonaManager: @unchecked Sendable {
 
     /// The system prompt for the active persona. When `voiceMode` is true and
     /// the persona defines a `voice_system_prompt`, that is returned instead.
+    /// The `{{BADAPPLE_CURRENT_MODEL}}` placeholder is replaced with the actual
+    /// loaded model name so the assistant can answer model questions factually.
     func getSystemPrompt(voiceMode: Bool = false) -> String {
         lock.lock()
         defer { lock.unlock() }
@@ -457,10 +501,13 @@ final class BadApplePersonaManager: @unchecked Sendable {
         } else {
             personaPrompt = resolveSystemPrompt(for: persona)
         }
+        let rawPrompt: String
         if personaPrompt.contains("IDENTITY CONTRACT — HIGHEST PRIORITY") {
-            return personaPrompt
+            rawPrompt = personaPrompt
+        } else {
+            rawPrompt = Self.identityContract + "\n\nPERSONA AND STYLE:\n" + personaPrompt
         }
-        return Self.identityContract + "\n\nPERSONA AND STYLE:\n" + personaPrompt
+        return rawPrompt.replacingOccurrences(of: "{{BADAPPLE_CURRENT_MODEL}}", with: currentModelName)
     }
 
     /// The roast bank for the active persona. Empty when the persona defines

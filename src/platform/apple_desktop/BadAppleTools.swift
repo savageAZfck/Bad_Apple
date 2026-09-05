@@ -125,9 +125,191 @@ func polishText(_ text: String) -> String {
     return result.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+/// Common first-line markers for source code across languages.
+private let codeStartMarkers = [
+    "def ", "class ", "import ", "from ",
+    "fn ", "func ", "function ", "pub ", "public ", "private ",
+    "struct ", "enum ", "impl ", "mod ", "use ", "package ",
+    "#include", "#!/", "int ", "void ", "char ", "const ",
+    "let ", "var ", "static ", "module ", "interface ",
+    "<!DOCTYPE", "<?xml", "<html",
+]
+
+/// Returns `true` if `text` is primarily source code rather than prose.
+private func isCodeLike(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return false }
+
+    // If any non-empty line starts with a known code marker, treat as code.
+    let lines = trimmed.components(separatedBy: .newlines)
+    for line in lines {
+        let stripped = line.trimmingCharacters(in: .whitespaces)
+        let lower = stripped.lowercased()
+        for marker in codeStartMarkers {
+            if lower.hasPrefix(marker.lowercased()) { return true }
+        }
+    }
+
+    // A single line containing a function definition pattern is also code.
+    if trimmed.range(of: #"\bdef\s+\w+\s*\("#, options: .regularExpression) != nil
+        || trimmed.range(of: #"\bfunction\s+\w+\s*\("#, options: .regularExpression) != nil
+        || trimmed.range(of: #"\bfn\s+\w+\s*\("#, options: .regularExpression) != nil
+        || trimmed.range(of: #"\bfunc\s+\w+\s*\("#, options: .regularExpression) != nil
+        || trimmed.range(of: #"#include\s+["<]"#, options: .regularExpression) != nil {
+        return true
+    }
+
+    // Multi-line text with indentation and code-like punctuation.
+    let codeLines = lines.filter {
+        let s = $0.trimmingCharacters(in: .whitespaces)
+        return s.hasPrefix("def ") || s.hasPrefix("class ") || s.hasPrefix("fn ")
+            || s.hasPrefix("func ") || s.hasPrefix("import ") || s.hasPrefix("from ")
+            || s.hasPrefix("    ") || s.hasPrefix("\t")
+    }
+    let hasCodePunctuation = trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "(){}[]=:;.,<>/\\\"|&!")) != nil
+    if codeLines.count >= 2 && hasCodePunctuation {
+        return true
+    }
+
+    // Fenced markdown code blocks only count as code if the block dominates the text.
+    if let start = trimmed.range(of: "```")?.lowerBound,
+       let end = trimmed[start...].range(of: "```", range: start..<trimmed.endIndex)?.upperBound,
+       end > start {
+        let before = trimmed[trimmed.startIndex..<start]
+        let after = trimmed[end...]
+        let nonCode = (before + after).trimmingCharacters(in: .whitespacesAndNewlines)
+        // If the prose before/after the fence is short, this is a code response.
+        if nonCode.count < 200 {
+            return true
+        }
+    }
+
+    return false
+}
+
+/// Strip non-code trailing lines (e.g. persona bars) from source code output.
+private func stripTrailingProse(_ text: String) -> String {
+    var lines = text.components(separatedBy: .newlines)
+    let codePunctuation = CharacterSet(charactersIn: "(){}[]=:;.,<>/\\\"|&!0123456789")
+    while let last = lines.last {
+        let trimmed = last.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            lines.removeLast()
+            continue
+        }
+        // Heuristic: a trailing line is prose if it is all lowercase and contains
+        // no code-like punctuation or digits.
+        let hasCodeChar = trimmed.rangeOfCharacter(from: codePunctuation) != nil
+        let hasUppercase = trimmed.rangeOfCharacter(from: .uppercaseLetters) != nil
+        let hasPersonaPhrase = trimmed.localizedCaseInsensitiveContains("hold the L")
+            || trimmed.localizedCaseInsensitiveContains("talk facts")
+            || trimmed.localizedCaseInsensitiveContains("no cap")
+            || trimmed.localizedCaseInsensitiveContains("bare metal")
+            || trimmed.localizedCaseInsensitiveContains("sovereign")
+            || trimmed.localizedCaseInsensitiveContains("cloud")
+        if hasPersonaPhrase || (!hasCodeChar && !hasUppercase) {
+            lines.removeLast()
+        } else {
+            break
+        }
+    }
+    return lines.joined(separator: "\n")
+}
+
+/// Clean source-code output without destroying newlines or indentation.
+private func cleanCodeOutput(_ text: String) -> String {
+    var result = text
+
+    // Strip Qwen3 thinking blocks and leaked stop tokens.
+    result = regexReplace(#"^Thinking Process:.*?(?:Final Answer:|Answer:)\s*"#, in: result, with: "", options: [.dotMatchesLineSeparators, .caseInsensitive])
+    result = regexReplace(#"\n?\s*<thinking>.*?\s*\n?"#, in: result, with: "", options: [.dotMatchesLineSeparators])
+    result = regexReplace(#"\n?\s*\.\.\.thinking\s*.*?(?:</s>|$)"#, in: result, with: "", options: [.dotMatchesLineSeparators])
+    result = regexReplace(#"</s>|<\|endoftext\|>|</thinking>"#, in: result, with: "")
+
+    // If the response is wrapped in markdown code fences, keep only the fenced block.
+    // This removes prose like "Here is the code:" before or after the fence.
+    if let fenceRange = result.range(of: "```") {
+        let afterStart = result.index(fenceRange.upperBound, offsetBy: 0)
+        if let nextFence = result[afterStart...].range(of: "```") {
+            // Skip the optional language tag on the opening line.
+            var content = String(result[afterStart..<nextFence.lowerBound])
+            if let firstNewline = content.firstIndex(of: "\n") {
+                let before = content[content.startIndex..<firstNewline].trimmingCharacters(in: .whitespaces)
+                if before.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "_" }) {
+                    content = String(content[content.index(after: firstNewline)...])
+                }
+            }
+            result = content
+        } else {
+            // Single unclosed fence: remove the opening marker and any trailing prose.
+            result = regexReplace(#"^```[a-zA-Z0-9_+-]*\n"#, in: result, with: "", options: [.anchorsMatchLines])
+            result = result.replacingOccurrences(of: "```", with: "")
+        }
+    } else {
+        // No fences: remove stray fence artifacts just in case.
+        result = regexReplace(#"^```[a-zA-Z0-9_+-]*\n"#, in: result, with: "", options: [.anchorsMatchLines])
+        result = regexReplace(#"\n```\s*$"#, in: result, with: "", options: [.anchorsMatchLines])
+        result = result.replacingOccurrences(of: "```", with: "")
+    }
+
+    // Replace CJK / fullwidth character runs with a space.
+    result = regexReplace(#"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]+"#, in: result, with: " ")
+
+    // Replace stray IPA phonetic characters with ASCII approximations.
+    let ipaMap: [Character: Character] = [
+        "\u{028B}": "v", "\u{028C}": "v", "\u{0251}": "a", "\u{0252}": "o",
+        "\u{025B}": "e", "\u{026A}": "i", "\u{028A}": "u", "\u{0254}": "o",
+        "\u{0259}": "a", "\u{00E6}": "a",
+    ]
+    result = String(result.map { ipaMap[$0] ?? $0 })
+
+    // Remove disallowed persona ticks.
+    result = regexReplace(#"\b[pP]+f+[tT]+\b"#, in: result, with: "")
+
+    // Strip leading prose before the first code-like line.
+    result = stripLeadingProse(result)
+
+    // Strip trailing persona/prose bars while preserving code.
+    result = stripTrailingProse(result)
+
+    return result.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// Strip non-code leading lines (explanations like "Here is the function...").
+private func stripLeadingProse(_ text: String) -> String {
+    let lines = text.components(separatedBy: .newlines)
+    let codePunctuation = CharacterSet(charactersIn: "(){}[]=:;.,<>/\\\"|&!0123456789")
+    var firstCodeIndex: Int? = nil
+    for (i, line) in lines.enumerated() {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { continue }
+        // A line is considered code if it starts with a known marker or contains
+        // code-like punctuation and at least some indentation.
+        let lower = trimmed.lowercased()
+        if codeStartMarkers.contains(where: { lower.hasPrefix($0) }) {
+            firstCodeIndex = i
+            break
+        }
+        let hasCodeChar = trimmed.rangeOfCharacter(from: codePunctuation) != nil
+        let hasIndent = line.hasPrefix("    ") || line.hasPrefix("\t")
+        if hasCodeChar && hasIndent {
+            firstCodeIndex = i
+            break
+        }
+    }
+    guard let idx = firstCodeIndex else { return text }
+    return lines[idx...].joined(separator: "\n")
+}
+
 /// Post-process final model output: remove thinking tags, code fence artifacts,
 /// normalize whitespace, collapse repeated sentences.
+/// For code output, preserves newlines and indentation instead of collapsing them.
 func postprocessOutput(_ text: String) -> String {
+    // Do not collapse whitespace for source code.
+    if isCodeLike(text) {
+        return cleanCodeOutput(text)
+    }
+
     var result = text
 
     // Strip Qwen3 thinking blocks.

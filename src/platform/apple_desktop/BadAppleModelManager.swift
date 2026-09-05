@@ -99,6 +99,14 @@ final class BadAppleModelManager {
             loadedIn: "mlx_server"
         ),
         ModelProfile(
+            id: "coder_7b",
+            name: "Coder 7B",
+            repoId: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+            sizeGB: 4.3,
+            kind: "text",
+            loadedIn: "mlx_server"
+        ),
+        ModelProfile(
             id: "main_32b",
             name: "Deep 32B",
             repoId: "mlx-community/Qwen3.5-32B-MLX-4bit",
@@ -561,6 +569,37 @@ final class BadAppleModelManager {
 
     // MARK: - Provenance
 
+    /// Build a canonical, deterministic string that uniquely represents a
+    /// manifest.  This is the exact message signed by the Secure Enclave when
+    /// recording provenance and re-computed when verifying it.
+    private func canonicalManifestMessage(repoId: String, localPath: String, recordedAt: TimeInterval, files: [String: ModelFileEntry]) -> String {
+        var lines: [String] = []
+        lines.append(repoId)
+        lines.append(localPath)
+        lines.append(String(format: "%.9f", recordedAt))
+        for key in files.keys.sorted() {
+            let e = files[key]!
+            lines.append("\(key):\(e.size):\(String(format: "%.9f", e.mtime)):\(e.sha256)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Sign a canonical manifest message using the identity agent if available.
+    /// Returns `(signature, publicKey)` base64 strings or `nil` if the agent
+    /// is unavailable or refuses to sign.
+    private func signManifest(_ manifest: ModelManifest) -> (signature: String, publicKey: String)? {
+        guard IdentityAgentClient.shared.isAvailable else { return nil }
+        let message = canonicalManifestMessage(
+            repoId: manifest.repoId,
+            localPath: manifest.localPath,
+            recordedAt: manifest.recordedAt,
+            files: manifest.files
+        )
+        guard let publicKey = IdentityAgentClient.shared.publicKey() else { return nil }
+        guard let signature = IdentityAgentClient.shared.sign(message: Data(message.utf8)) else { return nil }
+        return (signature, publicKey)
+    }
+
     /// Compute and save a SHA-256 manifest for a cached model.
     func recordProvenance(modelId: String, localPath: String) -> [String: Any] {
         guard isSafeModelId(modelId) else {
@@ -611,7 +650,7 @@ final class BadAppleModelManager {
         guard let profile = profiles[modelId] else {
             return ["status": "error", "error": "unknown model \(modelId)"]
         }
-        let manifest = ModelManifest(
+        var manifest = ModelManifest(
             repoId: profile.repoId,
             localPath: root.path,
             recordedAt: Date().timeIntervalSince1970,
@@ -619,8 +658,26 @@ final class BadAppleModelManager {
             signature: nil,
             publicKey: nil
         )
+
+        // Sign the manifest with the Secure Enclave identity agent.
+        if let signed = signManifest(manifest) {
+            manifest.signature = signed.signature
+            manifest.publicKey = signed.publicKey
+        }
+
         saveManifest(modelId: modelId, manifest: manifest)
-        return ["status": "recorded", "files": files.count, "total_bytes": totalHashed]
+        var result: [String: Any] = [
+            "status": "recorded",
+            "files": files.count,
+            "total_bytes": totalHashed
+        ]
+        if manifest.signature != nil {
+            result["signed"] = true
+        } else {
+            result["signed"] = false
+            result["note"] = "manifest recorded without Secure Enclave signature"
+        }
+        return result
     }
 
     /// Verify a cached model against the stored manifest.
@@ -705,6 +762,27 @@ final class BadAppleModelManager {
             ]
         }
 
+        // Verify the Secure Enclave signature if one was recorded.
+        if let signatureB64 = manifest.signature, let publicKeyB64 = manifest.publicKey {
+            guard let signatureData = Data(base64Encoded: signatureB64),
+                  let publicKeyData = Data(base64Encoded: publicKeyB64) else {
+                return ["status": "mismatch", "error": "manifest has malformed signature or public key"]
+            }
+            let message = canonicalManifestMessage(
+                repoId: manifest.repoId,
+                localPath: manifest.localPath,
+                recordedAt: manifest.recordedAt,
+                files: manifest.files
+            )
+            guard IdentityAgentClient.shared.verify(
+                message: Data(message.utf8),
+                signature: signatureData,
+                publicKey: publicKeyData
+            ) else {
+                return ["status": "mismatch", "error": "Secure Enclave signature verification failed"]
+            }
+        }
+
         lock.lock(); defer { lock.unlock() }
         state[modelId]?.verified = true
         saveState()
@@ -713,6 +791,7 @@ final class BadAppleModelManager {
             "files": manifest.files.count,
             "checked": checked,
             "recorded_at": manifest.recordedAt,
+            "signed": manifest.signature != nil,
         ]
     }
 

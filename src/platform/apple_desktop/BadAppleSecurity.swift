@@ -394,13 +394,134 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     }
 }
 
+// MARK: - Aho-Corasick Automaton
+
+/// A simple Aho-Corasick string matcher used by the output firewall.
+///
+/// This is a Swift port of the `AhoCorasickAutomaton` from the Python
+/// `StreamingFirewall` in `badapple_extras.py`.  It builds a trie, adds
+/// failure links with a breadth-first search, and then reports all
+/// non-overlapping matches in a single linear scan.
+private final class AhoCorasickAutomaton {
+    private struct Node {
+        var next: [Character: Int] = [:]
+        var fail: Int = 0
+        var output: [Int] = []
+    }
+
+    private var nodes: [Node] = [Node()]
+    private var patterns: [String] = []
+
+    /// Match reported by `search(_:)`.
+    struct Match {
+        /// Pattern index in the order the patterns were provided.
+        let patternIndex: Int
+        /// Range in the original (not lowercased) string that was matched.
+        let range: Range<String.Index>
+    }
+
+    init(patterns: [String]) {
+        self.patterns = patterns
+        for (index, pattern) in patterns.enumerated() {
+            insert(pattern: pattern, index: index)
+        }
+        buildFailureLinks()
+    }
+
+    private func insert(pattern: String, index: Int) {
+        var current = 0
+        for char in pattern {
+            if let next = nodes[current].next[char] {
+                current = next
+            } else {
+                nodes.append(Node())
+                let next = nodes.count - 1
+                nodes[current].next[char] = next
+                current = next
+            }
+        }
+        nodes[current].output.append(index)
+    }
+
+    private func buildFailureLinks() {
+        var queue: [Int] = []
+        // Root's children fail to root.
+        for child in nodes[0].next.values {
+            nodes[child].fail = 0
+            queue.append(child)
+        }
+
+        while !queue.isEmpty {
+            let current = queue.removeFirst()
+            for (char, child) in nodes[current].next {
+                var fail = nodes[current].fail
+                while fail != 0 && nodes[fail].next[char] == nil {
+                    fail = nodes[fail].fail
+                }
+                if let next = nodes[fail].next[char], next != child {
+                    nodes[child].fail = next
+                } else {
+                    nodes[child].fail = 0
+                }
+                // Inherit output from the fail link.
+                if !nodes[nodes[child].fail].output.isEmpty {
+                    nodes[child].output.append(contentsOf: nodes[nodes[child].fail].output)
+                }
+                queue.append(child)
+            }
+        }
+    }
+
+    /// Search `text` and return all non-overlapping matches in original-text
+    /// index ranges.  Matching is case-insensitive and extended-grapheme aware.
+    func search(_ text: String) -> [Match] {
+        // Build a parallel array of lowercased characters and their start
+        // indices in the original string.  We need this to map match positions
+        // in the lowercased stream back to the original text.
+        var chars: [Character] = []
+        var starts: [String.Index] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            starts.append(index)
+            chars.append(text[index..<next].lowercased().first ?? text[index])
+            index = next
+        }
+        starts.append(text.endIndex)
+
+        var matches: [Match] = []
+        var lastEnd: Int? = nil
+        var current = 0
+        for (i, char) in chars.enumerated() {
+            while current != 0 && nodes[current].next[char] == nil {
+                current = nodes[current].fail
+            }
+            if let next = nodes[current].next[char] {
+                current = next
+            }
+            for patternIndex in nodes[current].output {
+                let pattern = patterns[patternIndex]
+                let len = pattern.count
+                let start = i + 1 - len
+                let end = i + 1
+                guard start >= 0, end <= chars.count else { continue }
+                // Skip overlapping matches.
+                if let last = lastEnd, start < last { continue }
+                let range = starts[start]..<starts[end]
+                matches.append(Match(patternIndex: patternIndex, range: range))
+                lastEnd = end
+            }
+        }
+        return matches
+    }
+}
+
 // MARK: - Output Firewall
 
 /// Blocklist-driven output firewall.
 ///
 /// Ported from `StreamingFirewall` / `AhoCorasickAutomaton` in
-/// badapple_extras.py, simplified to plain `String.range(of:)` matching (no
-/// Aho-Corasick needed in Swift).  Patterns are loaded from
+/// badapple_extras.py.  Patterns are loaded from
 /// `/var/lib/bad_apple/blocklist.txt` (one per line; `#` comments and blank
 /// lines are ignored) and merged with built-in defaults so the firewall is
 /// useful even before a blocklist exists.
@@ -456,6 +577,8 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
     private func checkBlocklist(_ text: String) -> String {
         let snapshot = snapshotPatterns()
         let marker = Self.blockedMarker
+
+        // Structural-form check for long patterns (alphanumeric-only stripping).
         let structuralText = Self.structuralForm(text)
         if snapshot.contains(where: {
             let pattern = Self.structuralForm($0)
@@ -463,31 +586,21 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
         }) {
             return marker
         }
-        var result = text
-        for pattern in snapshot {
-            guard !pattern.isEmpty else { continue }
-            var cursor = result.startIndex
-            while cursor < result.endIndex,
-                  let range = result.range(
-                    of: pattern,
-                    options: [.caseInsensitive],
-                    range: cursor..<result.endIndex
-                  ) {
-                result.replaceSubrange(range, with: marker)
-                // Advance past the inserted marker so the marker itself is
-                // never re-scanned (avoids infinite loops if a pattern is a
-                // substring of the marker).
-                if let next = result.index(
-                    range.lowerBound,
-                    offsetBy: marker.count,
-                    limitedBy: result.endIndex
-                ) {
-                    cursor = next
-                } else {
-                    cursor = result.endIndex
-                }
-            }
+
+        // Aho-Corasick single-pass scan for exact (case-insensitive) patterns.
+        let automaton = AhoCorasickAutomaton(patterns: snapshot.map { $0.lowercased() })
+        var matches = automaton.search(text)
+        matches.sort { $0.range.lowerBound < $1.range.lowerBound }
+
+        var result = ""
+        var position = text.startIndex
+        for match in matches {
+            guard match.range.lowerBound >= position else { continue }
+            result.append(contentsOf: text[position..<match.range.lowerBound])
+            result.append(marker)
+            position = match.range.upperBound
         }
+        result.append(contentsOf: text[position..<text.endIndex])
         return result
     }
 
@@ -502,16 +615,21 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
     func checkChunk(_ chunk: String, accumulated: String) -> (String, Bool) {
         let snapshot = snapshotPatterns()
         let combined = accumulated + chunk
+
+        // Structural-form check.
         let structuralCombined = Self.structuralForm(combined)
-        for pattern in snapshot {
-            guard !pattern.isEmpty else { continue }
-            if combined.range(of: pattern, options: [.caseInsensitive]) != nil {
-                return (Self.blockedMarker, true)
-            }
-            let structuralPattern = Self.structuralForm(pattern)
-            if structuralPattern.count >= 8 && structuralCombined.contains(structuralPattern) {
-                return (Self.blockedMarker, true)
-            }
+        if snapshot.contains(where: {
+            let pattern = Self.structuralForm($0)
+            return pattern.count >= 8 && structuralCombined.contains(pattern)
+        }) {
+            return (Self.blockedMarker, true)
+        }
+
+        // Aho-Corasick single-pass scan of accumulated + chunk.
+        let automaton = AhoCorasickAutomaton(patterns: snapshot.map { $0.lowercased() })
+        let matches = automaton.search(combined)
+        if !matches.isEmpty {
+            return (Self.blockedMarker, true)
         }
         return (chunk, false)
     }
