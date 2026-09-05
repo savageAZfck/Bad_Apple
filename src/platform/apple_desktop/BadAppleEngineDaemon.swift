@@ -403,7 +403,7 @@ private func makeMetrics() -> [String: Any] {
         "tokens": BadAppleEngine.shared.lastTokenCount,
         "decode_tps": Double(BadAppleEngine.shared.lastTokensPerSecond),
         "total_tps": Double(BadAppleEngine.shared.lastTokensPerSecond),
-        "draft_accept_pct": speculativeActive ? 0.0 : 0.0,  // TODO: extract from MLX stream info
+        "draft_accept_pct": Double(BadAppleEngine.shared.lastDraftAcceptPct),
         "peak_memory_gb": Double(BadAppleEngine.shared.memoryUsageGB),
         "speculative": speculativeActive
     ]

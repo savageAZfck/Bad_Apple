@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use bad_apple::bad_apple_ipc::{call_agent, query_with_metrics};
+use bad_apple::cert;
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -99,8 +100,12 @@ fn main() -> Result<()> {
         return run_redteam_subcommand(&prompt_parts[1..]);
     }
 
+    if prompt_parts.first().map(std::string::String::as_str) == Some("cert") {
+        return run_cert();
+    }
+
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple cert");
     } else {
         prompt_parts.join(" ")
     };
@@ -1535,6 +1540,29 @@ fn run_redteam_subcommand(args: &[String]) -> Result<()> {
             }
         }
         _ => bail!("unknown redteam subcommand: {sub}\nusage: badapple redteam <run|watch|status|category <category>|probe <id>>"),
+    }
+    Ok(())
+}
+
+fn run_cert() -> Result<()> {
+    let results = cert::run();
+    let mut failures = 0;
+    for r in &results {
+        let status = if r.passed { "PASS" } else { "FAIL" };
+        eprintln!("[cert] [{status}] {}: {}", r.name, r.message);
+        if !r.passed {
+            failures += 1;
+        }
+    }
+    let summary = serde_json::json!({
+        "status": if failures == 0 { "ok" } else { "failed" },
+        "total": results.len(),
+        "failures": failures,
+        "results": results,
+    });
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    if failures > 0 {
+        bail!("cert suite failed: {failures} check(s)");
     }
     Ok(())
 }

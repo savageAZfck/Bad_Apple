@@ -150,19 +150,31 @@ public final class BadAppleInference: @unchecked Sendable {
         public let tokenCount: Int
         public let tier: String
         public let toolCalls: [ToolCall]
+        public let draftProposedTokens: Int
+        public let draftAcceptedTokens: Int
+        public let draftAcceptPct: Float
 
         public init(
             text: String,
             tokensPerSecond: Float = 0,
             tokenCount: Int = 0,
             tier: String = "main",
-            toolCalls: [ToolCall] = []
+            toolCalls: [ToolCall] = [],
+            draftProposedTokens: Int = 0,
+            draftAcceptedTokens: Int = 0
         ) {
             self.text = text
             self.tokensPerSecond = tokensPerSecond
             self.tokenCount = tokenCount
             self.tier = tier
             self.toolCalls = toolCalls
+            self.draftProposedTokens = draftProposedTokens
+            self.draftAcceptedTokens = draftAcceptedTokens
+            self.draftAcceptPct = if draftProposedTokens > 0 {
+                Float(draftAcceptedTokens) / Float(draftProposedTokens) * 100.0
+            } else {
+                0.0
+            }
         }
     }
 
@@ -496,6 +508,8 @@ public final class BadAppleInference: @unchecked Sendable {
                 var fullText = ""
                 var tps: Float = 0
                 var tokenCount = 0
+                var draftProposed = 0
+                var draftAccepted = 0
                 var detectedToolCalls: [BadAppleInference.ToolCall] = []
                 var stop = false
 
@@ -507,6 +521,8 @@ public final class BadAppleInference: @unchecked Sendable {
                     case .info(let info):
                         tps = Float(info.tokensPerSecond)
                         tokenCount = info.generationTokenCount
+                        draftProposed = info.proposedDraftTokens ?? 0
+                        draftAccepted = info.acceptedDraftTokens ?? 0
                     case .toolCall(let call):
                         if let text = toolCallText(from: call),
                            let toolCall = convertToolCall(call) {
@@ -531,7 +547,9 @@ public final class BadAppleInference: @unchecked Sendable {
                     tokensPerSecond: tps,
                     tokenCount: tokenCount,
                     tier: "main",
-                    toolCalls: finalToolCalls
+                    toolCalls: finalToolCalls,
+                    draftProposedTokens: draftProposed,
+                    draftAcceptedTokens: draftAccepted
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))
@@ -795,6 +813,8 @@ public final class BadAppleInference: @unchecked Sendable {
                 var fullText = ""
                 var tps: Float = 0
                 var tokenCount = 0
+                var draftProposed = 0
+                var draftAccepted = 0
 
                 for await event in stream {
                     switch event {
@@ -804,6 +824,8 @@ public final class BadAppleInference: @unchecked Sendable {
                     case .info(let info):
                         tps = Float(info.tokensPerSecond)
                         tokenCount = info.generationTokenCount
+                        draftProposed = info.proposedDraftTokens ?? 0
+                        draftAccepted = info.acceptedDraftTokens ?? 0
                     case .toolCall:
                         break
                     }
@@ -813,7 +835,9 @@ public final class BadAppleInference: @unchecked Sendable {
                     text: fullText,
                     tokensPerSecond: tps,
                     tokenCount: tokenCount,
-                    tier: "main"
+                    tier: "main",
+                    draftProposedTokens: draftProposed,
+                    draftAcceptedTokens: draftAccepted
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))

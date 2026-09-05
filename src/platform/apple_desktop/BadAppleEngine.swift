@@ -138,6 +138,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _modelId: String = ""
     private var _lastTokensPerSecond: Float = 0
     private var _lastTokenCount: Int = 0
+    private var _lastDraftAcceptPct: Float = 0
     private var _lastCacheHit: Bool = false
     private var _workspacePath: String?
     private var _airgapEnabled = false
@@ -162,6 +163,10 @@ final class BadAppleEngine: @unchecked Sendable {
 
     var lastTokenCount: Int {
         return stateLock.withLock { _lastTokenCount }
+    }
+
+    var lastDraftAcceptPct: Float {
+        return stateLock.withLock { _lastDraftAcceptPct }
     }
 
     var lastCacheHit: Bool {
@@ -869,6 +874,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         self.stateLock.withLock {
                             self._lastTokensPerSecond = result.tokensPerSecond
                             self._lastTokenCount = result.tokenCount
+                            self._lastDraftAcceptPct = result.draftAcceptPct
                         }
                         self.auditLedger.append(
                             eventType: "response",
@@ -978,6 +984,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         self.stateLock.withLock {
                             self._lastTokensPerSecond = result.tokensPerSecond
                             self._lastTokenCount = result.tokenCount
+                            self._lastDraftAcceptPct = result.draftAcceptPct
                         }
                         onToken(filtered)
                         onComplete(filtered)
@@ -1018,6 +1025,7 @@ final class BadAppleEngine: @unchecked Sendable {
                     self.stateLock.withLock {
                         self._lastTokensPerSecond = result.tokensPerSecond
                         self._lastTokenCount = result.tokenCount
+                        self._lastDraftAcceptPct = result.draftAcceptPct
                     }
                     self.auditLedger.append(
                         eventType: "response",
@@ -1174,6 +1182,7 @@ final class BadAppleEngine: @unchecked Sendable {
         stateLock.withLock {
             _lastTokensPerSecond = result.tokensPerSecond
             _lastTokenCount = result.tokenCount
+            _lastDraftAcceptPct = result.draftAcceptPct
         }
 
         // Postprocess and filter.
