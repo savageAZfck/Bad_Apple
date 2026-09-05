@@ -20,8 +20,16 @@ fn main() -> Result<()> {
     match mode {
         "stdio" => server.serve_stdio(),
         "socket" => server.serve_unix(),
+        "sse" => {
+            let addr = args
+                .get(1)
+                .cloned()
+                .or_else(|| std::env::var("BADAPPLE_MCP_SSE_ADDR").ok())
+                .unwrap_or_else(|| "127.0.0.1:9879".to_string());
+            server.serve_sse(&addr)
+        }
         _ => {
-            eprintln!("usage: badapple-mcp [stdio|socket]");
+            eprintln!("usage: badapple-mcp [stdio|socket|sse [addr]]");
             std::process::exit(1);
         }
     }

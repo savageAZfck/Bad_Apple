@@ -70,6 +70,7 @@ impl Default for McpTransport {
 pub struct McpProcess {
     pub id: String,
     pub child: Child,
+    pub transport: McpTransport,
     pub stdin: ChildStdin,
     pub started_at: Instant,
     pub last_heartbeat: Instant,
@@ -194,9 +195,6 @@ impl McpMarketplace {
         if !server.enabled {
             bail!("MCP server {id} is disabled");
         }
-        if server.transport != McpTransport::Stdio {
-            bail!("MCP server {id} uses non-stdio transport and cannot be started by this manager");
-        }
 
         // If already running, stop first to avoid duplicates.
         self.stop(id).await?;
@@ -253,6 +251,7 @@ impl McpMarketplace {
         let process = McpProcess {
             id: id.to_string(),
             child,
+            transport: server.transport,
             stdin,
             started_at: Instant::now(),
             last_heartbeat: Instant::now(),
@@ -319,6 +318,9 @@ impl McpMarketplace {
     pub async fn send(&self, id: &str, line: &str) -> Result<()> {
         if let Some(handle) = self.running.lock().await.get(id).cloned() {
             let mut process = handle.lock().await;
+            if process.transport != McpTransport::Stdio {
+                bail!("send is only supported for stdio MCP transports");
+            }
             process
                 .stdin
                 .write_all(line.as_bytes())

@@ -1,20 +1,34 @@
 //! Minimal Model Context Protocol (MCP) server host for Bad Apple.
 //!
-//! This module implements the local MCP JSON-RPC transport over `stdio` and
-//! Unix domain sockets. It proxies tool calls to the Bad Apple daemon via the
-//! SLICKS Unix socket, so external MCP clients can use Bad Apple as a context
-//! provider without opening TCP sockets.
+//! This module implements the local MCP JSON-RPC transport over `stdio`,
+//! Unix domain sockets, and HTTP Server-Sent Events (SSE). It proxies tool
+//! calls to the Bad Apple daemon via the SLICKS Unix socket, so external MCP
+//! clients can use Bad Apple as a context provider without opening TCP sockets.
 //!
 //! For now it exposes the built-in Bad Apple tools through the `invoke_tool`
 //! agent method and advertises the runtime status endpoint. Marketplace
 //! catalog/install will be added once the server lifecycle is stable.
 
 use anyhow::{Context, Result};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{sse::Event, IntoResponse, Sse},
+    routing::{get, post},
+    Router,
+};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::{mpsc::UnboundedSender, Mutex as AsyncMutex};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "Bad Apple MCP";
@@ -100,6 +114,97 @@ impl McpServer {
             }
         }
         Ok(())
+    }
+
+    /// Run the HTTP+SSE MCP transport on `bind_addr` (e.g. `127.0.0.1:9879`).
+    pub fn serve_sse(&self, bind_addr: &str) -> Result<()> {
+        let state = Arc::new(SseState::default());
+        let app = Router::new()
+            .route("/sse", get(sse_handler))
+            .route("/message", post(message_handler))
+            .with_state(state);
+
+        let rt =
+            tokio::runtime::Runtime::new().context("failed to create tokio runtime for MCP SSE")?;
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind(bind_addr)
+                .await
+                .with_context(|| format!("failed to bind MCP SSE server to {bind_addr}"))?;
+            axum::serve(listener, app)
+                .await
+                .context("MCP SSE server error")?;
+            Ok(())
+        })
+    }
+}
+
+#[derive(Default)]
+struct SseState {
+    sessions: AsyncMutex<HashMap<String, UnboundedSender<Event>>>,
+    next_id: AtomicU64,
+}
+
+#[derive(Deserialize)]
+struct MessageQuery {
+    session_id: String,
+}
+
+async fn sse_handler(
+    State(state): State<Arc<SseState>>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    let id = state.next_id.fetch_add(1, Ordering::SeqCst);
+    let session_id = format!("{:x}", id);
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(session_id.clone(), tx.clone());
+
+    let endpoint = format!("/message?session_id={}", session_id);
+    let _ = tx.send(Event::default().event("endpoint").data(endpoint));
+
+    let stream = UnboundedReceiverStream::new(rx).map(Ok::<_, Infallible>);
+    Sse::new(stream)
+}
+
+async fn message_handler(
+    State(state): State<Arc<SseState>>,
+    Query(query): Query<MessageQuery>,
+    body: String,
+) -> impl IntoResponse {
+    if body.len() > MAX_REQUEST_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "request too large");
+    }
+
+    let response = match tokio::task::spawn_blocking(move || handle_request(&body)).await {
+        Ok(Some(resp)) => resp,
+        Ok(None) => {
+            return (StatusCode::ACCEPTED, "");
+        }
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "handler panicked");
+        }
+    };
+
+    let text = match serde_json::to_string(&response) {
+        Ok(t) => t,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to serialize response",
+            )
+        }
+    };
+
+    let sessions = state.sessions.lock().await;
+    if let Some(tx) = sessions.get(&query.session_id) {
+        let _ = tx.send(Event::default().data(text));
+        drop(sessions);
+        (StatusCode::ACCEPTED, "")
+    } else {
+        drop(sessions);
+        (StatusCode::NOT_FOUND, "session not found")
     }
 }
 

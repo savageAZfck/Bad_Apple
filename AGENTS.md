@@ -196,10 +196,10 @@ target/release/badapple "disable private mode"
 ## Air-gap certification
 
 ```bash
-# The air-gap certification suite is being ported to Rust and is not currently
-# available from the command line. Run `target/release/badapple --doctor` for a
-# socket/process health report in the meantime.
+target/release/badapple cert
 ```
+
+Returns a JSON summary and exits non-zero on any failed check. The same suite runs as `cargo test --release` via `tests/cert_suite.rs`.
 
 P2P sync and HuggingFace hub are disabled by default for certification:
 
@@ -341,7 +341,11 @@ cargo clippy --release
 ## Latest features (new)
 
 - Streaming chat: POST /api/chat with `{"prompt": "...", "stream": true}` returns Server-Sent Events (tokens, tool calls, done, error).
-- Workspace file watching is now available via `badapple workspace watch [path]`. It monitors the workspace and calls `index_documents` on changes.
+- `badapple cert` exposes the air-gap certification suite from the command line with a JSON summary.
+- Workspace file watching is now wired into the daemon: setting a workspace starts a native FSEvents watcher and auto-`index_documents` on changes, without approval prompts.
+- Real speculative-decoding acceptance is reported in daemon metrics (`draft_accept_pct`) from `GenerateCompletionInfo.proposedDraftTokens` / `acceptedDraftTokens`.
+- P2P `send` and `receive` support symmetric encrypted model transfer (chunked, ACKed, SHA-256 verified).
+- `badapple-mcp` supports `stdio`, `socket`, and `sse` transports. The HTTP+SSE transport (`badapple-mcp sse [addr]`) exposes `GET /sse` and `POST /message` so external MCP clients can connect over HTTP.
 - Vault CLI is now available: `badapple vault get|set|remove|list|import`.
 - MCP marketplace is now available via `badapple mcp list|add|remove|install|uninstall|start|stop|status|init`. The catalog is stored at `BADAPPLE_MCP_CATALOG_PATH`.
 - The full unsigned release package builds successfully with `src/platform/apple_desktop/package_full_release.sh` (output `target/release/Bad_Apple-<version>-full-unsigned.zip`).
