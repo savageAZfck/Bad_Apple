@@ -192,9 +192,135 @@ async fn static_handler(
 
 async fn status_handler(State(_): State<Arc<DashboardState>>) -> impl IntoResponse {
     match agent_call("runtime_status", None).await {
-        Ok(v) => Json(v),
+        Ok(v) => Json(adapt_runtime_status(v)),
         Err(e) => Json(json!({"error": e.to_string()})),
     }
+}
+
+/// Adapt the native daemon's `runtime_status` schema to the one the web
+/// dashboard's SPA expects.
+fn adapt_runtime_status(mut v: Value) -> Value {
+    let Some(obj) = v.as_object_mut() else { return v };
+
+    // The native runtime reports `model_status` keyed by model ID and
+    // `active_model_ids`. The dashboard wants `active_models`, `runtime.mode`,
+    // `main_model_loaded`, `health.checks.main_model.ok`, and a few flattened
+    // hibernation/ambient fields.
+    let active_ids = obj
+        .get("active_model_ids")
+        .and_then(|a| a.as_array())
+        .and_then(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .next()
+        })
+        .unwrap_or_else(|| "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit".to_string());
+    // Prefer the first non-embedding active model as the "main" model the
+    // dashboard splash refers to. Embedding-only loads shouldn't be the hero.
+    let main_id = obj
+        .get("active_model_ids")
+        .and_then(|a| a.as_array())
+        .and_then(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .find(|s| !s.to_lowercase().contains("bge") && !s.to_lowercase().contains("embedding"))
+        })
+        .unwrap_or(&active_ids)
+        .to_string();
+
+    let main_ready = obj
+        .get("model_status")
+        .and_then(|m| m.get(&main_id))
+        .and_then(|m| m.get("status"))
+        .and_then(|s| s.as_str())
+        .map(|s| s == "ready")
+        .unwrap_or(false);
+
+    let private_mode = obj
+        .get("private_mode")
+        .cloned()
+        .unwrap_or(json!(false));
+
+    let mode = if main_ready { "READY" } else { "STARTING" };
+
+    let runtime = json!({
+        "mode": mode,
+        "killed": false,
+        "safe_mode_reason": null,
+        "private_mode": private_mode,
+    });
+
+    let health = json!({
+        "checks": {
+            "main_model": {
+                "ok": main_ready,
+                "detail": main_id,
+            }
+        }
+    });
+
+    // Flatten hibernation fields for the dashboard cards.
+    if let Some(hibernation) = obj.get("hibernation").cloned() {
+        if let Some(hobj) = hibernation.as_object() {
+            obj.insert(
+                "hibernating".to_string(),
+                hobj.get("active").cloned().unwrap_or(json!(false)),
+            );
+            obj.insert(
+                "idle_seconds".to_string(),
+                hobj.get("idle_seconds").cloned().unwrap_or(json!(0)),
+            );
+            obj.insert(
+                "hibernate_after".to_string(),
+                hobj.get("idle_threshold_seconds").cloned().unwrap_or(json!(300)),
+            );
+        }
+    }
+
+    // The dashboard uses `active_models` and `models.main_9b` for the splash.
+    if let Some(active) = obj.get("active_model_ids").cloned() {
+        obj.insert("active_models".to_string(), active.clone());
+        // Expose the first active model under the legacy `main_9b` key the SPA
+        // looks for during startup. The name is historical (9B used to be main).
+        if let Some(first) = active.as_array().and_then(|a| a.first()).and_then(|x| x.as_str()) {
+            if let Some(model_status) = obj.get("model_status").cloned() {
+                if let Some(ms) = model_status.get(first).cloned() {
+                    let models = json!({ "main_9b": ms });
+                    obj.insert("models".to_string(), models);
+                }
+            }
+        }
+    }
+
+    // Map ambient context to the field renderDashboard expects.
+    let ambient = obj.get("ambient_context").cloned().unwrap_or(json!(null));
+    obj.insert("ambient".to_string(), ambient);
+
+    // Provide sensible defaults for fields the dashboard tests/renders.
+    if !obj.contains_key("p2p_enabled") {
+        obj.insert("p2p_enabled".to_string(), json!(false));
+    }
+    if !obj.contains_key("autopilot") {
+        obj.insert("autopilot".to_string(), json!(false));
+    }
+    if !obj.contains_key("p2p_peers") {
+        obj.insert(
+            "p2p_peers".to_string(),
+            json!("No peers on the local network."),
+        );
+    }
+    if !obj.contains_key("ambient_running") {
+        obj.insert("ambient_running".to_string(), json!(false));
+    }
+
+    obj.insert("runtime".to_string(), runtime);
+    obj.insert("main_model_loaded".to_string(), json!(main_ready));
+    obj.insert("health".to_string(), health);
+
+    v
 }
 
 async fn list_models_handler() -> impl IntoResponse {
