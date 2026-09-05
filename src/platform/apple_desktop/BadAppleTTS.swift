@@ -78,7 +78,7 @@ private final class TTSServer {
     init() {
         socketPath = ProcessInfo.processInfo.environment["BADAPPLE_TTS_SOCKET"] ?? "/tmp/badapple_tts.sock"
         defaultVoiceName = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Best"
-        defaultLengthScale = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_LENGTH_SCALE"] ?? "0.965") ?? 0.965
+        defaultLengthScale = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_LENGTH_SCALE"] ?? "0.931") ?? 0.931
         defaultVolume = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOLUME"] ?? "1.0") ?? 1.0
         gTTSShouldStop = 0
         gTTSListenFd = -1
