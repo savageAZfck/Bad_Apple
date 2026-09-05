@@ -4276,7 +4276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 BadAppleEngine.shared.generateStreaming(
                     prompt: prompt,
                     voiceMode: false,
-                    maxTokens: 300
+                    maxTokens: 512
                 ) { chunk in
                     DispatchQueue.main.async { append(chunk) }
                 } onComplete: { _ in
@@ -4294,7 +4294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     _ = try await self.runBadAppleCLIStreaming(
                         prompt: prompt,
                         socketPath: BadAppleBrain.deepSocket,
-                        maxTokens: 300
+                        maxTokens: 512
                     ) { chunk in
                         DispatchQueue.main.async { append(chunk) }
                     }
@@ -5151,7 +5151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             BadAppleEngine.shared.generateStreaming(
                 prompt: effectivePrompt,
                 voiceMode: true,
-                maxTokens: 300
+                maxTokens: 500
             ) { chunk in
                 self.streamedTokenCount += chunk.count
                 if self.voiceStreamingTTSActive {
@@ -5179,7 +5179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         if roastEnabled { extraArgs += ["--roast"] }
 
         let socket = BadAppleBrain.deepSocket
-        let maxTokens = 300
+        let maxTokens = 500
 
         // Minimal environment for the voice CLI process: do not inherit the
         // full parent environment (which can carry attacker-set overrides) and
@@ -5199,7 +5199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
         Task {
             do {
-                let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens, extraArgs: extraArgs, timeout: 30.0, extraEnv: voiceEnv, minimalEnv: true) { chunk in
+                let finalText = try await runBadAppleCLIStreaming(prompt: effectivePrompt, socketPath: socket, maxTokens: maxTokens, extraArgs: extraArgs, timeout: 120.0, extraEnv: voiceEnv, minimalEnv: true) { chunk in
                     DispatchQueue.main.async {
                         self.streamedTokenCount += chunk.count
                         if self.voiceStreamingTTSActive {

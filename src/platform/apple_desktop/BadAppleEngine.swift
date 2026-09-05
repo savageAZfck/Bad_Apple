@@ -950,7 +950,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 sysPrompt += "\n\nContext:\n\(ragContext)"
             }
 
-            let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
+            let effectiveMaxTokens = maxTokens
             if let tools = toolRouter.toolSchemasForPrompt(text: prompt) {
                 sysPrompt += "\n\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
                 do {
@@ -999,12 +999,16 @@ final class BadAppleEngine: @unchecked Sendable {
                 let polished = postprocessOutput(result.text)
                 let filtered = self.outputFirewall.check(polished)
                 self.saveTurn(prompt: prompt, response: filtered)
-                Task {
-                    await self.semanticCache.store(
-                        prompt: prompt,
-                        response: filtered,
-                        persona: persona
-                    )
+                // Do not cache responses that were likely truncated by the token limit.
+                let looksComplete = result.tokenCount == 0 || result.tokenCount < maxTokens - 5
+                if looksComplete {
+                    Task {
+                        await self.semanticCache.store(
+                            prompt: prompt,
+                            response: filtered,
+                            persona: persona
+                        )
+                    }
                 }
                 DispatchQueue.main.async {
                     self.stateLock.withLock {
@@ -1141,7 +1145,7 @@ final class BadAppleEngine: @unchecked Sendable {
             sysPrompt += "\n\nContext:\n\(ragContext)"
         }
 
-        let effectiveMaxTokens = isSimpleQuery(prompt) ? min(maxTokens, 150) : maxTokens
+        let effectiveMaxTokens = maxTokens
 
         let result: BadAppleInference.GenerationResult
         if let tools = toolRouter.toolSchemasForPrompt(text: prompt) {
@@ -1172,11 +1176,15 @@ final class BadAppleEngine: @unchecked Sendable {
         let polished = postprocessOutput(result.text)
         let filtered = outputFirewall.check(polished)
 
-        await semanticCache.store(
-            prompt: prompt,
-            response: filtered,
-            persona: persona
-        )
+        // Do not cache responses that were likely truncated by the token limit.
+        let looksComplete = result.tokenCount == 0 || result.tokenCount < maxTokens - 5
+        if looksComplete {
+            await semanticCache.store(
+                prompt: prompt,
+                response: filtered,
+                persona: persona
+            )
+        }
 
         // Audit log.
         auditLedger.append(
