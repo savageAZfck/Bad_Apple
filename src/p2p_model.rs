@@ -44,6 +44,9 @@ pub const MAX_MODEL_BYTES: u64 = 80 * 1024 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TransferFrame {
     Request(RequestFrame),
+    PushRequest(PushRequestFrame),
+    PushAccept,
+    PushReject { reason: String },
     Offer(OfferFrame),
     Accept,
     Reject { reason: String },
@@ -59,6 +62,11 @@ pub struct RequestFrame {
     pub model_id: String,
     #[serde(default)]
     pub resume_chunks: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PushRequestFrame {
+    pub model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -190,20 +198,30 @@ impl P2PModelTransfer {
     async fn handle_incoming(&self, mut stream: TcpStream, _peer: String) -> Result<()> {
         let cipher = self.cipher()?;
 
-        // 1. Read the request.
-        let request = match recv_frame(&mut stream, &cipher).await? {
-            TransferFrame::Request(r) => r,
-            other => bail!("expected Request frame, got {other:?}"),
-        };
+        let first = recv_frame(&mut stream, &cipher).await?;
+        match first {
+            TransferFrame::Request(r) => self.handle_pull_request(&mut stream, &cipher, r).await,
+            TransferFrame::PushRequest(p) => {
+                self.handle_push_receive(&mut stream, &cipher, p).await
+            }
+            other => bail!("expected Request or PushRequest frame, got {other:?}"),
+        }
+    }
 
-        // 2. Resolve the model file.
+    async fn handle_pull_request<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: &mut S,
+        cipher: &P2PCipher,
+        request: RequestFrame,
+    ) -> Result<()> {
+        // 1. Resolve the model file.
         let manifests = self.advertised.lock().await;
         let manifest = match manifests.iter().find(|m| m.model_id == request.model_id) {
             Some(m) => m.clone(),
             None => {
                 send_frame(
-                    &mut stream,
-                    &cipher,
+                    stream,
+                    cipher,
                     TransferFrame::Error {
                         message: format!("model {} not available from this peer", request.model_id),
                     },
@@ -220,10 +238,10 @@ impl P2PModelTransfer {
         let total_chunks = data.len().div_ceil(manifest.chunk_size as usize);
         let resume: HashSet<usize> = request.resume_chunks.into_iter().collect();
 
-        // 3. Offer.
+        // 2. Offer.
         send_frame(
-            &mut stream,
-            &cipher,
+            stream,
+            cipher,
             TransferFrame::Offer(OfferFrame {
                 model_id: manifest.model_id,
                 file_name: manifest.file_name,
@@ -235,14 +253,14 @@ impl P2PModelTransfer {
         )
         .await?;
 
-        // 4. Wait for acceptance.
-        match recv_frame(&mut stream, &cipher).await? {
+        // 3. Wait for acceptance.
+        match recv_frame(stream, cipher).await? {
             TransferFrame::Accept => {}
             TransferFrame::Reject { reason } => bail!("puller rejected offer: {reason}"),
             other => bail!("expected Accept, got {other:?}"),
         };
 
-        // 5. Send chunks, skipping already-resumed ones.
+        // 4. Send chunks, skipping already-resumed ones.
         for index in 0..total_chunks {
             if resume.contains(&index) {
                 continue;
@@ -252,8 +270,8 @@ impl P2PModelTransfer {
             let chunk = &data[start..end];
 
             send_frame(
-                &mut stream,
-                &cipher,
+                stream,
+                cipher,
                 TransferFrame::Chunk(ChunkFrame {
                     index,
                     total: total_chunks,
@@ -262,15 +280,128 @@ impl P2PModelTransfer {
             )
             .await?;
 
-            // 6. Wait for ACK before continuing (flow control / retry).
-            match recv_frame(&mut stream, &cipher).await? {
+            // 5. Wait for ACK before continuing (flow control / retry).
+            match recv_frame(stream, cipher).await? {
                 TransferFrame::Ack(ack) if ack.index == index => {}
                 other => bail!("expected Ack({index}), got {other:?}"),
             }
         }
 
-        // 7. Done.
-        send_frame(&mut stream, &cipher, TransferFrame::Done).await?;
+        // 6. Done.
+        send_frame(stream, cipher, TransferFrame::Done).await?;
+        Ok(())
+    }
+
+    async fn handle_push_receive<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: &mut S,
+        cipher: &P2PCipher,
+        _request: PushRequestFrame,
+    ) -> Result<()> {
+        // Accept the push intent.
+        send_frame(stream, cipher, TransferFrame::PushAccept).await?;
+
+        // Wait for the sender's offer.
+        let offer = match recv_frame(stream, cipher).await? {
+            TransferFrame::Offer(o) => o,
+            TransferFrame::Error { message } => bail!("peer error: {message}"),
+            other => bail!("expected Offer, got {other:?}"),
+        };
+
+        if offer.total_bytes > MAX_MODEL_BYTES {
+            send_frame(
+                stream,
+                cipher,
+                TransferFrame::Reject {
+                    reason: "model is too large".to_string(),
+                },
+            )
+            .await?;
+            bail!("model is too large: {} bytes", offer.total_bytes);
+        }
+
+        // Confirm we will receive it.
+        send_frame(stream, cipher, TransferFrame::Accept).await?;
+
+        let part_path = self.model_dir.join(format!("{}.part", offer.file_name));
+        fs::create_dir_all(&self.model_dir)?;
+
+        // Initialize or open the partial file.
+        let file_len = if part_path.exists() {
+            fs::metadata(&part_path)?.len()
+        } else {
+            0
+        };
+        if file_len != offer.total_bytes {
+            let f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&part_path)?;
+            f.set_len(offer.total_bytes)?;
+        }
+
+        let mut received = HashSet::<usize>::new();
+        let mut file = fs::OpenOptions::new().write(true).open(&part_path)?;
+        let mut hasher = Sha256::new();
+
+        // Receive chunks.
+        loop {
+            match recv_frame(stream, cipher).await? {
+                TransferFrame::Chunk(chunk) => {
+                    if chunk.index >= offer.total_chunks {
+                        bail!("chunk index {} out of range", chunk.index);
+                    }
+                    let start = chunk.index * offer.chunk_size;
+                    file.seek(std::io::SeekFrom::Start(start as u64))?;
+                    file.write_all(&chunk.bytes)?;
+                    hasher.update(&chunk.bytes);
+                    received.insert(chunk.index);
+                    send_frame(
+                        stream,
+                        cipher,
+                        TransferFrame::Ack(AckFrame { index: chunk.index }),
+                    )
+                    .await?;
+                }
+                TransferFrame::Done => break,
+                TransferFrame::Error { message } => bail!("peer error during transfer: {message}"),
+                other => bail!("unexpected frame during push: {other:?}"),
+            }
+        }
+
+        // Verify.
+        if received.len() != offer.total_chunks {
+            let missing: Vec<_> = (0..offer.total_chunks)
+                .filter(|i| !received.contains(i))
+                .collect();
+            bail!("missing chunks: {missing:?}");
+        }
+        let actual = hex::encode(hasher.finalize());
+        if actual != offer.sha256 {
+            bail!(
+                "SHA-256 mismatch: expected {}, got {}",
+                offer.sha256,
+                actual
+            );
+        }
+
+        // Finalize.
+        let final_path = self.model_dir.join(&offer.file_name);
+        fs::rename(&part_path, &final_path)?;
+
+        // Update the advertised manifest list so the model is now locally available.
+        let manifest = ModelManifest {
+            model_id: offer.model_id,
+            file_name: offer.file_name,
+            total_bytes: offer.total_bytes,
+            sha256: offer.sha256,
+            origin_peer: "local-push".to_string(),
+            chunk_size: offer.chunk_size,
+        };
+        let mut manifests = self.advertised.lock().await;
+        manifests.retain(|m| m.model_id != manifest.model_id);
+        manifests.push(manifest);
         Ok(())
     }
 
@@ -398,13 +529,113 @@ impl P2PModelTransfer {
     }
 
     /// Send a model to a remote peer that is already listening with `receive`.
-    pub async fn push(&self, _peer_addr: &str, _model_id: &str) -> Result<()> {
-        // Not implemented here; push is symmetric to the receive path.
-        // A sender can use `serve` to wait for a pull, or the caller can
-        // connect and run the same `handle_sender` flow.
-        bail!(
-            "push is implemented by the receiver accepting a pull; use `pull` from the remote side"
-        );
+    pub async fn push(&self, peer_addr: &str, model_id: &str) -> Result<()> {
+        let path = self.find_model_file(model_id).with_context(|| {
+            format!("model {model_id} not found in {}", self.model_dir.display())
+        })?;
+
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let data =
+            fs::read(&path).with_context(|| format!("failed to read model file {path:?}"))?;
+        let sha256 = sha256_file(&path)?;
+        let chunk_size = DEFAULT_CHUNK_SIZE;
+        let total_chunks = data.len().div_ceil(chunk_size);
+        let total_bytes = data.len() as u64;
+
+        let mut stream = TcpStream::connect(peer_addr)
+            .await
+            .with_context(|| format!("failed to connect to {peer_addr}"))?;
+        let cipher = self.cipher()?;
+
+        // 1. Push request.
+        send_frame(
+            &mut stream,
+            &cipher,
+            TransferFrame::PushRequest(PushRequestFrame {
+                model_id: model_id.to_string(),
+            }),
+        )
+        .await?;
+
+        // 2. Wait for acceptance.
+        match recv_frame(&mut stream, &cipher).await? {
+            TransferFrame::PushAccept => {}
+            TransferFrame::PushReject { reason } => bail!("push rejected: {reason}"),
+            TransferFrame::Reject { reason } => bail!("push rejected: {reason}"),
+            other => bail!("expected PushAccept, got {other:?}"),
+        };
+
+        // 3. Offer.
+        send_frame(
+            &mut stream,
+            &cipher,
+            TransferFrame::Offer(OfferFrame {
+                model_id: model_id.to_string(),
+                file_name,
+                total_bytes,
+                total_chunks,
+                chunk_size,
+                sha256,
+            }),
+        )
+        .await?;
+
+        // 4. Wait for offer acceptance.
+        match recv_frame(&mut stream, &cipher).await? {
+            TransferFrame::Accept => {}
+            TransferFrame::Reject { reason } => bail!("receiver rejected offer: {reason}"),
+            other => bail!("expected Accept, got {other:?}"),
+        };
+
+        // 5. Send chunks.
+        for index in 0..total_chunks {
+            let start = index * chunk_size;
+            let end = ((index + 1) * chunk_size).min(data.len());
+            let chunk = &data[start..end];
+
+            send_frame(
+                &mut stream,
+                &cipher,
+                TransferFrame::Chunk(ChunkFrame {
+                    index,
+                    total: total_chunks,
+                    bytes: chunk.to_vec(),
+                }),
+            )
+            .await?;
+
+            // 6. Wait for ACK.
+            match recv_frame(&mut stream, &cipher).await? {
+                TransferFrame::Ack(ack) if ack.index == index => {}
+                other => bail!("expected Ack({index}), got {other:?}"),
+            }
+        }
+
+        // 7. Done.
+        send_frame(&mut stream, &cipher, TransferFrame::Done).await?;
+        Ok(())
+    }
+
+    fn find_model_file(&self, model_id: &str) -> Option<PathBuf> {
+        if !self.model_dir.is_dir() {
+            return None;
+        }
+        for entry in fs::read_dir(&self.model_dir).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if file_name_to_model_id(name) == model_id {
+                return Some(path);
+            }
+        }
+        None
     }
 }
 

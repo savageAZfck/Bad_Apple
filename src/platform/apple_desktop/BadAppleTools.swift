@@ -882,8 +882,26 @@ final class BadApplePolicyEngine: @unchecked Sendable {
     /// The result of evaluating a tool call against policy.
     enum ApprovalDecision {
         case approved
-        case denied
+        case denied(reason: String)
         case needsApproval
+    }
+
+    /// Per-tool policy settings parsed from policy.yaml.
+    private struct ToolPolicy {
+        var allowed: Bool = true
+        var requireApproval: Bool = true
+        var allowedPaths: [String] = []
+        var deniedPatterns: [String] = []
+        var allowedCommands: [String] = []
+        var maxTimeout: Int = 0
+        var allowedApps: [String] = []
+        var allowedFiles: [String] = []
+        var notesDir: String?
+        var maxSize: Int?
+    }
+
+    private enum Section {
+        case top, defaults, tools
     }
 
     // MARK: - State
@@ -891,10 +909,8 @@ final class BadApplePolicyEngine: @unchecked Sendable {
     private let lock = NSLock()
     private var _autopilot: Bool = false
     private var policyLoaded: Bool = false
-    private var defaultRequireApproval: Bool = true
-    private var defaultAllowed: Bool = true
-    private var toolApproval: [String: Bool] = [:]
-    private var toolAllowed: [String: Bool] = [:]
+    private var defaultPolicy = ToolPolicy()
+    private var toolPolicies: [String: ToolPolicy] = [:]
 
     /// Tools that always require approval regardless of policy file.
     private let hardcodedApprovalRequired: Set<String> = [
@@ -935,18 +951,9 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        // Code-level safety requirements cannot be relaxed by a stale or
-        // permissive policy file. Autopilot is handled separately by evaluate.
-        if hardcodedApprovalRequired.contains(toolName) {
-            return true
-        }
-        if let value = toolApproval[toolName] {
-            return value
-        }
-        if policyLoaded {
-            return defaultRequireApproval
-        }
-        return false
+        if hardcodedApprovalRequired.contains(toolName) { return true }
+        let policy = toolPolicies[toolName] ?? defaultPolicy
+        return policy.requireApproval
     }
 
     /// Check whether a tool is allowed at all by policy.
@@ -954,113 +961,384 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        if let value = toolAllowed[toolName] {
-            return value
-        }
-        if policyLoaded {
-            return defaultAllowed
-        }
-        return true
+        let policy = toolPolicies[toolName] ?? defaultPolicy
+        return policy.allowed
+    }
+
+    /// Maximum allowed timeout for a tool, in seconds.
+    func maxTimeout(toolName: String, defaultTimeout: Int = 30) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let policy = toolPolicies[toolName] ?? defaultPolicy
+        return policy.maxTimeout > 0 ? policy.maxTimeout : defaultTimeout
+    }
+
+    /// Maximum read size for tools that return file content.
+    func maxSize(toolName: String, defaultSize: Int = 100_000) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let policy = toolPolicies[toolName] ?? defaultPolicy
+        return policy.maxSize ?? defaultSize
     }
 
     /// Evaluate a tool call against the full policy and autopilot state.
     func evaluate(toolName: String, args: [String: String]) -> ApprovalDecision {
-        if !isAllowed(toolName: toolName) {
-            return .denied
+        let policy: ToolPolicy
+        let auto: Bool
+        lock.lock()
+        policy = toolPolicies[toolName] ?? defaultPolicy
+        auto = _autopilot
+        lock.unlock()
+
+        guard policy.allowed else {
+            return .denied(reason: "tool '\(toolName)' is disabled by policy")
         }
-        if autopilot {
+
+        if let reason = validateArgs(toolName: toolName, args: args, policy: policy) {
+            return .denied(reason: reason)
+        }
+
+        if auto {
             return .approved
         }
-        if requiresApproval(toolName: toolName) {
+        if hardcodedApprovalRequired.contains(toolName) || policy.requireApproval {
             return .needsApproval
         }
         return .approved
     }
 
-    // MARK: - Policy Loading
+    // MARK: - Argument Validation
 
-    /// Load policy from the YAML file using simple line-based parsing.
-    /// Parses `autopilot`, `defaults.require_approval`, `defaults.allowed`,
-    /// and per-tool `require_approval` / `allowed` values.
-    private func loadPolicy() {
-        guard let content = try? String(contentsOfFile: policyPath, encoding: .utf8) else {
-            return
+    private func validateArgs(toolName: String, args: [String: String], policy: ToolPolicy) -> String? {
+        switch toolName {
+        case "read_file", "list_directory", "search_content", "search_local_files",
+             "index_documents", "read_document":
+            let path = args["path"] ?? "~"
+            return validatePath(path, policy: policy, tool: toolName)
+
+        case "write_file":
+            let path = args["path"] ?? ""
+            if path.isEmpty { return "write_file requires a path" }
+            if let notesDir = policy.notesDir, !notesDir.isEmpty {
+                let expandedNotes = expandPath(notesDir)
+                let expandedPath = expandPath(path)
+                guard isPath(expandedPath, under: [expandedNotes]) else {
+                    return "write_file path must be under notes_dir \(notesDir)"
+                }
+            }
+            return validatePath(path, policy: policy, tool: toolName)
+
+        case "run_shell":
+            let command = args["command"] ?? ""
+            if command.isEmpty { return "run_shell requires a command" }
+            if !policy.allowedCommands.isEmpty {
+                let first = command.trimmingCharacters(in: .whitespaces)
+                    .split(separator: " ", omittingEmptySubsequences: true)
+                    .first.map(String.init) ?? ""
+                let base = (first as NSString).lastPathComponent
+                let name = base.isEmpty ? first : base
+                let lowered = name.lowercased()
+                guard policy.allowedCommands.map({ $0.lowercased() }).contains(lowered) else {
+                    return "command '\(name)' is not in the policy allowed_commands list"
+                }
+            }
+            for pattern in policy.deniedPatterns {
+                if command.contains(pattern) {
+                    return "command matches denied pattern '\(pattern)'"
+                }
+            }
+            return nil
+
+        case "run_applescript":
+            let script = args["script"] ?? ""
+            if script.isEmpty { return "run_applescript requires a script" }
+            for pattern in policy.deniedPatterns {
+                if script.lowercased().contains(pattern.lowercased()) {
+                    return "AppleScript matches denied pattern '\(pattern)'"
+                }
+            }
+            if !policy.allowedApps.isEmpty {
+                let loweredAllowed = Set(policy.allowedApps.map { $0.lowercased() })
+                let targeted = matchesAppTell(script)
+                for app in targeted where !loweredAllowed.contains(app.lowercased()) {
+                    return "AppleScript targets application '\(app)' which is not in allowed_apps"
+                }
+            }
+            return nil
+
+        case "run_shortcut":
+            let name = args["name"] ?? ""
+            if name.isEmpty { return "run_shortcut requires a name" }
+            for pattern in policy.deniedPatterns {
+                if name.contains(pattern) {
+                    return "shortcut name matches denied pattern '\(pattern)'"
+                }
+            }
+            return nil
+
+        default:
+            return nil
+        }
+    }
+
+    private func matchesAppTell(_ script: String) -> [String] {
+        var names: [String] = []
+        let pattern = #"(?i)tell\s+(?:application|app)\s+\"([^\"]+)\""#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return names }
+        let range = NSRange(script.startIndex..., in: script)
+        regex.enumerateMatches(in: script, options: [], range: range) { match, _, _ in
+            guard let match = match, let r = Range(match.range(at: 1), in: script) else { return }
+            names.append(String(script[r]))
+        }
+        return names
+    }
+
+    private func validatePath(_ path: String, policy: ToolPolicy, tool: String) -> String? {
+        let expanded = expandPath(path)
+        guard !expanded.isEmpty else { return "\(tool) path is empty" }
+        if expanded.contains("..") { return "\(tool) path contains path traversal '..'" }
+
+        let targets = [path, expanded]
+        for pattern in policy.deniedPatterns {
+            for target in targets where target.contains(pattern) {
+                return "\(tool) path matches denied pattern '\(pattern)'"
+            }
         }
 
-        var inDefaults = false
-        var inTools = false
-        var currentTool: String?
+        if !policy.allowedPaths.isEmpty {
+            let expandedRoots = policy.allowedPaths.map(expandPath)
+            guard isPath(expanded, under: expandedRoots) else {
+                return "\(tool) path '\(path)' is not under allowed_paths"
+            }
+        }
+        return nil
+    }
 
-        for rawLine in content.components(separatedBy: "\n") {
-            // Skip comments and blank lines.
+    private func isPath(_ path: String, under roots: [String]) -> Bool {
+        let resolved = (path as NSString).standardizingPath
+        for root in roots {
+            let resolvedRoot = (root as NSString).standardizingPath
+            if resolved == resolvedRoot || resolved.hasPrefix(resolvedRoot + "/") { return true }
+        }
+        return false
+    }
+
+    private func expandPath(_ path: String) -> String {
+        if path == "~" { return NSHomeDirectory() }
+        if path.hasPrefix("~/") { return NSHomeDirectory() + String(path.dropFirst(2)) }
+        if path.hasPrefix("~") { return NSHomeDirectory() + String(path.dropFirst(1)) }
+        return path
+    }
+
+    // MARK: - Policy Loading
+
+    /// Load policy from the YAML file. Supports scalars, flow lists, and block lists.
+    private func loadPolicy() {
+        guard let content = try? String(contentsOfFile: policyPath, encoding: .utf8) else { return }
+
+        var defaults = ToolPolicy()
+        var tools: [String: ToolPolicy] = [:]
+        var section: Section = .top
+        var currentToolName: String?
+        var currentPolicy: ToolPolicy?
+        var currentListKey: String?
+        var currentList: [String] = []
+
+        let lines = content.components(separatedBy: "\n")
+        for rawLine in lines {
             let stripped = rawLine.trimmingCharacters(in: .whitespaces)
             if stripped.isEmpty || stripped.hasPrefix("#") { continue }
+            let indent = rawLine.prefix(while: { $0 == " " }).count
 
-            // Count leading spaces to determine nesting level.
-            let leadingSpaces = rawLine.prefix(while: { $0 == " " }).count
+            if indent == 0 {
+                // Flush any pending list/tool before changing section.
+                if section == .defaults, let key = currentListKey, !currentList.isEmpty {
+                    applyListField(key: key, list: currentList, policy: &defaults)
+                } else if section == .tools, let key = currentListKey, !currentList.isEmpty,
+                          var policy = currentPolicy, let name = currentToolName {
+                    applyListField(key: key, list: currentList, policy: &policy)
+                    tools[name] = policy
+                    currentPolicy = policy
+                }
+                currentListKey = nil
+                currentList = []
+                if let name = currentToolName, let policy = currentPolicy {
+                    tools[name] = policy
+                }
+                currentToolName = nil
+                currentPolicy = nil
 
-            if leadingSpaces == 0 {
-                // Top-level key.
-                currentTool = nil
-                inDefaults = false
-                inTools = false
+                section = .top
 
                 if stripped == "defaults:" {
-                    inDefaults = true
+                    section = .defaults
                 } else if stripped == "tools:" {
-                    inTools = true
+                    section = .tools
                 } else if stripped.contains(":") {
                     let parts = stripped.split(separator: ":", maxSplits: 1)
                     if parts.count == 2 {
                         let key = String(parts[0]).trimmingCharacters(in: .whitespaces)
                         let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
                         if key == "autopilot" {
-                            lock.lock()
-                            _autopilot = (value == "true")
-                            lock.unlock()
+                            lock.lock(); _autopilot = (value == "true"); lock.unlock()
                         }
                     }
                 }
-            } else if inDefaults {
-                // Defaults section (indent 2).
-                if stripped.contains(":") {
-                    let parts = stripped.split(separator: ":", maxSplits: 1)
-                    if parts.count == 2 {
-                        let key = String(parts[0]).trimmingCharacters(in: .whitespaces)
-                        let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
-                        lock.lock()
-                        if key == "require_approval" {
-                            defaultRequireApproval = (value == "true")
-                        } else if key == "allowed" {
-                            defaultAllowed = (value == "true")
-                        }
-                        lock.unlock()
+                continue
+            }
+
+            switch section {
+            case .top:
+                continue
+            case .defaults:
+                if let colon = stripped.firstIndex(of: ":") {
+                    let key = String(stripped[..<colon]).trimmingCharacters(in: .whitespaces)
+                    let value = String(stripped[stripped.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                    if value.isEmpty {
+                        currentListKey = key
+                        currentList = []
+                    } else if value.hasPrefix("[") && value.hasSuffix("]") {
+                        let inner = String(value.dropFirst().dropLast())
+                        applyListField(key: key, list: parseFlowList(inner), policy: &defaults)
+                    } else {
+                        applyScalarField(key: key, value: value, policy: &defaults)
                     }
+                } else if stripped.hasPrefix("- "), currentListKey != nil {
+                    let item = String(stripped.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                    currentList.append(trimQuotes(item))
                 }
-            } else if inTools {
-                if leadingSpaces == 2 && stripped.hasSuffix(":") {
-                    // Tool name entry.
-                    currentTool = String(stripped.dropLast())
-                } else if let tool = currentTool, stripped.contains(":") {
-                    let parts = stripped.split(separator: ":", maxSplits: 1)
-                    if parts.count == 2 {
-                        let key = String(parts[0]).trimmingCharacters(in: .whitespaces)
-                        let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
-                        lock.lock()
-                        if key == "require_approval" {
-                            toolApproval[tool] = (value == "true")
-                        } else if key == "allowed" {
-                            toolAllowed[tool] = (value == "true")
+            case .tools:
+                if indent == 2 {
+                    // New tool block.
+                    if let name = currentToolName, var policy = currentPolicy {
+                        if let key = currentListKey, !currentList.isEmpty {
+                            applyListField(key: key, list: currentList, policy: &policy)
                         }
-                        lock.unlock()
+                        tools[name] = policy
+                        currentListKey = nil
+                        currentList = []
                     }
+                    let toolName = stripped.hasSuffix(":") ? String(stripped.dropLast()) : stripped
+                    currentToolName = toolName
+                    currentPolicy = defaults
+                    continue
+                }
+                guard var policy = currentPolicy, let name = currentToolName else { continue }
+                if let colon = stripped.firstIndex(of: ":") {
+                    let key = String(stripped[..<colon]).trimmingCharacters(in: .whitespaces)
+                    let value = String(stripped[stripped.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                    if value.isEmpty {
+                        currentListKey = key
+                        currentList = []
+                    } else if value.hasPrefix("[") && value.hasSuffix("]") {
+                        let inner = String(value.dropFirst().dropLast())
+                        applyListField(key: key, list: parseFlowList(inner), policy: &policy)
+                    } else {
+                        applyScalarField(key: key, value: value, policy: &policy)
+                    }
+                    tools[name] = policy
+                    currentPolicy = policy
+                } else if stripped.hasPrefix("- "), currentListKey != nil {
+                    let item = String(stripped.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                    currentList.append(trimQuotes(item))
                 }
             }
         }
 
+        // Flush any trailing list/tool.
+        if section == .tools, let key = currentListKey, !currentList.isEmpty,
+           var policy = currentPolicy, let name = currentToolName {
+            applyListField(key: key, list: currentList, policy: &policy)
+            tools[name] = policy
+        } else if section == .defaults, let key = currentListKey, !currentList.isEmpty {
+            applyListField(key: key, list: currentList, policy: &defaults)
+        }
+        if let name = currentToolName, let policy = currentPolicy {
+            tools[name] = policy
+        }
+
         lock.lock()
+        defaultPolicy = defaults
+        toolPolicies = tools
         policyLoaded = true
         lock.unlock()
+    }
+
+    private func parseFlowList(_ inner: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        var inQuotes = false
+        var quoteChar: Character?
+        for char in inner {
+            if inQuotes {
+                if char == quoteChar {
+                    inQuotes = false
+                    quoteChar = nil
+                } else {
+                    current.append(char)
+                }
+            } else if char == "\"" || char == "'" {
+                inQuotes = true
+                quoteChar = char
+            } else if char == "," {
+                result.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        let last = current.trimmingCharacters(in: .whitespaces)
+        if !last.isEmpty { result.append(last) }
+        return result.filter { !$0.isEmpty }.map(trimQuotes)
+    }
+
+    private func applyScalarField(key: String, value: String, policy: inout ToolPolicy) {
+        switch key {
+        case "allowed":
+            policy.allowed = parseBool(value)
+        case "require_approval":
+            policy.requireApproval = parseBool(value)
+        case "max_timeout":
+            if let i = Int(value) { policy.maxTimeout = i }
+        case "max_size":
+            if let i = Int(value) { policy.maxSize = i }
+        case "notes_dir":
+            policy.notesDir = value
+        default:
+            break
+        }
+    }
+
+    private func applyListField(key: String, list: [String], policy: inout ToolPolicy) {
+        switch key {
+        case "allowed_paths":
+            policy.allowedPaths = list
+        case "denied_patterns":
+            policy.deniedPatterns = list
+        case "allowed_commands":
+            policy.allowedCommands = list
+        case "allowed_apps":
+            policy.allowedApps = list
+        case "allowed_files":
+            policy.allowedFiles = list
+        default:
+            break
+        }
+    }
+
+    private func parseBool(_ value: String) -> Bool {
+        value.lowercased() == "true"
+    }
+
+    private func trimQuotes(_ s: String) -> String {
+        var r = s
+        if r.hasPrefix("\"") { r.removeFirst() }
+        if r.hasPrefix("'") { r.removeFirst() }
+        if r.hasSuffix("\"") { r.removeLast() }
+        if r.hasSuffix("'") { r.removeLast() }
+        return r.trimmingCharacters(in: .whitespaces)
     }
 }
 
@@ -1111,8 +1389,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         if !approved, let policy = policyEngine {
             let decision = policy.evaluate(toolName: name, args: args)
             switch decision {
-            case .denied:
-                return "Policy: tool '\(name)' is not allowed."
+            case .denied(let reason):
+                return "Policy: \(reason)"
             case .needsApproval:
                 return "Approval required before I can run \(name). Reply with 'approve' to proceed. (Set autopilot to skip these prompts.)"
             case .approved:
@@ -1120,29 +1398,33 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             }
         }
 
+        let timeout = policyEngine?.maxTimeout(toolName: name) ?? 30
+
         switch name {
         case "get_current_time":
             return getCurrentTime()
         case "read_file":
-            return readFile(path: args["path"] ?? "")
+            let readMax = policyEngine?.maxSize(toolName: "read_file") ?? 10_000
+            let maxChars = parseLimit(args["max_chars"], defaultValue: 10_000, maximum: readMax)
+            return readFile(path: args["path"] ?? "", maxChars: maxChars)
         case "list_directory":
             return listDirectory(path: args["path"] ?? "")
         case "search_content":
             let pattern = args["pattern"] ?? args["query"] ?? ""
             let path = args["path"] ?? "~"
-            return searchContent(pattern: pattern, path: path)
+            return searchContent(pattern: pattern, path: path, timeout: timeout)
         case "run_shell":
-            return runShell(command: args["command"] ?? "")
+            return runShell(command: args["command"] ?? "", timeout: timeout)
         case "write_file":
             return writeFile(path: args["path"] ?? "", content: args["content"] ?? "")
         case "screen_capture":
             return screenCapture(path: args["path"])
         case "run_applescript":
-            return runAppleScript(script: args["script"] ?? "")
+            return runAppleScript(script: args["script"] ?? "", timeout: timeout)
         case "list_shortcuts":
             return listShortcuts()
         case "run_shortcut":
-            return runShortcut(name: args["name"] ?? "", input: args["input"])
+            return runShortcut(name: args["name"] ?? "", input: args["input"], timeout: timeout)
         case "index_documents":
             return indexDocuments(path: args["path"] ?? "")
         case "search_notes":
@@ -1178,14 +1460,17 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         case "workspace_status":
             return workspaceStatus()
         case "read_document":
+            let readMax = policyEngine?.maxSize(toolName: "read_document") ?? 100_000
+            let maxChars = parseLimit(args["max_chars"], defaultValue: 10_000, maximum: readMax)
             return readDocument(
                 path: args["path"] ?? "",
-                maxChars: parseLimit(args["max_chars"], defaultValue: 10_000, maximum: 100_000)
+                maxChars: maxChars
             )
         case "search_local_files":
             return searchLocalFiles(
                 pattern: args["pattern"] ?? "",
-                path: args["path"] ?? "~"
+                path: args["path"] ?? "~",
+                timeout: timeout
             )
         case "set_session_seed":
             return setSessionSeed(seed: args["seed"] ?? "")
@@ -1289,7 +1574,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     }
 
     /// Read the text content of a file, respecting the jail and a size limit.
-    func readFile(path: String) -> String {
+    func readFile(path: String, maxChars: Int = 10_000) -> String {
         guard let jailed = jailPath(path) else {
             return "Error: path '\(path)' is outside allowed roots"
         }
@@ -1310,7 +1595,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             ?? String(data: data, encoding: .isoLatin1)
             ?? ""
 
-        let limit = 10_000
+        let limit = max(1, maxChars)
         if text.count > limit {
             return String(text.prefix(limit)) + "\n... (\(text.count) characters total)"
         }
@@ -1347,7 +1632,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     }
 
     /// Search for a text pattern inside files under a directory using grep.
-    func searchContent(pattern: String, path: String) -> String {
+    func searchContent(pattern: String, path: String, timeout: Int = 15) -> String {
         if pattern.isEmpty {
             return "Error: no search pattern provided"
         }
@@ -1378,7 +1663,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             "--", pattern, resolvedPath,
         ]
 
-        let result = runProcess(launchPath: "/usr/bin/grep", arguments: arguments, timeout: 15)
+        let result = runProcess(launchPath: "/usr/bin/grep", arguments: arguments, timeout: TimeInterval(timeout))
         if result.exitCode != 0 && result.stdout.isEmpty {
             return "No matches found"
         }
@@ -1392,7 +1677,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     /// Run a shell command from a safe allowlist. Rejects dangerous characters
     /// and commands not in the allowlist.
-    func runShell(command: String) -> String {
+    func runShell(command: String, timeout: Int = 15) -> String {
         if command.isEmpty {
             return "Error: no command"
         }
@@ -1445,7 +1730,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
 
         let restArgs = Array(tokens.dropFirst())
-        let result = runProcess(launchPath: resolved, arguments: restArgs, timeout: 15)
+        let result = runProcess(launchPath: resolved, arguments: restArgs, timeout: TimeInterval(timeout))
 
         if result.exitCode != 0 {
             let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1489,7 +1774,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     /// Execute AppleScript directly. Arguments are passed to osascript without
     /// a shell, and script features that could bypass the command cage are denied.
-    func runAppleScript(script: String) -> String {
+    func runAppleScript(script: String, timeout: Int = 15) -> String {
         let source = script.trimmingCharacters(in: .whitespacesAndNewlines)
         if source.isEmpty { return "Error: no AppleScript provided" }
         if source.count > 10_000 || source.contains("\0") {
@@ -1504,7 +1789,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return "Error: AppleScript contains denied operation '\(match)'"
         }
 
-        let result = runProcess(launchPath: "/usr/bin/osascript", arguments: ["-e", source], timeout: 15)
+        let result = runProcess(launchPath: "/usr/bin/osascript", arguments: ["-e", source], timeout: TimeInterval(timeout))
         if result.exitCode != 0 {
             let error = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return "Error running AppleScript: \(error.isEmpty ? "osascript failed" : error)"
@@ -1536,18 +1821,18 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     }
 
     /// Run an exact Shortcut name without shell interpolation.
-    func runShortcut(name: String, input: String?) -> String {
+    func runShortcut(name: String, input: String?, timeout: Int = 60) -> String {
         let shortcutName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if shortcutName.isEmpty || shortcutName.count > 255 || shortcutName.contains("\0") {
             return "Error: invalid shortcut name"
         }
 
-        var payload: [String: Any] = ["name": shortcutName, "timeout": 60]
+        var payload: [String: Any] = ["name": shortcutName, "timeout": timeout]
         if let input, !input.isEmpty {
             guard input.utf8.count <= 100_000 else { return "Error: shortcut input is too large" }
             payload["input"] = input
         }
-        if let response = callAqua(command: "run_shortcut", payload: payload, timeout: 60),
+        if let response = callAqua(command: "run_shortcut", payload: payload, timeout: TimeInterval(timeout)),
            let ok = response["ok"] as? Bool {
             if ok, let output = response["output"] as? String {
                 return output.isEmpty ? "done" : String(output.prefix(20_000))
@@ -1566,7 +1851,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let result = runProcess(
             launchPath: "/usr/bin/shortcuts",
             arguments: arguments,
-            timeout: 60,
+            timeout: TimeInterval(timeout),
             standardInput: standardInput
         )
         if result.exitCode != 0 {
@@ -2005,7 +2290,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     }
 
     /// Search for files by name pattern in a directory using FileManager.
-    func searchLocalFiles(pattern: String, path: String) -> String {
+    func searchLocalFiles(pattern: String, path: String, timeout: Int = 15) -> String {
         if pattern.isEmpty { return "Error: no search pattern provided" }
 
         let resolvedPath: String
@@ -2028,6 +2313,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
         let loweredPattern = pattern.lowercased()
         var matches: [String] = []
+        let deadline = Date().addingTimeInterval(TimeInterval(timeout))
         let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
         guard let enumerator = FileManager.default.enumerator(
             at: URL(fileURLWithPath: resolvedPath),
@@ -2038,6 +2324,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
         for case let url as URL in enumerator {
             if matches.count >= 50 { break }
+            if Date() > deadline { break }
             let name = url.lastPathComponent.lowercased()
             if name.contains(loweredPattern) {
                 matches.append(url.path)

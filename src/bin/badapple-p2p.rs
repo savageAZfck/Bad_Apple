@@ -360,27 +360,28 @@ fn pull_model(peer_id: &str, model_id: &str) -> Result<()> {
 }
 
 fn send_model(peer_id: &str, model_id: &str) -> Result<()> {
-    // `send` starts a server and advertises that the named peer can pull.
-    // This keeps the protocol symmetric: a model always moves from a listening
-    // sender to an active puller.
+    // `send` now actively pushes a model to a listening peer.
     let peer_id = peer_id.to_string();
     let model_id = model_id.to_string();
     with_runtime(move || {
         let rt = Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             let svc = transfer_service()?;
-            svc.scan_and_advertise(hostname()).await?;
-            let manifests = svc.advertised_manifests().await;
-            if !manifests.iter().any(|m| m.model_id == model_id) {
-                anyhow::bail!("model {model_id} not found in {}", model_dir().display());
+            let peer_addr = if peer_id.contains(':') {
+                peer_id
+            } else {
+                format!("{peer_id}:9878")
+            };
+            match svc.push(&peer_addr, &model_id).await {
+                Ok(()) => {
+                    println!("{{\"status\": \"ok\", \"peer\": \"{peer_addr}\", \"model\": \"{model_id}\"}}");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("{{\"status\": \"error\", \"message\": \"{e:#}\"}}");
+                    std::process::exit(1);
+                }
             }
-            let port = std::env::var("BADAPPLE_P2P_TRANSFER_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(9878);
-            let (addr, handle) = svc.serve(port).await?;
-            println!("{{\"status\": \"serving\", \"peer\": \"{peer_id}\", \"model\": \"{model_id}\", \"addr\": \"{addr}\", \"message\": \"peer should run: badapple-p2p pull {addr} {model_id}\"}}");
-            handle.await?
         })
     })
 }

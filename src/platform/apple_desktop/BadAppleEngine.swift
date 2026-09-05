@@ -698,8 +698,8 @@ final class BadAppleEngine: @unchecked Sendable {
                 )
                 let output: String
                 switch policyEngine.evaluate(toolName: call.name, args: call.args) {
-                case .denied:
-                    output = "That action is blocked by your safety settings."
+                case .denied(let reason):
+                    output = "Policy: \(reason)"
                 case .needsApproval:
                     let id = createApproval(name: call.name, args: call.args)
                     auditLedger.append(
