@@ -654,7 +654,8 @@ async fn send_frame<S>(stream: &mut S, cipher: &P2PCipher, frame: TransferFrame)
 where
     S: AsyncWrite + Unpin,
 {
-    let plaintext = bincode::serialize(&frame)?;
+    let mut plaintext = Vec::new();
+    ciborium::into_writer(&frame, &mut plaintext)?;
     let ciphertext = cipher
         .encrypt(&plaintext)
         .map_err(|e| anyhow!("encrypt failed: {e}"))?;
@@ -680,7 +681,7 @@ where
     let plaintext = cipher
         .decrypt(&ciphertext)
         .map_err(|e| anyhow!("decrypt failed: {e}"))?;
-    let frame = bincode::deserialize(&plaintext)?;
+    let frame: TransferFrame = ciborium::from_reader(&mut plaintext.as_slice())?;
     Ok(frame)
 }
 

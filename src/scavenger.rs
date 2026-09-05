@@ -1,18 +1,19 @@
 //! APFS file scavenger: watches a local directory, chunks text files,
 //! tokenizes each chunk through the Qwen tokenizer, looks up token vectors
 //! in the memory-mapped 622 MB FP16 embedding table, and persists the
-//! chunked text, metadata hashes, token IDs, and vector state to Sled.
+//! chunked text, metadata hashes, token IDs, and vector state to redb.
 //!
 //! All processing is local and offline: no network sockets are opened and
 //! the only external I/O is to the filesystem, tokenizer, embedding table,
-//! and Sled database.
+//! and redb database.
 
+use crate::redb_kv;
 use anyhow::{anyhow, Context, Result};
 use half::f16;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use redb::Database;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sled::Db;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -238,7 +239,7 @@ pub struct Scavenger {
     config: ScavengerConfig,
     tokenizer: Arc<Tokenizer>,
     embeddings: Arc<EmbeddingTable>,
-    db: Arc<Db>,
+    db: Arc<Database>,
 }
 
 impl Scavenger {
@@ -250,11 +251,11 @@ impl Scavenger {
             }
         }
 
-        // Reset a corrupted Sled tree on request. This is intended for initial
+        // Reset a corrupted redb tree on request. This is intended for initial
         // installs where the strategy/scavenger DB has become unreadable.
         if config.reset_db && config.sled_db_path.exists() {
             tracing::info!(
-                "scavenger resetting Sled database at {}",
+                "scavenger resetting redb database at {}",
                 config.sled_db_path.display()
             );
             let _ = fs::remove_dir_all(&config.sled_db_path);
@@ -273,27 +274,27 @@ impl Scavenger {
             config.vocab_size,
         )?);
 
-        // Open Sled, recovering from corruption if necessary by deleting the
+        // Open redb, recovering from corruption if necessary by deleting the
         // directory and trying once more. This prevents the daemon from giving
         // up on the whole subsystem because of a stale corrupted tree.
-        let db = match sled::open(&config.sled_db_path) {
+        let db = match redb_kv::open(&config.sled_db_path) {
             Ok(db) => db,
             Err(error) => {
                 tracing::warn!(
-                    "scavenger Sled open failed ({}); removing and retrying",
+                    "scavenger redb open failed ({}); removing and retrying",
                     error
                 );
                 let _ = fs::remove_dir_all(&config.sled_db_path);
-                sled::open(&config.sled_db_path).with_context(|| {
+                redb_kv::open(&config.sled_db_path).with_context(|| {
                     format!(
-                        "unable to open Sled database at {}",
+                        "unable to open redb database at {}",
                         config.sled_db_path.display()
                     )
                 })?
             }
         };
 
-        // Log disk headroom for the Sled database before we start writing.
+        // Log disk headroom for the redb database before we start writing.
         if let Some((free_mb, total_mb)) = disk_headroom_mb(&config.sled_db_path) {
             tracing::info!(
                 "scavenger disk headroom: {} MB free / {} MB total",
@@ -515,10 +516,9 @@ impl Scavenger {
     }
 
     fn write_path_catalog(&self) -> Result<()> {
-        let mut paths = self
-            .db
-            .scan_prefix(METADATA_PREFIX)
-            .filter_map(std::result::Result::ok)
+        let mut paths = redb_kv::scan_prefix(&self.db, METADATA_PREFIX)
+            .unwrap_or_default()
+            .into_iter()
             .filter_map(|(_, raw)| serde_json::from_slice::<FileMetadata>(&raw).ok())
             .map(|metadata| metadata.path)
             .collect::<Vec<_>>();
@@ -541,18 +541,17 @@ impl Scavenger {
     fn purge_file(&self, path: &Path) {
         let path_key = path_key(path);
         let meta_key = meta_key(&path_key);
-        {
-            if let Ok(Some(raw)) = self.db.get(&meta_key) {
-                if let Ok(meta) = serde_json::from_slice::<FileMetadata>(&raw) {
-                    for i in 0..meta.chunk_count {
-                        let chunk_key = chunk_key(&path_key, i);
-                        let _ = self.db.remove(chunk_key);
-                    }
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        if let Ok(Some(raw)) = redb_kv::get(&self.db, &meta_key) {
+            if let Ok(meta) = serde_json::from_slice::<FileMetadata>(&raw) {
+                for i in 0..meta.chunk_count {
+                    keys.push(chunk_key(&path_key, i));
                 }
             }
-            let _ = self.db.remove(&meta_key);
-            let _ = self.db.flush();
         }
+        keys.push(meta_key);
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let _ = redb_kv::remove_many(&self.db, &key_refs);
         tracing::info!("scavenger purged {}", path.display());
     }
 
@@ -610,7 +609,7 @@ impl Scavenger {
         let current_hash = content_hash_bytes(text.as_bytes());
 
         // Skip if unchanged.
-        if let Ok(Some(raw)) = self.db.get(&meta_key) {
+        if let Ok(Some(raw)) = redb_kv::get(&self.db, &meta_key) {
             if let Ok(meta) = serde_json::from_slice::<FileMetadata>(&raw) {
                 if meta.content_hash == current_hash {
                     return Ok(());
@@ -624,24 +623,25 @@ impl Scavenger {
         let chunks = self.chunk_text(&text);
         let chunk_count = chunks.len();
 
-        // Isolate all Sled writes in a block and force a flush before releasing
-        // the page locks back to the OS kernel.
-        {
-            for (i, chunk_text) in chunks.iter().enumerate() {
-                let record = self.embed_chunk(path, mtime, i, chunk_text)?;
-                let key = chunk_key(&path_key, i);
-                let value = serde_json::to_vec(&record)?;
-                self.db.insert(key, value)?;
-            }
-
-            let metadata = FileMetadata {
-                path: path.to_string_lossy().into_owned(),
-                content_hash: current_hash,
-                chunk_count,
-            };
-            self.db.insert(&meta_key, serde_json::to_vec(&metadata)?)?;
-            self.db.flush()?;
+        // Batch all redb writes for this file into a single transaction.
+        let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(chunk_count + 1);
+        for (i, chunk_text) in chunks.iter().enumerate() {
+            let record = self.embed_chunk(path, mtime, i, chunk_text)?;
+            let key = chunk_key(&path_key, i);
+            let value = serde_json::to_vec(&record)?;
+            items.push((key, value));
         }
+        let metadata = FileMetadata {
+            path: path.to_string_lossy().into_owned(),
+            content_hash: current_hash,
+            chunk_count,
+        };
+        items.push((meta_key, serde_json::to_vec(&metadata)?));
+        let item_refs: Vec<(&[u8], &[u8])> = items
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
+        redb_kv::insert_many(&self.db, &item_refs)?;
 
         tracing::info!(
             "scavenger indexed {} -> {} chunks",
@@ -871,8 +871,8 @@ fn chunk_key(path_key: &str, index: usize) -> Vec<u8> {
 }
 
 /// Return the number of records whose keys start with `prefix`.
-fn count_with_prefix(db: &sled::Db, prefix: &[u8]) -> usize {
-    db.scan_prefix(prefix).count()
+fn count_with_prefix(db: &Database, prefix: &[u8]) -> usize {
+    redb_kv::count_prefix(db, prefix).unwrap_or_default()
 }
 
 /// Return the free / total space in megabytes for the disk holding `path`.

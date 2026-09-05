@@ -33,6 +33,7 @@ pub mod p2p_model;
 pub mod production_blueprint;
 pub mod protocol;
 pub mod red_team;
+pub mod redb_kv;
 pub mod scavenger;
 pub mod simd;
 pub mod strategy_library;

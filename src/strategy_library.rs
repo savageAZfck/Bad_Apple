@@ -1,11 +1,14 @@
 //! Durable strategy cache for the Bad Apple agent.
 //!
 //! A strategy is a proven tool template keyed by a problem signature (typically
-//! a goal string or a domain). The library is backed by Sled so strategies
+//! a goal string or a domain). The library is backed by redb so strategies
 //! survive restarts, and it exposes a policy-improvement interface for pruning
 //! low-reliability templates.
 
 use crate::production_blueprint::{CausalGraph, CausalRelation};
+use crate::redb_kv;
+use anyhow::Result;
+use redb::Database;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -48,19 +51,19 @@ impl Strategy {
     }
 }
 
-/// Sled-backed strategy library.
+/// redb-backed strategy library.
 #[derive(Clone)]
 pub struct StrategyLibrary {
-    db: Arc<sled::Db>,
+    db: Arc<Database>,
     /// Causal graph that records how strategies relate to system assets and
     /// constraints.  Shared across clones of the library.
     causal_graph: Arc<Mutex<CausalGraph>>,
 }
 
 impl StrategyLibrary {
-    /// Open or create the Sled database at the given path.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, sled::Error> {
-        let db = sled::open(path)?;
+    /// Open or create the redb database at the given path.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let db = redb_kv::open(path.as_ref())?;
         Ok(Self {
             db: Arc::new(db),
             causal_graph: Arc::new(Mutex::new(CausalGraph::bad_apple_default())),
@@ -71,7 +74,7 @@ impl StrategyLibrary {
     pub async fn get(&self, key: &str) -> Option<Strategy> {
         let db = Arc::clone(&self.db);
         let key = key.to_string();
-        match spawn_blocking(move || db.get(key.as_bytes())).await {
+        match spawn_blocking(move || redb_kv::get(&db, key.as_bytes())).await {
             Ok(Ok(Some(bytes))) => serde_json::from_slice(&bytes).ok(),
             _ => None,
         }
@@ -86,7 +89,7 @@ impl StrategyLibrary {
         let db = Arc::clone(&self.db);
         let bytes = serde_json::to_vec(strategy)?;
         let key = strategy.key.clone();
-        spawn_blocking(move || db.insert(key.as_bytes(), bytes).map(|_| ())).await??;
+        spawn_blocking(move || redb_kv::insert(&db, key.as_bytes(), &bytes)).await??;
 
         if let Ok(mut graph) = self.causal_graph.lock() {
             graph.add_relation(&strategy.key, CausalRelation::Enables, &strategy.problem);
@@ -106,7 +109,7 @@ impl StrategyLibrary {
     pub async fn remove(&self, key: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let db = Arc::clone(&self.db);
         let key = key.to_string();
-        spawn_blocking(move || db.remove(key.as_bytes()).map(|_| ())).await??;
+        spawn_blocking(move || redb_kv::remove(&db, key.as_bytes())).await??;
         Ok(())
     }
 
@@ -115,7 +118,7 @@ impl StrategyLibrary {
         let db = Arc::clone(&self.db);
         spawn_blocking(move || {
             let mut out = Vec::new();
-            for (_, value) in db.iter().flatten() {
+            for (_, value) in redb_kv::iter(&db).unwrap_or_default() {
                 if let Ok(s) = serde_json::from_slice::<Strategy>(&value) {
                     if s.reliability < threshold {
                         out.push(s);
@@ -149,7 +152,7 @@ impl StrategyLibrary {
         spawn_blocking(move || {
             let mut best: Option<Strategy> = None;
             let mut best_score = 0.0;
-            for (_, value) in db.iter().flatten() {
+            for (_, value) in redb_kv::iter(&db).unwrap_or_default() {
                 if let Ok(s) = serde_json::from_slice::<Strategy>(&value) {
                     let s_lower = s.problem.to_lowercase();
                     let mut score =

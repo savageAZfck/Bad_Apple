@@ -8,15 +8,12 @@ targets = [
 ]
 
 [advisories]
-# The pinned `candle-core`, `tokenizers`, `sled`, and `cbindgen` ecosystems
-# carry several transitive unmaintained crates that have no safe upgrade path
-# today. Ignored here with explicit reasons for acquisition transparency.
+# The pinned `candle-core`, `metal`, `tokenizers`, and `wasmi` ecosystems carry
+# one remaining transitive unmaintained proc-macro (`paste`) that has no safe
+# upgrade path today without migrating those larger crates. The sled/bincode
+# advisories were resolved by replacing sled with redb and bincode with ciborium.
 ignore = [
-    { id = "RUSTSEC-2024-0375", reason = "atty is a transitive dep of cbindgen 0.26 build; no safe upgrade available" },
-    { id = "RUSTSEC-2025-0057", reason = "fxhash is a transitive dep of sled 0.34; no safe upgrade available" },
-    { id = "RUSTSEC-2024-0384", reason = "instant is a transitive dep of sled 0.34 via parking_lot; no safe upgrade available" },
-    { id = "RUSTSEC-2025-0119", reason = "number_prefix is a transitive dep of tokenizers 0.15 via indicatif; no safe upgrade available" },
-    { id = "RUSTSEC-2024-0436", reason = "paste is a transitive proc-macro dep of candle-core 0.10.2 and tokenizers; no safe upgrade available" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is a transitive proc-macro dep of candle-core 0.10.2/gemm/pulp, metal 0.29, tokenizers 0.22.2, and wasmi_core 0.35; removing it requires migrating the gatekeeper Candle brain, Metal UMA, tokenizer, and WASM cage to newer crates" },
 ]
 
 [licenses]
