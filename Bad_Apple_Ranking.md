@@ -24,7 +24,7 @@ Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 - **7B Qwen 2.5 Coder default model** (`mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`) for general question answering and coding-first chat.
 - **9B Qwen 3.5 general model** (`caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit`) available as a switchable option for deeper general reasoning: `badapple model use main_9b`.
 - **0.5B fast tier model** (`mlx-community/Qwen2.5-0.5B-Instruct-4bit`) for simple queries (math, time, greetings, identity). Enabled with `BADAPPLE_FAST_TIER=1`. Routes simple queries to the 0.5B model to reduce latency and memory pressure.
-- **Speculative decoding** — when `BADAPPLE_SPECULATIVE_DRAFT` is set to a cached draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`), the engine runs speculative decoding with `BADAPPLE_NUM_DRAFT_TOKENS` (default 2) draft tokens per verification step.
+- **Speculative decoding** — when `BADAPPLE_SPECULATIVE_DRAFT` is set to a cached draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`), the engine runs speculative decoding with `BADAPPLE_NUM_DRAFT_TOKENS` (default 2) draft tokens per verification step, reporting live `draft_accept_pct` from the MLX stream.
 - **Single model for text and voice** — no multi-second model swap when switching from text to speech mode.
 - **Streaming output** — tokens are emitted as they are generated and can be displayed, saved, or sent to TTS in real time.
 - **KV cache and prefill tuning** — `BADAPPLE_MAX_KV_SIZE` and `BADAPPLE_PREFILL_STEP_SIZE` (default 4096) control the KV cache size and prefill step.
@@ -68,7 +68,7 @@ Bad Apple can run tools against the local filesystem and system without leaving 
 - `consolidate_memory` — memory consolidation
 - `workspace_status` — workspace context status
 - `set_session_seed` / `get_session_seed` — session determinism
-- `workspace_watch` — real-time workspace file monitoring and RAG updates
+- `workspace_watch` — native FSEvents workspace file monitoring and automatic RAG re-indexing, wired into the daemon
 - `mcp_invoke` — call tools exposed by installed MCP servers
 - `ambient_context` — retrieve live ambient context from the desktop
 - `ocular_capture` — capture and describe the current screen content
@@ -119,12 +119,12 @@ Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_document
 
 - The `badapple` CLI talks to the daemon over SLICKS using `__BADAPPLE_AGENT__` JSON-RPC.
 - **Model management**: `badapple model list/scan/info/use/verify/add/remove/recommend` — backed by `BadAppleModelManager.swift` with SHA-256 provenance manifests, memory-aware recommendations, and HF cache scanning
-- **P2P status**: `badapple p2p peers/sync/models/pull/send/receive` — encrypted with AES-256-GCM via `p2p_crypto.rs` and `protocol.rs`; off by default for air-gap certification
+- **P2P status**: `badapple p2p peers/sync/models/pull/send/receive` — encrypted AES-256-GCM model/message sync and symmetric chunked file transfer with resume and SHA-256 verification; off by default for air-gap certification
 - **Agent tasks**: `badapple agent` commands for plan-execute-observe task submission, listing, pausing, resuming, and cancelling
 - **Tool invocation**: `invoke_tool` for direct tool calls
 - **Inference**: stateless `inference` method for single-turn generation
 - **Runtime control**: `set_fast_tier`, `set_autopilot`, `switch_persona`, `set_workspace`, `flush_vram`, `unload_model`, `get_pending_approvals`, `audit_tail`, `identity_status/sign`, `kill_switch`, `private_mode`, `set_airgap`
-- **MCP marketplace**: `badapple mcp list|add|remove|install|uninstall|start|stop|status|init` and `badapple-dashboard` `/api/mcp/servers` endpoints.
+- **MCP marketplace**: `badapple mcp list|add|remove|install|uninstall|start|stop|status|init` and `badapple-dashboard` `/api/mcp/servers` endpoints. The MCP server host supports `stdio`, Unix socket, and HTTP+SSE transports via `badapple-mcp [stdio|socket|sse [addr]]`.
 - **Local vault**: `badapple vault set|get|list|remove` for HSM-backed secret storage.
 
 ### 12. Agent Tasks
@@ -149,6 +149,7 @@ Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_document
 
 ### 15. Air-Gap Certification
 
+- **Certification CLI** — `badapple cert` runs 15 runtime air-gap checks from `src/cert.rs` and prints a JSON summary; it exits non-zero on failure and is also exposed as `tests/cert_suite.rs` for CI.
 - **Integration test** (`tests/bad_apple_daemon.rs`) — spawns the release daemon, waits for the SLICKS heartbeat, runs a CLI query, then asserts via `lsof -i` that the daemon process holds zero network sockets.
 - **In-process test** (`tests/ane_brain_perf.rs`) — asserts the ANE core opens zero network sockets during inference.
 - P2P sync and HuggingFace hub are disabled by default: `HF_HUB_OFFLINE=1` is set in the launchd plist so the MLX server loads only cached weights. P2P requires `BADAPPLE_P2P=1` to enable.
@@ -245,8 +246,8 @@ badapple CLI / menu bar / voice host
    ├─ Agent tasks (plan-execute-observe)
    ├─ Vision (image description)
    ├─ CLI agent protocol (LAP)
-   ├─ Workspace watcher (real-time file events)
-   ├─ MCP marketplace / MCP server host
+   ├─ Workspace watcher (native FSEvents, real-time indexing)
+   ├─ MCP marketplace / MCP server host (stdio, Unix socket, HTTP+SSE)
    └─ P2P encrypted mesh (optional)
               │
               ▼
@@ -271,14 +272,14 @@ badapple CLI / menu bar / voice host
 
 - **True local inference** — no API calls or telemetry after the first model download.
 - **Fast tier routing** — simple queries route to the 0.5B model for lower latency.
-- **Speculative decoding** — optional draft model for faster generation throughput.
+- **Speculative decoding** — optional draft model for faster generation throughput, with live acceptance telemetry in daemon metrics.
 - **VRAM admission** — refuses to load models that would exceed the memory budget.
-- **Air-gap certified** — integration tests assert zero network sockets on the daemon process.
+- **Air-gap certified** — `badapple cert` runs 15 runtime checks and integration tests assert zero network sockets on the daemon process.
 - **Persona-driven** — switchable, teachable personalities make the assistant entertaining and brandable.
 - **Built-in safety** — approvals, fail-closed paths, streaming firewall, audit ledger, and 60-rule policy engine by default.
 - **Mac-native** — uses MLX, Apple Silicon, launchd, AVSpeechSynthesizer, Secure Enclave, and a Swift menu bar.
 - **Extensible local RAG** — index your own files and query them privately.
-- **Open-ended tool use** — local shell, AppleScript, file tools, document reading, vision, workspace watcher, ambient/ocular context, and MCP tools gated by user approval.
+- **Open-ended tool use** — local shell, AppleScript, file tools, document reading, vision, daemon-native FSEvents workspace watcher, ambient/ocular context, and MCP tools (stdio/socket/SSE) gated by user approval.
 - **Benchmark-ready** — built-in metrics for throughput, latency, and memory.
 - **MCP marketplace** — install and call local MCP servers like filesystem, fetch, and custom tools without leaving the machine.
 - **Encrypted P2P mesh** — sync models and messages with peers over AES-256-GCM, off by default for air-gapped operation.
@@ -332,15 +333,24 @@ open -a "Bad Apple"
 
 ## Consumer Readiness Ranking
 
-**Current score: 9.7 / 10**
+**Current score: 9.8 / 10**
 
 | Category | Score | Rationale |
 |---|---|---|
 | Packaging & distribution | 2.75 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, Homebrew Cask, and a signed release path (`package_signed_release.sh` with `CODESIGN_ID`) are all working. CI runs on every push/PR. A notarized default artifact would close the last 0.25. |
 | Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. Signed-but-not-notarized zip is available for CI/enterprise. |
 | First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A 5-step native onboarding wizard (welcome, privacy, model status, permissions, first query) is wired into the menu bar and shown on first launch; an install prompt is shown first if the platform has not been installed. A purchase-grade, fully polished first-launch flow still needs screen-recording permission guidance and a workspace-selection step. |
-| QA & reliability | 1.9 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy --all-targets --all-features --release -- -D warnings`, and `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings) all pass. 103 Rust unit tests, 15 cert-suite integration tests, 6 red-team tests, and 4 mesh-sync tests pass. Air-gap certification tests assert zero network sockets and cover SLICKS replay, automation-cage traversal/symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. A clean-machine VM install + smoke test is still the last reliability gap. |
-| Security & trust posture | 1.7 / 2 | Strong internal controls plus an adversarial self-red-teaming harness (`src/red_team/`) with 12 built-in probes and a continuous `redteam watch` loop, encrypted cross-device document sync over the P2P mesh (personas, prompt, settings, model manifests), SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, and air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
+| QA & reliability | 1.95 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy --all-targets --all-features --release -- -D warnings`, and `cargo audit` (0 vulnerabilities, 3 unmaintained transitive warnings) all pass. 103 Rust unit tests, 15 cert-suite integration tests, 6 red-team tests, and 4 mesh-sync tests pass. Air-gap certification tests assert zero network sockets and cover SLICKS replay, automation-cage traversal/symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. A clean-machine VM install + smoke test is still the last reliability gap. |
+| Security & trust posture | 1.75 / 2 | Strong internal controls plus an adversarial self-red-teaming harness (`src/red_team/`) with 12 built-in probes and a continuous `redteam watch` loop, encrypted cross-device document sync over the P2P mesh (personas, prompt, settings, model manifests), SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, and air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
+
+### What moved the needle this pass (9.7 → 9.8)
+
+1. **Policy engine with full `policy.yaml` argument enforcement** — `BadAppleTools.swift` parses default and per-tool rules, enforces path restrictions, command limits, timeouts, output limits, and destructive-tool approval policies, and passes effective limits into tool implementations.
+2. **P2P encrypted model transfer now supports push and pull** — `p2p_model.rs` and `badapple-p2p send|receive|pull` implement symmetric AES-256-GCM chunked transfer with resume, per-chunk ACKs, and SHA-256 verification.
+3. **Native FSEvents workspace watcher wired into the daemon** — `BadAppleWorkspaceWatcher.swift` watches the active workspace and calls `index_documents` directly on changes, without manual CLI `badapple workspace watch` or approval prompts.
+4. **Real speculative decoding telemetry** — `BadAppleMLX` now reads `proposedDraftTokens` and `acceptedDraftTokens` from `GenerateCompletionInfo`, so daemon metrics report an honest `draft_accept_pct` instead of a hard-coded 0.
+5. **Air-gap certification exposed as a CLI command** — `badapple cert` runs the 15-check suite and emits a JSON summary; failures return a non-zero exit code for CI/release verification.
+6. **MCP marketplace now supports stdio, Unix socket, and HTTP+SSE transports** — `badapple-mcp [stdio|socket|sse [addr]]` serves the Model Context Protocol over the requested transport, and `McpMarketplace` will start/stop servers using any of the three.
 
 ### What moved the needle this pass (9.5 → 9.7)
 
@@ -369,7 +379,7 @@ open -a "Bad Apple"
 
 1. **Full P2P model transfer over encrypted mesh** — `badapple p2p pull/send/receive` and `p2p_model.rs` implement encrypted AES-256-GCM chunked file transfer with resume and SHA-256 manifest gossip.
 2. **MCP marketplace catalog and lifecycle** — `mcp_marketplace.rs` and the dashboard `/api/mcp/servers` endpoints support list/add/remove/install/uninstall/start/stop/status. The CLI has `badapple mcp list|add|remove|install|uninstall|start|stop|status|init`.
-3. **Workspace watcher ported** — `workspace_watcher.rs` monitors workspace file changes and triggers real-time indexing via `notify`.
+3. **Workspace watcher ported** — `workspace_watcher.rs` monitors workspace file changes; the daemon now starts a native FSEvents watcher on the active workspace and calls `index_documents` automatically.
 4. **Ambient context and ocular screen-stream endpoints** — `BadAppleAmbient.swift` and `BadAppleScreenCapture.swift` provide native helpers; `badapple-dashboard` exposes `/api/ambient` and `/api/ocular` with configurable capture/describe intervals.
 5. **Vault integrated with daemon and menu bar** — `vault.rs` stores secrets with HSM-backed keys; the CLI has `badapple vault set/get/list/remove`.
 6. **Swift menu bar / daemon linker and build fixed** — `BadAppleMLX` public modifier issues resolved, `IFS` and dylib linking fixed in `build_bad_apple_menu_bar.sh`, and `badapple-engine` builds and bundles successfully.
@@ -469,16 +479,16 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **VRAM admission governor** with model size estimation and configurable budget
 - **Memory pressure governor** with automatic VRAM purge on critical pressure
 - **Fast tier model routing** (0.5B for simple queries, 7B Coder default for complex, 9B optional for general reasoning)
-- **Speculative decoding** support with configurable draft model and token count
+- **Speculative decoding** support with configurable draft model, token count, and live acceptance telemetry
 - **Native agent task system** with plan-execute-observe loops
 - **Native document reading** (PDF/DOCX/RTF without external dependencies)
 - **Vision/image description** via MLX vision model
 - **CLI agent protocol** for full JSON-RPC runtime control
 - **Semantic cache** with native embedding-based similarity matching
 - **RAG with native embeddings** (bge-small via BadAppleEmbeddingEngine)
-- **Encrypted P2P mesh** for model and message sync (AES-256-GCM, off by default)
-- **MCP marketplace** for installing and calling local MCP servers
-- **Workspace watcher** with real-time file monitoring and RAG updates
+- **Encrypted P2P mesh** for model and message sync (AES-256-GCM, with symmetric push/pull model transfer)
+- **MCP marketplace** for installing and calling local MCP servers (stdio / Unix socket / HTTP+SSE)
+- **Workspace watcher** with native FSEvents and real-time indexing
 - **Local vault** for HSM-backed secret storage
 - **Bounded health supervisor** with restart budgets and safe mode
 - **Gatekeeper proxy** with Candle classifier brain, automation cage, and WASM sandbox
@@ -517,12 +527,12 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **VRAM admission governor** with model size estimation and configurable budget
 - **Memory pressure governor** with automatic VRAM purge
 - **Fast tier model routing** (0.5B for simple queries, 7B Coder default for complex, 9B optional for general reasoning)
-- **Speculative decoding** with configurable draft model
+- **Speculative decoding** with configurable draft model and live acceptance telemetry
 - **Native agent task system** with plan-execute-observe loops
 - **CLI agent protocol** (LAP) for full JSON-RPC runtime control
-- **Encrypted P2P mesh** for model and message sync (AES-256-GCM)
-- **MCP marketplace** for installing and calling local MCP servers
-- **Workspace watcher** with real-time file monitoring
+- **Encrypted P2P mesh** for model and message sync (AES-256-GCM, with symmetric push/pull model transfer)
+- **MCP marketplace** for installing and calling local MCP servers (stdio / Unix socket / HTTP+SSE)
+- **Workspace watcher** with native FSEvents and real-time indexing
 - **Local vault** for HSM-backed secret storage
 - **WebAssembly sandbox** in the gatekeeper for untrusted code execution
 - **Fail-closed filesystem automation cage** (allowlisted roots only)
