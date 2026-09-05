@@ -536,7 +536,7 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **Local vault** for HSM-backed secret storage
 - **WebAssembly sandbox** in the gatekeeper for untrusted code execution
 - **Fail-closed filesystem automation cage** (allowlisted roots only)
-- **APFS file scavenger** module with tokenized chunking and Sled persistence
+- **APFS file scavenger** module with tokenized chunking and redb persistence
 - **128 Rust/cert/mesh/red-team tests (103 unit + 15 cert-suite + 4 mesh-sync + 6 red-team)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 ### Notarization stance
