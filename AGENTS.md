@@ -352,6 +352,9 @@ cargo clippy --release
 - Signed packaging is supported via `src/platform/apple_desktop/package_signed_release.sh` with `CODESIGN_ID`. Self-signed dev certificates can be created with `src/platform/apple_desktop/create_dev_signing_cert.sh`. Notarization requires an Apple Developer ID.
 - Workspace file watching, MCP marketplace, dashboard ambient context, and ocular screen-stream endpoints are now available. Automatic fact extraction is being ported to Rust/Swift and is not currently available.
 - Persona editor, dashboard, and control-center UI are being ported to the Swift menu bar and are not currently available from the web.
+- `curious_self_improve` is a native tool that runs a bounded self-check (cert suite, doctor, output firewall, git status, and source TODO/FIXME/HACK/XXX scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger it with `target/release/badapple "curious check"`.
+- Curious autopilot: when the active persona is `curious` and autopilot is on, the engine runs `curious_self_improve` on a loop. Set the interval in seconds with `BADAPPLE_CURIOUS_INTERVAL` (default 300; 0 disables).
+- Tool prompts are now generated in plain English with a concrete `<tool_call>` example for each relevant tool, and the executor recognizes common 7B-model misnames (e.g. `add_output_firewall_pattern` -> `update_output_firewall`, `run_diagnostics` -> `self_audit`).
 
 ## New web UI (SPA) and native splash
 
@@ -554,3 +557,12 @@ and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.
   responsible IDE process instead of Bad Apple. Use the registered LaunchAgent.
 - A successful native smoke test logs `Native Swift MLX engine loaded` and a
   Swift audit-ledger response with a nonzero `tps` value.
+
+## Latest hardening (this session)
+
+- `badapple-dashboard` now supports optional bearer-token auth via `BADAPPLE_DASHBOARD_TOKEN`. When set, all `/api/*` endpoints require `Authorization: Bearer <token>`; static/index routes remain open. The dashboard still binds to loopback only by default.
+- `BadAppleTools` exposes a new `self_audit` tool. When approved, it runs `badapple cert` and `badapple --doctor` and returns a JSON summary. It is wired into the tool keyword map for prompts like "run a self audit", "health check", or "cert suite".
+- `BadAppleTools` now has `inspect_output_firewall` (read-only) and `update_output_firewall` (add/remove a pattern and reload) tools. The engine injects its live `BadAppleOutputFirewall` instance into the tool executor so the model can inspect and update `/var/lib/bad_apple/blocklist.txt` at runtime.
+- `badapple-p2p` no longer has any hard-coded fallback secret. `BADAPPLE_P2P_SECRET` must be at least 32 bytes, or `BADAPPLE_SLICKS_KEY_PATH` must point to a non-empty key file. P2P output directories are validated to be absolute, `..`-free, and under `/var/lib/bad_apple` or `~/.bad_apple`.
+- `BadAppleTools.runShell` blocks execution-spawning `find` arguments (`-exec`, `-ok`, `;`, `{}`, `-delete`, `xargs`), and `runAppleScript` rejects additional bypass patterns (`do javascript`, `open location`, `keystroke`, `key code`, `current application`, `current application's`).
+- `BadAppleModelManager` no longer forces `HF_HUB_OFFLINE=0` during downloads; the daemon's `set_allow_downloads` handler defaults to off and respects the configured policy.

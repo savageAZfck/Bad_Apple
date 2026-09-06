@@ -17,12 +17,12 @@ struct BadAppleAmbient {
         var windowTitle = ""
         if let axApp = AXUIElementCreateApplication(app.processIdentifier) as AXUIElement? {
             var focusedWindow: AnyObject?
-            if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success {
-                if let window = focusedWindow as! AXUIElement? {
-                    var titleValue: AnyObject?
-                    if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success {
-                        windowTitle = titleValue as? String ?? ""
-                    }
+            if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
+               let v = focusedWindow, CFGetTypeID(v) == AXUIElementGetTypeID() {
+                let window = v as! AXUIElement
+                var titleValue: AnyObject?
+                if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success {
+                    windowTitle = titleValue as? String ?? ""
                 }
             }
         }

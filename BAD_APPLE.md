@@ -99,7 +99,7 @@ Bad Apple is a private, on-device AI assistant for macOS. It runs a 7B Qwen 2.5 
 
 When asked, it can say:
 
-> I can answer questions, run local tools, search files, write notes, run shell/AppleScript/Shortcuts, index documents, manage working memory, switch personas, speak, stream JSON, and run benchmarks — all on your Mac, babe.
+> I can answer questions, run local tools, search files, write notes, run shell/AppleScript/Shortcuts, index documents, manage working memory, switch personas, run a self-improvement check, speak, stream JSON, and run benchmarks — all on your Mac, babe.
 
 ## Features
 
@@ -124,6 +124,7 @@ When asked, it can say:
 - **Hash-chained audit ledger** (`/var/lib/bad_apple/ledger.jsonl`) with PII redaction
 - **Semantic cache** (`BAAI/bge-small-en-v1.5`) for instant repeated-answer hits
 - **Human-in-the-loop approvals** for destructive tools
+- **Bounded Curious self-improvement autopilot** — when `curious` persona is active and autopilot is on, the engine runs a local self-check (cert suite, doctor, output firewall, git status, source TODO/FIXME scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple "curious check"`.
 
 ### Tools (local, no cloud)
 

@@ -7,8 +7,10 @@
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Request, State},
+    http::header::AUTHORIZATION,
     http::StatusCode,
+    middleware::{from_fn_with_state, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
@@ -28,6 +30,7 @@ struct DashboardState {
     web_root: PathBuf,
     helpers: HelperPaths,
     ocular: Arc<RwLock<OcularState>>,
+    token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -92,14 +95,19 @@ fn main() -> Result<()> {
     }
 
     let helpers = helper_paths();
+    let token = std::env::var("BADAPPLE_DASHBOARD_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let state = Arc::new(DashboardState {
         web_root: web_root.clone(),
         helpers,
         ocular: Arc::new(RwLock::new(OcularState::new())),
+        token,
     });
 
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-    rt.block_on(run_server(port, web_root, state))
+    rt.block_on(run_server(port, state))
 }
 
 fn helper_paths() -> HelperPaths {
@@ -123,32 +131,56 @@ fn helper_paths() -> HelperPaths {
     }
 }
 
-async fn run_server(port: u16, web_root: PathBuf, state: Arc<DashboardState>) -> Result<()> {
-    let app = Router::new()
-        .route("/", get(index_handler))
-        .route("/api/status", get(status_handler))
+async fn require_token(
+    State(state): State<Arc<DashboardState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if let Some(expected) = &state.token {
+        let got = req
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+        if got != format!("Bearer {expected}") {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok(next.run(req).await)
+}
+
+async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
+    let api_state = state.clone();
+    let api = Router::new()
+        .route("/status", get(status_handler))
         .route(
-            "/api/models",
+            "/models",
             get(list_models_handler).post(models_action_handler),
         )
-        .route("/api/models/:id", get(model_info_handler))
-        .route("/api/models/:id/use", post(use_model_handler))
-        .route("/api/models/:id/verify", post(verify_model_handler))
-        .route("/api/agents", post(agents_action_handler))
-        .route("/api/chat", post(chat_handler))
-        .route("/api/p2p/peers", get(p2p_peers_handler))
-        .route("/api/p2p/sync", post(p2p_sync_handler))
-        .route("/api/p2p/models", get(p2p_models_handler))
-        .route("/api/p2p/pull", post(p2p_pull_handler))
-        .route("/api/p2p/send", post(p2p_send_handler))
-        .route("/api/mcp/servers", get(mcp_servers_handler))
-        .route("/api/mcp/servers", post(mcp_add_server_handler))
-        .route("/api/mcp/servers/:id", delete(mcp_remove_server_handler))
-        .route("/api/ambient", get(ambient_handler))
-        .route("/api/ocular", get(ocular_handler))
-        .route("/api/ocular", post(ocular_action_handler))
-        .route("/api/ocular/screen.png", get(ocular_screen_handler))
-        .nest_service("/static", ServeDir::new(web_root.join("static")))
+        .route("/models/:id", get(model_info_handler))
+        .route("/models/:id/use", post(use_model_handler))
+        .route("/models/:id/verify", post(verify_model_handler))
+        .route("/agents", post(agents_action_handler))
+        .route("/chat", post(chat_handler))
+        .route("/p2p/peers", get(p2p_peers_handler))
+        .route("/p2p/sync", post(p2p_sync_handler))
+        .route("/p2p/models", get(p2p_models_handler))
+        .route("/p2p/pull", post(p2p_pull_handler))
+        .route("/p2p/send", post(p2p_send_handler))
+        .route("/mcp/servers", get(mcp_servers_handler))
+        .route("/mcp/servers", post(mcp_add_server_handler))
+        .route("/mcp/servers/:id", delete(mcp_remove_server_handler))
+        .route("/ambient", get(ambient_handler))
+        .route("/ocular", get(ocular_handler))
+        .route("/ocular", post(ocular_action_handler))
+        .route("/ocular/screen.png", get(ocular_screen_handler))
+        .layer(from_fn_with_state(api_state.clone(), require_token))
+        .with_state(api_state);
+
+    let app = Router::new()
+        .route("/", get(index_handler))
+        .nest("/api", api)
+        .nest_service("/static", ServeDir::new(state.web_root.join("static")))
         .fallback(static_handler)
         .with_state(state);
 

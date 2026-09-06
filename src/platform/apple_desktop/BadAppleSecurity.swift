@@ -362,8 +362,10 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     }
 
     private static let redactionRules: [RedactionRule] = {
-        func rule(_ pattern: String, _ replacement: String) -> RedactionRule {
-            let regex = try! NSRegularExpression(pattern: pattern, options: [])
+        func rule(_ pattern: String, _ replacement: String) -> RedactionRule? {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+                return nil
+            }
             return RedactionRule(regex: regex, replacement: replacement)
         }
         return [
@@ -383,7 +385,7 @@ final class BadAppleAuditLedger: @unchecked Sendable {
             rule(#"[Bb]earer\s+[A-Za-z0-9_\-\.=]+"#, redactedBearer),
             // Long random-looking tokens (40+ alphanumeric / _ - chars).
             rule(#"[A-Za-z0-9_\-]{40,}"#, redactedToken),
-        ]
+        ].compactMap { $0 }
     }()
 
     // MARK: - Logging
@@ -562,6 +564,26 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
         lock.lock()
         patterns = combined
         lock.unlock()
+    }
+
+    /// Number of active patterns (built-in defaults + blocklist).
+    func totalPatternCount() -> Int {
+        snapshotPatterns().count
+    }
+
+    /// Number of built-in default patterns.
+    func defaultPatternCount() -> Int {
+        Self.defaultPatterns.count
+    }
+
+    /// Number of patterns loaded from the on-disk blocklist.
+    func blocklistPatternCount() -> Int {
+        totalPatternCount() - defaultPatternCount()
+    }
+
+    /// Read the raw on-disk blocklist file, or an empty string if it does not exist.
+    func blocklistContents() -> String {
+        (try? String(contentsOfFile: Self.blocklistPath, encoding: .utf8)) ?? ""
     }
 
     // MARK: - Public API

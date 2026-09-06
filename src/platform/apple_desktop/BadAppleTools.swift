@@ -606,12 +606,45 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: false
         ),
         BadAppleTool(
+            name: "inspect_output_firewall",
+            description: "Inspect the active output firewall: built-in default patterns, on-disk blocklist patterns, and the blocklist file path.",
+            parameters: [
+                .init(name: "show_patterns", description: "If 'true', include the on-disk blocklist patterns in the response. Default 'false'.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "update_output_firewall",
+            description: "Add or remove a pattern in the output firewall blocklist file and reload the active pattern set. Patterns must be 3-256 characters with no control characters or newlines.",
+            parameters: [
+                .init(name: "pattern", description: "The literal pattern to add or remove.", required: true),
+                .init(name: "action", description: "'add' (default) or 'remove'.", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
             name: "undo_last",
             description: "Undo the most recent user action by removing the last appended note or generated image.",
             parameters: [
                 .init(name: "kind", description: "What to undo: 'note' or 'image'. Default is 'note'.", required: false),
             ],
             requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "self_audit",
+            description: "Run the local cert suite and doctor diagnostic and return a JSON summary. Use this to verify Bad Apple's own security, health, and air-gap posture.",
+            parameters: [
+                .init(name: "include", description: "Comma-separated list: 'cert', 'doctor', or 'all' (default 'all').", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "curious_self_improve",
+            description: "Run a bounded Curious self-improvement check: self-audit, output firewall, git status, search for TODO/FIXME/HACK/XXX in the source, and write a proposal note under ~/.bad_apple/notes/proposed_patches/.",
+            parameters: [
+                .init(name: "include", description: "What to include in the self-audit: 'cert', 'doctor', or 'all' (default 'all').", required: false),
+            ],
+            requiresApproval: false
         ),
     ]
 
@@ -644,6 +677,15 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "working memory", "scratchpad", "runtime status", "health status",
         // System
         "system", "process", "memory", "disk usage",
+        // Self-audit
+        "self audit", "run diagnostics", "health check", "cert suite", "air gap check",
+        // Output firewall
+        "blocklist", "block pattern", "what is blocked", "what is output firewall", "inspect output firewall", "inspect firewall",
+        "add pattern", "add output firewall", "add pattern to output firewall",
+        "remove pattern", "remove output firewall", "remove pattern from output firewall",
+        "block this pattern", "update firewall",
+        // Curious self-improvement
+        "curious", "self improve", "improve yourself", "improve bad apple", "curious check",
         // Code
         "code", "function", "compile", "build",
     ]
@@ -674,19 +716,60 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["search files", "find files", "file search", "search local files"], ["search_local_files"]),
         (["session seed", "set seed", "deterministic seed"], ["set_session_seed", "get_session_seed"]),
         (["git status", "git diff", "what changed"], ["git_status"]),
+        (["blocklist", "block pattern", "what is blocked", "what is output firewall", "inspect output firewall", "inspect firewall"], ["inspect_output_firewall"]),
+        (["add pattern", "add output firewall", "add pattern to output firewall", "remove pattern", "remove output firewall", "remove pattern from output firewall", "block this pattern", "update firewall"], ["update_output_firewall"]),
         (["undo", "delete last", "remove last"], ["undo_last"]),
+        (["self audit", "self_audit", "run self audit", "audit bad apple", "run diagnostics", "health check", "cert suite", "air gap check"], ["self_audit"]),
+        (["curious", "self improve", "improve yourself", "improve bad apple", "curious check"], ["curious_self_improve"]),
     ]
 
     // MARK: - Prompt Routing
 
-    /// Return formatted tool definitions relevant to the prompt, or nil if no
-    /// tools are needed.
-    func toolsForPrompt(text: String) -> String? {
+    /// Match if any keyword is a substring of `text` or if all words of the
+    /// keyword appear in `text`. This catches "add testpattern to the output
+    /// firewall" without matching on single words like "add" alone.
+    private func matchesKeyword(_ keyword: String, in text: String) -> Bool {
         let low = text.lowercased()
+        let words = Set(low.split(separator: " ").map { String($0) })
+        if low.contains(keyword) { return true }
+        let keywordWords = keyword.split(separator: " ").map { String($0) }
+        guard !keywordWords.isEmpty else { return false }
+        return Set(keywordWords).isSubset(of: words)
+    }
+
+    /// Return formatted definitions for all tools. Used by the agent, which
+    /// may need to pick from any available tool for a planned step.
+    func allToolsForPrompt() -> String? {
+        guard !tools.isEmpty else { return nil }
+
+        var lines: [String] = ["Available tools:"]
+        for tool in tools {
+            lines.append("")
+            lines.append("[\(tool.name)] \u{2014} \(tool.description)")
+            if !tool.parameters.isEmpty {
+                lines.append("  Parameters:")
+                for param in tool.parameters {
+                    let req = param.required ? "required" : "optional"
+                    lines.append("    \(param.name) (\(req)): \(param.description)")
+                }
+            }
+            if tool.requiresApproval {
+                lines.append("  Requires user approval before it runs.")
+            }
+            if let example = exampleForTool(tool) {
+                lines.append("  Example: \(example)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Return formatted tool definitions relevant to the prompt, or nil if no
+    /// tools are needed. Uses plain English so a 7B local model can follow.
+    func toolsForPrompt(text: String) -> String? {
         var selectedNames = Set<String>()
 
         for (keywords, toolNames) in keywordToolMap {
-            if keywords.contains(where: { low.contains($0) }) {
+            if keywords.contains(where: { matchesKeyword($0, in: text) }) {
                 selectedNames.formUnion(toolNames)
             }
         }
@@ -700,12 +783,19 @@ final class BadAppleToolRouter: @unchecked Sendable {
         for tool in selected {
             lines.append("")
             lines.append("[\(tool.name)] \u{2014} \(tool.description)")
-            lines.append("  Parameters:")
-            for param in tool.parameters {
-                let req = param.required ? "required" : "optional"
-                lines.append("    \(param.name) (\(req)): \(param.description)")
+            if !tool.parameters.isEmpty {
+                lines.append("  Parameters:")
+                for param in tool.parameters {
+                    let req = param.required ? "required" : "optional"
+                    lines.append("    \(param.name) (\(req)): \(param.description)")
+                }
             }
-            lines.append("  Requires approval: \(tool.requiresApproval ? "yes" : "no")")
+            if tool.requiresApproval {
+                lines.append("  Requires user approval before it runs.")
+            }
+            if let example = exampleForTool(tool) {
+                lines.append("  Example: \(example)")
+            }
         }
         return lines.joined(separator: "\n")
     }
@@ -713,11 +803,10 @@ final class BadAppleToolRouter: @unchecked Sendable {
     /// Return tool schemas in the chat-template format expected by
     /// `BadAppleInference.generateWithTools`.
     func toolSchemasForPrompt(text: String) -> [[String: Any]]? {
-        let low = text.lowercased()
         var selectedNames = Set<String>()
 
         for (keywords, toolNames) in keywordToolMap {
-            if keywords.contains(where: { low.contains($0) }) {
+            if keywords.contains(where: { matchesKeyword($0, in: text) }) {
                 selectedNames.formUnion(toolNames)
             }
         }
@@ -759,10 +848,48 @@ final class BadAppleToolRouter: @unchecked Sendable {
         }
     }
 
+    /// Build a concrete `<tool_call>` example for a single tool, with all
+    /// required parameters filled in. This keeps the local 7B model from
+    /// nesting the schema under `arguments.properties`.
+    private func exampleForTool(_ tool: BadAppleTool) -> String? {
+        let argExamples: [String: String] = [
+            "read_file": "\"path\":\"/var/lib/bad_apple/blocklist.txt\"",
+            "write_file": "\"path\":\"/Users/savag3/.bad_apple/notes.txt\",\"content\":\"hello\"",
+            "list_directory": "\"path\":\"/Users/savag3/.bad_apple\"",
+            "search_content": "\"pattern\":\"TODO\",\"path\":\"/Users/savag3/bad_apple/src\"",
+            "run_shell": "\"command\":\"ls /tmp\"",
+            "run_applescript": "\"script\":\"tell app \\\"Finder\\\" to activate\"",
+            "run_shortcut": "\"name\":\"Good Morning\"",
+            "set_workspace": "\"path\":\"/Users/savag3/bad_apple\"",
+            "describe_image": "\"path\":\"/var/lib/bad_apple/generated_images/image.png\"",
+            "image_generation": "\"prompt\":\"a red apple on a beach\"",
+            "search_local_files": "\"pattern\":\"AGENTS.md\"",
+            "index_documents": "\"path\":\"/Users/savag3/bad_apple\"",
+            "read_document": "\"path\":\"/Users/savag3/bad_apple/README.md\"",
+            "translate_text": "\"text\":\"hello\",\"to\":\"spanish\"",
+            "consolidate_memory": "",
+            "workspace_status": "",
+            "set_session_seed": "\"seed\":\"42\"",
+            "get_session_seed": "",
+            "git_status": "",
+            "inspect_output_firewall": "\"show_patterns\":\"false\"",
+            "update_output_firewall": "\"pattern\":\"badword\",\"action\":\"add\"",
+            "undo_last": "\"kind\":\"image\"",
+            "self_audit": "\"include\":\"all\"",
+            "curious_self_improve": "\"include\":\"all\"",
+            "screen_capture": "",
+        ]
+
+        let exampleArgs = argExamples[tool.name] ?? ""
+        let args = exampleArgs.isEmpty ? "" : ",\"arguments\":{\(exampleArgs)}"
+        let prefix = "<tool_call>{\"name\":\"" + tool.name + "\""
+        let suffix = "\"\(args)}</tool_call>"
+        return prefix + tool.name + suffix
+    }
+
     /// Heuristic: should the model be offered tools for this prompt?
     func shouldUseTools(prompt: String) -> Bool {
-        let low = prompt.lowercased()
-        return toolKeywords.contains { low.contains($0) }
+        return toolKeywords.contains { matchesKeyword($0, in: prompt) }
     }
 
     // MARK: - Tool Call Extraction
@@ -849,7 +976,47 @@ final class BadAppleToolRouter: @unchecked Sendable {
             calls.append((name: name, args: args))
         }
 
+        // Some local models emit a bare JSON object instead of wrapping it in
+        // <tool_call> tags. Extract top-level JSON objects and treat `name` +
+        // `arguments` (or `arguments.properties` if the model nested the schema)
+        // as a tool call.
+        for candidate in plainJSONCandidates(text) {
+            guard let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = object["name"] as? String else { continue }
+            var rawArgs = object["arguments"] as? [String: Any] ?? [:]
+            if rawArgs.count == 1, let props = rawArgs["properties"] as? [String: Any] {
+                rawArgs = props
+            }
+            let args = rawArgs.mapValues { value in
+                if let string = value as? String { return string }
+                return String(describing: value)
+            }
+            calls.append((name: name, args: args))
+        }
+
         return calls
+    }
+
+    /// Find balanced top-level JSON objects in `text` by brace counting.
+    private func plainJSONCandidates(_ text: String) -> [String] {
+        var candidates: [String] = []
+        var depth = 0
+        var start: String.Index?
+        for index in text.indices {
+            let c = text[index]
+            if c == "{" {
+                if depth == 0 { start = index }
+                depth += 1
+            } else if c == "}", depth > 0 {
+                depth -= 1
+                if depth == 0, let s = start {
+                    candidates.append(String(text[s...index]))
+                    start = nil
+                }
+            }
+        }
+        return candidates
     }
 
     // MARK: - Multi-Step Detection
@@ -1082,6 +1249,21 @@ final class BadApplePolicyEngine: @unchecked Sendable {
                 if name.contains(pattern) {
                     return "shortcut name matches denied pattern '\(pattern)'"
                 }
+            }
+            return nil
+
+        case "update_output_firewall":
+            let pattern = args["pattern"] ?? ""
+            if pattern.isEmpty { return "update_output_firewall requires a pattern" }
+            if pattern.count < 3 || pattern.count > 256 {
+                return "output firewall pattern must be 3-256 characters"
+            }
+            let action = (args["action"] ?? "add").lowercased()
+            if action != "add" && action != "remove" {
+                return "output firewall action must be 'add' or 'remove'"
+            }
+            if pattern.rangeOfCharacter(from: .controlCharacters) != nil || pattern.rangeOfCharacter(from: .newlines) != nil {
+                return "output firewall pattern must not contain control characters or newlines"
             }
             return nil
 
@@ -1373,6 +1555,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     /// to this closure with (path, prompt) and returns the description.
     var visionProvider: ((String, String) async -> String)?
 
+    /// Optional output firewall reference. When set, `inspect_output_firewall`
+    /// and `update_output_firewall` can read and modify the active blocklist.
+    var outputFirewall: BadAppleOutputFirewall?
+
     /// Optional workspace root. When set, paths within the workspace are
     /// allowed in addition to the home and temp directories.
     var workspace: String? {
@@ -1394,27 +1580,57 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         self.policyEngine = policyEngine
     }
 
+    // MARK: - Tool Aliases
+
+    /// Map common misnames the 7B model invents to the real tool names.
+    private let toolAliases: [String: [String]] = [
+        "update_output_firewall": ["add_output_firewall_pattern", "remove_output_firewall_pattern", "add_blocklist", "remove_blocklist"],
+        "self_audit": ["run_diagnostics", "health_check", "diagnostics", "cert_suite"],
+        "inspect_output_firewall": ["output_firewall", "firewall_patterns"],
+    ]
+
+    private let allKnownToolNames: [String] = [
+        "get_current_time", "read_file", "write_file", "list_directory", "search_content",
+        "run_shell", "run_applescript", "run_shortcut", "set_workspace", "workspace_status",
+        "describe_image", "image_generation", "search_local_files", "index_documents", "read_document",
+        "translate_text", "consolidate_memory", "set_session_seed", "get_session_seed", "git_status",
+        "inspect_output_firewall", "update_output_firewall", "undo_last", "self_audit", "screen_capture"
+    ]
+
+    private func resolveToolName(_ name: String) -> String {
+        let lower = name.lowercased().replacingOccurrences(of: "-", with: "_")
+        if allKnownToolNames.contains(lower) { return lower }
+        for (real, aliases) in toolAliases {
+            if aliases.contains(lower) { return real }
+        }
+        for real in allKnownToolNames.sorted(by: { $0.count > $1.count }) {
+            if lower.contains(real) { return real }
+        }
+        return name
+    }
+
     // MARK: - Tool Execution
 
     /// Execute a tool by name with the given arguments.
     /// Returns the tool result as a string (or an error message).
     func executeTool(name: String, args: [String: String], approved: Bool = false) async -> String {
+        let resolved = resolveToolName(name)
         // Check policy if a policy engine is attached.
         if !approved, let policy = policyEngine {
-            let decision = policy.evaluate(toolName: name, args: args)
+            let decision = policy.evaluate(toolName: resolved, args: args)
             switch decision {
             case .denied(let reason):
                 return "Policy: \(reason)"
             case .needsApproval:
-                return "Approval required before I can run \(name). Reply with 'approve' to proceed. (Set autopilot to skip these prompts.)"
+                return "Approval required before I can run \(resolved). Reply with 'approve' to proceed. (Set autopilot to skip these prompts.)"
             case .approved:
                 break
             }
         }
 
-        let timeout = policyEngine?.maxTimeout(toolName: name) ?? 30
+        let timeout = policyEngine?.maxTimeout(toolName: resolved) ?? 30
 
-        switch name {
+        switch resolved {
         case "get_current_time":
             return getCurrentTime()
         case "read_file":
@@ -1492,10 +1708,18 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return getSessionSeed()
         case "git_status":
             return gitStatus(path: args["path"] ?? "")
+        case "inspect_output_firewall":
+            return inspectOutputFirewall(showPatterns: args["show_patterns"] ?? "false")
+        case "update_output_firewall":
+            return updateOutputFirewall(pattern: args["pattern"] ?? "", action: args["action"] ?? "add")
         case "undo_last":
             return undoLast(kind: args["kind"] ?? "note")
+        case "self_audit":
+            return selfAudit(include: args["include"] ?? "all")
+        case "curious_self_improve":
+            return curiousSelfImprove(include: args["include"] ?? "all")
         default:
-            return "Unknown tool: \(name)"
+            return "Unknown tool: \(resolved)"
         }
     }
 
@@ -1744,6 +1968,17 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
 
         let restArgs = Array(tokens.dropFirst())
+
+        // Block execution-spawning arguments (find -exec/-ok, xargs, etc.).
+        if let denied = restArgs.first(where: { arg in
+            let lower = arg.lowercased()
+            return lower.hasPrefix("-exec") || lower.hasPrefix("-ok") ||
+                   lower == ";" || lower == "{}" ||
+                   lower == "xargs" || lower == "-delete"
+        }) {
+            return "Error: denied argument '\(denied)'"
+        }
+
         let result = runProcess(launchPath: resolved, arguments: restArgs, timeout: TimeInterval(timeout))
 
         if result.exitCode != 0 {
@@ -1797,7 +2032,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let lowered = source.lowercased()
         let denied = [
             "do shell script", "do script", "run script", "use framework",
-            "current application's", "curl", "wget", "rm -rf",
+            "do javascript", "open location",
+            "current application", "current application's",
+            "keystroke", "key code",
+            "curl", "wget", "rm -rf",
         ]
         if let match = denied.first(where: { lowered.contains($0) }) {
             return "Error: AppleScript contains denied operation '\(match)'"
@@ -2041,17 +2279,15 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let seed = Int.random(in: 0...1_000_000_000)
         let output = (outDir as NSString).appendingPathComponent("badapple_gen_\(seed).png")
 
-        // Search for the mflux binary.
-        let env = ProcessInfo.processInfo.environment
+        // Search for the mflux binary in trusted locations only. Do not honour
+        // BADAPPLE_MFLUX_PATH, since an arbitrary path could point to malware.
         let candidates = [
-            (env["BADAPPLE_MFLUX_PATH"] ?? ""),
-            "mflux-generate-flux2",
-            "/opt/homebrew/bin/mflux-generate-flux2",
             "/usr/local/bin/mflux-generate-flux2",
-            (env["HOME"] ?? "/") + "/.local/bin/mflux-generate-flux2",
+            "/opt/homebrew/bin/mflux-generate-flux2",
+            "\(NSHomeDirectory())/.local/bin/mflux-generate-flux2",
         ]
         let fm = FileManager.default
-        guard let exe = candidates.first(where: { !$0.isEmpty && fm.fileExists(atPath: $0) }) else {
+        guard let exe = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) else {
             return "Error: mflux-generate-flux2 not found. Install mflux with `pip install mflux` to enable image generation."
         }
 
@@ -2389,6 +2625,99 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         return "Error: git status failed: \(result.stderr)"
     }
 
+    /// Inspect the output firewall pattern counts and optional blocklist contents.
+    func inspectOutputFirewall(showPatterns: String) -> String {
+        let show = showPatterns.lowercased() == "true"
+        let fm = FileManager.default
+        let path = BadAppleOutputFirewall.blocklistPath
+        let exists = fm.fileExists(atPath: path)
+
+        let total = outputFirewall?.totalPatternCount() ?? 0
+        let defaults = outputFirewall?.defaultPatternCount() ?? 0
+        let blocklist = outputFirewall?.blocklistPatternCount() ?? 0
+
+        var lines: [String] = [
+            "Output firewall",
+            "  blocklist path: \(path)",
+            "  blocklist exists: \(exists)",
+            "  total patterns: \(total)",
+            "  built-in defaults: \(defaults)",
+            "  blocklist patterns: \(blocklist)",
+        ]
+
+        if show {
+            let contents = outputFirewall?.blocklistContents() ?? ""
+            let patterns = contents
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            lines.append("  on-disk patterns:")
+            for pattern in patterns {
+                lines.append("    - \(pattern)")
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Add or remove a pattern in the output firewall blocklist and reload.
+    func updateOutputFirewall(pattern: String, action: String) -> String {
+        let path = BadAppleOutputFirewall.blocklistPath
+        let fm = FileManager.default
+
+        let dir = (path as NSString).deletingLastPathComponent
+        if !fm.fileExists(atPath: dir) {
+            do {
+                try fm.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o770])
+            } catch {
+                return "Error: cannot create blocklist directory: \(error.localizedDescription)"
+            }
+        }
+
+        let action = action.lowercased()
+        if action == "add" {
+            var existing = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            let patterns = existing
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            if patterns.contains(pattern) {
+                return "Pattern '\(pattern)' is already in the blocklist."
+            }
+            if !existing.isEmpty && !existing.hasSuffix("\n") {
+                existing.append("\n")
+            }
+            existing.append(pattern + "\n")
+            do {
+                try existing.write(toFile: path, atomically: true, encoding: .utf8)
+                outputFirewall?.reload()
+                return "Added pattern '\(pattern)' to the output firewall blocklist."
+            } catch {
+                return "Error: cannot write blocklist: \(error.localizedDescription)"
+            }
+        } else if action == "remove" {
+            let contents = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            var lines = contents.split(separator: "\n", omittingEmptySubsequences: false).map { String($0) }
+            let originalCount = lines.count
+            lines.removeAll { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                return !trimmed.hasPrefix("#") && trimmed == pattern
+            }
+            if lines.count == originalCount {
+                return "Pattern '\(pattern)' was not found in the blocklist."
+            }
+            do {
+                try lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
+                outputFirewall?.reload()
+                return "Removed pattern '\(pattern)' from the output firewall blocklist."
+            } catch {
+                return "Error: cannot write blocklist: \(error.localizedDescription)"
+            }
+        }
+
+        return "Error: unknown action '\(action)'"
+    }
+
     /// Undo the most recent note or image generation.
     func undoLast(kind: String) -> String {
         let kind = kind.lowercased()
@@ -2437,6 +2766,119 @@ final class BadAppleToolExecutor: @unchecked Sendable {
                 return "Error removing note: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// Run the local cert suite and/or doctor diagnostic and return a JSON summary.
+    func selfAudit(include: String) -> String {
+        guard let binary = badappleBinaryPath() else {
+            return "Error: badapple binary not found in an approved location"
+        }
+
+        let parts = include
+            .lowercased()
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let includeCert = parts.contains("all") || parts.contains("cert")
+        let includeDoctor = parts.contains("all") || parts.contains("doctor")
+
+        var result: [String: Any] = [:]
+
+        if includeCert {
+            let r = runProcess(launchPath: binary, arguments: ["cert"], timeout: 60)
+            if r.exitCode != 0 {
+                result["cert"] = ["ok": false, "error": r.stderr + r.stdout]
+            } else if let data = r.stdout.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) {
+                result["cert"] = json
+            } else {
+                result["cert"] = ["ok": true, "text": r.stdout]
+            }
+        }
+
+        if includeDoctor {
+            let r = runProcess(launchPath: binary, arguments: ["--doctor"], timeout: 60)
+            result["doctor"] = [
+                "exit_code": r.exitCode,
+                "output": (r.stdout + r.stderr).prefix(20_000),
+            ]
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
+              let text = String(data: data, encoding: .utf8) else {
+            return "Error: could not encode self-audit result"
+        }
+        return text
+    }
+
+    /// Run a bounded Curious self-improvement check and write a proposal note.
+    /// This is the tool the Curious autopilot invokes so it can improve Bad Apple
+    /// on its own without relying on the 7B model for multi-step planning.
+    func curiousSelfImprove(include: String) -> String {
+        let base = workspace ?? "/Users/savag3/bad_apple"
+        let proposalsDir = NSHomeDirectory() + "/.bad_apple/notes/proposed_patches"
+        try? FileManager.default.createDirectory(
+            atPath: proposalsDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        let audit = selfAudit(include: include)
+        let firewall = inspectOutputFirewall(showPatterns: "false")
+        let git = gitStatus(path: base)
+        let rawCodeSearch = searchContent(pattern: "TODO|FIXME|HACK|XXX", path: base, timeout: 30)
+        let codeSearch = rawCodeSearch
+            .components(separatedBy: .newlines)
+            .filter { !$0.contains("searchContent(pattern:") && !$0.contains("\"TODO|FIXME|HACK|XXX\"") }
+            .joined(separator: "\n")
+
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+        let timestamp = dateFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let proposalPath = (proposalsDir as NSString).appendingPathComponent("\(timestamp)-curious-proposal.md")
+
+        var body = "# Curious self-improvement check\n\n"
+        body += "**When:** \(dateFormatter.string(from: Date()))\n\n"
+        body += "**Workspace:** \(base)\n\n"
+        body += "## Self-audit\n\n```json\n"
+        body += audit.prefix(2_000)
+        body += "\n```\n\n"
+        body += "## Output firewall\n\n"
+        body += firewall
+        body += "\n\n"
+        body += "## Git status\n\n```\n"
+        body += git
+        body += "\n```\n\n"
+        body += "## Source markers (TODO/FIXME/HACK/XXX)\n\n```\n"
+        body += codeSearch
+        body += "\n```\n\n"
+        body += "## Proposal\n\n"
+        body += "Review the items above. If a safe concrete improvement is identified, describe it here and implement it.\n"
+
+        if let data = body.data(using: .utf8) {
+            do {
+                try data.write(to: URL(fileURLWithPath: proposalPath), options: .atomic)
+            } catch {
+                return "Wrote findings, but could not save proposal: \(error.localizedDescription)\n\nAudit: \(audit.prefix(500))"
+            }
+        }
+
+        return "Curious self-improvement check complete. Proposal written to \(proposalPath)."
+    }
+
+    /// Locate the trusted `badapple` helper binary used for self-audit and CLI calls.
+    private func badappleBinaryPath() -> String? {
+        let fm = FileManager.default
+        let candidates: [String] = [
+            Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Helpers/badapple")
+                .path,
+            (ProcessInfo.processInfo.arguments.first.map {
+                (URL(fileURLWithPath: $0).deletingLastPathComponent().appendingPathComponent("badapple")).path
+            } ?? ""),
+            "/usr/local/bin/badapple",
+            fm.currentDirectoryPath + "/target/release/badapple",
+        ]
+        return candidates.first { !$0.isEmpty && fm.isExecutableFile(atPath: $0) }
     }
 
     // MARK: - Private Helpers

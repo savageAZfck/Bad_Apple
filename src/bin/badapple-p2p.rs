@@ -21,7 +21,7 @@
 //!   BADAPPLE_P2P_PEERS       - comma-separated list of peers to connect to
 //!   BADAPPLE_P2P_MAX_PEERS   - maximum concurrent peers (default 8)
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bad_apple::mesh_sync::{
     build_engram, handle_incoming, read_local_doc, MeshDocKind, MeshPacket, MeshStore,
 };
@@ -78,14 +78,14 @@ fn run() -> Result<()> {
     }
 }
 
-fn with_runtime<F, T>(f: F) -> T
+fn with_runtime<F, T>(f: F) -> Result<T>
 where
-    F: FnOnce() -> T + Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
     std::thread::spawn(f)
         .join()
-        .expect("p2p runtime thread panicked")
+        .map_err(|_| anyhow::anyhow!("p2p runtime thread panicked"))?
 }
 
 fn build_manager() -> Result<Arc<ConnectionManager>> {
@@ -108,22 +108,32 @@ fn build_manager() -> Result<Arc<ConnectionManager>> {
 }
 
 fn resolve_secret() -> Result<Vec<u8>> {
-    if let Ok(secret) = std::env::var("BADAPPLE_P2P_SECRET") {
-        return Ok(secret.into_bytes());
-    }
-    if let Ok(path) = std::env::var("BADAPPLE_SLICKS_KEY_PATH") {
+    let secret = if let Ok(secret) = std::env::var("BADAPPLE_P2P_SECRET") {
+        if secret.is_empty() {
+            bail!("BADAPPLE_P2P_SECRET is empty")
+        }
+        secret.into_bytes()
+    } else if let Ok(path) = std::env::var("BADAPPLE_SLICKS_KEY_PATH") {
         let key = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read SLICKS key from {}", path))?;
-        return Ok(key.trim().into());
+        let key = key.trim();
+        if key.is_empty() {
+            bail!("SLICKS key file at {} is empty", path)
+        }
+        key.as_bytes().to_vec()
+    } else {
+        // No configured secret. Fail closed: never fall back to a hard-coded key.
+        bail!("P2P requires BADAPPLE_P2P_SECRET or BADAPPLE_SLICKS_KEY_PATH")
+    };
+    if secret.len() < 32 {
+        bail!("P2P secret must be at least 32 bytes")
     }
-    // Fallback to a hard-coded dev secret. This is unsafe and should only be
-    // used for local testing; production installs distribute keys out of band.
-    Ok(b"bad-apple-p2p-dev-secret-do-not-use-in-prod".to_vec())
+    Ok(secret)
 }
 
 fn list_peers() -> Result<()> {
     with_runtime(|| {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let cm = build_manager().context("failed to build connection manager")?;
             let tcp_port = std::env::var("BADAPPLE_P2P_TCP_PORT")
@@ -159,7 +169,7 @@ fn list_peers() -> Result<()> {
 
 fn do_sync() -> Result<()> {
     with_runtime(|| {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let cm = build_manager().context("failed to build connection manager")?;
             let tcp_port = std::env::var("BADAPPLE_P2P_TCP_PORT")
@@ -203,7 +213,7 @@ fn do_sync() -> Result<()> {
 fn sync_doc(kind: &str) -> Result<()> {
     let kind: MeshDocKind = kind.parse()?;
     with_runtime(move || {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let cm = build_manager().context("failed to build connection manager")?;
             let tcp_port = p2p_tcp_port();
@@ -238,7 +248,7 @@ fn sync_doc(kind: &str) -> Result<()> {
 
 fn receive_mesh(timeout_ms: u64) -> Result<()> {
     with_runtime(move || {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let cm = build_manager().context("failed to build connection manager")?;
             let tcp_port = p2p_tcp_port();
@@ -291,23 +301,56 @@ fn p2p_ws_port() -> u16 {
         .unwrap_or(9877)
 }
 
-fn model_dir() -> std::path::PathBuf {
-    std::env::var("BADAPPLE_P2P_MODEL_DIR")
+fn model_dir() -> Result<std::path::PathBuf> {
+    let raw = std::env::var("BADAPPLE_P2P_MODEL_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/bad_apple/p2p_models"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/bad_apple/p2p_models"));
+    validate_p2p_dir(raw)
+}
+
+fn pull_output_dir() -> Result<std::path::PathBuf> {
+    let raw = std::env::var("BADAPPLE_P2P_OUTPUT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/bad_apple/p2p_models"));
+    validate_p2p_dir(raw)
+}
+
+fn validate_p2p_dir(path: std::path::PathBuf) -> Result<std::path::PathBuf> {
+    let abs = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    if abs
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        bail!("P2P output directory must not contain '..' components");
+    }
+    let allowed = {
+        let home = std::env::var("HOME").unwrap_or_default();
+        [
+            std::path::PathBuf::from("/var/lib/bad_apple"),
+            std::path::PathBuf::from(home).join(".bad_apple"),
+        ]
+    };
+    if !allowed.iter().any(|root| abs.starts_with(root)) {
+        bail!("P2P output directory must be under /var/lib/bad_apple or ~/.bad_apple");
+    }
+    Ok(abs)
 }
 
 fn transfer_service() -> Result<bad_apple::p2p_model::P2PModelTransfer> {
     let secret = resolve_secret()?;
     Ok(bad_apple::p2p_model::P2PModelTransfer::new(
         secret,
-        model_dir(),
+        model_dir()?,
     ))
 }
 
 fn list_models() -> Result<()> {
     with_runtime(|| {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let svc = transfer_service()?;
             svc.scan_and_advertise(hostname()).await?;
@@ -334,12 +377,10 @@ fn pull_model(peer_id: &str, model_id: &str) -> Result<()> {
     let peer_id = peer_id.to_string();
     let model_id = model_id.to_string();
     with_runtime(move || {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let svc = transfer_service()?;
-            let output_dir = std::env::var("BADAPPLE_P2P_OUTPUT_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| model_dir());
+            let output_dir = pull_output_dir()?;
             let peer_addr = if peer_id.contains(':') {
                 peer_id
             } else {
@@ -351,7 +392,7 @@ fn pull_model(peer_id: &str, model_id: &str) -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("{{\"status\": \"error\", \"message\": \"{e:#}\"}}");
-                    std::process::exit(1);
+                    bail!("{e:#}");
                 }
             }
             Ok(())
@@ -364,7 +405,7 @@ fn send_model(peer_id: &str, model_id: &str) -> Result<()> {
     let peer_id = peer_id.to_string();
     let model_id = model_id.to_string();
     with_runtime(move || {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let svc = transfer_service()?;
             let peer_addr = if peer_id.contains(':') {
@@ -379,7 +420,7 @@ fn send_model(peer_id: &str, model_id: &str) -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("{{\"status\": \"error\", \"message\": \"{e:#}\"}}");
-                    std::process::exit(1);
+                    bail!("{e:#}");
                 }
             }
         })
@@ -388,7 +429,7 @@ fn send_model(peer_id: &str, model_id: &str) -> Result<()> {
 
 fn receive_model(_peer_id: Option<&str>, _model_id: Option<&str>) -> Result<()> {
     with_runtime(|| {
-        let rt = Runtime::new().expect("tokio runtime");
+        let rt = Runtime::new().context("tokio runtime")?;
         rt.block_on(async {
             let svc = transfer_service()?;
             svc.scan_and_advertise(hostname()).await?;
@@ -397,9 +438,10 @@ fn receive_model(_peer_id: Option<&str>, _model_id: Option<&str>) -> Result<()> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(9878);
             let (addr, handle) = svc.serve(port).await?;
+            let dir = model_dir()?;
             println!(
                 "{{\"status\": \"serving\", \"addr\": \"{addr}\", \"model_dir\": \"{}\"}}",
-                model_dir().display()
+                dir.display()
             );
             handle.await?
         })

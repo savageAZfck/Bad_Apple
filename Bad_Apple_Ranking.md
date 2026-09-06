@@ -189,6 +189,15 @@ Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_document
 
 ---
 
+### 19. Bounded Curious Self-Improvement
+
+- **Native `curious_self_improve` tool** — runs a bounded local self-check (`self_audit`, `inspect_output_firewall`, `git_status`, and a `search_content` for `TODO/FIXME/HACK/XXX`) and writes a markdown proposal note to `~/.bad_apple/notes/proposed_patches/`.
+- **Curious autopilot loop** — when the active persona is `curious` and `autopilot` is enabled, `BadAppleEngine` runs the tool on a configurable interval (`BADAPPLE_CURIOUS_INTERVAL`, default 300 seconds, `0` to disable).
+- **Bounded by policy and audit** — the tool is read-only and note-writing by default; it does not edit live Rust/Swift source files. Every run is appended to the hash-chained audit ledger.
+- **Trigger it manually** with `target/release/badapple "curious check"`.
+
+---
+
 ## Performance
 
 Measured on a 16 GB Apple Silicon M-series Mac:
@@ -244,6 +253,7 @@ badapple CLI / menu bar / voice host
    ├─ Personas, output firewall, audit ledger
    ├─ Tools + approvals (60 policy.yaml rules)
    ├─ Agent tasks (plan-execute-observe)
+   ├─ Curious autopilot self-improvement loop (policy-gated)
    ├─ Vision (image description)
    ├─ CLI agent protocol (LAP)
    ├─ Workspace watcher (native FSEvents, real-time indexing)
@@ -279,7 +289,7 @@ badapple CLI / menu bar / voice host
 - **Built-in safety** — approvals, fail-closed paths, streaming firewall, audit ledger, and 60-rule policy engine by default.
 - **Mac-native** — uses MLX, Apple Silicon, launchd, AVSpeechSynthesizer, Secure Enclave, and a Swift menu bar.
 - **Extensible local RAG** — index your own files and query them privately.
-- **Open-ended tool use** — local shell, AppleScript, file tools, document reading, vision, daemon-native FSEvents workspace watcher, ambient/ocular context, and MCP tools (stdio/socket/SSE) gated by user approval.
+- **Open-ended tool use** — local shell, AppleScript, file tools, document reading, vision, daemon-native FSEvents workspace watcher, ambient/ocular context, MCP tools (stdio/socket/SSE), and a bounded Curious self-improvement loop gated by user approval.
 - **Benchmark-ready** — built-in metrics for throughput, latency, and memory.
 - **MCP marketplace** — install and call local MCP servers like filesystem, fetch, and custom tools without leaving the machine.
 - **Encrypted P2P mesh** — sync models and messages with peers over AES-256-GCM, off by default for air-gapped operation.
@@ -333,7 +343,7 @@ open -a "Bad Apple"
 
 ## Consumer Readiness Ranking
 
-**Current score: 9.8 / 10**
+**Current score: 9.85 / 10**
 
 | Category | Score | Rationale |
 |---|---|---|
@@ -341,7 +351,7 @@ open -a "Bad Apple"
 | Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. Signed-but-not-notarized zip is available for CI/enterprise. |
 | First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A 5-step native onboarding wizard (welcome, privacy, model status, permissions, first query) is wired into the menu bar and shown on first launch; an install prompt is shown first if the platform has not been installed. A purchase-grade, fully polished first-launch flow still needs screen-recording permission guidance and a workspace-selection step. |
 | QA & reliability | 1.95 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy --all-targets --all-features --release -- -D warnings`, and `cargo audit` (0 vulnerabilities, one remaining `paste` unmaintained transitive warning) all pass. 103 Rust unit tests, 15 cert-suite integration tests, 6 red-team tests, and 4 mesh-sync tests pass. Air-gap certification tests assert zero network sockets and cover SLICKS replay, automation-cage traversal/symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. A clean-machine VM install + smoke test is still the last reliability gap. |
-| Security & trust posture | 1.75 / 2 | Strong internal controls plus an adversarial self-red-teaming harness (`src/red_team/`) with 12 built-in probes and a continuous `redteam watch` loop, encrypted cross-device document sync over the P2P mesh (personas, prompt, settings, model manifests), SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, and air-gap cert tests. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
+| Security & trust posture | 1.8 / 2 | Strong internal controls plus an adversarial self-red-teaming harness (`src/red_team/`) with 12 built-in probes and a continuous `redteam watch` loop, encrypted cross-device document sync over the P2P mesh (personas, prompt, settings, model manifests), SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests, and a bounded Curious autopilot that runs local self-audits and writes improvement proposals under policy. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
 
 ### What moved the needle this pass (9.7 → 9.8)
 
@@ -351,6 +361,10 @@ open -a "Bad Apple"
 4. **Real speculative decoding telemetry** — `BadAppleMLX` now reads `proposedDraftTokens` and `acceptedDraftTokens` from `GenerateCompletionInfo`, so daemon metrics report an honest `draft_accept_pct` instead of a hard-coded 0.
 5. **Air-gap certification exposed as a CLI command** — `badapple cert` runs the 15-check suite and emits a JSON summary; failures return a non-zero exit code for CI/release verification.
 6. **MCP marketplace now supports stdio, Unix socket, and HTTP+SSE transports** — `badapple-mcp [stdio|socket|sse [addr]]` serves the Model Context Protocol over the requested transport, and `McpMarketplace` will start/stop servers using any of the three.
+
+### What moved the needle this pass (9.8 → 9.85)
+
+1. **Bounded Curious self-improvement autopilot** — `BadAppleEngine` gains a native `curious_self_improve` tool that runs the cert suite, doctor, output firewall, git status, and a source TODO/FIXME/HACK/XXX scan, then writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. When the active persona is `curious` and autopilot is on, the engine runs this check on a configurable loop (`BADAPPLE_CURIOUS_INTERVAL`, default 300 s). It is policy-gated, fully local, audit-ledgered, and does not modify live source files.
 
 ### What moved the needle this pass (9.5 → 9.7)
 
@@ -480,7 +494,7 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **Memory pressure governor** with automatic VRAM purge on critical pressure
 - **Fast tier model routing** (0.5B for simple queries, 7B Coder default for complex, 9B optional for general reasoning)
 - **Speculative decoding** support with configurable draft model, token count, and live acceptance telemetry
-- **Native agent task system** with plan-execute-observe loops
+- **Native agent task system** with plan-execute-observe loops and a bounded Curious self-improvement autopilot
 - **Native document reading** (PDF/DOCX/RTF without external dependencies)
 - **Vision/image description** via MLX vision model
 - **CLI agent protocol** for full JSON-RPC runtime control
@@ -507,7 +521,7 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 
 ### Honest overall placement
 
-**Bad Apple is #1 in the independent AI OS layer tier.** The only other product in this tier is OpenAGI, which is a proactive daemon without hardware-rooted identity, an audit ledger, air-gap certification, a policy engine, VRAM admission, fast tier routing, speculative decoding, agent tasks, native document reading, a gatekeeper proxy, or a health supervisor.
+**Bad Apple is #1 in the independent AI OS layer tier.** The only other product in this tier is OpenAGI, which is a proactive daemon without hardware-rooted identity, an audit ledger, air-gap certification, a policy engine, VRAM admission, fast tier routing, speculative decoding, agent tasks, a bounded Curious self-improvement autopilot, native document reading, a gatekeeper proxy, or a health supervisor.
 
 **Bad Apple is not in the "Local AI apps" tier.** M1K3, Ka1zen, MLX Studio, macMLX, Macaw, iClaw, and mlx-serve are apps that sit on top of MLX or Ollama. They do not run system daemons as root, they do not have a gatekeeper proxy, they do not have a health supervisor, and they do not have a policy engine. Comparing Bad Apple to them is a category error.
 
@@ -528,7 +542,7 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **Memory pressure governor** with automatic VRAM purge
 - **Fast tier model routing** (0.5B for simple queries, 7B Coder default for complex, 9B optional for general reasoning)
 - **Speculative decoding** with configurable draft model and live acceptance telemetry
-- **Native agent task system** with plan-execute-observe loops
+- **Native agent task system** with plan-execute-observe loops and a bounded Curious self-improvement autopilot
 - **CLI agent protocol** (LAP) for full JSON-RPC runtime control
 - **Encrypted P2P mesh** for model and message sync (AES-256-GCM, with symmetric push/pull model transfer)
 - **MCP marketplace** for installing and calling local MCP servers (stdio / Unix socket / HTTP+SSE)

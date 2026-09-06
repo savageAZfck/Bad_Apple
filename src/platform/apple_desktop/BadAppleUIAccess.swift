@@ -61,9 +61,9 @@ final class BadAppleUIAccess {
     private func getPoint(_ element: AXUIElement) -> CGPoint? {
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value)
-        guard err == .success, let axValue = value else { return nil }
+        guard err == .success, let axValue = value, CFGetTypeID(axValue) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero
-        if AXValueGetValue(axValue as! AXValue, .cgPoint, &point) {
+        if AXValueGetValue((axValue as! AXValue), .cgPoint, &point) {
             return point
         }
         return nil
@@ -72,9 +72,9 @@ final class BadAppleUIAccess {
     private func getSize(_ element: AXUIElement) -> CGSize? {
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value)
-        guard err == .success, let axValue = value else { return nil }
+        guard err == .success, let axValue = value, CFGetTypeID(axValue) == AXValueGetTypeID() else { return nil }
         var size = CGSize.zero
-        if AXValueGetValue(axValue as! AXValue, .cgSize, &size) {
+        if AXValueGetValue((axValue as! AXValue), .cgSize, &size) {
             return size
         }
         return nil

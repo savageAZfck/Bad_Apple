@@ -576,10 +576,12 @@ final class PiperTTSClient {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        // Match sentence ends or clean clause breaks (", ") in long text. This
-        // lets long lists and long sentences split naturally instead of being
-        // speed-read as one wall of words.
-        let regex = try! NSRegularExpression(pattern: "[.!?]+(?:\\s+|$)|,+(?:\\s+|$)|\\n+", options: [])
+        // Match sentence ends and explicit line breaks only. Commas are kept
+        // inside the chunk because the chunkers should not turn a single
+        // breath-mark into a wall of tiny pieces.
+        guard let regex = try? NSRegularExpression(pattern: #"[.!?]+(?:\s+|$)|\n+"#, options: []) else {
+            return [trimmed]
+        }
 
         var chunks: [String] = []
         var remaining = trimmed
@@ -1393,10 +1395,99 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 
+    /// Sanitize streaming/menu text for speech. Remove markup, tool calls,
+    /// code, URLs, markdown and any symbols that the voice might read aloud.
+    /// Preserve natural prosody punctuation and use chunk breaks for breaths.
+    private func sanitizeForSpeech(_ text: String) -> String {
+        var s = text
+
+        // URLs, code blocks, tool calls, XML tags, inline code, markdown.
+        s = s.replacingOccurrences(of: #"https?://\S+"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"```[\s\S]*?```"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"<tool_call>[\s\S]*?</tool_call>"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"`[^`]*`"#, with: " ", options: .regularExpression)
+
+        // Markdown emphasis/headers/list markers and links.
+        s = s.replacingOccurrences(of: #"(\*+|_+|~+|#+|>\s*)"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+
+        // Bullets and list markers.
+        s = s.replacingOccurrences(of: #"\n\s*[•·*-]\s+"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?m)^[•·*-]\s+"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"[•·]"#, with: " ", options: .regularExpression)
+
+        // Ellipses, dashes and clause-breaking colons/semicolons become chunk
+        // breaks instead of spoken punctuation.
+        s = s.replacingOccurrences(of: #"\.{3,}|…"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s*[—–]\s*"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s*-{2,}\s*"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(\s*)[:;](\s+)"#, with: "$1\u{000A}$2", options: .regularExpression)
+
+        // Double quotes and other speech-vocalized symbols become spaces.
+        s = s.replacingOccurrences(of: "\"", with: " ")
+
+        // Allow-list pass: keep alphanumerics, whitespace and safe prosody
+        // punctuation. Remove apostrophes/hyphens that are not inside a word
+        // so the engine never says "quote" or "minus".
+        let chars = Array(s)
+        var out = ""
+        for i in 0..<chars.count {
+            let c = chars[i]
+            let isSafePunct = (c == "," || c == "." || c == "?" || c == "!")
+            let isApostrophe = (c == "'" || c == "\u{2019}")
+            let isHyphen = (c == "-")
+            if c.isLetter || c.isNumber || c.isWhitespace || isSafePunct {
+                out.append(c)
+                continue
+            }
+            if isApostrophe {
+                let prev = i > 0 ? chars[i - 1] : nil
+                let next = i + 1 < chars.count ? chars[i + 1] : nil
+                let prevOk = prev?.isLetter ?? false || prev?.isNumber ?? false
+                let nextOk = next?.isLetter ?? false || next?.isNumber ?? false
+                if prevOk && nextOk {
+                    out.append(c)
+                } else {
+                    out.append(" ")
+                }
+                continue
+            }
+            if isHyphen {
+                let prev = i > 0 ? chars[i - 1] : nil
+                let next = i + 1 < chars.count ? chars[i + 1] : nil
+                let prevLetter = prev?.isLetter ?? false
+                let nextLetter = next?.isLetter ?? false
+                if prevLetter && nextLetter {
+                    out.append(c)
+                } else {
+                    out.append(" ")
+                }
+                continue
+            }
+            out.append(" ")
+        }
+        s = out
+
+        // Tidy spaces before punctuation and collapse whitespace.
+        s = s.replacingOccurrences(of: #"\s+([.,?!])"#, with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\n\n+"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: " \n", with: "\n")
+        s = s.replacingOccurrences(of: "\n ", with: "\n")
+
+        // Return one clean chunk per line. The chunkers below split on these
+        // breaks, so the voice never races through a list.
+        let pieces = s.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.contains(where: { $0.isLetter || $0.isNumber }) }
+        return pieces.joined(separator: "\n")
+    }
+
     /// Normalize text before TTS so ellipses, em dashes, run-on dashes, bullets,
     /// line breaks, colons and semicolons become clean pauses. Collapse duplicate
     /// punctuation so the voice does not "speak" raw punctuation.
-    private func normalizeForTTS(_ text: String) -> String {
+    private func oldNormalizeForTTS(_ text: String) -> String {
         var normalized = text
 
         normalized = normalized.replacingOccurrences(of: "\\.{3,}", with: ", ", options: .regularExpression)
@@ -1499,7 +1590,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             let c = chars[i]
             current.append(c)
 
-            if c == "?" || c == "!" || c == "." || c == "," || c == "\n" {
+            if c == "?" || c == "!" || c == "." || c == "\n" {
                 // only end a sentence if the next char is whitespace/EOL,
                 // so decimals like "3.14" and mid-word punctuation don't split.
                 let next = i + 1 < chars.count ? chars[i + 1] : nil
@@ -1570,7 +1661,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     /// the model is still generating the rest of the response.
     func speakStreamingChunk(_ text: String) {
         guard enabled else { return }
-        streamTTSBuffer += normalizeForTTS(text)
+        streamTTSBuffer += sanitizeForSpeech(text)
         pumpStreamTTS(final: false)
     }
 
@@ -1715,7 +1806,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     /// Queue a single streamed sentence chunk without stopping any in-flight audio.
     /// This keeps responses smooth while the model is still generating the next chunk.
     func speakChunk(_ text: String) {
-        let spoken = normalizeForTTS(text)
+        let spoken = sanitizeForSpeech(text)
         guard enabled else { return }
         guard !spoken.isEmpty else { return }
         state = .speaking
@@ -1734,7 +1825,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         guard enabled else { return }
         guard state == .speaking || state == .processing else { return }
         let voice = bestVoice()
-        let normalized = normalizeForTTS(text)
+        let normalized = sanitizeForSpeech(text)
         let chunks = prosodyChunks(from: normalized)
         for chunk in chunks {
             let utterance = AVSpeechUtterance(string: chunk.text)
@@ -1754,7 +1845,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     func speak(_ text: String) {
         currentSpeakID += 1
         let id = currentSpeakID
-        let spoken = normalizeForTTS(text)
+        let spoken = sanitizeForSpeech(text)
         guard enabled else { return }
         guard !spoken.isEmpty else {
             scheduleRestart(after: 0.1)
@@ -1797,7 +1888,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     private func speakWithApple(_ text: String, id: Int) {
         guard enabled, currentSpeakID == id else { return }
         let voice = bestVoice()
-        let normalized = normalizeForTTS(text)
+        let normalized = sanitizeForSpeech(text)
         let chunks = prosodyChunks(from: normalized)
         badAppleVoiceLog("speaking with \(chunks.count) chunk(s), voice: \(voice.identifier)")
 
@@ -6641,9 +6732,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         var out: CFTypeRef?
         var title = ""
         let result = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &out)
-        if result == .success, let window = out {
+        if result == .success, let window = out, CFGetTypeID(window) == AXUIElementGetTypeID() {
             var titleRef: CFTypeRef?
-            AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &titleRef)
+            AXUIElementCopyAttributeValue((window as! AXUIElement), kAXTitleAttribute as CFString, &titleRef)
             title = (titleRef as? String) ?? ""
         }
         let context = title.isEmpty ? "Application: \(appName)" : "Application: \(appName)\nWindow: \(title)"

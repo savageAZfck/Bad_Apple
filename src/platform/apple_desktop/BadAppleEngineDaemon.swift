@@ -390,6 +390,21 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
     case "autopilot off", "disable autopilot":
         BadAppleEngine.shared.autopilot = false
         return "Autopilot disabled. Destructive tools require approval."
+    case "curious check", "run curious", "curious autopilot check":
+        let result = await BadAppleEngine.shared.executeTool(
+            name: "curious_self_improve",
+            args: ["include": "all"]
+        )
+        return result
+    case "list agent tasks", "agent tasks", "list tasks":
+        let tasks = await BadAppleEngine.shared.listAgentTasks()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        guard let data = try? encoder.encode(tasks),
+              let json = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return json
     default:
         return nil
     }
@@ -717,7 +732,9 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["entries": entries], error: nil)
 
     case "set_allow_downloads":
-        let enabled = params["enabled"] as? Bool ?? true
+        // Default to false when the parameter is missing so callers must
+        // explicitly opt in to network downloads.
+        let enabled = params["enabled"] as? Bool ?? false
         BadAppleEngine.shared.modelManager.allowDownloads = enabled
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId,
                      result: ["allow_downloads": enabled], error: nil)
@@ -1058,21 +1075,20 @@ private func p2pCommandArgs(method: String, params: [String: Any]) -> [String] {
 
 private func findP2PHelper() -> String? {
     let fm = FileManager.default
-    // Try the running executable's directory first (release build).
+    // Do not honour BADAPPLE_P2P_HELPER; only run the helper that is bundled
+    // or built next to this executable to avoid executing a malicious binary.
     if let exe = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("badapple-p2p").path,
-       fm.fileExists(atPath: exe) { return exe }
+       fm.isExecutableFile(atPath: exe) { return exe }
     let candidates = [
         "target/release/badapple-p2p",
         "../target/release/badapple-p2p",
         "../../target/release/badapple-p2p",
     ]
-    let env = ProcessInfo.processInfo.environment
-    if let custom = env["BADAPPLE_P2P_HELPER"], fm.fileExists(atPath: custom) { return custom }
     for c in candidates {
-        if fm.fileExists(atPath: c) { return c }
+        if fm.isExecutableFile(atPath: c) { return c }
         if let home = NSHomeDirectory() as String? {
             let abs = (home as NSString).appendingPathComponent(c)
-            if fm.fileExists(atPath: abs) { return abs }
+            if fm.isExecutableFile(atPath: abs) { return abs }
         }
     }
     return nil

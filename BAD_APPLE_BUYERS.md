@@ -21,6 +21,7 @@ Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 
 - **Persistent memory + RAG**: remembers user facts and searches indexed local documents.
 - **Hot-reloadable persona**: edit `prompt.txt` without restarting the 7B/9B model.
 - **MCP + local marketplace**: exposes tools to MCP clients and can run local stdio MCP servers under the same policy gate.
+- **Curious self-improvement**: in `curious` persona with autopilot on, Bad Apple runs a bounded self-check (audit, firewall, git, source markers) and writes a proposal note so it can improve on its own, all local and policy-gated.
 
 ## Models loaded
 
@@ -84,7 +85,7 @@ When asked, it should say:
 > 2. Run local tools: shell, AppleScript, file read/write/search, and macOS Shortcuts with your approval.
 > 3. Use local MCP servers with per-tool write approvals.
 > 4. Index documents for RAG, remember facts, and manage a workspace / project context.
-> 5. Run multi-step agent tasks and capture ambient context.
+> 5. Run multi-step agent tasks, a bounded Curious self-improvement check, and capture ambient context.
 > 6. Engage the kill switch and the air-gap hard switch.
 > 7. Pre-download models, switch personas, run benchmarks, and stream JSON.
 > 8. Speak responses through the local TTS server and integrate with macOS Shortcuts and Siri.
@@ -103,6 +104,7 @@ When asked, it should say:
 5. `teach <line>` to store a custom quip
 6. Multi-turn conversation with local JSONL history
 7. Hot-reloadable system prompt via `prompt.txt`
+8. `curious check` — runs a bounded self-improvement audit and writes a proposal note; `curious` persona with autopilot can run it on a loop
 
 ### 2. Memory and knowledge
 1. Working memory / scratchpad

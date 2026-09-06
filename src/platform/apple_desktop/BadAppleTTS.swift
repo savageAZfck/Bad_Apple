@@ -158,8 +158,10 @@ private final class TTSServer {
         }
 
         pathBytes.withUnsafeBufferPointer { src in
-            _ = withUnsafeMutablePointer(to: &addr.sun_path) { dst in
-                memcpy(dst, src.baseAddress!, pathBytes.count)
+            if let base = src.baseAddress, pathBytes.count > 0 {
+                _ = withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+                    memcpy(dst, base, pathBytes.count)
+                }
             }
         }
         addr.sun_len = UInt8(2 + pathBytes.count + 1)
@@ -348,7 +350,7 @@ private final class TTSServer {
             throw TTSError.invalidRequest("text too long (max \(maxTextLength) characters)")
         }
 
-        let cleanText = sanitizeText(text)
+        let cleanText = sanitizeSpeech(text)
         guard !cleanText.isEmpty else {
             throw TTSError.invalidRequest("text is empty after cleaning")
         }
@@ -421,6 +423,97 @@ private final class TTSServer {
         }
 
         return result
+    }
+
+    /// Sanitize text for speech: strip markup, code, XML tool-call tags, URLs,
+    /// markdown and any symbols a voice engine might read aloud. Keep natural
+    /// prosody punctuation (,.?!) and use sentence/line breaks for breaths.
+    private func sanitizeSpeech(_ text: String) -> String {
+        var s = text
+
+        // URLs, code blocks, tool calls, XML tags, inline code, markdown.
+        s = s.replacingOccurrences(of: #"https?://\S+"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"```[\s\S]*?```"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"<tool_call>[\s\S]*?</tool_call>"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"`[^`]*`"#, with: " ", options: .regularExpression)
+
+        // Markdown emphasis/headers/list markers and links.
+        s = s.replacingOccurrences(of: #"(\*+|_+|~+|#+|>\s*)"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+
+        // Bullets and list markers.
+        s = s.replacingOccurrences(of: #"\n\s*[•·*-]\s+"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?m)^[•·*-]\s+"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"[•·]"#, with: " ", options: .regularExpression)
+
+        // Ellipses, dashes and clause-breaking colons/semicolons become chunk
+        // breaks instead of spoken punctuation.
+        s = s.replacingOccurrences(of: #"\.{3,}|…"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s*[—–]\s*"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s*-{2,}\s*"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(\s*)[:;](\s+)"#, with: "$1\u{000A}$2", options: .regularExpression)
+
+        // Double quotes and other speech-vocalized symbols become spaces.
+        s = s.replacingOccurrences(of: "\"", with: " ")
+
+        // Allow-list pass: keep alphanumerics, whitespace and safe prosody
+        // punctuation. Remove apostrophes/hyphens that are not inside a word
+        // so the engine never says "quote" or "minus".
+        let chars = Array(s)
+        var out = ""
+        for i in 0..<chars.count {
+            let c = chars[i]
+            let isSafePunct = (c == "," || c == "." || c == "?" || c == "!")
+            let isApostrophe = (c == "'" || c == "\u{2019}")
+            let isHyphen = (c == "-")
+            if c.isLetter || c.isNumber || c.isWhitespace || isSafePunct {
+                out.append(c)
+                continue
+            }
+            if isApostrophe {
+                let prev = i > 0 ? chars[i - 1] : nil
+                let next = i + 1 < chars.count ? chars[i + 1] : nil
+                let prevOk = prev?.isLetter ?? false || prev?.isNumber ?? false
+                let nextOk = next?.isLetter ?? false || next?.isNumber ?? false
+                if prevOk && nextOk {
+                    out.append(c)
+                } else {
+                    out.append(" ")
+                }
+                continue
+            }
+            if isHyphen {
+                let prev = i > 0 ? chars[i - 1] : nil
+                let next = i + 1 < chars.count ? chars[i + 1] : nil
+                let prevLetter = prev?.isLetter ?? false
+                let nextLetter = next?.isLetter ?? false
+                if prevLetter && nextLetter {
+                    out.append(c)
+                } else {
+                    out.append(" ")
+                }
+                continue
+            }
+            out.append(" ")
+        }
+        s = out
+
+        // Tidy spaces before punctuation and collapse whitespace.
+        s = s.replacingOccurrences(of: #"\s+([.,?!])"#, with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\n\n+"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: " \n", with: "\n")
+        s = s.replacingOccurrences(of: "\n ", with: "\n")
+
+        // Turn remaining line breaks into sentence pauses. This is a safe
+        // fallback for direct socket use where the client did not split.
+        s = s.replacingOccurrences(of: "\n", with: ". ")
+
+        let pieces = s.components(separatedBy: ". ")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.contains(where: { $0.isLetter || $0.isNumber }) }
+        return pieces.joined(separator: ". ")
     }
 
     /// Prepare text for the TTS engine: remove markup, turn ellipses, dashes,

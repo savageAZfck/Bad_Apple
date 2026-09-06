@@ -59,6 +59,7 @@ final class BadAppleEngine: @unchecked Sendable {
             guard let self else { return "Vision engine unavailable." }
             return await self.describeImageInternal(at: path, prompt: prompt)
         }
+        exec.outputFirewall = outputFirewall
         return exec
     }()
     private let embeddingEngine = BadAppleEmbeddingEngine()
@@ -101,6 +102,8 @@ final class BadAppleEngine: @unchecked Sendable {
     // MARK: - Model Integrity
 
     private var lastConfigHash: String?
+    private var curiousAutopilotTask: Task<Void, Never>?
+    private let curiousProposalsDir = NSHomeDirectory() + "/.bad_apple/notes/proposed_patches"
     private lazy var agent: BadAppleAgent? = try? BadAppleAgent(
         planner: { [weak self] goal, maximumSteps in
             guard let self else { return [] }
@@ -443,6 +446,12 @@ final class BadAppleEngine: @unchecked Sendable {
         let defaultModelId = BadAppleInference.defaultConfig.modelId
         stateLock.withLock { _modelId = defaultModelId }
         personaManager.setCurrentModel(repoId: defaultModelId)
+        try? FileManager.default.createDirectory(
+            atPath: curiousProposalsDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        updateCuriousAutopilotLoop()
     }
 
     /// Replace the default main-model configuration before any load. No-op if
@@ -470,7 +479,10 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Switch to a named persona.
     func switchPersona(_ name: String) -> Bool {
         let result = personaManager.switchPersona(name)
-        if result { personaManager.reloadPersonas() }
+        if result {
+            personaManager.reloadPersonas()
+            updateCuriousAutopilotLoop()
+        }
         return result
     }
 
@@ -634,34 +646,53 @@ final class BadAppleEngine: @unchecked Sendable {
     private func generateAgentAction(
         _ context: BadAppleAgentGenerationContext
     ) async throws -> BadAppleAgentAction {
-        let tools = toolRouter.toolsForPrompt(text: context.plannedStep.instruction) ?? "No tools are available."
+        let tools = toolRouter.allToolsForPrompt() ?? "No tools are available."
+        let agentSystem = """
+        You are the Bad Apple agent executor. You are given a goal and a single step.
+        Pick exactly one tool for the step, or mark the step finished.
+        - If a tool is needed, output ONLY: <tool_call>{"name":"tool_name","arguments":{"param":"value"}}</tool_call>
+        - If this step is done, output ONLY: <done>short plain-English summary of what this step produced</done>
+        Do not add prose, sign-offs, markdown, or explanations. Use only the exact tool names shown below.
+        """
+        let prompt = """
+        Goal: \(context.goal)
+        Step \(context.stepIndex + 1) of \(context.maxSteps): \(context.plannedStep.instruction)
+
+        \(tools)
+
+        Rules:
+        - This is step \(context.stepIndex + 1) of \(context.maxSteps). If it is not the last step, you MUST call a tool. Do not finish early.
+        - Only use `<done>` on the final step, or if the goal is fully complete.
+        - Do not summarize or make up results. If the step says to run, inspect, search, check, or write, use the matching tool.
+        - Output one `<tool_call>` block or one `<done>` block. Nothing else.
+        """
         let result = try await inference.generate(
-            prompt: "Goal: \(context.goal)\nCurrent step: \(context.plannedStep.instruction)\n\(tools)\nReturn only JSON with thought, tool, arguments, and finish. Use either tool or finish, not both.",
-            systemPrompt: systemPrompt(voiceMode: false),
+            prompt: prompt,
+            systemPrompt: agentSystem,
             maxTokens: 256,
             temperature: 0
         )
-        if let start = result.text.firstIndex(of: "{"),
-           let end = result.text.lastIndex(of: "}"),
-           start <= end,
-           let data = String(result.text[start...end]).data(using: .utf8),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let thought = object["thought"] as? String ?? ""
-            let tool = object["tool"] as? String
-            let finish = object["finish"] as? String
-            let rawArgs = object["arguments"] as? [String: Any] ?? [:]
-            let arguments = rawArgs.mapValues { value in
-                if let string = value as? String { return string }
-                return String(describing: value)
-            }
-            return BadAppleAgentAction(
-                thought: thought,
-                tool: tool?.isEmpty == true ? nil : tool,
-                arguments: arguments,
-                finish: finish?.isEmpty == true ? nil : finish
+
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Look for a finished step.
+        if let doneStart = text.range(of: "<done>")?.upperBound,
+           let doneEnd = text.range(of: "</done>", range: doneStart..<text.endIndex)?.lowerBound {
+            let summary = String(text[doneStart..<doneEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return .finish(summary.isEmpty ? "Step completed." : summary)
+        }
+
+        // Look for a tool call.
+        if let call = toolRouter.extractToolCalls(text: text).first {
+            return BadAppleAgentAction.call(
+                tool: call.name,
+                arguments: call.args,
+                thought: ""
             )
         }
-        return .finish(postprocessOutput(result.text))
+
+        return .finish(postprocessOutput(text))
     }
 
     private func createApproval(name: String, args: [String: String]) -> String {
@@ -979,14 +1010,15 @@ final class BadAppleEngine: @unchecked Sendable {
             }
 
             let effectiveMaxTokens = maxTokens
-            if let tools = toolRouter.toolSchemasForPrompt(text: prompt) {
-                sysPrompt += "\n\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
+            if let toolsText = toolRouter.toolsForPrompt(text: prompt) {
+                let example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>"
+                sysPrompt += "\n\nYou have these local tools available, written in plain English. If you need one, output ONLY one block like this: \(example). Do not wrap arguments inside a \"properties\" object. Put the actual arguments directly inside \"arguments\". Never invent a tool result.\n\n\(toolsText)"
                 do {
                     let result = try await toolAwareGeneration(
                         prompt: prompt,
                         systemPrompt: sysPrompt,
                         history: history,
-                        tools: tools,
+                        tools: nil,
                         maxTokens: effectiveMaxTokens,
                         persona: persona
                     )
@@ -1403,7 +1435,76 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Toggle autopilot mode (skip approval prompts for destructive tools).
     var autopilot: Bool {
         get { policyEngine.autopilot }
-        set { policyEngine.autopilot = newValue }
+        set {
+            policyEngine.autopilot = newValue
+            updateCuriousAutopilotLoop()
+        }
+    }
+
+    /// Returns the seconds between Curious autopilot self-improvement loops.
+    /// Set `BADAPPLE_CURIOUS_INTERVAL` to 0 to disable, or a positive number
+    /// to override the default 300 seconds (5 minutes).
+    private func curiousAutopilotInterval() -> TimeInterval {
+        let raw = ProcessInfo.processInfo.environment["BADAPPLE_CURIOUS_INTERVAL"]
+        if let raw, let seconds = TimeInterval(raw) {
+            if seconds > 0 { return seconds }
+            return 0
+        }
+        return 300
+    }
+
+    /// The bounded goal the Curious autopilot agent pursues on its own.
+    func curiousAutopilotGoal() -> String {
+        """
+        You are Bad Apple's Curious self-improvement agent. On your own, do these things in order:
+        1. Run self_audit with include "all".
+        2. Inspect the output firewall (show_patterns "false").
+        3. Check the workspace git status.
+        4. Search the bad_apple source code for "TODO", "FIXME", "HACK", or "XXX".
+        5. If you find a safe, concrete improvement (especially in prompt text, AGENTS.md, or a small defensive check), write a short proposal to \(curiousProposalsDir)/<timestamp>-<topic>.md.
+        6. Do not modify live Rust or Swift source files in this task. Only write the proposal note.
+        7. Finish by summarizing what you checked and what, if anything, you proposed.
+        """
+    }
+
+    /// Start or stop the background Curious autopilot loop based on
+    /// autopilot state and active persona.
+    private func updateCuriousAutopilotLoop() {
+        let shouldRun = autopilot && activePersona == "curious" && curiousAutopilotInterval() > 0
+        if shouldRun {
+            startCuriousAutopilotLoop()
+        } else {
+            stopCuriousAutopilotLoop()
+        }
+    }
+
+    private func startCuriousAutopilotLoop() {
+        guard curiousAutopilotTask == nil else { return }
+        let interval = curiousAutopilotInterval()
+        guard interval > 0 else { return }
+        curiousAutopilotTask = Task { [weak self] in
+            guard let self = self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                guard self.autopilot, self.activePersona == "curious" else { continue }
+                let result = await self.toolExecutor.executeTool(
+                    name: "curious_self_improve",
+                    args: ["include": "all"],
+                    approved: true
+                )
+                self.auditLedger.append(
+                    eventType: "curious_autopilot_check",
+                    data: ["result": result],
+                    persona: self.activePersona
+                )
+            }
+        }
+    }
+
+    private func stopCuriousAutopilotLoop() {
+        curiousAutopilotTask?.cancel()
+        curiousAutopilotTask = nil
     }
 
     /// Check if a tool requires user approval.
@@ -1445,6 +1546,7 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     func unload() async {
+        stopCuriousAutopilotLoop()
         await inference.unload()
         let mid = stateLock.withLock { () -> String in
             _isLoaded = false

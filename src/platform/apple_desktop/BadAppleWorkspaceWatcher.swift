@@ -100,7 +100,9 @@ final class BadAppleWorkspaceWatcher {
     }
 
     private func handleEvents(numEvents: Int, eventPaths: UnsafeMutableRawPointer, eventFlags: UnsafePointer<FSEventStreamEventFlags>, eventIds: UnsafePointer<FSEventStreamEventId>) {
-        let cfArray = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue() as! [String]
+        guard let cfArray = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue() as? [String] else {
+            return
+        }
         lock.lock()
         defer { lock.unlock() }
 

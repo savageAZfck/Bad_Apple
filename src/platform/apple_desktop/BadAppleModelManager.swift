@@ -343,9 +343,9 @@ final class BadAppleModelManager {
         task.executableURL = helperURL
         task.arguments = [repoId]
 
-        var env = ProcessInfo.processInfo.environment
-        env["HF_HUB_OFFLINE"] = "0"
-        task.environment = env
+        // Inherit the parent environment; do not force HF_HUB_OFFLINE=0 so
+        // system/user offline settings and air-gap certification are respected.
+        task.environment = ProcessInfo.processInfo.environment
 
         // Run the download in the background and poll isRunning (same pattern
         // BadAppleTools.runProcess uses; this works without a Foundation run loop).
@@ -460,14 +460,11 @@ final class BadAppleModelManager {
         saveState()
     }
 
-    /// Locate the native `badapple-fetch` Rust helper. Check the override env
-    /// var, the executable's directory (dev builds), the app bundle, and PATH.
+    /// Locate the native `badapple-fetch` Rust helper. Do not honour the
+    /// BADAPPLE_FETCH env var; an untrusted path could be a malicious binary.
+    /// Search the executable's directory (dev builds), the app bundle, and the
+    /// standard PATH directories.
     private func fetchHelperURL() -> URL? {
-        if let env = ProcessInfo.processInfo.environment["BADAPPLE_FETCH"], !env.isEmpty {
-            let url = URL(fileURLWithPath: env)
-            if FileManager.default.isExecutableFile(atPath: url.path) { return url }
-        }
-
         let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
         let sameDir = exe.deletingLastPathComponent().appendingPathComponent("badapple-fetch")
         if FileManager.default.isExecutableFile(atPath: sameDir.path) {

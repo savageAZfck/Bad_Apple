@@ -8,54 +8,121 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-fn normalize_for_tts(text: &str) -> String {
-    // Fold ellipses, em/en dashes, run-on hyphens, bullets, line breaks, colons
-    // and semicolons into clean comma/period breaths. Collapse duplicate
-    // punctuation so the voice engine does not "speak" raw punctuation.
-    let dots = regex::Regex::new(r"\.{3,}").unwrap();
-    let dashes = regex::Regex::new(r"[\u{2014}\u{2013}]|-{2,}").unwrap();
-    let colons = regex::Regex::new(r"[;:]").unwrap();
-    let paragraphs = regex::Regex::new(r"\n\n+").unwrap();
-    let bullet_lines = regex::Regex::new(r"\n\s*[•·]\s*").unwrap();
-    let leading_bullet = regex::Regex::new(r"^[•·]\s*").unwrap();
-    let stray_bullets = regex::Regex::new(r"[•·]").unwrap();
-    let lines = regex::Regex::new(r"\n").unwrap();
-    let mut normalized = dots.replace_all(text, ", ").to_string();
-    normalized = dashes.replace_all(&normalized, ", ").to_string();
-    normalized = colons.replace_all(&normalized, ", ").to_string();
-    normalized = paragraphs.replace_all(&normalized, ". ").to_string();
-    normalized = bullet_lines.replace_all(&normalized, ", ").to_string();
-    normalized = lines.replace_all(&normalized, ", ").to_string();
-    normalized = leading_bullet.replace_all(&normalized, "").to_string();
-    normalized = stray_bullets.replace_all(&normalized, ", ").to_string();
+fn sanitize_for_tts(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
 
-    let comma_dup = regex::Regex::new(r",\s*,").unwrap();
-    let comma_period = regex::Regex::new(r",\s*\.").unwrap();
-    let period_comma = regex::Regex::new(r"\.\s*,").unwrap();
-    let period_dup = regex::Regex::new(r"\.\s*\.").unwrap();
-    let leading_comma = regex::Regex::new(r"^,\s*").unwrap();
-    let leading_period = regex::Regex::new(r"^\.\s*").unwrap();
+    // Strip URLs.
+    let re = regex::Regex::new(r"https?://\S+").unwrap();
+    let mut s = re.replace_all(text, " ").to_string();
 
-    loop {
-        let before = normalized.clone();
-        normalized = comma_dup.replace_all(&normalized, ", ").to_string();
-        normalized = comma_period.replace_all(&normalized, ". ").to_string();
-        normalized = period_comma.replace_all(&normalized, ". ").to_string();
-        normalized = period_dup.replace_all(&normalized, ". ").to_string();
-        normalized = leading_comma.replace_all(&normalized, "").to_string();
-        normalized = leading_period.replace_all(&normalized, "").to_string();
-        if normalized == before {
-            break;
+    // Strip fenced code blocks, inline code, and markup that speech engines
+    // read as literal punctuation.
+    let re = regex::Regex::new(r"```[\s\S]*?```").unwrap();
+    s = re.replace_all(&s, " ").to_string();
+    let re = regex::Regex::new(r"<tool_call>[\s\S]*?</tool_call>").unwrap();
+    s = re.replace_all(&s, " ").to_string();
+    let re = regex::Regex::new(r"<[^>]+>").unwrap();
+    s = re.replace_all(&s, " ").to_string();
+    let re = regex::Regex::new(r"`[^`]*`").unwrap();
+    s = re.replace_all(&s, " ").to_string();
+
+    // Strip markdown emphasis/headers/list markers and turn links into text.
+    let re = regex::Regex::new(r"(\*+|_+|~+|#+|>\s*)").unwrap();
+    s = re.replace_all(&s, " ").to_string();
+    let re = regex::Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").unwrap();
+    s = re.replace_all(&s, "$1").to_string();
+
+    // Remove bullet characters and list markers.
+    let re = regex::Regex::new(r"\n\s*[•·*-]\s+").unwrap();
+    s = re.replace_all(&s, "\n").to_string();
+    let re = regex::Regex::new(r"(?m)^[•·*-]\s+").unwrap();
+    s = re.replace_all(&s, "").to_string();
+    let re = regex::Regex::new(r"[•·]").unwrap();
+    s = re.replace_all(&s, " ").to_string();
+
+    // Ellipses, em/en dashes and run-on hyphens become chunk breaks, not
+    // punctuation the voice can read.
+    let re = regex::Regex::new(r"\.{3,}|…").unwrap();
+    s = re.replace_all(&s, "\n").to_string();
+    let re = regex::Regex::new(r"\s*[—–]\s*").unwrap();
+    s = re.replace_all(&s, "\n").to_string();
+    let re = regex::Regex::new(r"\s*-{2,}\s*").unwrap();
+    s = re.replace_all(&s, "\n").to_string();
+
+    // Clause-breaking colons and semicolons become chunk breaks when followed
+    // by whitespace; colons in times/URLs are left for the allowlist pass.
+    let re = regex::Regex::new(r"(\s*)([:;])(\s+)").unwrap();
+    s = re.replace_all(&s, "$1\n$3").to_string();
+
+    // Remove double quotes.
+    s = s.replace('"', " ");
+
+    // Allow-list pass: keep alphanumerics, whitespace, and a tiny set of
+    // punctuation the engine uses for prosody (,.?!). Remove or replace
+    // everything else so the voice never reads symbols aloud. Keep apostrophes
+    // only in contractions and hyphens only inside words.
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_alphanumeric() || c.is_whitespace() || c == ',' || c == '.' || c == '?' || c == '!'
+        {
+            out.push(c);
+            continue;
         }
+        if c == '\'' {
+            let prev = i.checked_sub(1).and_then(|j| chars.get(j)).copied();
+            let next = chars.get(i + 1).copied();
+            if prev.is_some_and(|p| p.is_alphanumeric())
+                && next.is_some_and(|n| n.is_alphanumeric())
+            {
+                out.push(c);
+            } else {
+                out.push(' ');
+            }
+            continue;
+        }
+        if c == '-' {
+            let prev = i.checked_sub(1).and_then(|j| chars.get(j)).copied();
+            let next = chars.get(i + 1).copied();
+            if prev.is_some_and(|p| p.is_alphabetic()) && next.is_some_and(|n| n.is_alphabetic()) {
+                out.push(c);
+            } else {
+                out.push(' ');
+            }
+            continue;
+        }
+        out.push(' ');
     }
+    s = out;
 
-    // Strip leading punctuation and double spaces.
-    let leading_punct = regex::Regex::new(r"^[,.:;!?\\-–—\s]+").unwrap();
-    normalized = leading_punct.replace_all(&normalized, "").to_string();
-    while normalized.contains("  ") {
-        normalized = normalized.replace("  ", " ");
-    }
-    normalized.trim().to_string()
+    // Tidy spaces before punctuation and collapse whitespace.
+    let re = regex::Regex::new(r"\s+([.,?!])").unwrap();
+    s = re.replace_all(&s, "$1").to_string();
+    let re = regex::Regex::new(r"\n\n+").unwrap();
+    s = re.replace_all(&s, "\n").to_string();
+    let re = regex::Regex::new(r"[ \t]+").unwrap();
+    s = re.replace_all(&s, " ").to_string();
+    let re = regex::Regex::new(r" \n").unwrap();
+    s = re.replace_all(&s, "\n").to_string();
+    let re = regex::Regex::new(r"\n ").unwrap();
+    s = re.replace_all(&s, "\n").to_string();
+
+    // Return one clean line per chunk.
+    s.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            if !line.contains(|c: char| c.is_alphabetic() || c.is_ascii_digit()) {
+                return None;
+            }
+            Some(line.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn main() -> Result<()> {
@@ -291,17 +358,12 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
     let mut buffer = String::new();
     let mut deadline: Option<Instant> = None;
 
-    fn is_break_point(buf: &str) -> bool {
-        if buf.len() >= MAX_CHUNK {
-            return true;
-        }
-        if buf.len() < MIN_CHUNK {
-            return false;
-        }
-        if buf.ends_with(['.', '!', '?', ',', '\n']) {
-            return true;
-        }
-        false
+    fn is_sentence_end(s: &str) -> bool {
+        s.trim_end().ends_with(['.', '!', '?'])
+    }
+
+    fn has_speech(s: &str) -> bool {
+        s.contains(|c: char| c.is_alphabetic() || c.is_ascii_digit())
     }
 
     loop {
@@ -312,9 +374,31 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
 
         match rx.recv_timeout(timeout) {
             Ok(TtsMsg::Text(text)) => {
-                buffer.push_str(&normalize_for_tts(&text));
-                if is_break_point(&buffer) {
-                    speak_chunk(&normalize_for_tts(&buffer));
+                if text.is_empty() {
+                    continue;
+                }
+                buffer.push_str(&sanitize_for_tts(&text));
+
+                // Flush complete lines as soon as they appear so list items
+                // and clause breaks become their own utterances.
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim();
+                    if !line.is_empty() && has_speech(line) {
+                        speak_chunk(line);
+                    }
+                    let rest = buffer.split_off(pos + 1);
+                    buffer = rest;
+                }
+
+                if buffer.is_empty() {
+                    deadline = None;
+                } else if buffer.len() >= MIN_CHUNK
+                    && (is_sentence_end(&buffer) || buffer.len() >= MAX_CHUNK)
+                {
+                    let line = buffer.trim();
+                    if !line.is_empty() && has_speech(line) {
+                        speak_chunk(line);
+                    }
                     buffer.clear();
                     deadline = None;
                 } else {
@@ -322,17 +406,19 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
                 }
             }
             Ok(TtsMsg::Flush) | Err(RecvTimeoutError::Disconnected) => {
-                if !buffer.is_empty() {
-                    speak_chunk(&normalize_for_tts(&buffer));
+                let line = buffer.trim();
+                if !line.is_empty() && has_speech(line) {
+                    speak_chunk(line);
                 }
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-                if !buffer.is_empty() {
-                    speak_chunk(&normalize_for_tts(&buffer));
-                    buffer.clear();
-                    deadline = None;
+                let line = buffer.trim();
+                if !line.is_empty() && has_speech(line) {
+                    speak_chunk(line);
                 }
+                buffer.clear();
+                deadline = None;
             }
         }
     }
@@ -371,57 +457,67 @@ fn tts_binary_path() -> Option<std::path::PathBuf> {
 }
 
 /// Send a chunk to the local native TTS server and play it with afplay.
-/// If the server is not running, attempt to start it once.
+/// If the server is not running, attempt to start it once. Multi-line text is
+/// split so each line is synthesised as a separate utterance.
 fn speak_chunk(text: &str) {
     if !text.contains(|c: char| c.is_alphabetic() || c.is_ascii_digit()) {
         return;
     }
 
-    let voice = std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "Best".to_string());
-    let socket = std::env::var("BADAPPLE_TTS_SOCKET")
-        .unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());
-
-    // Make sure the TTS server socket is reachable.  The platform install loads
-    // the LaunchAgent, but a bare `cargo build --release` run needs to start it.
-    let stream = match UnixStream::connect(&socket) {
-        Ok(s) => Some(s),
-        Err(_) => {
-            if let Some(bin) = tts_binary_path() {
-                let _ = start_tts_server(&bin, &socket);
-                // Give the server a moment to bind.
-                for _ in 0..20 {
-                    if UnixStream::connect(&socket).is_ok() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-            UnixStream::connect(&socket).ok()
+    let text = sanitize_for_tts(text);
+    for line in text.split('\n') {
+        let line = line.trim();
+        if line.is_empty() || !line.contains(|c: char| c.is_alphabetic() || c.is_ascii_digit()) {
+            continue;
         }
-    };
 
-    let mut stream = match stream {
-        Some(s) => s,
-        None => return,
-    };
+        let voice = std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "Best".to_string());
+        let socket = std::env::var("BADAPPLE_TTS_SOCKET")
+            .unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());
 
-    let request = format!(
-        "{{\"text\":{},\"voice\":{}}}\n",
-        serde_json::to_string(text).unwrap_or_default(),
-        serde_json::to_string(&voice).unwrap_or_default()
-    );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return;
-    }
-    let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
-        return;
-    }
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) {
-        if let Some(wav) = json.get("wav_path").and_then(|v| v.as_str()) {
-            let _ = std::process::Command::new("/usr/bin/afplay")
-                .arg(wav)
-                .status();
+        // Make sure the TTS server socket is reachable.  The platform install
+        // loads the LaunchAgent, but a bare `cargo build --release` run needs to
+        // start it.
+        let stream = match UnixStream::connect(&socket) {
+            Ok(s) => Some(s),
+            Err(_) => {
+                if let Some(bin) = tts_binary_path() {
+                    let _ = start_tts_server(&bin, &socket);
+                    // Give the server a moment to bind.
+                    for _ in 0..20 {
+                        if UnixStream::connect(&socket).is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+                UnixStream::connect(&socket).ok()
+            }
+        };
+
+        let mut stream = match stream {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let request = format!(
+            "{{\"text\":{},\"voice\":{}}}\n",
+            serde_json::to_string(line).unwrap_or_default(),
+            serde_json::to_string(&voice).unwrap_or_default()
+        );
+        if stream.write_all(request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut response = String::new();
+        if stream.read_to_string(&mut response).is_err() {
+            continue;
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) {
+            if let Some(wav) = json.get("wav_path").and_then(|v| v.as_str()) {
+                let _ = std::process::Command::new("/usr/bin/afplay")
+                    .arg(wav)
+                    .status();
+            }
         }
     }
 }
@@ -1622,7 +1718,7 @@ fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
          Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n\n\
-         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 500)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (wicket, drill, genz, midwest, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
+         Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 500)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (cali, curious, drill, genz, midwest, wicket, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: Best; Piper voices in voices/ take priority, then AVFoundation voices)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
     );
 }

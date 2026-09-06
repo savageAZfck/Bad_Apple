@@ -27,7 +27,7 @@ All inference, tool execution, memory, and audit state stay on the machine.
 
 ## Consumer Readiness
 
-**Current score: 9.8 / 10**
+**Current score: 9.85 / 10**
 
 Bad Apple is **#1 in the independent AI OS layer tier**. The only other product
 in this tier is OpenAGI, and it lacks Bad Apple's hardware-rooted identity,
@@ -94,6 +94,11 @@ coding benchmarks.
   MCP, vault, and audits.
 - **Persona system** — hot-reloadable `prompt.txt`, `personas.json`, and
   voice-specific prompts.
+- **Bounded Curious self-improvement autopilot** — when the `curious` persona is
+  active and autopilot is on, the engine runs a local self-check (cert, doctor,
+  output firewall, git status, source TODO/FIXME scan) and writes a proposal note
+  to `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple
+  "curious check"`.
 - **Air-gap certification** — `badapple cert` runs 15 runtime checks; Rust
   integration tests assert zero network sockets.
 
@@ -122,6 +127,7 @@ badapple CLI / menu bar / voice host / dashboard
    ├─ Output firewall (Aho-Corasick)
    ├─ Tool router + policy engine
    ├─ FSEvents workspace watcher
+   ├─ Curious autopilot self-improvement loop (policy-gated)
    ├─ MCP server (stdio / socket / SSE)
    └─ P2P encrypted mesh
               │
@@ -186,6 +192,9 @@ target/release/badapple --benchmark
 target/release/badapple --doctor
 target/release/badapple cert
 
+# Curious self-improvement check (manual trigger)
+target/release/badapple "curious check"
+
 # Persona switch
 target/release/badapple "switch to wicket"
 target/release/badapple --roast "Tell me about cloud AI"
@@ -234,7 +243,7 @@ routing through Apple. Direct-download users can run the included
 
 | Metric | Value |
 |---|---|
-| Consumer-readiness score | 9.8 / 10 |
+| Consumer-readiness score | 9.85 / 10 |
 | Rust tests | 103 passing |
 | Cert suite | 15 checks passing |
 | Mesh-sync tests | 4 passing |
