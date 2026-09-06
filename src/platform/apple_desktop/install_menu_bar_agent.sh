@@ -6,6 +6,22 @@ PLIST_SRC="${REPO_ROOT}/src/platform/apple_desktop/com.badapple.menubar.plist"
 PLIST_DST="${HOME}/Library/LaunchAgents/com.badapple.menubar.plist"
 APP_EXECUTABLE="/Applications/Bad Apple.app/Contents/MacOS/BadApple"
 
+# Tune memory-governor thresholds to the machine's total unified memory.
+RAM_GB=$(($(sysctl -n hw.memsize) / 1024 / 1024 / 1024))
+if [[ "$RAM_GB" -ge 24 ]]; then
+    BADAPPLE_MEMORY_ELEVATED=0.80
+    BADAPPLE_MEMORY_UNHEALTHY=0.90
+    BADAPPLE_MEMORY_CRITICAL=0.95
+elif [[ "$RAM_GB" -ge 12 ]]; then
+    BADAPPLE_MEMORY_ELEVATED=0.75
+    BADAPPLE_MEMORY_UNHEALTHY=0.85
+    BADAPPLE_MEMORY_CRITICAL=0.90
+else
+    BADAPPLE_MEMORY_ELEVATED=0.70
+    BADAPPLE_MEMORY_UNHEALTHY=0.80
+    BADAPPLE_MEMORY_CRITICAL=0.85
+fi
+
 if [[ ! -x "${APP_EXECUTABLE}" ]]; then
     echo "Bad Apple is not installed at /Applications/Bad Apple.app" >&2
     exit 1
@@ -25,7 +41,11 @@ else
 fi
 
 mkdir -p "${CONSOLE_HOME}/Library/LaunchAgents"
-install -m 644 "${PLIST_SRC}" "${PLIST_DST}"
+sed -e "s|__BADAPPLE_ROOT__|${REPO_ROOT}|g" \
+    -e "s|__BADAPPLE_MEMORY_ELEVATED__|${BADAPPLE_MEMORY_ELEVATED}|g" \
+    -e "s|__BADAPPLE_MEMORY_UNHEALTHY__|${BADAPPLE_MEMORY_UNHEALTHY}|g" \
+    -e "s|__BADAPPLE_MEMORY_CRITICAL__|${BADAPPLE_MEMORY_CRITICAL}|g" \
+    "${PLIST_SRC}" > "${PLIST_DST}"
 plutil -lint "${PLIST_DST}"
 
 if [[ -n "${RUN_AS}" ]]; then

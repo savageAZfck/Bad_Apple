@@ -17,11 +17,17 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>BADAPPLE_PROMPT_FILE</key>
-        <string>/Users/savag3/bad_apple/prompt.txt</string>
+        <string>__BADAPPLE_ROOT__/prompt.txt</string>
         <key>BADAPPLE_PERSONAS_FILE</key>
-        <string>/Users/savag3/bad_apple/personas.json</string>
+        <string>__BADAPPLE_ROOT__/personas.json</string>
         <key>BADAPPLE_SOCKET_PATH</key>
         <string>/var/run/badapple/substrate_mlx.sock</string>
+        <key>BADAPPLE_MEMORY_ELEVATED</key>
+        <string>__BADAPPLE_MEMORY_ELEVATED__</string>
+        <key>BADAPPLE_MEMORY_UNHEALTHY</key>
+        <string>__BADAPPLE_MEMORY_UNHEALTHY__</string>
+        <key>BADAPPLE_MEMORY_CRITICAL</key>
+        <string>__BADAPPLE_MEMORY_CRITICAL__</string>
     </dict>
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>
