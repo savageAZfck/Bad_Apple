@@ -1570,6 +1570,14 @@ final class BadAppleEngine: @unchecked Sendable {
             return "I am Bad Apple, the local AI operating system layer for macOS. I am written in Rust, Swift, and Metal compute shaders, I run a self-red teaming harness, and the current language-model component inside me is \(modelName) running through MLX; that model is one subsystem, not what I am. \(accessNote) Lowkey, it's all running on your bare-metal Mac, homie. No cloud. \(signOff(for: lower))"
         }
 
+        // Autopilot status — must be deterministic, not hallucinated by the model.
+        if lower.contains("autopilot") || lower.contains("auto pilot") ||
+            lower.contains("auto-run") || lower.contains("auto run") {
+            return self.autopilot
+                ? "Autopilot is on. Destructive tools run without approval, and I can act on my own source code independently. \(signOff(for: lower))"
+                : "Autopilot is off. Destructive actions still need your approval. \(signOff(for: lower))"
+        }
+
         // Identity queries
         if lower == "who are you" || lower == "what are you" ||
             lower.contains("what is your name") || lower.contains("what's your name") {
