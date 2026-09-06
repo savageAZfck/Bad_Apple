@@ -8,6 +8,19 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+fn normalize_for_tts(text: &str) -> String {
+    // Fold ellipses, em/en dashes, and run-on hyphens into a comma breath
+    // so the voice engine does not insert long dead air or read them as words.
+    let dots = regex::Regex::new(r"\.{3,}").unwrap();
+    let dashes = regex::Regex::new(r"[\u{2014}\u{2013}]|-{2,}").unwrap();
+    let mut normalized = dots.replace_all(text, ", ").to_string();
+    normalized = dashes.replace_all(&normalized, ", ").to_string();
+    while normalized.contains("  ") {
+        normalized = normalized.replace("  ", " ");
+    }
+    normalized.trim().to_string()
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut prompt_parts = Vec::new();
@@ -252,19 +265,6 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
             return true;
         }
         false
-    }
-
-    fn normalize_for_tts(text: &str) -> String {
-        let mut normalized = text.to_string();
-        normalized = normalized.replace("...", ", ");
-        normalized = normalized.replace('…', ", ");
-        normalized = normalized.replace('—', ", ");
-        normalized = normalized.replace('–', ", ");
-        // Collapse double spaces created by replacements.
-        while normalized.contains("  ") {
-            normalized = normalized.replace("  ", " ");
-        }
-        normalized
     }
 
     loop {

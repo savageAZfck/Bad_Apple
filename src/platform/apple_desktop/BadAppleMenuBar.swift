@@ -258,75 +258,17 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
         }
     }
 
-    /// Strip the trailing silence off a Piper WAV so consecutive chunks do not
-    /// leave dead air between them. Leaves a tiny natural tail so the last
-    /// phoneme does not get clipped.
-    private func trimTrailingSilence(url: URL) -> URL? {
-        guard let input = try? AVAudioFile(forReading: url) else { return nil }
-        let format = input.processingFormat
-        let frameCount = AVAudioFrameCount(input.length)
-        guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            return nil
-        }
-
-        do {
-            try input.read(into: buffer)
-        } catch {
-            return nil
-        }
-
-        let threshold: Float = 0.005
-        let sampleRate = format.sampleRate
-        let tailFrames = AVAudioFrameCount(max(1.0, sampleRate * 0.045)) // 45ms tail
-
-        var lastAudible: AVAudioFramePosition = 0
-        let channels = Int(format.channelCount)
-        for frame in (0..<Int(frameCount)).reversed() {
-            var audible = false
-            for ch in 0..<channels {
-                guard let channelData = buffer.floatChannelData?[ch] else { continue }
-                let sample = channelData[frame]
-                if abs(sample) > threshold {
-                    audible = true
-                    break
-                }
-            }
-            if audible {
-                lastAudible = AVAudioFramePosition(frame)
-                break
-            }
-        }
-
-        let endFrame = min(AVAudioFramePosition(frameCount) - 1, lastAudible + AVAudioFramePosition(tailFrames))
-        let newFrameCount = AVAudioFrameCount(endFrame + 1)
-        guard newFrameCount > 0, newFrameCount <= buffer.frameCapacity else { return nil }
-        buffer.frameLength = newFrameCount
-
-        let trimmedURL = url.deletingPathExtension()
-            .appendingPathExtension("trimmed")
-            .appendingPathExtension(url.pathExtension)
-        do {
-            let output = try AVAudioFile(forWriting: trimmedURL, settings: format.settings, commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-            try output.write(from: buffer)
-            return trimmedURL
-        } catch {
-            return nil
-        }
-    }
-
     private func makePlayItem(url: URL, completion: ((Bool) -> Void)?) -> PlayItem {
-        let trimmedURL = trimTrailingSilence(url: url) ?? url
-        if let player = try? AVAudioPlayer(contentsOf: trimmedURL) {
+        if let player = try? AVAudioPlayer(contentsOf: url) {
             player.delegate = self
             if !player.prepareToPlay() {
-                badAppleVoiceLog("PiperTTSPlayback: prepareToPlay() failed for \(trimmedURL.path), will attempt afplay fallback")
+                badAppleVoiceLog("PiperTTSPlayback: prepareToPlay() failed for \(url.path), will attempt afplay fallback")
             }
-            return PlayItem(url: trimmedURL, player: player, completion: completion)
+            return PlayItem(url: url, player: player, completion: completion)
         }
 
-        badAppleVoiceLog("PiperTTSPlayback: AVAudioPlayer failed for \(trimmedURL.path), falling back to afplay")
-        let item = PlayItem(url: trimmedURL, completion: completion)
+        badAppleVoiceLog("PiperTTSPlayback: AVAudioPlayer failed for \(url.path), falling back to afplay")
+        let item = PlayItem(url: url, completion: completion)
         item.afplayTask = makeAfplayTask(item)
         return item
     }
@@ -1448,13 +1390,14 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 
-    /// Normalize text before TTS so ellipses and em dashes do not create
-    /// awkward dead-air pauses. Replace them with commas for natural rhythm.
+    /// Normalize text before TTS so ellipses, em dashes, and run-on dashes do
+    /// not create awkward dead-air pauses. Fold them into a comma breath.
     private func normalizeForTTS(_ text: String) -> String {
         var normalized = text
-        normalized = normalized.replacingOccurrences(of: "...", with: ", ")
+        normalized = normalized.replacingOccurrences(of: "\\.{3,}", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "…", with: ", ")
-        normalized = normalized.replacingOccurrences(of: "—", with: ", ")
+        normalized = normalized.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
         while normalized.contains("  ") {
             normalized = normalized.replacingOccurrences(of: "  ", with: " ")
         }
@@ -1478,27 +1421,23 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         switch ending {
         case "?":
             pitch = 1.03
-            // Questions get a slightly longer breath if they were a full thought.
-            postDelay = isLong ? 0.16 : (isShort ? 0.05 : 0.10)
-            rate = isLong ? 0.44 : (isShort ? 0.48 : 0.46)
+            postDelay = isLong ? 0.22 : (isShort ? 0.12 : 0.16)
+            rate = isLong ? 0.44 : 0.46
         case "!":
             pitch = 1.02
-            // Exclamations are punchy, but a longer one still needs a beat.
-            postDelay = isLong ? 0.14 : (isShort ? 0.05 : 0.09)
-            rate = isLong ? 0.44 : 0.48
+            postDelay = isLong ? 0.20 : (isShort ? 0.10 : 0.14)
+            rate = isLong ? 0.44 : 0.46
         case "\n":
             pitch = 0.96
-            // Paragraph break = longer breath; stacked newlines = bigger gap.
-            let extra = text.hasSuffix("\n\n") ? 0.08 : 0.0
-            postDelay = 0.12 + extra
+            let extra = text.hasSuffix("\n\n") ? 0.10 : 0.0
+            postDelay = 0.18 + extra
             rate = 0.46
         case ".":
             fallthrough
         default:
             pitch = 0.97
-            // Short clause: barely a breath. Long sentence: take a real one.
-            postDelay = isLong ? 0.12 : (isShort ? 0.03 : 0.06)
-            rate = isLong ? 0.44 : (isShort ? 0.48 : 0.46)
+            postDelay = isLong ? 0.18 : (isShort ? 0.08 : 0.12)
+            rate = isLong ? 0.44 : 0.46
         }
 
         return ProsodyChunk(text: text, rate: rate, pitch: pitch, postDelay: postDelay)
