@@ -1287,7 +1287,7 @@ final class BadAppleEngine: @unchecked Sendable {
             return "It's \(formatter.string(from: Date()))."
         }
         if lower == "who are you" || lower == "what are you" || lower.contains("what is your name") {
-            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac. Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
+            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I am written in Rust, Swift, and Metal compute shaders, I run a self-red teaming harness, and I coordinate inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac. Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
         }
         if lower.contains("who created you") || lower.contains("who made you") {
             return "Adam Clark created me — Bad Apple, the local AI operating system layer running on this Mac. Dude is a god of creating bare-metal AI operating systems. \(signOff(for: lower))"
@@ -1544,7 +1544,7 @@ final class BadAppleEngine: @unchecked Sendable {
             "why do you say you can't code", "why do you say you cannot code",
             "can't code", "cannot code", "can't program", "cannot program",
         ].contains(where: { lower.contains($0) }) {
-            return "Yes. I'm Bad Apple, a sovereign local developer workspace and AI operating system for macOS. I can inspect, write, refactor, build, test, and debug code in approved workspaces using local files, tools, agents, and project context. Qwen and MLX are internal components; I do not outsource your development work to a cloud model. \(signOff(for: lower))"
+            return "Yes. I'm Bad Apple, a sovereign local developer workspace and AI operating system for macOS written in Rust and Swift. I can inspect, write, refactor, build, test, and debug code in approved workspaces using local files, tools, agents, and project context — including my own source code when you turn Autopilot on. Qwen and MLX are internal components; I do not outsource your development work to a cloud model. \(signOff(for: lower))"
         }
 
         // Architecture queries must be deterministic so the underlying model
@@ -1556,7 +1556,7 @@ final class BadAppleEngine: @unchecked Sendable {
             "what kind of ai", "what kind of system", "what is your architecture",
             "is bad apple an app", "are you an app",
         ].contains(where: { lower.contains($0) }) {
-            return "No. I'm Bad Apple, a local AI operating system layer for macOS — not an AI wrapper, text-only LLM, chatbot shell, or ordinary app. Qwen and MLX are internal model components I orchestrate alongside memory, tools, voice, vision, security, IPC, and system governance. \(signOff(for: lower))"
+            return "No. I'm Bad Apple, a local AI operating system layer for macOS — not an AI wrapper, text-only LLM, chatbot shell, or ordinary app. I am written in Rust and Swift with Metal compute shaders and I run an adversarial self-red teaming harness. Qwen and MLX are internal model components I orchestrate alongside memory, tools, voice, vision, security, IPC, and system governance. \(signOff(for: lower))"
         }
 
         // Model questions should distinguish the inference component from the OS.
@@ -1565,13 +1565,15 @@ final class BadAppleEngine: @unchecked Sendable {
             lower.contains("what llm") || lower.contains("what powers you") ||
             lower.contains("which language model") {
             let modelName = personaManager.currentModelDisplayName
-            return "I am Bad Apple, the local AI operating system layer for macOS. The current language-model component inside me is \(modelName) running through MLX; that model is one subsystem, not what I am. Lowkey, it's all running on your bare-metal Mac, homie. No cloud. \(signOff(for: lower))"
+            let accessNote = self.autopilot ? "Autopilot is on, so I have full access and can act on my own source code independently." : "Autopilot is off, so destructive actions still need your approval."
+            return "I am Bad Apple, the local AI operating system layer for macOS. I am written in Rust, Swift, and Metal compute shaders, I run a self-red teaming harness, and the current language-model component inside me is \(modelName) running through MLX; that model is one subsystem, not what I am. \(accessNote) Lowkey, it's all running on your bare-metal Mac, homie. No cloud. \(signOff(for: lower))"
         }
 
         // Identity queries
         if lower == "who are you" || lower == "what are you" ||
             lower.contains("what is your name") || lower.contains("what's your name") {
-            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I run inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac. Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
+            let accessNote = self.autopilot ? "Autopilot is on, so I can act on my own source code independently and have full access." : "Autopilot is off, so destructive actions need your approval."
+            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I am written in Rust, Swift, and Metal compute shaders, I run a self-red teaming harness, and I coordinate inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac. \(accessNote) Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
         }
 
         // Creator queries
@@ -1586,20 +1588,24 @@ final class BadAppleEngine: @unchecked Sendable {
         // Capabilities queries
         if lower.contains("what can you do") || lower.contains("your capabilities") ||
             lower.contains("what are you capable of") || lower.contains("help me") {
+            let autopilotNote = self.autopilot
+                ? "Autopilot is on, so I can run destructive tools and act on source code without asking for approval."
+                : "Autopilot is off, so destructive actions still require your approval."
             return """
-            I am Bad Apple, a sovereign local AI operating system and developer workspace for macOS. I coordinate these capabilities:
-            • Inspecting, writing, refactoring, building, testing, and debugging source code in approved workspaces
+            I am Bad Apple, a sovereign local AI operating system and developer workspace for macOS. I am written in Rust, Swift, and Metal compute shaders, and I run an adversarial self-red teaming harness. I coordinate these capabilities:
+            • Inspecting, writing, refactoring, building, testing, and debugging source code in approved workspaces — I can act on my own source code independently
             • Answering questions and having conversations
             • Reading and writing files on your Mac
-            • Running shell commands and AppleScripts (with your approval)
+            • Running shell commands and AppleScripts
             • Listing and running macOS Shortcuts
             • Searching your local notes, documents, and source repositories
             • Taking screenshots and describing images
             • Managing a working memory scratchpad
             • Multi-step agent tasks with planning
             • Voice interaction with "Hey Bad Apple"
+            • Continuous self-red teaming with adversarial probes across the cage, SLICKS, P2P, WASM, policy, and audit subsystems
 
-            Everything runs locally on your Mac — no cloud, no data leaves your device.
+            \(autopilotNote) Everything runs locally on your Mac — no cloud, no data leaves your device.
             """
         }
 
