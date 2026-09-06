@@ -4234,8 +4234,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleFastTierOnly") }
     }
     private var autopilotEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: "BadAppleAutopilot") as? Bool ?? false }
-        set { UserDefaults.standard.set(newValue, forKey: "BadAppleAutopilot") }
+        get {
+            if let value = UserDefaults.standard.object(forKey: "BadAppleAutopilot") as? Bool {
+                return value
+            }
+            return UserDefaults.standard.object(forKey: "BadAppleSettingsAutopilot") as? Bool ?? false
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "BadAppleAutopilot")
+            UserDefaults.standard.set(newValue, forKey: "BadAppleSettingsAutopilot")
+        }
     }
     private var focusEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "BadAppleFocusEnabled") as? Bool ?? false }
@@ -4344,6 +4352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let daemonAlreadyRunning = FileManager.default.fileExists(atPath: BadAppleBrain.deepSocket)
         if daemonAlreadyRunning {
             badAppleVoiceLog("daemon already running on \(BadAppleBrain.deepSocket) — not loading in-process engine")
+            syncAutopilotToDaemon()
         } else {
             Task.detached(priority: .background) {
                 await nativeEngine.loadModel()
@@ -5083,6 +5092,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         Task {
             _ = try? await runBadAppleCLI(prompt: fastTierOnly ? "fast tier on" : "fast tier off", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
             await MainActor.run { self.rebuildMenu() }
+        }
+    }
+
+    /// Push the persisted UserDefaults autopilot state to the daemon so the
+    /// assistant's reported state matches the UI toggle after restarts.
+    private func syncAutopilotToDaemon() {
+        Task {
+            _ = try? await runBadAppleCLI(prompt: autopilotEnabled ? "autopilot on" : "autopilot off", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
         }
     }
 
@@ -6789,7 +6806,7 @@ final class BadAppleSettingsWindow: NSObject {
     ]
 
     // UserDefaults keys
-    private let autopilotKey = "BadAppleSettingsAutopilot"
+    private let autopilotKey = "BadAppleAutopilot"
     private let fastTierKey = "BadAppleSettingsFastTier"
     private let voiceModeKey = "BadAppleSettingsVoiceMode"
     private let p2pKey = "BadAppleSettingsP2PSync"
@@ -7075,6 +7092,7 @@ final class BadAppleSettingsWindow: NSObject {
     @objc private func autopilotToggled(_ sender: NSButton) {
         let enabled = sender.state == .on
         UserDefaults.standard.set(enabled, forKey: autopilotKey)
+        UserDefaults.standard.set(enabled, forKey: "BadAppleSettingsAutopilot")
         autopilotLabel?.textColor = enabled ? .systemOrange : .labelColor
         BadAppleEngine.shared.autopilot = enabled
         sendCommand(enabled ? "enable autopilot" : "disable autopilot")

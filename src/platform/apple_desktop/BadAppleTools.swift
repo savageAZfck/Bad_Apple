@@ -921,6 +921,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
 
     /// Policy file path.
     private let policyPath = "/var/lib/bad_apple/policy.yaml"
+    private let autopilotOverridePath = "/var/lib/bad_apple/autopilot"
 
     // MARK: - Init
 
@@ -941,7 +942,13 @@ final class BadApplePolicyEngine: @unchecked Sendable {
             lock.lock()
             _autopilot = newValue
             lock.unlock()
+            persistAutopilot(newValue)
         }
+    }
+
+    private func persistAutopilot(_ value: Bool) {
+        let text = value ? "true" : "false"
+        _ = try? text.write(toFile: autopilotOverridePath, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Policy Checks
@@ -1263,6 +1270,13 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         defaultPolicy = defaults
         toolPolicies = tools
         policyLoaded = true
+
+        // Apply any runtime autopilot override saved by a previous session.
+        if let saved = try? String(contentsOfFile: autopilotOverridePath, encoding: .utf8) {
+            let value = saved.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            _autopilot = (value == "true")
+        }
+
         lock.unlock()
     }
 

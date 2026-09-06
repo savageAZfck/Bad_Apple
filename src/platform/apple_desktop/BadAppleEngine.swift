@@ -1492,6 +1492,7 @@ final class BadAppleEngine: @unchecked Sendable {
         status["ambient_context"] = ambientContext ?? NSNull()
         status["fast_tier"] = fastTierEnabled
         status["fast_model_loaded"] = fastModelLoaded
+        status["autopilot"] = autopilot
         status["vram"] = await runtime.vramStatus()
         return status
     }
