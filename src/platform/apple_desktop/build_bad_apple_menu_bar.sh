@@ -223,6 +223,7 @@ echo "Installed badapple-engine and MLX runtime into ${BUILD_DIR}."
 
 install -d "${CONTENTS_DIR}/Helpers"
 install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev/null || true
+install -m 755 "${BUILD_DIR}/badapple-fetch" "${CONTENTS_DIR}/Helpers/badapple-fetch" 2>/dev/null || true
 
 # Screen capture helper runs as a child of the Bad Apple bundle so it uses
 # Bad Apple's Screen Recording permission instead of the Aqua helper.

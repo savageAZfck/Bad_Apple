@@ -304,7 +304,7 @@ final class BadAppleModelManager {
 
     // MARK: - Downloads
 
-    /// Queue a background download using `huggingface-cli` or `python3 -m huggingface_hub`.
+    /// Queue a background download using the native `badapple-fetch` Rust helper.
     /// Downloads only happen if `BADAPPLE_ALLOW_DOWNLOADS=1`.
     func startDownload(modelId: String) -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
@@ -327,23 +327,24 @@ final class BadAppleModelManager {
         state.lastUpdated = Date().timeIntervalSince1970
         saveState()
 
-        // Determine download command.
-        let task = Process()
+        // Use the native Rust helper. Falls back to environment overrides.
         let timeout = downloadTimeout
         let repoId = profile.repoId
-        if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3") || FileManager.default.fileExists(atPath: "/usr/bin/python3") {
-            let python = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3") ? "/opt/homebrew/bin/python3" : "/usr/bin/python3"
-            task.executableURL = URL(fileURLWithPath: python)
-            task.arguments = ["-m", "huggingface_hub.cli", "download", repoId]
-        } else {
-            // Fallback: try the `huggingface-cli` binary if installed.
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            task.arguments = ["huggingface-cli", "download", repoId]
+        guard let helperURL = fetchHelperURL() else {
+            state.status = .error
+            state.error = "badapple-fetch helper not found; run cargo build --release --bin badapple-fetch"
+            state.progress = 0.0
+            state.lastUpdated = Date().timeIntervalSince1970
+            saveState()
+            return statusDictionary(for: modelId)
         }
+
+        let task = Process()
+        task.executableURL = helperURL
+        task.arguments = [repoId]
 
         var env = ProcessInfo.processInfo.environment
         env["HF_HUB_OFFLINE"] = "0"
-        env["PYTHONUNBUFFERED"] = "1"
         task.environment = env
 
         // Run the download in the background and poll isRunning (same pattern
@@ -448,7 +449,7 @@ final class BadAppleModelManager {
             state.status = .error
             if state.error.isEmpty {
                 let stderrHint = stderr.isEmpty ? "" : " (stderr: \(stderr))"
-                state.error = "download failed (exit code \(exitCode))\(stderrHint). Make sure huggingface_hub is installed and allow_downloads is enabled."
+                state.error = "download failed (exit code \(exitCode))\(stderrHint). Make sure badapple-fetch is built and allow_downloads is enabled."
             }
             state.progress = 0.0
         } else {
@@ -457,6 +458,36 @@ final class BadAppleModelManager {
             state.progress = 0.0
         }
         saveState()
+    }
+
+    /// Locate the native `badapple-fetch` Rust helper. Check the override env
+    /// var, the executable's directory (dev builds), the app bundle, and PATH.
+    private func fetchHelperURL() -> URL? {
+        if let env = ProcessInfo.processInfo.environment["BADAPPLE_FETCH"], !env.isEmpty {
+            let url = URL(fileURLWithPath: env)
+            if FileManager.default.isExecutableFile(atPath: url.path) { return url }
+        }
+
+        let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+        let sameDir = exe.deletingLastPathComponent().appendingPathComponent("badapple-fetch")
+        if FileManager.default.isExecutableFile(atPath: sameDir.path) {
+            return sameDir
+        }
+
+        if let bundled = Bundle.main.url(forAuxiliaryExecutable: "badapple-fetch"),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+
+        let paths = [
+            "/usr/local/bin/badapple-fetch",
+            "/opt/homebrew/bin/badapple-fetch",
+            "/usr/bin/badapple-fetch",
+        ]
+        for path in paths where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
     }
 
     func cancelDownload(modelId: String) -> [String: Any] {

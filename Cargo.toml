@@ -44,6 +44,10 @@ path = "src/bin/badapple-p2p.rs"
 name = "badapple-fetch-metallib"
 path = "src/bin/badapple_fetch_metallib.rs"
 
+[[bin]]
+name = "badapple-fetch"
+path = "src/bin/badapple-fetch.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -92,6 +96,7 @@ safetensors = "0.7.0"
 objc2-metal = "0.3.2"
 hf-chat-template = "1.0.0"
 ureq = "3.4"
+urlencoding = "2.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
