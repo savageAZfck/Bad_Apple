@@ -41,12 +41,15 @@ cloud models** (Claude 4, GPT-4o, Gemini 2.5) on raw reasoning and difficult
 coding. Its value is the integrated, auditable, air-gapped system architecture —
 not the raw model alone.
 
-The remaining blockers to 10/10 are the deliberate lack of Apple notarization, a
-clean-machine VM install/smoke test run on a real fresh Mac, and one remaining
-`paste` transitive dependency after the recent `sled` → `redb` and
-`bincode` → `ciborium` work. Recent work closed the first-run preflight,
-memory-adaptive install, menubar-plist rendering, and Homebrew Cask consumer
-paths.
+The remaining blockers to 10/10 are the deliberate lack of Apple notarization,
+a clean-machine VM install/smoke test run on a real fresh Mac, and one
+remaining `paste` transitive dependency after the recent `sled` → `redb` and
+`bincode` → `ciborium` work.
+
+Recent work closed the first-run preflight, memory-adaptive install,
+menubar-plist rendering, source-free public release
+(`savageAZfck/bad-apple-releases`), and public Homebrew Cask
+(`savageAZfck/homebrew-bad-apple`).
 
 **Hardware:** Apple Silicon Mac (M1 or newer). Bad Apple uses roughly 6 GB of
 unified memory once the 7B model is loaded, so 8 GB total is the practical
