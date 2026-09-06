@@ -9,11 +9,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn normalize_for_tts(text: &str) -> String {
-    // Fold ellipses, em/en dashes, run-on hyphens, bullets, and line breaks
-    // into clean comma/period breaths. Collapse duplicate punctuation so the
-    // voice engine does not "speak" raw commas or periods.
+    // Fold ellipses, em/en dashes, run-on hyphens, bullets, line breaks, colons
+    // and semicolons into clean comma/period breaths. Collapse duplicate
+    // punctuation so the voice engine does not "speak" raw punctuation.
     let dots = regex::Regex::new(r"\.{3,}").unwrap();
     let dashes = regex::Regex::new(r"[\u{2014}\u{2013}]|-{2,}").unwrap();
+    let colons = regex::Regex::new(r"[;:]").unwrap();
     let paragraphs = regex::Regex::new(r"\n\n+").unwrap();
     let bullet_lines = regex::Regex::new(r"\n\s*[•·]\s*").unwrap();
     let leading_bullet = regex::Regex::new(r"^[•·]\s*").unwrap();
@@ -21,6 +22,7 @@ fn normalize_for_tts(text: &str) -> String {
     let lines = regex::Regex::new(r"\n").unwrap();
     let mut normalized = dots.replace_all(text, ", ").to_string();
     normalized = dashes.replace_all(&normalized, ", ").to_string();
+    normalized = colons.replace_all(&normalized, ", ").to_string();
     normalized = paragraphs.replace_all(&normalized, ". ").to_string();
     normalized = bullet_lines.replace_all(&normalized, ", ").to_string();
     normalized = lines.replace_all(&normalized, ", ").to_string();
@@ -47,6 +49,9 @@ fn normalize_for_tts(text: &str) -> String {
         }
     }
 
+    // Strip leading punctuation and double spaces.
+    let leading_punct = regex::Regex::new(r"^[,.:;!?\\-–—\s]+").unwrap();
+    normalized = leading_punct.replace_all(&normalized, "").to_string();
     while normalized.contains("  ") {
         normalized = normalized.replace("  ", " ");
     }
@@ -293,7 +298,7 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
         if buf.len() < MIN_CHUNK {
             return false;
         }
-        if buf.ends_with(['.', '!', '?', ':', ';', '\n']) {
+        if buf.ends_with(['.', '!', '?', '\n']) {
             return true;
         }
         false
@@ -368,6 +373,10 @@ fn tts_binary_path() -> Option<std::path::PathBuf> {
 /// Send a chunk to the local native TTS server and play it with afplay.
 /// If the server is not running, attempt to start it once.
 fn speak_chunk(text: &str) {
+    if !text.contains(|c: char| c.is_alphabetic() || c.is_ascii_digit()) {
+        return;
+    }
+
     let voice = std::env::var("BADAPPLE_TTS_VOICE").unwrap_or_else(|_| "Best".to_string());
     let socket = std::env::var("BADAPPLE_TTS_SOCKET")
         .unwrap_or_else(|_| "/tmp/badapple_tts.sock".to_string());

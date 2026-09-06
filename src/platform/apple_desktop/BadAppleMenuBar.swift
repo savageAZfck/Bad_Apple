@@ -607,8 +607,9 @@ final class PiperTTSClient {
                 splitIndex = prefix.index(prefix.startIndex, offsetBy: maxLength)
             }
 
-            let chunk = String(remaining[..<splitIndex!]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !chunk.isEmpty {
+            var chunk = String(remaining[..<splitIndex!]).trimmingCharacters(in: .whitespacesAndNewlines)
+            chunk = chunk.replacingOccurrences(of: "^[,.:;!?\\-–—]+", with: "", options: .regularExpression)
+            if !chunk.isEmpty, chunk.contains(where: { $0.isLetter || $0.isNumber }) {
                 chunks.append(chunk)
             }
             remaining = String(remaining[splitIndex!...]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1391,8 +1392,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     }
 
     /// Normalize text before TTS so ellipses, em dashes, run-on dashes, bullets,
-    /// and line breaks become clean pauses. Collapse duplicate punctuation so the
-    /// voice does not "speak" raw commas or periods.
+    /// line breaks, colons and semicolons become clean pauses. Collapse duplicate
+    /// punctuation so the voice does not "speak" raw punctuation.
     private func normalizeForTTS(_ text: String) -> String {
         var normalized = text
 
@@ -1400,6 +1401,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         normalized = normalized.replacingOccurrences(of: "…", with: ", ")
         normalized = normalized.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "[;:]", with: ", ", options: .regularExpression)
 
         normalized = normalized.replacingOccurrences(of: "\\n\\n+", with: ". ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "\\n\\s*[•·]\\s*", with: ", ", options: .regularExpression)
@@ -1418,6 +1420,9 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             normalized = normalized.replacingOccurrences(of: "^\\.\\s*", with: "", options: .regularExpression)
             changed = (normalized != before)
         }
+
+        // Strip leading punctuation that would otherwise be spoken.
+        normalized = normalized.replacingOccurrences(of: "^[,.:;!?\\-–—\\s]+", with: "", options: .regularExpression)
 
         while normalized.contains("  ") {
             normalized = normalized.replacingOccurrences(of: "  ", with: " ")
@@ -1471,8 +1476,9 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         var current = ""
 
         func flush() {
-            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
+            var trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            trimmed = trimmed.replacingOccurrences(of: "^[,.:;!?\\-–—]+", with: "", options: .regularExpression)
+            guard !trimmed.isEmpty, trimmed.contains(where: { $0.isLetter || $0.isNumber }) else {
                 current = ""
                 return
             }

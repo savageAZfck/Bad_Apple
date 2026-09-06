@@ -414,10 +414,10 @@ private final class TTSServer {
         return result
     }
 
-    /// Prepare text for the TTS engine: remove markup, turn ellipses and dashes
-    /// into brief breaths, and convert bullets/line breaks into clean pauses.
-    /// This also collapses duplicate punctuation so the voice does not "speak"
-    /// raw commas or periods.
+    /// Prepare text for the TTS engine: remove markup, turn ellipses, dashes,
+    /// colons and bullets into brief breaths, and convert line breaks into clean
+    /// pauses. This also collapses duplicate punctuation so the voice does not
+    /// "speak" raw commas, periods, or colons.
     private func sanitizeText(_ text: String) -> String {
         var normalized = text
 
@@ -425,10 +425,11 @@ private final class TTSServer {
         normalized = normalized.replacingOccurrences(of: "https?://\\S+", with: "", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "*", with: "")
 
-        // Ellipses, em/en dashes, and run-on hyphens become breaths.
+        // Ellipses, em/en dashes, run-on hyphens, colons and semicolons become breaths.
         normalized = normalized.replacingOccurrences(of: "\\.\\.\\.+", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "[;:]", with: ", ", options: .regularExpression)
 
         // Paragraph breaks first, so they become real sentence pauses.
         normalized = normalized.replacingOccurrences(of: "\\n\\n+", with: ". ", options: .regularExpression)
@@ -470,6 +471,14 @@ private final class TTSServer {
 
         while cleaned.contains("  ") {
             cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
+        }
+
+        // Remove any leading punctuation that would be spoken.
+        cleaned = cleaned.replacingOccurrences(of: "^[,.:;!?\\-–—\\s]+", with: "", options: .regularExpression)
+
+        // If the chunk has no words, return empty so the engine stays silent.
+        if !cleaned.contains(where: { $0.isLetter || $0.isNumber }) {
+            return ""
         }
 
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
