@@ -950,24 +950,56 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     }
 
     private func requestPermissionsAndStart() {
-        state = .requestingPermission
-        badAppleVoiceLog("requesting speech recognition authorization")
-        SFSpeechRecognizer.requestAuthorization { [weak self] speechStatus in
-            guard let self = self, self.enabled else { return }
-            badAppleVoiceLog("speech authorization status: \(speechStatus.rawValue)")
-            guard speechStatus == .authorized else {
-                self.failClosed("speech recognition permission denied")
-                return
+        continuePermissionFlow()
+    }
+
+    private func continuePermissionFlow() {
+        let speechAuth = SFSpeechRecognizer.authorizationStatus()
+        let micAuth = AVCaptureDevice.authorizationStatus(for: .audio)
+        badAppleVoiceLog("voice auth status: speech=\(speechAuth.rawValue) mic=\(micAuth.rawValue)")
+
+        if speechAuth == .authorized && micAuth == .authorized {
+            DispatchQueue.main.async { [weak self] in self?.configureOnDeviceRecognizer() }
+            return
+        }
+
+        if speechAuth == .denied || speechAuth == .restricted {
+            failClosed("speech recognition permission denied")
+            return
+        }
+        if micAuth == .denied || micAuth == .restricted {
+            failClosed("microphone permission denied")
+            return
+        }
+
+        if speechAuth == .notDetermined {
+            state = .requestingPermission
+            badAppleVoiceLog("requesting speech recognition authorization")
+            SFSpeechRecognizer.requestAuthorization { [weak self] speechStatus in
+                guard let self = self, self.enabled else { return }
+                badAppleVoiceLog("speech authorization status: \(speechStatus.rawValue)")
+                if speechStatus == .authorized {
+                    self.continuePermissionFlow()
+                } else {
+                    self.failClosed("speech recognition permission denied")
+                }
             }
+            return
+        }
+
+        if micAuth == .notDetermined {
+            state = .requestingPermission
+            badAppleVoiceLog("requesting microphone access")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 guard let self = self, self.enabled else { return }
                 badAppleVoiceLog("microphone access: \(granted)")
-                guard granted else {
+                if granted {
+                    self.continuePermissionFlow()
+                } else {
                     self.failClosed("microphone permission denied")
-                    return
                 }
-                DispatchQueue.main.async { self.configureOnDeviceRecognizer() }
             }
+            return
         }
     }
 
