@@ -70,7 +70,24 @@ If that fails, the dashboard server is not running; restart the platform daemons
 
 - Close other large apps before starting Bad Apple.
 - Use `badapple "flush vram"` or `badapple "unload all models"` to free VRAM.
+- Lower the KV cache: `badapple "set max kv size to 2048"` (or 1024 on 8 GB Macs).
 - Disable `BADAPPLE_FAST_TIER` if you are troubleshooting inference.
+- The installer automatically picks `BADAPPLE_MAX_KV_SIZE` and draft-token
+  settings based on your Mac's total RAM. To re-apply, run the installer again.
+
+### Installer preflight fails
+
+The release `install.sh` runs `first_run_preflight.sh` before anything else. If
+it fails, fix the listed item:
+
+- **macOS version**: macOS 26.0 or later is required.
+- **Apple Silicon**: Bad Apple runs on arm64 only.
+- **RAM**: 8 GB is the practical minimum, 16 GB is comfortable. On 8 GB the
+  installer sets a smaller KV cache automatically.
+- **Disk**: Keep at least 40 GB free for the OS, model, and swap.
+- **Xcode / CLT**: Run `xcode-select --install`.
+- **Model cache**: First launch downloads the 7B model if it is not cached.
+  Set `BADAPPLE_ALLOW_DOWNLOADS=1` or seed the cache from another machine.
 
 ## Built-in diagnostic tools
 

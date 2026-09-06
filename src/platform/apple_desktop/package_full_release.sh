@@ -68,9 +68,24 @@ Quick install:
 
     sudo ./install.sh
 
-This copies Bad Apple.app into /Applications, installs the native system
-daemons (no Python venv required), and starts the menu bar. The first
-launch will download model weights (several GB) if they are not cached.
+The installer runs a friendly preflight that checks your Mac (macOS version,
+Apple Silicon, RAM, free disk, Xcode tools, and model cache). If anything is
+off, it tells you exactly what to do.
+
+What the installer does:
+- Copies Bad Apple.app into /Applications.
+- Strips the Gatekeeper quarantine flag.
+- Installs the native system daemons (no Python venv required).
+- Tunes the KV cache and memory governor to your Mac's RAM.
+- Starts the menu bar.
+
+Requirements:
+- macOS 26.0 or later
+- Apple Silicon (M1 or newer)
+- 8 GB of unified memory minimum, 16 GB recommended
+
+The first launch will download model weights (~4-6 GB) if they are not cached.
+For an air-gap install, seed the model cache before running the installer.
 
 For the manual path, copy Bad Apple.app to /Applications, then run the
 platform installer from a checkout as documented in INSTALL.md.

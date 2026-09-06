@@ -23,7 +23,8 @@ else
 fi
 
 if [[ ! -x "${APP_EXECUTABLE}" ]]; then
-    echo "Bad Apple is not installed at /Applications/Bad Apple.app" >&2
+    echo "error: Bad Apple.app is not installed at /Applications/Bad Apple.app" >&2
+    echo "       Run the installer first: sudo ./install.sh" >&2
     exit 1
 fi
 
