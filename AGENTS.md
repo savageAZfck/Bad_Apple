@@ -4,7 +4,7 @@ This file captures the project-specific commands and conventions learned while w
 
 ## Project layout
 
-- `target/release/badapple-engine` — Native Swift MLX daemon. Loads the 9B Qwen 3.5 model and serves the SLICKS Unix socket.
+- `target/release/badapple-engine` — Native Swift MLX daemon. Loads the 7B Qwen 2.5 Coder model and serves the SLICKS Unix socket.
 - `src/bin/badapple.rs` + `src/` — Rust CLI client that talks to the daemon.
 - `src/platform/apple_bridge/com.badapple.mlx.plist` — launchd daemon config.
 - `prompt.txt` — Hot-reloadable system prompt. Edits take effect on the next query without restarting the model.
@@ -261,7 +261,7 @@ The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`,
 
 Set in `src/platform/apple_bridge/com.badapple.mlx.plist`:
 
-- `BADAPPLE_DFLASH=0` — DFlash is off for this quant. DFlash's 9B draft model is too heavy to beat the verification overhead, so plain `mlx-lm` is faster overall.
+- `BADAPPLE_DFLASH=0` — DFlash is off for this quant. DFlash's larger draft model is too heavy to beat the verification overhead, so plain `mlx-lm` is faster overall.
 - `BADAPPLE_SPECULATIVE_DRAFT=auto` — set to a cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft.
 - `BADAPPLE_NUM_DRAFT_TOKENS=2` — number of tokens the draft model generates per verification step. Runtime command: `set draft tokens to 4`.
 
@@ -274,7 +274,7 @@ In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple
 
 - `BAD_APPLE.md` is the live technical doc; keep it in sync with the architecture and the latest benchmark numbers.
 - `BAD_APPLE_BUYERS.md` is the buyer-facing doc; commit it when the numbers change.
-- The 4B voice bundle has been removed in favor of the unified 9B brain; do not reintroduce it.
+- The 4B voice bundle has been removed in favor of the unified main brain; do not reintroduce it.
 - `cargo fmt --check` is now clean; run `cargo fmt` and `cargo build --release` after Rust changes.
 - Verification: `cargo fmt --check && cargo clippy --release --tests && cargo test --release` must all pass before committing. There are 102+ Rust library tests and 10 cert-suite integration tests.
 - `cargo build --release` may emit a future-incompatibility warning from `block v0.1.6` (a transitive dep of `metal 0.29`). It cannot be fixed without migrating `metal` to `objc2-metal`.
@@ -339,7 +339,10 @@ cargo clippy --release
   - `badapple-p2p pull <peer_addr:port> <model_id>` pulls the model from a listening peer
   - Transfers use AES-256-GCM over a dedicated TCP stream with per-chunk ACKs, resume support, and SHA-256 verification.
 - P2P is off by default. Enable with the menu bar `Mesh > P2P Sync`.
-- Consumer install: double-click `Install Bad Apple` from the release zip, or run `src/platform/apple_desktop/install_badapple.sh`.
+- Consumer install: Homebrew Cask (`brew install --cask bad-apple`), or extract the
+  full release `Bad_Apple-<version>-full-unsigned.zip` and run `sudo ./install.sh`.
+- Legacy unsigned app-only zip: double-click `Install Bad Apple` from the release
+  zip, or run `src/platform/apple_desktop/install_badapple.sh`.
 - First-run onboarding and plain-English Status window in `BadAppleMenuBar.swift`.
 
 ## Latest features (new)
@@ -439,11 +442,11 @@ cargo clippy --release
 ## Lazy main-model loading
 
 - Set `BADAPPLE_LAZY_MAIN_MODEL=1` in `com.badapple.mlx.plist` to skip loading
-  the 9B brain at daemon startup. The first non-fast-tier request calls
+  the main brain at daemon startup. The first non-fast-tier request calls
   `_ensure_main_model()` and loads the brain on demand.
 - `BADAPPLE_FAST_TIER=1` keeps simple queries (math, time, identity, greetings,
   `ping`, jokes, thanks) on the fast tier so the UI is responsive while the
-  9B model is still absent.
+  main model is still absent.
 - When lazy mode is on and `BADAPPLE_FAST_MODEL` is unset, the fast tier falls
   back to the cached `mlx-community/Qwen2.5-0.5B-Instruct-4bit` model.
 - The `runtime_status` dashboard payload now includes `main_model_loaded` and

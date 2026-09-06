@@ -56,6 +56,7 @@ done
 
 # The app bundle already contains updater/strip scripts, but keep a copy at the top level.
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${PKG_DIR}/strip_quarantine.sh"
+install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/first_run_preflight.sh" "${PKG_DIR}/first_run_preflight.sh"
 
 cat > "${PKG_DIR}/README.txt" <<'EOF'
 Welcome to Bad Apple!
@@ -87,6 +88,9 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Run a friendly preflight that checks RAM, disk, macOS version, and model cache.
+"${SCRIPT_DIR}/first_run_preflight.sh"
 REPO_ROOT="${SCRIPT_DIR}/bad_apple"
 APP="${SCRIPT_DIR}/Bad Apple.app"
 
