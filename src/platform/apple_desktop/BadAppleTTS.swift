@@ -414,27 +414,57 @@ private final class TTSServer {
         return result
     }
 
+    /// Prepare text for the TTS engine: remove markup, turn ellipses and dashes
+    /// into brief breaths, and convert bullets/line breaks into clean pauses.
+    /// This also collapses duplicate punctuation so the voice does not "speak"
+    /// raw commas or periods.
     private func sanitizeText(_ text: String) -> String {
-        let withoutURLs = text.replacingOccurrences(of: "https?://\\S+", with: "", options: .regularExpression)
-        let withoutAsterisks = withoutURLs.replacingOccurrences(of: "*", with: "")
-        // Ellipses, em-dashes, and run-on hyphens read as long dead air, so fold
-        // them into a brief comma breath.
-        let withoutEllipses = withoutAsterisks.replacingOccurrences(of: "\\.\\.\\.+", with: ", ", options: .regularExpression)
-        let withoutEmDashes = withoutEllipses.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
-        let withoutRunOnDashes = withoutEmDashes.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
-        // Bullets and line breaks become spoken pauses so lists don't sound like
-        // one continuous wall of text.
-        let withoutBullets = withoutRunOnDashes.replacingOccurrences(of: "[•·]", with: ", ", options: .regularExpression)
-        let withParagraphBreaks = withoutBullets.replacingOccurrences(of: "\\n\\n+", with: ". ", options: .regularExpression)
-        let withLineBreaks = withParagraphBreaks.replacingOccurrences(of: "\\n", with: ", ", options: .regularExpression)
+        var normalized = text
 
+        // Strip URLs and markdown markers.
+        normalized = normalized.replacingOccurrences(of: "https?://\\S+", with: "", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "*", with: "")
+
+        // Ellipses, em/en dashes, and run-on hyphens become breaths.
+        normalized = normalized.replacingOccurrences(of: "\\.\\.\\.+", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
+
+        // Paragraph breaks first, so they become real sentence pauses.
+        normalized = normalized.replacingOccurrences(of: "\\n\\n+", with: ". ", options: .regularExpression)
+
+        // Bullets that start a line become the separator, consuming the newline.
+        normalized = normalized.replacingOccurrences(of: "\\n\\s*[•·]\\s*", with: ", ", options: .regularExpression)
+
+        // Any remaining newline is a clause break.
+        normalized = normalized.replacingOccurrences(of: "\\n", with: ", ", options: .regularExpression)
+
+        // Leading bullet at the very start of the text.
+        normalized = normalized.replacingOccurrences(of: "^[•·]\\s*", with: "", options: .regularExpression)
+
+        // Stray bullets elsewhere.
+        normalized = normalized.replacingOccurrences(of: "[•·]", with: ", ", options: .regularExpression)
+
+        // Collapse duplicate/fused punctuation so the voice doesn't read
+        // "comma comma" or "period comma".
+        var changed = true
+        while changed {
+            let before = normalized
+            normalized = normalized.replacingOccurrences(of: ",\\s*,", with: ", ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: ",\\s*\\.", with: ". ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "\\.\\s*,", with: ". ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "\\.\\s*\\.", with: ". ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "^,\\s*", with: "", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "^\\.\\s*", with: "", options: .regularExpression)
+            changed = (normalized != before)
+        }
+
+        // Strip control characters, keep printable ASCII and whitespace.
         var cleaned = ""
-        for scalar in withLineBreaks.unicodeScalars {
+        for scalar in normalized.unicodeScalars {
             let value = scalar.value
-            if value == 0x09 || value == 0x0A || value == 0x0D || (value >= 0x20 && value <= 0x7E) {
+            if (value >= 0x20 && value <= 0x7E) || scalar.properties.isWhitespace {
                 cleaned.append(Character(scalar))
-            } else if scalar.properties.isWhitespace {
-                cleaned.append(" ")
             }
         }
 

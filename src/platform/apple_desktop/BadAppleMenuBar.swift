@@ -1390,19 +1390,35 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 
-    /// Normalize text before TTS so ellipses, em dashes, and run-on dashes do
-    /// not create awkward dead-air pauses. Fold them into a comma breath.
-    /// Bullets and line breaks also become comma/period pauses so lists do not
-    /// sound like a wall of text.
+    /// Normalize text before TTS so ellipses, em dashes, run-on dashes, bullets,
+    /// and line breaks become clean pauses. Collapse duplicate punctuation so the
+    /// voice does not "speak" raw commas or periods.
     private func normalizeForTTS(_ text: String) -> String {
         var normalized = text
+
         normalized = normalized.replacingOccurrences(of: "\\.{3,}", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "…", with: ", ")
         normalized = normalized.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
-        normalized = normalized.replacingOccurrences(of: "[•·]", with: ", ", options: .regularExpression)
+
         normalized = normalized.replacingOccurrences(of: "\\n\\n+", with: ". ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "\\n\\s*[•·]\\s*", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "\\n", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "^[•·]\\s*", with: "", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "[•·]", with: ", ", options: .regularExpression)
+
+        var changed = true
+        while changed {
+            let before = normalized
+            normalized = normalized.replacingOccurrences(of: ",\\s*,", with: ", ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: ",\\s*\\.", with: ". ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "\\.\\s*,", with: ". ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "\\.\\s*\\.", with: ". ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "^,\\s*", with: "", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: "^\\.\\s*", with: "", options: .regularExpression)
+            changed = (normalized != before)
+        }
+
         while normalized.contains("  ") {
             normalized = normalized.replacingOccurrences(of: "  ", with: " ")
         }

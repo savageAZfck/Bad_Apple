@@ -10,17 +10,43 @@ use std::time::{Duration, Instant};
 
 fn normalize_for_tts(text: &str) -> String {
     // Fold ellipses, em/en dashes, run-on hyphens, bullets, and line breaks
-    // into comma/period breaths so the voice engine does not speed-read lists.
+    // into clean comma/period breaths. Collapse duplicate punctuation so the
+    // voice engine does not "speak" raw commas or periods.
     let dots = regex::Regex::new(r"\.{3,}").unwrap();
     let dashes = regex::Regex::new(r"[\u{2014}\u{2013}]|-{2,}").unwrap();
-    let bullets = regex::Regex::new(r"[•·]").unwrap();
     let paragraphs = regex::Regex::new(r"\n\n+").unwrap();
+    let bullet_lines = regex::Regex::new(r"\n\s*[•·]\s*").unwrap();
+    let leading_bullet = regex::Regex::new(r"^[•·]\s*").unwrap();
+    let stray_bullets = regex::Regex::new(r"[•·]").unwrap();
     let lines = regex::Regex::new(r"\n").unwrap();
     let mut normalized = dots.replace_all(text, ", ").to_string();
     normalized = dashes.replace_all(&normalized, ", ").to_string();
-    normalized = bullets.replace_all(&normalized, ", ").to_string();
     normalized = paragraphs.replace_all(&normalized, ". ").to_string();
+    normalized = bullet_lines.replace_all(&normalized, ", ").to_string();
     normalized = lines.replace_all(&normalized, ", ").to_string();
+    normalized = leading_bullet.replace_all(&normalized, "").to_string();
+    normalized = stray_bullets.replace_all(&normalized, ", ").to_string();
+
+    let comma_dup = regex::Regex::new(r",\s*,").unwrap();
+    let comma_period = regex::Regex::new(r",\s*\.").unwrap();
+    let period_comma = regex::Regex::new(r"\.\s*,").unwrap();
+    let period_dup = regex::Regex::new(r"\.\s*\.").unwrap();
+    let leading_comma = regex::Regex::new(r"^,\s*").unwrap();
+    let leading_period = regex::Regex::new(r"^\.\s*").unwrap();
+
+    loop {
+        let before = normalized.clone();
+        normalized = comma_dup.replace_all(&normalized, ", ").to_string();
+        normalized = comma_period.replace_all(&normalized, ". ").to_string();
+        normalized = period_comma.replace_all(&normalized, ". ").to_string();
+        normalized = period_dup.replace_all(&normalized, ". ").to_string();
+        normalized = leading_comma.replace_all(&normalized, "").to_string();
+        normalized = leading_period.replace_all(&normalized, "").to_string();
+        if normalized == before {
+            break;
+        }
+    }
+
     while normalized.contains("  ") {
         normalized = normalized.replace("  ", " ");
     }
