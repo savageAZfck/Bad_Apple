@@ -45,6 +45,10 @@ The remaining blockers to 10/10 are the deliberate lack of Apple notarization, a
 clean-machine VM install/smoke test, and one remaining `paste` transitive
 dependency after the recent `sled` → `redb` and `bincode` → `ciborium` work.
 
+**Hardware:** Apple Silicon Mac (M1 or newer). Bad Apple uses roughly 6 GB of
+unified memory once the 7B model is loaded, so 8 GB total is the practical
+floor and 16 GB is the comfortable recommendation.
+
 See [Bad_Apple_Ranking.md](Bad_Apple_Ranking.md) for the full ranking,
 benchmarks, and competitive placement.
 

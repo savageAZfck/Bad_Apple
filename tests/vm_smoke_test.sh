@@ -115,11 +115,19 @@ fi
 ok "disk space: ${FREE_GB:-unknown} GB free"
 
 TOTAL_MEM_GB=$(($(sysctl -n hw.memsize) / 1024 / 1024 / 1024))
-if [[ "$TOTAL_MEM_GB" -lt 16 ]]; then
-  ko "insufficient RAM" "need at least 16 GB, found $TOTAL_MEM_GB GB"
+if [[ "$TOTAL_MEM_GB" -lt 6 ]]; then
+  ko "insufficient RAM" "Bad Apple needs ~6 GB of available unified memory; found $TOTAL_MEM_GB GB total"
   exit 1
 fi
-ok "RAM: ${TOTAL_MEM_GB} GB"
+if [[ "$TOTAL_MEM_GB" -lt 8 ]]; then
+  warn "only $TOTAL_MEM_GB GB RAM: Bad Apple itself uses ~6 GB; macOS may be tight"
+else
+  if [[ "$TOTAL_MEM_GB" -lt 16 ]]; then
+    ok "RAM: ${TOTAL_MEM_GB} GB (works; 16 GB is more comfortable)"
+  else
+    ok "RAM: ${TOTAL_MEM_GB} GB"
+  fi
+fi
 
 if [[ -z "$BADAPPLE_ZIP" ]]; then
   # Try to find the latest full-unsigned zip in the release dir

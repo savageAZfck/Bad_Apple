@@ -6,9 +6,14 @@ Bad Apple runs entirely on your Mac. **No Apple Developer ID is required.** The 
 
 - macOS 26.0 or later (macOS 26 beta/Sonoma+ for `FoundationModels`)
 - Apple Silicon Mac (M1 or newer)
+- **8 GB of unified memory minimum; 16 GB is comfortable.** Bad Apple itself uses
+  roughly 6 GB once the 7B model is loaded, plus whatever macOS and other apps
+  need. Larger models (32B/70B) need more.
+- Model weights cached locally (the first download can be several GB)
+
+For building from source only:
 - Xcode 16+ or Command Line Tools with `swiftc`
 - Rust via [rustup](https://rustup.rs)
-- Model weights cached locally (the first download can be several GB)
 
 ## One-command build (from source)
 
