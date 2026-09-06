@@ -9,12 +9,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn normalize_for_tts(text: &str) -> String {
-    // Fold ellipses, em/en dashes, and run-on hyphens into a comma breath
-    // so the voice engine does not insert long dead air or read them as words.
+    // Fold ellipses, em/en dashes, run-on hyphens, bullets, and line breaks
+    // into comma/period breaths so the voice engine does not speed-read lists.
     let dots = regex::Regex::new(r"\.{3,}").unwrap();
     let dashes = regex::Regex::new(r"[\u{2014}\u{2013}]|-{2,}").unwrap();
+    let bullets = regex::Regex::new(r"[•·]").unwrap();
+    let paragraphs = regex::Regex::new(r"\n\n+").unwrap();
+    let lines = regex::Regex::new(r"\n").unwrap();
     let mut normalized = dots.replace_all(text, ", ").to_string();
     normalized = dashes.replace_all(&normalized, ", ").to_string();
+    normalized = bullets.replace_all(&normalized, ", ").to_string();
+    normalized = paragraphs.replace_all(&normalized, ". ").to_string();
+    normalized = lines.replace_all(&normalized, ", ").to_string();
     while normalized.contains("  ") {
         normalized = normalized.replace("  ", " ");
     }

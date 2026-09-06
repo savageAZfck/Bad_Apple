@@ -1392,12 +1392,17 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
 
     /// Normalize text before TTS so ellipses, em dashes, and run-on dashes do
     /// not create awkward dead-air pauses. Fold them into a comma breath.
+    /// Bullets and line breaks also become comma/period pauses so lists do not
+    /// sound like a wall of text.
     private func normalizeForTTS(_ text: String) -> String {
         var normalized = text
         normalized = normalized.replacingOccurrences(of: "\\.{3,}", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "…", with: ", ")
         normalized = normalized.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
         normalized = normalized.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "[•·]", with: ", ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "\\n\\n+", with: ". ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "\\n", with: ", ", options: .regularExpression)
         while normalized.contains("  ") {
             normalized = normalized.replacingOccurrences(of: "  ", with: " ")
         }

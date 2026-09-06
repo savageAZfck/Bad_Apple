@@ -417,19 +417,29 @@ private final class TTSServer {
     private func sanitizeText(_ text: String) -> String {
         let withoutURLs = text.replacingOccurrences(of: "https?://\\S+", with: "", options: .regularExpression)
         let withoutAsterisks = withoutURLs.replacingOccurrences(of: "*", with: "")
-        // Ellipses and em-dashes read as 1-2 s of dead air with the current TTS,
-        // so fold them into a brief comma pause that sounds like a breath.
+        // Ellipses, em-dashes, and run-on hyphens read as long dead air, so fold
+        // them into a brief comma breath.
         let withoutEllipses = withoutAsterisks.replacingOccurrences(of: "\\.\\.\\.+", with: ", ", options: .regularExpression)
-        let withoutEmDashes = withoutEllipses.replacingOccurrences(of: "—", with: ", ").replacingOccurrences(of: "–", with: ", ")
+        let withoutEmDashes = withoutEllipses.replacingOccurrences(of: "[—–]", with: ", ", options: .regularExpression)
+        let withoutRunOnDashes = withoutEmDashes.replacingOccurrences(of: "-{2,}", with: ", ", options: .regularExpression)
+        // Bullets and line breaks become spoken pauses so lists don't sound like
+        // one continuous wall of text.
+        let withoutBullets = withoutRunOnDashes.replacingOccurrences(of: "[•·]", with: ", ", options: .regularExpression)
+        let withParagraphBreaks = withoutBullets.replacingOccurrences(of: "\\n\\n+", with: ". ", options: .regularExpression)
+        let withLineBreaks = withParagraphBreaks.replacingOccurrences(of: "\\n", with: ", ", options: .regularExpression)
 
         var cleaned = ""
-        for scalar in withoutEmDashes.unicodeScalars {
+        for scalar in withLineBreaks.unicodeScalars {
             let value = scalar.value
             if value == 0x09 || value == 0x0A || value == 0x0D || (value >= 0x20 && value <= 0x7E) {
                 cleaned.append(Character(scalar))
             } else if scalar.properties.isWhitespace {
                 cleaned.append(" ")
             }
+        }
+
+        while cleaned.contains("  ") {
+            cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
         }
 
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)

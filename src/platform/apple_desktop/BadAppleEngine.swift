@@ -1571,8 +1571,12 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         // Autopilot status — must be deterministic, not hallucinated by the model.
-        if lower.contains("autopilot") || lower.contains("auto pilot") ||
-            lower.contains("auto-run") || lower.contains("auto run") {
+        let autopilotTriggers = [
+            "autopilot", "auto pilot", "auto-run", "auto run",
+            "do you need approval", "do i need to approve", "approval prompt",
+            "skip approval", "can you run without asking", "are you on auto",
+        ]
+        if autopilotTriggers.contains(where: { lower.contains($0) }) {
             return self.autopilot
                 ? "Autopilot is on. Destructive tools run without approval, and I can act on my own source code independently. \(signOff(for: lower))"
                 : "Autopilot is off. Destructive actions still need your approval. \(signOff(for: lower))"
