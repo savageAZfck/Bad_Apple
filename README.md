@@ -161,7 +161,22 @@ badapple cert
 
 ## Install
 
-Unsigned build (no Apple Developer ID required):
+### Consumer install (Homebrew Cask — one command)
+
+This is the smoothest path. Homebrew removes the Gatekeeper quarantine flag and
+runs the native platform installer for you:
+
+```bash
+brew tap savage3/bad-apple https://github.com/savage3/homebrew-bad-apple
+brew install --cask bad-apple
+```
+
+The 7B model is downloaded on first use. If you prefer to seed the cache
+offline, set `MODEL_CACHE_SRC` before installing; see `tests/vm_smoke_test.sh`.
+
+### Developer / manual install (unsigned)
+
+No Apple Developer ID required:
 
 ```bash
 cargo build --release
@@ -170,7 +185,8 @@ sudo src/platform/apple_desktop/strip_quarantine.sh
 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
-For release packaging and signing see `package_signed_release.sh` and
+For release packaging and signing see `package_full_release.sh`,
+`package_homebrew_cask.sh`, `package_signed_release.sh`, and
 `package_unsigned.sh`.
 
 ## Quick Use

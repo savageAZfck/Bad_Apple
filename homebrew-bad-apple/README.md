@@ -1,6 +1,6 @@
 # homebrew-bad-apple
 
-A Homebrew tap for Bad Apple, an air-gapped, on-device AI assistant for macOS.
+A Homebrew tap for Bad Apple, a sovereign, local AI operating-system layer for macOS.
 
 ## Install
 
@@ -11,7 +11,7 @@ brew install --cask bad-apple
 
 This installs `Bad Apple.app` into `/Applications`, removes its Gatekeeper
 quarantine flag, and runs the platform installer to set up the system
-daemons. The 9B model is downloaded on first use.
+daemons. The 7B model is downloaded on first use.
 
 ## Notes
 

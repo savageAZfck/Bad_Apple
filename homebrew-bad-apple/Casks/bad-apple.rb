@@ -1,56 +1,52 @@
 cask "bad-apple" do
   version "0.1.0"
   # Update this sha256 for each release. package_homebrew_cask.sh does it automatically.
-  sha256 "801d5fce09b2ad265af976bedaa836ebb0afe5c461fc375bfc88f1100c98dc2f"
+  sha256 "REPLACE_SHA256"
 
   url "https://github.com/savage3/Bad_Apple/releases/download/v#{version}/Bad_Apple-#{version}-full-unsigned.zip"
   name "Bad Apple"
-  desc "Air-gapped, on-device AI assistant"
+  desc "Sovereign, local AI operating-system layer"
   homepage "https://github.com/savage3/Bad_Apple"
 
   # The release zip contains both the .app bundle and the bad_apple platform.
-  # Copy the app to /Applications; the postflight will stage the platform.
+  # Homebrew copies the app to /Applications; postflight copies the platform
+  # to ~/.bad_apple/versions and runs the native platform installer.
   depends_on :macos
+  depends_on arch: :arm64
 
   app "Bad_Apple-#{version}-full/Bad Apple.app"
 
-  postflight do
-    version = cask.version
-    source = "#{staged_path}/Bad_Apple-#{version}-full/bad_apple"
-    target = "#{Dir.home}/.bad_apple/versions/#{version}/bad_apple"
+  postflight_steps do
+    # Keep a pristine, persistent copy of the platform per version so the
+    # LaunchDaemons and menu bar app continue to work after Homebrew cleans
+    # up the staged download.
+    copy "Bad_Apple-{{version}}-full",
+         ".bad_apple/versions/{{version}}/Bad_Apple-{{version}}-full",
+         source_base: :staged_path,
+         target_base: :home,
+         recursive:   true,
+         overwrite:   true
 
-    # Keep a pristine copy of the platform directory per version.
-    FileUtils.rm_r(target, force: true, verbose: false)
-    FileUtils.mkdir_p File.dirname(target)
-    FileUtils.cp_r source, target
-
-    # Remove the Gatekeeper quarantine flag from the installed app.
-    system_command "/usr/bin/xattr",
-                   args:  ["-dr", "com.apple.quarantine", "#{appdir}/Bad Apple.app"],
-                   print: false
-
-    # Install the system LaunchDaemons. This will prompt for admin once.
-    install_script = "#{target}/src/platform/apple_bridge/install_badapple_platform.sh"
-    install_command = "\"#{install_script}\" --install --unsigned-install"
-    system_command "/usr/bin/osascript",
-                   args:  ["-e", "do shell script #{install_command} with administrator privileges"],
-                   print: true
+    run ".bad_apple/versions/{{version}}/Bad_Apple-{{version}}-full/install.sh",
+        base:           :home,
+        sudo:           true,
+        print_stdout:   true,
+        print_stderr:   true,
+        must_succeed:   true,
+        writable_paths: ["{{appdir}}/Bad Apple.app"],
+        writable_base:  :home
   end
 
-  uninstall_preflight do
-    # Unload the system LaunchDaemons before removing the app.
-    system_command "/bin/launchctl",
-                   args:         ["bootout", "system/com.badapple.supervisor"],
-                   print:        false,
-                   must_succeed: false
-    system_command "/bin/launchctl",
-                   args:         ["bootout", "system/com.badapple.mlx"],
-                   print:        false,
-                   must_succeed: false
-    system_command "/bin/launchctl",
-                   args:         ["bootout", "system/com.badapple.gatekeeper"],
-                   print:        false,
-                   must_succeed: false
+  uninstall_preflight_steps do
+    run "/bin/launchctl",
+        args: ["bootout", "system/com.badapple.supervisor"],
+        sudo: true, must_succeed: false
+    run "/bin/launchctl",
+        args: ["bootout", "system/com.badapple.mlx"],
+        sudo: true, must_succeed: false
+    run "/bin/launchctl",
+        args: ["bootout", "system/com.badapple.gatekeeper"],
+        sudo: true, must_succeed: false
   end
 
   zap trash: [
@@ -60,11 +56,11 @@ cask "bad-apple" do
   ]
 
   caveats <<~EOS
-    Bad Apple is an unsigned, air-gapped app. If you see a Gatekeeper warning,
-    it should have been removed automatically. If not, run:
-      xattr -dr com.apple.quarantine /Applications/Bad Apple.app
+    Bad Apple is an unsigned, air-gapped app. Homebrew removes the Gatekeeper
+    quarantine flag during install, but if you see a warning, run:
+      xattr -dr com.apple.quarantine "/Applications/Bad Apple.app"
 
-    The system daemons are installed during this cask. The 9B model is
+    The system daemons are installed during this cask. The 7B model is
     downloaded on first use.
   EOS
 end

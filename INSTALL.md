@@ -96,9 +96,20 @@ target/release/badapple "What is 2+2?"
 
 Open the dashboard at `http://127.0.0.1:8787` in your browser.
 
-## One-command consumer install (prebuilt release)
+## One-command consumer install (Homebrew Cask)
 
-Download `Bad_Apple-<version>-full-unsigned.zip` and run the bundled installer as root:
+The fastest, lowest-friction path. Homebrew strips the quarantine flag and runs
+the platform installer automatically:
+
+```bash
+brew tap savage3/bad-apple https://github.com/savage3/homebrew-bad-apple
+brew install --cask bad-apple
+```
+
+## Manual prebuilt release install
+
+If you do not use Homebrew, download `Bad_Apple-<version>-full-unsigned.zip` and
+run the bundled installer as root:
 
 ```bash
 unzip Bad_Apple-<version>-full-unsigned.zip
