@@ -475,31 +475,56 @@ async fn models_action_handler(Json(body): Json<Value>) -> impl IntoResponse {
             }
         }
         "allow_downloads" => {
-            // The engine currently does not expose a live toggle for this. The
-            // UI can still reflect the checkbox; a page refresh re-reads state.
             let enabled = body
                 .get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            Json(json!({"allow_downloads": enabled}))
+            let mut params = Map::new();
+            params.insert("enabled".to_string(), json!(enabled));
+            match agent_call("set_allow_downloads", Some(Value::Object(params))).await {
+                Ok(v) => Json(v),
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
         }
         "download" => {
             let model_id = body.get("model_id").and_then(|r| r.as_str()).unwrap_or("");
             if model_id.is_empty() {
                 return Json(json!({"error": "model_id is required"}));
             }
-            // The engine does not expose a download_model RPC. Report that
-            // downloads need to be enabled via the engine for now.
             let mut params = Map::new();
             params.insert("model_id".to_string(), Value::String(model_id.to_string()));
-            match agent_call("model_info", Some(Value::Object(params))).await {
-                Ok(status) => Json(json!({
-                    "status": status.get("status").cloned().unwrap_or(json!("missing")),
-                    "memory_check": {
-                        "ok": false,
-                        "message": "download not wired to engine; set BADAPPLE_ALLOW_DOWNLOADS=1 and use the CLI helper"
+            match agent_call("download_model", Some(Value::Object(params))).await {
+                Ok(status) => {
+                    let s = status.get("status").cloned().unwrap_or(json!("missing"));
+                    let size_gb = status
+                        .get("size_gb")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    // Build a memory-check summary for the UI alert. The model
+                    // manager queues the HF download; the check here only
+                    // reflects the declared size, not real-time VRAM after load.
+                    let mut mem = Map::new();
+                    if s == "queued" || s == "downloading" || s == "cached" || s == "loaded" {
+                        mem.insert("ok".to_string(), json!(true));
+                        mem.insert(
+                            "message".to_string(),
+                            json!(format!("{size_gb} GB download queued")),
+                        );
+                    } else {
+                        mem.insert("ok".to_string(), json!(false));
+                        mem.insert(
+                            "message".to_string(),
+                            json!(status
+                                .get("error")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("download did not start")),
+                        );
                     }
-                })),
+                    Json(json!({
+                        "status": s,
+                        "memory_check": mem,
+                    }))
+                }
                 Err(e) => Json(json!({"error": e.to_string()})),
             }
         }

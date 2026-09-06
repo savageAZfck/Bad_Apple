@@ -716,6 +716,24 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
         }
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["entries": entries], error: nil)
 
+    case "set_allow_downloads":
+        let enabled = params["enabled"] as? Bool ?? true
+        BadAppleEngine.shared.modelManager.allowDownloads = enabled
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId,
+                     result: ["allow_downloads": enabled], error: nil)
+
+    case "download_model":
+        let modelId = params["model_id"] as? String ?? ""
+        if modelId.isEmpty {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil,
+                         error: "model_id is required")
+            return
+        }
+        let result = BadAppleEngine.shared.modelManager.startDownload(modelId: modelId)
+        let error = (result["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId,
+                     result: error == nil ? result : nil, error: error)
+
     case "p2p_peers", "p2p_sync", "p2p_models", "p2p_pull_model", "p2p_send_model", "p2p_receive_model":
         let env = ProcessInfo.processInfo.environment
         guard env["BADAPPLE_P2P"] == "1" || env["BADAPPLE_P2P_ENABLED"] == "1" else {

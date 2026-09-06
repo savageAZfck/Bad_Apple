@@ -241,13 +241,14 @@ final class BadAppleModelManager {
         guard let profile = profiles[modelId], let state = state[modelId] else {
             return ["error": "unknown model \(modelId)"]
         }
+        // Provenance verification does file I/O and hashing; status() is called
+        // frequently while holding the model manager lock, so keep this quick.
+        // The verified flag is updated by markLoaded/recordProvenance.
         var provenance: [String: Any] = ["status": "unknown"]
-        if !state.localPath.isEmpty {
-            if let _ = safeLocalPath(state.localPath, mustExist: false) {
-                provenance = verifyProvenance(modelId: modelId, localPath: state.localPath)
-            } else {
-                provenance = ["status": "invalid_path", "error": "local path is outside HF cache"]
-            }
+        if state.verified {
+            provenance = ["status": "verified"]
+        } else if !state.error.isEmpty {
+            provenance = ["status": "error", "error": state.error]
         }
         return [
             "id": profile.id,
@@ -313,10 +314,10 @@ final class BadAppleModelManager {
         if !(_allowDownloads || _onlineOverride) {
             return ["error": "Downloads are disabled. Set BADAPPLE_ALLOW_DOWNLOADS=1 or enable in the dashboard."]
         }
-        if state.status == .downloading || state.status == .queued {
+        if downloadTasks[modelId] != nil {
             return statusDictionary(for: modelId)
         }
-        if downloadTasks[modelId] != nil {
+        if state.status == .cached || state.status == .loaded {
             return statusDictionary(for: modelId)
         }
 
@@ -329,14 +330,15 @@ final class BadAppleModelManager {
         // Determine download command.
         let task = Process()
         let timeout = downloadTimeout
-        if FileManager.default.fileExists(atPath: "/usr/bin/python3") || FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3") {
+        let repoId = profile.repoId
+        if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3") || FileManager.default.fileExists(atPath: "/usr/bin/python3") {
             let python = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3") ? "/opt/homebrew/bin/python3" : "/usr/bin/python3"
             task.executableURL = URL(fileURLWithPath: python)
-            task.arguments = ["-m", "huggingface_hub.cli", "download", profile.repoId]
+            task.arguments = ["-m", "huggingface_hub.cli", "download", repoId]
         } else {
             // Fallback: try the `huggingface-cli` binary if installed.
             task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            task.arguments = ["huggingface-cli", "download", profile.repoId]
+            task.arguments = ["huggingface-cli", "download", repoId]
         }
 
         var env = ProcessInfo.processInfo.environment
@@ -344,24 +346,58 @@ final class BadAppleModelManager {
         env["PYTHONUNBUFFERED"] = "1"
         task.environment = env
 
-        // Start a watchdog timer to terminate the process if it exceeds the timeout.
-        let timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
+        // Run the download in the background and poll isRunning (same pattern
+        // BadAppleTools.runProcess uses; this works without a Foundation run loop).
+        // A separate DispatchWorkItem acts as the timeout watchdog.
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        task.standardOutput = stdoutPipe
+        task.standardError = stderrPipe
+
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
             self?.downloadTimedOut(modelId: modelId)
         }
-
-        task.terminationHandler = { [weak self] _ in
-            timer.invalidate()
-            self?.downloadCompleted(modelId: modelId)
-        }
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + timeout,
+            execute: timeoutWorkItem
+        )
 
         downloadTasks[modelId] = task
-        do {
-            try task.run()
-        } catch {
-            state.status = .error
-            state.error = "failed to start download: \(error.localizedDescription)"
-            downloadTasks.removeValue(forKey: modelId)
-            saveState()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var stderrData = Data()
+            let group = DispatchGroup()
+            DispatchQueue.global().async(group: group) {
+                _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            DispatchQueue.global().async(group: group) {
+                stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+
+            let semaphore = DispatchSemaphore(value: 0)
+            task.terminationHandler = { _ in
+                semaphore.signal()
+            }
+
+            do {
+                try task.run()
+                let waitResult = semaphore.wait(timeout: .now() + timeout)
+                group.wait()
+                timeoutWorkItem.cancel()
+                let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if waitResult == .timedOut {
+                    self?.downloadTimedOut(modelId: modelId)
+                } else {
+                    self?.downloadCompleted(
+                        modelId: modelId,
+                        exitCode: task.terminationStatus,
+                        stderr: stderr
+                    )
+                }
+            } catch {
+                group.wait()
+                timeoutWorkItem.cancel()
+                self?.downloadFailedToStart(modelId: modelId, error: error)
+            }
         }
 
         return statusDictionary(for: modelId)
@@ -371,6 +407,7 @@ final class BadAppleModelManager {
         lock.lock(); defer { lock.unlock() }
         if let task = downloadTasks[modelId] {
             task.terminate()
+            downloadTasks.removeValue(forKey: modelId)
         }
         guard let state = state[modelId] else { return }
         state.status = .error
@@ -379,7 +416,18 @@ final class BadAppleModelManager {
         saveState()
     }
 
-    private func downloadCompleted(modelId: String) {
+    private func downloadFailedToStart(modelId: String, error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        downloadTasks.removeValue(forKey: modelId)
+        guard let state = state[modelId] else { return }
+        state.status = .error
+        state.error = "failed to start download: \(error.localizedDescription)"
+        state.progress = 0.0
+        state.lastUpdated = Date().timeIntervalSince1970
+        saveState()
+    }
+
+    private func downloadCompleted(modelId: String, exitCode: Int32? = nil, stderr: String = "") {
         lock.lock(); defer { lock.unlock() }
         downloadTasks.removeValue(forKey: modelId)
         guard let profile = profiles[modelId], let state = self.state[modelId] else { return }
@@ -396,6 +444,13 @@ final class BadAppleModelManager {
                     _ = self?.recordProvenance(modelId: modelId, localPath: path)
                 }
             }
+        } else if let exitCode = exitCode, exitCode != 0 {
+            state.status = .error
+            if state.error.isEmpty {
+                let stderrHint = stderr.isEmpty ? "" : " (stderr: \(stderr))"
+                state.error = "download failed (exit code \(exitCode))\(stderrHint). Make sure huggingface_hub is installed and allow_downloads is enabled."
+            }
+            state.progress = 0.0
         } else {
             state.status = .error
             state.error = "download completed but model not found in HF cache"
@@ -804,6 +859,20 @@ final class BadAppleModelManager {
             let payload = try JSONDecoder().decode([String: [String: ModelState]].self, from: data)
             if let saved = payload["state"] {
                 for (mid, s) in saved where state[mid] != nil {
+                    // A download that was queued/downloading in a previous process
+                    // was interrupted; do not claim it is still active.
+                    if s.status == .downloading || s.status == .queued {
+                        if !s.localPath.isEmpty && FileManager.default.fileExists(atPath: s.localPath) {
+                            s.status = .cached
+                            s.progress = 1.0
+                            s.error = ""
+                        } else {
+                            s.status = .missing
+                            s.progress = 0.0
+                            s.localPath = ""
+                            s.error = ""
+                        }
+                    }
                     state[mid] = s
                 }
             }
