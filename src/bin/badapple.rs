@@ -251,10 +251,20 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
         if buf.ends_with(['.', '!', '?', ':', ';', '\n']) {
             return true;
         }
-        if buf.ends_with("—") || buf.ends_with("...") || buf.ends_with("…") {
-            return true;
-        }
         false
+    }
+
+    fn normalize_for_tts(text: &str) -> String {
+        let mut normalized = text.to_string();
+        normalized = normalized.replace("...", ", ");
+        normalized = normalized.replace('…', ", ");
+        normalized = normalized.replace('—', ", ");
+        normalized = normalized.replace('–', ", ");
+        // Collapse double spaces created by replacements.
+        while normalized.contains("  ") {
+            normalized = normalized.replace("  ", " ");
+        }
+        normalized
     }
 
     loop {
@@ -265,9 +275,9 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
 
         match rx.recv_timeout(timeout) {
             Ok(TtsMsg::Text(text)) => {
-                buffer.push_str(&text);
+                buffer.push_str(&normalize_for_tts(&text));
                 if is_break_point(&buffer) {
-                    speak_chunk(&buffer);
+                    speak_chunk(&normalize_for_tts(&buffer));
                     buffer.clear();
                     deadline = None;
                 } else {
@@ -276,13 +286,13 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
             }
             Ok(TtsMsg::Flush) | Err(RecvTimeoutError::Disconnected) => {
                 if !buffer.is_empty() {
-                    speak_chunk(&buffer);
+                    speak_chunk(&normalize_for_tts(&buffer));
                 }
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
                 if !buffer.is_empty() {
-                    speak_chunk(&buffer);
+                    speak_chunk(&normalize_for_tts(&buffer));
                     buffer.clear();
                     deadline = None;
                 }

@@ -1390,6 +1390,19 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 
+    /// Normalize text before TTS so ellipses and em dashes do not create
+    /// awkward dead-air pauses. Replace them with commas for natural rhythm.
+    private func normalizeForTTS(_ text: String) -> String {
+        var normalized = text
+        normalized = normalized.replacingOccurrences(of: "...", with: ", ")
+        normalized = normalized.replacingOccurrences(of: "…", with: ", ")
+        normalized = normalized.replacingOccurrences(of: "—", with: ", ")
+        while normalized.contains("  ") {
+            normalized = normalized.replacingOccurrences(of: "  ", with: " ")
+        }
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Split the response into chilled, beachy chunks. US voices stay relaxed
     /// with a slightly slower rate and a soft, natural pitch.
     private func prosodyChunks(from text: String) -> [ProsodyChunk] {
@@ -1412,11 +1425,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             let c = chars[i]
             current.append(c)
 
-            if c == "…" || (c == "." && i + 1 < chars.count && chars[i + 1] == "." && i + 2 < chars.count && chars[i + 2] == ".") {
-                // ellipsis: slow trailing breath
-                flush(0.15, rate: 0.44, pitch: 0.95)
-                if c == "." { i += 2 }
-            } else if c == "?" {
+            if c == "?" {
                 flush(0.15, rate: 0.46, pitch: 1.00)
             } else if c == "!" {
                 flush(0.15, rate: 0.48, pitch: 1.00)
@@ -1490,7 +1499,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     /// the model is still generating the rest of the response.
     func speakStreamingChunk(_ text: String) {
         guard enabled else { return }
-        streamTTSBuffer += text
+        streamTTSBuffer += normalizeForTTS(text)
         pumpStreamTTS(final: false)
     }
 
@@ -1635,7 +1644,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     /// Queue a single streamed sentence chunk without stopping any in-flight audio.
     /// This keeps responses smooth while the model is still generating the next chunk.
     func speakChunk(_ text: String) {
-        let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let spoken = normalizeForTTS(text)
         guard enabled else { return }
         guard !spoken.isEmpty else { return }
         state = .speaking
@@ -1654,7 +1663,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         guard enabled else { return }
         guard state == .speaking || state == .processing else { return }
         let voice = bestVoice()
-        let chunks = prosodyChunks(from: text)
+        let normalized = normalizeForTTS(text)
+        let chunks = prosodyChunks(from: normalized)
         for chunk in chunks {
             let utterance = AVSpeechUtterance(string: chunk.text)
             utterance.voice = voice
@@ -1673,7 +1683,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     func speak(_ text: String) {
         currentSpeakID += 1
         let id = currentSpeakID
-        let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let spoken = normalizeForTTS(text)
         guard enabled else { return }
         guard !spoken.isEmpty else {
             scheduleRestart(after: 0.1)
@@ -1716,7 +1726,8 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     private func speakWithApple(_ text: String, id: Int) {
         guard enabled, currentSpeakID == id else { return }
         let voice = bestVoice()
-        let chunks = prosodyChunks(from: text)
+        let normalized = normalizeForTTS(text)
+        let chunks = prosodyChunks(from: normalized)
         badAppleVoiceLog("speaking with \(chunks.count) chunk(s), voice: \(voice.identifier)")
 
         for chunk in chunks {
