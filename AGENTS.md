@@ -291,12 +291,16 @@ In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple
 
 ## Phase 4 Agent OS Control Center
 
-- The local dashboard, working-memory scratchpad, and runtime `tier` toggle are
-  being ported to Rust/Swift and are not currently available from the command
-  line.
+- The web dashboard is served by `badapple-dashboard` on port 8787. The runtime
+  `tier` toggle is available from the CLI: `fast tier on` / `fast tier off`.
+  Working memory can be read/written via `read_working_memory` and
+  `write_working_memory` tools.
+- The Swift menu bar persona editor and full control-center UI are not currently
+  available from the web dashboard.
 - Fast tiering is controlled by the `BADAPPLE_FAST_TIER` setting in
-  `com.badapple.mlx.plist` and the menu bar `Fast Tier Only` toggle. When on,
-  simple math, identity, time, and greeting queries route to the 0.5B fast model.
+  `com.badapple.mlx.plist`, the CLI `fast tier on`/`off`, and the menu bar
+  `Fast Tier Only` toggle. When on, simple math, identity, time, and greeting
+  queries route to the 0.5B fast model.
 - macOS Shortcuts can be listed/run through `list_shortcuts` and `run_shortcut`
   tools and the menu bar `Tools > Run Shortcut...`/`List Shortcuts`.
 
@@ -351,7 +355,9 @@ cargo clippy --release
 - The full unsigned release package builds successfully with `src/platform/apple_desktop/package_full_release.sh` (output `target/release/Bad_Apple-<version>-full-unsigned.zip`).
 - Signed packaging is supported via `src/platform/apple_desktop/package_signed_release.sh` with `CODESIGN_ID`. Self-signed dev certificates can be created with `src/platform/apple_desktop/create_dev_signing_cert.sh`. Notarization requires an Apple Developer ID.
 - Workspace file watching, MCP marketplace, dashboard ambient context, and ocular screen-stream endpoints are now available. Automatic fact extraction is being ported to Rust/Swift and is not currently available.
-- Persona editor, dashboard, and control-center UI are being ported to the Swift menu bar and are not currently available from the web.
+- The web dashboard is served by `badapple-dashboard` on port 8787. The Swift
+  menu bar persona editor and full control-center UI are not currently available
+  from the web.
 - `curious_self_improve` is a native tool that runs a bounded self-check (cert suite, doctor, output firewall, git status, and source TODO/FIXME/HACK/XXX scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger it with `target/release/badapple "curious check"`.
 - Curious autopilot: when the active persona is `curious` and autopilot is on, the engine runs `curious_self_improve` on a loop. Set the interval in seconds with `BADAPPLE_CURIOUS_INTERVAL` (default 300; 0 disables).
 - Tool prompts are now generated in plain English with a concrete `<tool_call>` example for each relevant tool, and the executor recognizes common 7B-model misnames (e.g. `add_output_firewall_pattern` -> `update_output_firewall`, `run_diagnostics` -> `self_audit`).
@@ -490,18 +496,14 @@ cargo clippy --release
 
 ## Cognitive architecture validation
 
-- The cognitive architecture benchmark (connectome, hyperdimensional core,
-  dual-process governor) is being ported to Rust/Swift and is not currently
-  available from the command line.
-- When it is available, it will run the same set of prompts (simple / medium /
-  complex) in three modes: `cognitive_full` (full cognitive stack),
-  `fast_tier_only` (0.5B model, no cognitive layer), and `9b_only` (9B brain,
-  no cognitive layer, no fast tier).
-- Each mode is selected with env vars: `BADAPPLE_COGNITIVE` toggles the
-  cognitive layer and `BADAPPLE_FAST_TIER` toggles the fast 0.5B tier.
-- Metrics captured per query: latency, token count, decode tok/s, and tier.
-  Results will print as a comparison table and can be saved as JSON.
-- It will use the CLI's `--json` stream, so the `badapple` binary must be built
+- The `connectome`, `hyperdimensional_core`, and dual-process `governor` modules
+  were removed from the compiled product; no cognitive architecture benchmark is
+  currently available.
+- Benchmarking is available via `target/release/badapple --benchmark` and the
+  `--json` streaming output. Use `BADAPPLE_FAST_TIER` to compare the 0.5B fast
+  tier against the main 7B or 9B model.
+- Metrics captured per query: latency, token count, decode tok/s, tier, and
+  `draft_accept_pct`. Results print as a comparison table and can be saved as JSON.
   (`target/release/badapple`) or on `PATH`. Each query has a 120 s timeout.
 
 ## Model versioning

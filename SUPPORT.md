@@ -18,7 +18,7 @@ tail -n 50 /var/log/bad_apple_mlx_server.log
 
 Look for:
 
-- `[daemon] model loaded` — the 9B brain is ready.
+- `[daemon] model loaded` — the 7B brain is ready.
 - `safe_mode` — the supervisor shut something down due to repeated failures.
 - `Socket path ... does not exist` — the gatekeeper or MLX daemon is not running.
 
@@ -85,9 +85,10 @@ target/release/badapple "flush vram"
 target/release/badapple "unload all models"
 
 # Air-gap / security certification
-# The certification suite is being ported to Rust and is not currently available
-# from the command line. Run `target/release/badapple --doctor` for a socket/process
-# health report in the meantime.
+target/release/badapple cert
+
+# Collect a shareable crash / state report (secrets are redacted)
+target/release/badapple --crash-report
 ```
 
 ## Reporting issues
@@ -95,8 +96,9 @@ target/release/badapple "unload all models"
 If you hit a bug that the steps above do not fix:
 
 1. Note the output of `target/release/badapple --doctor`.
-2. Capture the last 100 lines of `/var/log/bad_apple_mlx_server.log`.
-3. Include your macOS version, Mac model, and whether you are running the signed or unsigned build.
-4. File an issue with that information.
+2. Run `target/release/badapple cert` and include the JSON summary.
+3. Run `target/release/badapple --crash-report` and attach the generated report.
+4. Capture the last 100 lines of `/var/log/bad_apple_mlx_server.log`.
+5. Include your macOS version, Mac model, and whether you are running the signed or unsigned build.
 
 Bad Apple is under active development. Logs rule everything around here.

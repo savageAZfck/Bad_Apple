@@ -1453,20 +1453,6 @@ final class BadAppleEngine: @unchecked Sendable {
         return 300
     }
 
-    /// The bounded goal the Curious autopilot agent pursues on its own.
-    func curiousAutopilotGoal() -> String {
-        """
-        You are Bad Apple's Curious self-improvement agent. On your own, do these things in order:
-        1. Run self_audit with include "all".
-        2. Inspect the output firewall (show_patterns "false").
-        3. Check the workspace git status.
-        4. Search the bad_apple source code for "TODO", "FIXME", "HACK", or "XXX".
-        5. If you find a safe, concrete improvement (especially in prompt text, AGENTS.md, or a small defensive check), write a short proposal to \(curiousProposalsDir)/<timestamp>-<topic>.md.
-        6. Do not modify live Rust or Swift source files in this task. Only write the proposal note.
-        7. Finish by summarizing what you checked and what, if anything, you proposed.
-        """
-    }
-
     /// Start or stop the background Curious autopilot loop based on
     /// autopilot state and active persona.
     private func updateCuriousAutopilotLoop() {

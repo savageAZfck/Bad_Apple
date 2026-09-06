@@ -82,7 +82,7 @@ This makes Bad Apple start at login and restart after a crash.
 
 ## First launch
 
-After the platform installer finishes, wait about 45 seconds for the 9B MLX model and embedding model to load. Check the log:
+After the platform installer finishes, wait about 45 seconds for the 7B MLX model and embedding model to load. Check the log:
 
 ```bash
 tail -n 20 /var/log/bad_apple_mlx_server.log
@@ -117,7 +117,7 @@ This:
 
 ## Using larger models
 
-Bad Apple can load any MLX-compatible model. The default is a 9B Qwen 3.5 4-bit. For 32B models, reduce the KV-cache budget to avoid unified-memory pressure:
+Bad Apple can load any MLX-compatible model. The default is a 7B Qwen 2.5 Coder 4-bit; the 9B Qwen 3.5 is switchable. For 32B models, reduce the KV-cache budget to avoid unified-memory pressure:
 
 ```bash
 # Ask Bad Apple to shrink the KV cache before switching
