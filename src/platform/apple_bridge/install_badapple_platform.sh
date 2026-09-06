@@ -5,7 +5,7 @@ REPO_ROOT="${BADAPPLE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 
 fail() {
     printf 'error: %s\n' "$*" >&2
-    printf '       For troubleshooting, run: badapple --doctor\n' >&2
+    printf '       For troubleshooting, run: %s/target/release/badapple --doctor\n' "${REPO_ROOT}" >&2
     printf '       See also: SUPPORT.md in the Bad Apple source folder\n' >&2
     exit 1
 }

@@ -15,6 +15,7 @@ ZIP_PATH="${REPO_ROOT}/target/release/Bad_Apple-${VERSION}-unsigned.zip"
 # Binaries required at runtime.
 BINS=(
     badapple
+    badapple-fetch
     badapple-identity
     badapple-identity-agent
     badapple-supervisor
@@ -180,6 +181,13 @@ echo "Stripping quarantine flag..."
 echo "Installing platform from ${REPO_ROOT}..."
 cd "${REPO_ROOT}"
 BADAPPLE_ROOT="${REPO_ROOT}" src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install
+
+# Link the native CLI and fetch helper into a standard PATH directory so
+# `badapple --doctor` and `badapple-fetch` work from a fresh Terminal.
+echo "Linking CLI into /usr/local/bin..."
+install -d /usr/local/bin
+ln -sf "${REPO_ROOT}/target/release/badapple" /usr/local/bin/badapple
+ln -sf "${REPO_ROOT}/target/release/badapple-fetch" /usr/local/bin/badapple-fetch
 
 echo "Bad Apple is installed. Launch it from /Applications."
 EOF

@@ -470,14 +470,23 @@ final class BadAppleModelManager {
     /// Search the executable's directory (dev builds), the app bundle, and the
     /// standard PATH directories.
     private func fetchHelperURL() -> URL? {
+        let fm = FileManager.default
         let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
         let sameDir = exe.deletingLastPathComponent().appendingPathComponent("badapple-fetch")
-        if FileManager.default.isExecutableFile(atPath: sameDir.path) {
+        if fm.isExecutableFile(atPath: sameDir.path) {
             return sameDir
         }
 
+        // Build script installs helpers into Contents/Helpers alongside the main
+        // executable. Bundled auxiliary paths may not cover this directory.
+        let bundleHelpers = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/badapple-fetch")
+        if fm.isExecutableFile(atPath: bundleHelpers.path) {
+            return bundleHelpers
+        }
+
         if let bundled = Bundle.main.url(forAuxiliaryExecutable: "badapple-fetch"),
-           FileManager.default.isExecutableFile(atPath: bundled.path) {
+           fm.isExecutableFile(atPath: bundled.path) {
             return bundled
         }
 
@@ -486,7 +495,7 @@ final class BadAppleModelManager {
             "/opt/homebrew/bin/badapple-fetch",
             "/usr/bin/badapple-fetch",
         ]
-        for path in paths where FileManager.default.isExecutableFile(atPath: path) {
+        for path in paths where fm.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
         return nil

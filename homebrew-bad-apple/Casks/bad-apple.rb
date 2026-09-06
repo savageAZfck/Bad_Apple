@@ -47,6 +47,9 @@ cask "bad-apple" do
     run "/bin/launchctl",
         args: ["bootout", "system/com.badapple.gatekeeper"],
         sudo: true, must_succeed: false
+    run "/bin/rm",
+        args: ["-f", "/usr/local/bin/badapple", "/usr/local/bin/badapple-fetch"],
+        sudo: true, must_succeed: false
   end
 
   zap trash: [
