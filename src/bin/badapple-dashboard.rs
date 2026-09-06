@@ -127,10 +127,14 @@ async fn run_server(port: u16, web_root: PathBuf, state: Arc<DashboardState>) ->
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/api/status", get(status_handler))
-        .route("/api/models", get(list_models_handler))
+        .route(
+            "/api/models",
+            get(list_models_handler).post(models_action_handler),
+        )
         .route("/api/models/:id", get(model_info_handler))
         .route("/api/models/:id/use", post(use_model_handler))
         .route("/api/models/:id/verify", post(verify_model_handler))
+        .route("/api/agents", post(agents_action_handler))
         .route("/api/chat", post(chat_handler))
         .route("/api/p2p/peers", get(p2p_peers_handler))
         .route("/api/p2p/sync", post(p2p_sync_handler))
@@ -181,11 +185,45 @@ async fn static_handler(
         }
         path.push(segment);
     }
+
+    // Standalone HTML pages (e.g. /models -> web/models.html).
+    let html_path = path.with_extension("html");
+    if tokio::fs::metadata(&html_path).await.is_ok() {
+        return serve_file(&html_path).await;
+    }
+
+    // Static files / directories (e.g. /static/..., /models/...).
     if path.is_dir() {
         path.push("index.html");
     }
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => (StatusCode::OK, bytes).into_response(),
+    if tokio::fs::metadata(&path).await.is_ok() {
+        return serve_file(&path).await;
+    }
+
+    // SPA catch-all: index.html handles client-side routing for /chat, /settings, etc.
+    let index = state.web_root.join("index.html");
+    serve_file(&index).await
+}
+
+fn content_type_for(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|s| s.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn serve_file(path: &std::path::Path) -> Response {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Response::builder()
+            .header("Content-Type", content_type_for(path))
+            .body(axum::body::Body::from(bytes))
+            .unwrap()
+            .into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
@@ -200,7 +238,9 @@ async fn status_handler(State(_): State<Arc<DashboardState>>) -> impl IntoRespon
 /// Adapt the native daemon's `runtime_status` schema to the one the web
 /// dashboard's SPA expects.
 fn adapt_runtime_status(mut v: Value) -> Value {
-    let Some(obj) = v.as_object_mut() else { return v };
+    let Some(obj) = v.as_object_mut() else {
+        return v;
+    };
 
     // The native runtime reports `model_status` keyed by model ID and
     // `active_model_ids`. The dashboard wants `active_models`, `runtime.mode`,
@@ -224,9 +264,9 @@ fn adapt_runtime_status(mut v: Value) -> Value {
         .get("active_model_ids")
         .and_then(|a| a.as_array())
         .and_then(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str())
-                .find(|s| !s.to_lowercase().contains("bge") && !s.to_lowercase().contains("embedding"))
+            a.iter().filter_map(|x| x.as_str()).find(|s| {
+                !s.to_lowercase().contains("bge") && !s.to_lowercase().contains("embedding")
+            })
         })
         .unwrap_or(&active_ids)
         .to_string();
@@ -239,10 +279,7 @@ fn adapt_runtime_status(mut v: Value) -> Value {
         .map(|s| s == "ready")
         .unwrap_or(false);
 
-    let private_mode = obj
-        .get("private_mode")
-        .cloned()
-        .unwrap_or(json!(false));
+    let private_mode = obj.get("private_mode").cloned().unwrap_or(json!(false));
 
     let mode = if main_ready { "READY" } else { "STARTING" };
 
@@ -275,7 +312,9 @@ fn adapt_runtime_status(mut v: Value) -> Value {
             );
             obj.insert(
                 "hibernate_after".to_string(),
-                hobj.get("idle_threshold_seconds").cloned().unwrap_or(json!(300)),
+                hobj.get("idle_threshold_seconds")
+                    .cloned()
+                    .unwrap_or(json!(300)),
             );
         }
     }
@@ -285,7 +324,11 @@ fn adapt_runtime_status(mut v: Value) -> Value {
         obj.insert("active_models".to_string(), active.clone());
         // Expose the first active model under the legacy `main_9b` key the SPA
         // looks for during startup. The name is historical (9B used to be main).
-        if let Some(first) = active.as_array().and_then(|a| a.first()).and_then(|x| x.as_str()) {
+        if let Some(first) = active
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|x| x.as_str())
+        {
             if let Some(model_status) = obj.get("model_status").cloned() {
                 if let Some(ms) = model_status.get(first).cloned() {
                     let models = json!({ "main_9b": ms });
@@ -352,6 +395,157 @@ async fn verify_model_handler(Path(id): Path<String>) -> impl IntoResponse {
     let mut params = Map::new();
     params.insert("model_id".to_string(), Value::String(id));
     match agent_call("verify_models", Some(Value::Object(params))).await {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"error": e.to_string()})),
+    }
+}
+
+async fn models_action_handler(Json(body): Json<Value>) -> impl IntoResponse {
+    let action = body.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    match action {
+        "status" => match agent_call("list_models", None).await {
+            Ok(v) => Json(models_list_to_map(v)),
+            Err(e) => Json(json!({"error": e.to_string()})),
+        },
+        "recommend" => {
+            let query = body.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            let mut params = Map::new();
+            params.insert("query".to_string(), Value::String(query.to_string()));
+            match agent_call("recommend_model", Some(Value::Object(params))).await {
+                Ok(v) => Json(v),
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
+        }
+        "switch" => {
+            let model_ref = body.get("model_ref").and_then(|r| r.as_str()).unwrap_or("");
+            let mut params = Map::new();
+            params.insert(
+                "model_ref".to_string(),
+                Value::String(model_ref.to_string()),
+            );
+            match agent_call("switch_main_model", Some(Value::Object(params))).await {
+                Ok(v) => Json(v),
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
+        }
+        "admit" => {
+            let model_ref = body.get("model_ref").and_then(|r| r.as_str()).unwrap_or("");
+            if model_ref.is_empty() {
+                return Json(json!({"error": "model_ref is required"}));
+            }
+            let mut rec_params = Map::new();
+            rec_params.insert("query".to_string(), Value::String(model_ref.to_string()));
+            let mut info_params = Map::new();
+            info_params.insert("model_id".to_string(), Value::String(model_ref.to_string()));
+            let (rec, info) = tokio::join!(
+                agent_call("recommend_model", Some(Value::Object(rec_params))),
+                agent_call("model_info", Some(Value::Object(info_params)))
+            );
+            match (rec, info) {
+                (Ok(r), Ok(i)) => {
+                    let available = r
+                        .get("available_gb")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let needed = i.get("size_gb").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1.4;
+                    let ok = available >= needed;
+                    Json(json!({
+                        "ok": ok,
+                        "available_gb": round2(available),
+                        "needed_gb": round2(needed),
+                    }))
+                }
+                (Err(e), _) | (_, Err(e)) => Json(json!({"error": e.to_string()})),
+            }
+        }
+        "refresh" => {
+            let model_id = body.get("model_id").and_then(|r| r.as_str()).unwrap_or("");
+            if model_id.is_empty() {
+                match agent_call("scan_models", None).await {
+                    Ok(v) => Json(v),
+                    Err(e) => Json(json!({"error": e.to_string()})),
+                }
+            } else {
+                let mut params = Map::new();
+                params.insert("model_id".to_string(), Value::String(model_id.to_string()));
+                match agent_call("model_info", Some(Value::Object(params))).await {
+                    Ok(v) => Json(v),
+                    Err(e) => Json(json!({"error": e.to_string()})),
+                }
+            }
+        }
+        "allow_downloads" => {
+            // The engine currently does not expose a live toggle for this. The
+            // UI can still reflect the checkbox; a page refresh re-reads state.
+            let enabled = body
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Json(json!({"allow_downloads": enabled}))
+        }
+        "download" => {
+            let model_id = body.get("model_id").and_then(|r| r.as_str()).unwrap_or("");
+            if model_id.is_empty() {
+                return Json(json!({"error": "model_id is required"}));
+            }
+            // The engine does not expose a download_model RPC. Report that
+            // downloads need to be enabled via the engine for now.
+            let mut params = Map::new();
+            params.insert("model_id".to_string(), Value::String(model_id.to_string()));
+            match agent_call("model_info", Some(Value::Object(params))).await {
+                Ok(status) => Json(json!({
+                    "status": status.get("status").cloned().unwrap_or(json!("missing")),
+                    "memory_check": {
+                        "ok": false,
+                        "message": "download not wired to engine; set BADAPPLE_ALLOW_DOWNLOADS=1 and use the CLI helper"
+                    }
+                })),
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
+        }
+        _ => Json(json!({"error": format!("unknown model action: {action}")})),
+    }
+}
+
+fn models_list_to_map(v: Value) -> Value {
+    let Some(obj) = v.as_object() else { return v };
+    let mut map = Map::new();
+    if let Some(arr) = obj.get("models").and_then(|m| m.as_array()) {
+        for m in arr {
+            if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
+                map.insert(id.to_string(), m.clone());
+            }
+        }
+    }
+    Value::Object(map)
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+async fn agents_action_handler(Json(body): Json<Value>) -> impl IntoResponse {
+    let action = body.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    let method = match action {
+        "list" => "list_agent_tasks",
+        "create" => "run_agent_task",
+        "cancel" => "cancel_agent_task",
+        "pause" => "pause_agent_task",
+        "resume" => "resume_agent_task",
+        "delete" => "cancel_agent_task", // engine has no delete; cancel stops it
+        _ => return Json(json!({"error": format!("unknown agent action: {action}")})),
+    };
+    let mut params = Map::new();
+    if let Some(goal) = body.get("goal") {
+        params.insert("goal".to_string(), goal.clone());
+    }
+    if let Some(max_steps) = body.get("max_steps") {
+        params.insert("max_steps".to_string(), max_steps.clone());
+    }
+    if let Some(task_id) = body.get("task_id") {
+        params.insert("task_id".to_string(), task_id.clone());
+    }
+    match agent_call(method, Some(Value::Object(params))).await {
         Ok(v) => Json(v),
         Err(e) => Json(json!({"error": e.to_string()})),
     }

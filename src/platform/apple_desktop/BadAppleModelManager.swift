@@ -259,7 +259,7 @@ final class BadAppleModelManager {
             "progress": round(state.progress * 1000) / 1000,
             "error": state.error,
             "local_path": state.localPath,
-            "allow_downloads": allowDownloads,
+            "allow_downloads": _allowDownloads || _onlineOverride,
             "loaded_in": profile.loadedIn,
             "verified": state.verified,
             "provenance": provenance,
@@ -310,7 +310,7 @@ final class BadAppleModelManager {
         guard isSafeModelId(modelId), let profile = profiles[modelId], let state = self.state[modelId] else {
             return ["error": "unknown or invalid model_id: \(modelId)"]
         }
-        if !allowDownloads {
+        if !(_allowDownloads || _onlineOverride) {
             return ["error": "Downloads are disabled. Set BADAPPLE_ALLOW_DOWNLOADS=1 or enable in the dashboard."]
         }
         if state.status == .downloading || state.status == .queued {
