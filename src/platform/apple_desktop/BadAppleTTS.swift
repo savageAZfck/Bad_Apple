@@ -459,6 +459,60 @@ private final class TTSServer {
         }
     }
 
+    /// Strip trailing silence from the generated WAV so consecutive chunks do not
+    /// leave dead air between them. Leaves ~45ms of natural tail.
+    private func trimTrailingSilence(at url: URL) {
+        guard let input = try? AVAudioFile(forReading: url) else { return }
+        let format = input.processingFormat
+        let frameCount = AVAudioFrameCount(input.length)
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return
+        }
+
+        do {
+            try input.read(into: buffer)
+        } catch {
+            return
+        }
+
+        let threshold: Float = 0.005
+        let sampleRate = format.sampleRate
+        let tailFrames = AVAudioFrameCount(max(1.0, sampleRate * 0.045))
+
+        var lastAudible: AVAudioFramePosition = 0
+        let channels = Int(format.channelCount)
+        for frame in (0..<Int(frameCount)).reversed() {
+            var audible = false
+            for ch in 0..<channels {
+                guard let channelData = buffer.floatChannelData?[ch] else { continue }
+                let sample = channelData[frame]
+                if abs(sample) > threshold {
+                    audible = true
+                    break
+                }
+            }
+            if audible {
+                lastAudible = AVAudioFramePosition(frame)
+                break
+            }
+        }
+
+        let endFrame = min(AVAudioFramePosition(frameCount) - 1, lastAudible + AVAudioFramePosition(tailFrames))
+        let newFrameCount = AVAudioFrameCount(endFrame + 1)
+        guard newFrameCount > 0, newFrameCount <= buffer.frameCapacity else { return }
+        buffer.frameLength = newFrameCount
+
+        let tempURL = url.deletingPathExtension().appendingPathExtension("trimmed").appendingPathExtension(url.pathExtension)
+        do {
+            let output = try AVAudioFile(forWriting: tempURL, settings: format.settings, commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+            try output.write(from: buffer)
+            _ = try? fileManager.replaceItemAt(url, withItemAt: tempURL)
+        } catch {
+            _ = try? fileManager.removeItem(at: tempURL)
+        }
+    }
+
     private func voiceScore(_ voice: AVSpeechSynthesisVoice) -> (Int, Int) {
         let quality: Int
         switch voice.quality {
@@ -730,6 +784,10 @@ private final class TTSServer {
             return SynthesisResult(url: outputURL, sampleRate: 0, durationMs: 0,
                                    error: TTSError.synthesisFailed("piper exited \(process.terminationStatus): \(stderr)"))
         }
+
+        // Trim the trailing silence off the generated WAV so concatenated
+        // playback (menu bar or CLI afplay) does not have dead air between chunks.
+        trimTrailingSilence(at: outputURL)
 
         // Derive the sample rate and duration from the generated WAV.
         var sampleRate: Double = 0

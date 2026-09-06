@@ -258,17 +258,75 @@ private final class PiperTTSPlaybackController: NSObject, AVAudioPlayerDelegate 
         }
     }
 
-    private func makePlayItem(url: URL, completion: ((Bool) -> Void)?) -> PlayItem {
-        if let player = try? AVAudioPlayer(contentsOf: url) {
-            player.delegate = self
-            if !player.prepareToPlay() {
-                badAppleVoiceLog("PiperTTSPlayback: prepareToPlay() failed for \(url.path), will attempt afplay fallback")
-            }
-            return PlayItem(url: url, player: player, completion: completion)
+    /// Strip the trailing silence off a Piper WAV so consecutive chunks do not
+    /// leave dead air between them. Leaves a tiny natural tail so the last
+    /// phoneme does not get clipped.
+    private func trimTrailingSilence(url: URL) -> URL? {
+        guard let input = try? AVAudioFile(forReading: url) else { return nil }
+        let format = input.processingFormat
+        let frameCount = AVAudioFrameCount(input.length)
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return nil
         }
 
-        badAppleVoiceLog("PiperTTSPlayback: AVAudioPlayer failed for \(url.path), falling back to afplay")
-        let item = PlayItem(url: url, completion: completion)
+        do {
+            try input.read(into: buffer)
+        } catch {
+            return nil
+        }
+
+        let threshold: Float = 0.005
+        let sampleRate = format.sampleRate
+        let tailFrames = AVAudioFrameCount(max(1.0, sampleRate * 0.045)) // 45ms tail
+
+        var lastAudible: AVAudioFramePosition = 0
+        let channels = Int(format.channelCount)
+        for frame in (0..<Int(frameCount)).reversed() {
+            var audible = false
+            for ch in 0..<channels {
+                guard let channelData = buffer.floatChannelData?[ch] else { continue }
+                let sample = channelData[frame]
+                if abs(sample) > threshold {
+                    audible = true
+                    break
+                }
+            }
+            if audible {
+                lastAudible = AVAudioFramePosition(frame)
+                break
+            }
+        }
+
+        let endFrame = min(AVAudioFramePosition(frameCount) - 1, lastAudible + AVAudioFramePosition(tailFrames))
+        let newFrameCount = AVAudioFrameCount(endFrame + 1)
+        guard newFrameCount > 0, newFrameCount <= buffer.frameCapacity else { return nil }
+        buffer.frameLength = newFrameCount
+
+        let trimmedURL = url.deletingPathExtension()
+            .appendingPathExtension("trimmed")
+            .appendingPathExtension(url.pathExtension)
+        do {
+            let output = try AVAudioFile(forWriting: trimmedURL, settings: format.settings, commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+            try output.write(from: buffer)
+            return trimmedURL
+        } catch {
+            return nil
+        }
+    }
+
+    private func makePlayItem(url: URL, completion: ((Bool) -> Void)?) -> PlayItem {
+        let trimmedURL = trimTrailingSilence(url: url) ?? url
+        if let player = try? AVAudioPlayer(contentsOf: trimmedURL) {
+            player.delegate = self
+            if !player.prepareToPlay() {
+                badAppleVoiceLog("PiperTTSPlayback: prepareToPlay() failed for \(trimmedURL.path), will attempt afplay fallback")
+            }
+            return PlayItem(url: trimmedURL, player: player, completion: completion)
+        }
+
+        badAppleVoiceLog("PiperTTSPlayback: AVAudioPlayer failed for \(trimmedURL.path), falling back to afplay")
+        let item = PlayItem(url: trimmedURL, completion: completion)
         item.afplayTask = makeAfplayTask(item)
         return item
     }
