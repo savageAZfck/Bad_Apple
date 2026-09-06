@@ -1403,19 +1403,63 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Context-aware prosody for each utterance. Pause, rate, and pitch vary
+    /// with the length and punctuation of the chunk so the voice doesn't take
+    /// the same breath after every phrase.
+    private func prosodyForChunk(_ text: String, ending: Character?) -> ProsodyChunk {
+        let wordCount = text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .count
+        let isLong = wordCount > 18
+        let isShort = wordCount < 6
+
+        let rate: Float
+        let pitch: Float
+        let postDelay: TimeInterval
+
+        switch ending {
+        case "?":
+            pitch = 1.03
+            // Questions get a slightly longer breath if they were a full thought.
+            postDelay = isLong ? 0.16 : (isShort ? 0.05 : 0.10)
+            rate = isLong ? 0.44 : (isShort ? 0.48 : 0.46)
+        case "!":
+            pitch = 1.02
+            // Exclamations are punchy, but a longer one still needs a beat.
+            postDelay = isLong ? 0.14 : (isShort ? 0.05 : 0.09)
+            rate = isLong ? 0.44 : 0.48
+        case "\n":
+            pitch = 0.96
+            // Paragraph break = longer breath; stacked newlines = bigger gap.
+            let extra = text.hasSuffix("\n\n") ? 0.08 : 0.0
+            postDelay = 0.12 + extra
+            rate = 0.46
+        case ".":
+            fallthrough
+        default:
+            pitch = 0.97
+            // Short clause: barely a breath. Long sentence: take a real one.
+            postDelay = isLong ? 0.12 : (isShort ? 0.03 : 0.06)
+            rate = isLong ? 0.44 : (isShort ? 0.48 : 0.46)
+        }
+
+        return ProsodyChunk(text: text, rate: rate, pitch: pitch, postDelay: postDelay)
+    }
+
     /// Split the response into chilled, beachy chunks. US voices stay relaxed
     /// with a slightly slower rate and a soft, natural pitch.
     private func prosodyChunks(from text: String) -> [ProsodyChunk] {
         var chunks: [ProsodyChunk] = []
         var current = ""
 
-        func flush(_ postDelay: TimeInterval = 0.0, rate: Float = 0.46, pitch: Float = 0.96) {
+        func flush() {
             let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 current = ""
                 return
             }
-            chunks.append(ProsodyChunk(text: trimmed, rate: rate, pitch: pitch, postDelay: postDelay))
+            let ending = trimmed.last
+            chunks.append(prosodyForChunk(trimmed, ending: ending))
             current = ""
         }
 
@@ -1425,23 +1469,20 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             let c = chars[i]
             current.append(c)
 
-            if c == "?" {
-                flush(0.15, rate: 0.46, pitch: 1.00)
-            } else if c == "!" {
-                flush(0.15, rate: 0.48, pitch: 1.00)
-            } else if c == "." || c == "\n" {
-                // only end a sentence if the next char is whitespace or we are at the end
+            if c == "?" || c == "!" || c == "." || c == "\n" {
+                // only end a sentence if the next char is whitespace/EOL,
+                // so decimals like "3.14" and mid-word punctuation don't split.
                 let next = i + 1 < chars.count ? chars[i + 1] : nil
                 if next == nil || next!.isWhitespace || next! == "\n" {
-                    flush(0.12)
+                    flush()
                 }
             }
 
             i += 1
         }
 
-        flush(0.10)
-        return chunks.isEmpty ? [ProsodyChunk(text: text, rate: 0.46, pitch: 0.96, postDelay: 0.10)] : chunks
+        flush()
+        return chunks.isEmpty ? [prosodyForChunk(text, ending: text.last)] : chunks
     }
 
     private var usePiperTTS: Bool {

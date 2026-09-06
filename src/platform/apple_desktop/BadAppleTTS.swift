@@ -390,7 +390,8 @@ private final class TTSServer {
         // AVFoundation synthesizer only when no Piper voice is available.
         let outputURL: URL
         let result: SynthesisResult
-        if let piperResult = synthesizeWithPiperIfAvailable(text: cleanText, voice: voiceName, lengthScale: lengthScale, outputURL: URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).wav")), piperResult.error == nil {
+        let sentenceSilence = sentenceSilenceFor(cleanText)
+        if let piperResult = synthesizeWithPiperIfAvailable(text: cleanText, voice: voiceName, lengthScale: lengthScale, sentenceSilence: sentenceSilence, outputURL: URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).wav")), piperResult.error == nil {
             outputURL = piperResult.url
             result = piperResult
         } else {
@@ -432,6 +433,30 @@ private final class TTSServer {
         }
 
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Context-aware silence between sentences. Short punchy phrases barely
+    /// breathe; long thoughts and paragraph breaks get more room.
+    private func sentenceSilenceFor(_ text: String) -> Double {
+        let wordCount = text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .count
+        let isLong = wordCount > 18
+        let isShort = wordCount < 6
+
+        switch text.last {
+        case "?":
+            return isLong ? 0.16 : (isShort ? 0.06 : 0.10)
+        case "!":
+            return isLong ? 0.14 : (isShort ? 0.05 : 0.09)
+        case "\n":
+            let extra = text.hasSuffix("\n\n") ? 0.08 : 0.0
+            return 0.12 + extra
+        case ".":
+            return isLong ? 0.12 : (isShort ? 0.03 : 0.06)
+        default:
+            return isLong ? 0.10 : (isShort ? 0.02 : 0.05)
+        }
     }
 
     private func voiceScore(_ voice: AVSpeechSynthesisVoice) -> (Int, Int) {
@@ -631,7 +656,7 @@ private final class TTSServer {
         return nil
     }
 
-    private func synthesizeWithPiperIfAvailable(text: String, voice: String, lengthScale: Double, outputURL: URL) -> SynthesisResult? {
+    private func synthesizeWithPiperIfAvailable(text: String, voice: String, lengthScale: Double, sentenceSilence: Double, outputURL: URL) -> SynthesisResult? {
         let normalized = voice.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Resolve the actual model name. "Best" and "Default" mean the first
@@ -676,7 +701,7 @@ private final class TTSServer {
             "-i", inputURL.path,
             "-f", outputURL.path,
             "--length-scale", "\(lengthScale)",
-            "--sentence-silence", "0.1",
+            "--sentence-silence", "\(sentenceSilence)",
         ]
 
         // Piper expects to find its espeak-ng data and libonnxruntime. Set a
