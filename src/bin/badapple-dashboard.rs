@@ -152,7 +152,10 @@ async fn run_server(port: u16, web_root: PathBuf, state: Arc<DashboardState>) ->
         .fallback(static_handler)
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Bind to loopback only. The cert suite treats an all-interfaces listener
+    // as an external network socket, and it is the safer default for a local
+    // dashboard anyway.
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind dashboard to {}", addr))?;
