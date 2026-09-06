@@ -112,7 +112,10 @@ cd "${REPO_ROOT}"
 BADAPPLE_ROOT="${REPO_ROOT}" src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install
 
 echo "Installing menu bar LaunchAgent..."
-src/platform/apple_desktop/install_menu_bar_agent.sh
+CONSOLE_USER="${SUDO_USER:-$(logname 2>/dev/null || id -un)}"
+CONSOLE_HOME=$(eval echo "~$CONSOLE_USER")
+# The LaunchAgent must be installed in the logged-in user's domain.
+sudo -u "$CONSOLE_USER" -E HOME="$CONSOLE_HOME" src/platform/apple_desktop/install_menu_bar_agent.sh
 
 echo "Bad Apple is installed. Launch it from /Applications."
 EOF
