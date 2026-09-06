@@ -6871,7 +6871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         alert.addButton(withTitle: "Cancel")
         let result = alert.runModal()
         if result == .alertFirstButtonReturn {
-            let repo = "savag3/bad_apple"
+            let repo = "savageAZfck/bad-apple-releases"
             let cmd = "BADAPPLE_GH_REPO=\(repo) \\\"\(script)\\\""
             let appleScript = "do shell script \"\(cmd)\" with administrator privileges"
             var errorInfo: NSDictionary?

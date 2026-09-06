@@ -5,7 +5,7 @@ A Homebrew tap for Bad Apple, a sovereign, local AI operating-system layer for m
 ## Install
 
 ```bash
-brew tap savage3/bad-apple https://github.com/savage3/homebrew-bad-apple
+brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
 brew install --cask bad-apple
 ```
 
@@ -19,7 +19,7 @@ daemons. The 7B model is downloaded on first use.
   `--unsigned-install` platform installer flag.
 - A signed release can be produced with
   `src/platform/apple_desktop/package_signed_release.sh` in the main repo.
-- The platform code is copied to `~/.bad_apple/versions/<version>/bad_apple`.
+- The platform code is copied to `~/.bad_apple/versions/<version>/Bad_Apple-<version>-unsigned`.
 - Bad Apple uses roughly 6 GB of unified memory once the 7B model is loaded;
   8 GB total is the practical minimum and 16 GB is the comfortable recommendation.
 
@@ -27,5 +27,5 @@ daemons. The 7B model is downloaded on first use.
 
 ```bash
 brew uninstall --cask bad-apple
-brew untap savage3/bad-apple
+brew untap savageAZfck/bad-apple
 ```

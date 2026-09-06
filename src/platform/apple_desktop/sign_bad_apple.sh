@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 APP_DIR="${REPO_ROOT}/target/release/Bad Apple.app"
-CERT_NAME="Bad Apple Dev (savag3)"
+CERT_NAME="Bad Apple Dev (local)"
 KEYCHAIN="${HOME}/Library/Keychains/badapple.keychain-db"
 
 # Unlock the dev keychain and allow codesign to use it without prompting.

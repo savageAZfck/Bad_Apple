@@ -6,12 +6,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CERT_NAME="Bad Apple Dev (savag3)"
+CERT_NAME="Bad Apple Dev (local)"
 CERT_FILE="${REPO_ROOT}/.badapple_dev_cert.p12"
 KEY_FILE="${REPO_ROOT}/.badapple_dev_cert.key"
 CRT_FILE="${REPO_ROOT}/.badapple_dev_cert.crt"
 KEYCHAIN="${HOME}/Library/Keychains/badapple.keychain-db"
-CN="Bad Apple Dev (savag3)"
+CN="Bad Apple Dev (local)"
 
 if [[ -f "${CERT_FILE}" ]]; then
     echo "Developer certificate already exists: ${CERT_FILE}"
@@ -27,7 +27,7 @@ x509_extensions = v3_req
 
 [ req_distinguished_name ]
 O = Bad Apple Dev
-CN = Bad Apple Dev (savag3)
+CN = Bad Apple Dev (local)
 
 [ v3_req ]
 keyUsage = critical, digitalSignature

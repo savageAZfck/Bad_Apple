@@ -852,20 +852,21 @@ final class BadAppleToolRouter: @unchecked Sendable {
     /// required parameters filled in. This keeps the local 7B model from
     /// nesting the schema under `arguments.properties`.
     private func exampleForTool(_ tool: BadAppleTool) -> String? {
+        let home = NSHomeDirectory()
         let argExamples: [String: String] = [
             "read_file": "\"path\":\"/var/lib/bad_apple/blocklist.txt\"",
-            "write_file": "\"path\":\"/Users/savag3/.bad_apple/notes.txt\",\"content\":\"hello\"",
-            "list_directory": "\"path\":\"/Users/savag3/.bad_apple\"",
-            "search_content": "\"pattern\":\"TODO\",\"path\":\"/Users/savag3/bad_apple/src\"",
+            "write_file": "\"path\":\"\(home)/.bad_apple/notes.txt\",\"content\":\"hello\"",
+            "list_directory": "\"path\":\"\(home)/.bad_apple\"",
+            "search_content": "\"pattern\":\"TODO\",\"path\":\"\(home)/Documents/src\"",
             "run_shell": "\"command\":\"ls /tmp\"",
             "run_applescript": "\"script\":\"tell app \\\"Finder\\\" to activate\"",
             "run_shortcut": "\"name\":\"Good Morning\"",
-            "set_workspace": "\"path\":\"/Users/savag3/bad_apple\"",
+            "set_workspace": "\"path\":\"\(home)/Documents\"",
             "describe_image": "\"path\":\"/var/lib/bad_apple/generated_images/image.png\"",
             "image_generation": "\"prompt\":\"a red apple on a beach\"",
             "search_local_files": "\"pattern\":\"AGENTS.md\"",
-            "index_documents": "\"path\":\"/Users/savag3/bad_apple\"",
-            "read_document": "\"path\":\"/Users/savag3/bad_apple/README.md\"",
+            "index_documents": "\"path\":\"\(home)/Documents\"",
+            "read_document": "\"path\":\"\(home)/Documents/README.md\"",
             "translate_text": "\"text\":\"hello\",\"to\":\"spanish\"",
             "consolidate_memory": "",
             "workspace_status": "",
@@ -2814,7 +2815,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     /// This is the tool the Curious autopilot invokes so it can improve Bad Apple
     /// on its own without relying on the 7B model for multi-step planning.
     func curiousSelfImprove(include: String) -> String {
-        let base = workspace ?? "/Users/savag3/bad_apple"
+        let base = workspace ?? NSHomeDirectory()
         let proposalsDir = NSHomeDirectory() + "/.bad_apple/notes/proposed_patches"
         try? FileManager.default.createDirectory(
             atPath: proposalsDir,

@@ -107,18 +107,18 @@ The fastest, lowest-friction path. Homebrew strips the quarantine flag and runs
 the platform installer automatically:
 
 ```bash
-brew tap savage3/bad-apple https://github.com/savage3/homebrew-bad-apple
+brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
 brew install --cask bad-apple
 ```
 
 ## Manual prebuilt release install
 
-If you do not use Homebrew, download `Bad_Apple-<version>-full-unsigned.zip` and
-run the bundled installer as root:
+If you do not use Homebrew, download `Bad_Apple-<version>-unsigned.zip` from the
+release repo and run the bundled installer as root:
 
 ```bash
-unzip Bad_Apple-<version>-full-unsigned.zip
-cd Bad_Apple-<version>-full
+unzip Bad_Apple-<version>-unsigned.zip
+cd Bad_Apple-<version>-unsigned
 sudo ./install.sh
 ```
 

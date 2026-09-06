@@ -3,10 +3,10 @@ cask "bad-apple" do
   # Update this sha256 for each release. package_homebrew_cask.sh does it automatically.
   sha256 "REPLACE_SHA256"
 
-  url "https://github.com/savage3/Bad_Apple/releases/download/v#{version}/Bad_Apple-#{version}-full-unsigned.zip"
+  url "https://github.com/savageAZfck/bad-apple-releases/releases/download/v#{version}/Bad_Apple-#{version}-unsigned.zip"
   name "Bad Apple"
   desc "Sovereign, local AI operating-system layer"
-  homepage "https://github.com/savage3/Bad_Apple"
+  homepage "https://github.com/savageAZfck/bad-apple-releases"
 
   # The release zip contains both the .app bundle and the bad_apple platform.
   # Homebrew copies the app to /Applications; postflight copies the platform
@@ -14,20 +14,20 @@ cask "bad-apple" do
   depends_on :macos
   depends_on arch: :arm64
 
-  app "Bad_Apple-#{version}-full/Bad Apple.app"
+  app "Bad_Apple-#{version}-unsigned/Bad Apple.app"
 
   postflight_steps do
     # Keep a pristine, persistent copy of the platform per version so the
     # LaunchDaemons and menu bar app continue to work after Homebrew cleans
     # up the staged download.
-    copy "Bad_Apple-{{version}}-full",
-         ".bad_apple/versions/{{version}}/Bad_Apple-{{version}}-full",
+    copy "Bad_Apple-{{version}}-unsigned",
+         ".bad_apple/versions/{{version}}/Bad_Apple-{{version}}-unsigned",
          source_base: :staged_path,
          target_base: :home,
          recursive:   true,
          overwrite:   true
 
-    run ".bad_apple/versions/{{version}}/Bad_Apple-{{version}}-full/install.sh",
+    run ".bad_apple/versions/{{version}}/Bad_Apple-{{version}}-unsigned/install.sh",
         base:           :home,
         sudo:           true,
         print_stdout:   true,

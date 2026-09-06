@@ -435,7 +435,7 @@ cargo clippy --release
   configured for a GitHub release; the local tap points at the freshly built
   unsigned zip for testing:
   ```bash
-  brew tap local/bad-apple /Users/savag3/bad_apple/target/release/homebrew-bad-apple
+  brew tap local/bad-apple ./target/release/homebrew-bad-apple
   brew install --cask bad-apple
   ```
 

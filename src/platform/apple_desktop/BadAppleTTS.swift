@@ -721,8 +721,7 @@ private final class TTSServer {
             return URL(fileURLWithPath: env)
         }
 
-        // Bundled/known venv location from the original Bad Apple install.
-        let home = ProcessInfo.processInfo.environment["HOME"] ?? "/Users/savag3"
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         let knownPaths = [
             URL(fileURLWithPath: home).appendingPathComponent(".local/share/badapple/venv/bin/piper"),
             URL(fileURLWithPath: "/usr/local/bin/piper"),
@@ -753,7 +752,7 @@ private final class TTSServer {
             dirs.append(URL(fileURLWithPath: env))
         }
 
-        let home = ProcessInfo.processInfo.environment["HOME"] ?? "/Users/savag3"
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         dirs.append(URL(fileURLWithPath: home).appendingPathComponent(".local/share/badapple/voices"))
         dirs.append(URL(fileURLWithPath: home).appendingPathComponent(".bad_apple/voices"))
 

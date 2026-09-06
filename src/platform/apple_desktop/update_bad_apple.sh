@@ -6,14 +6,15 @@ set -euo pipefail
 # the app in /Applications, strips the quarantine flag, and restarts the menu bar.
 #
 # Environment:
-#   BADAPPLE_GH_REPO  - owner/repo on GitHub (default: savag3/bad_apple)
+#   BADAPPLE_GH_REPO  - owner/repo on GitHub (default: savageAZfck/bad-apple-releases)
 #   BADAPPLE_TAG      - specific tag to install, or "latest" (default: latest)
 #
 # The matching release asset must be named one of:
 #   Bad_Apple-<version>-unsigned.zip
 #   Bad_Apple-<tag>-unsigned.zip
+#   Bad_Apple-<version>.zip
 
-REPO="${BADAPPLE_GH_REPO:-savag3/bad_apple}"
+REPO="${BADAPPLE_GH_REPO:-savageAZfck/bad-apple-releases}"
 TAG="${BADAPPLE_TAG:-latest}"
 APP="/Applications/Bad Apple.app"
 BACKUP_DIR="${HOME}/.bad_apple/backups"

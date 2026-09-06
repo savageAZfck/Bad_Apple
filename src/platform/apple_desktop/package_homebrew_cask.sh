@@ -11,11 +11,17 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 VERSION="$(cd "${REPO_ROOT}" && grep '^version' Cargo.toml | head -n1 | sed -e 's/.*= *"//' -e 's/".*//')"
-ZIP_NAME="Bad_Apple-${VERSION}-full-unsigned.zip"
+ZIP_NAME="Bad_Apple-${VERSION}-unsigned.zip"
 ZIP_PATH="${REPO_ROOT}/target/release/${ZIP_NAME}"
 
 if [[ ! -f "${ZIP_PATH}" ]]; then
-    echo "error: release zip not found at ${ZIP_PATH}; run package_full_release.sh first" >&2
+    # Fall back to the dev-only full source zip for local testing.
+    ZIP_NAME="Bad_Apple-${VERSION}-full-unsigned.zip"
+    ZIP_PATH="${REPO_ROOT}/target/release/${ZIP_NAME}"
+fi
+
+if [[ ! -f "${ZIP_PATH}" ]]; then
+    echo "error: release zip not found at ${ZIP_PATH}; run package_minimal_release.sh or package_full_release.sh first" >&2
     exit 1
 fi
 
@@ -28,7 +34,7 @@ mkdir -p "${LOCAL_TAP}/Casks"
 cp "${REPO_ROOT}/homebrew-bad-apple/README.md" "${LOCAL_TAP}/README.md"
 
 sed -e 's#REPLACE_SHA256#'"${SHA256}"'#' \
-    -e 's|url "https://github.com/savage3/Bad_Apple/releases/download/v#{version}/Bad_Apple-#{version}-full-unsigned.zip"|url "file://'"${ZIP_PATH}"'"|' \
+    -e 's|url "https://github.com/savageAZfck/bad-apple-releases/releases/download/v#{version}/Bad_Apple-#{version}-unsigned.zip"|url "file://'"${ZIP_PATH}"'"|' \
     "${REPO_ROOT}/homebrew-bad-apple/Casks/bad-apple.rb" > "${LOCAL_TAP}/Casks/bad-apple.rb"
 
 # Make the local tap look like a real git repo so brew tap is happy.
@@ -41,5 +47,5 @@ echo "  brew tap local/bad-apple ${LOCAL_TAP}"
 echo "  brew install --cask bad-apple"
 echo ""
 echo "To use the GitHub release tap instead:"
-echo "  brew tap savage3/bad-apple https://github.com/savage3/homebrew-bad-apple"
+echo "  brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple"
 echo "  brew install --cask bad-apple"

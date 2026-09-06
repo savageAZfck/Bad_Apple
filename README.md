@@ -174,7 +174,7 @@ This is the smoothest path. Homebrew removes the Gatekeeper quarantine flag and
 runs the native platform installer for you:
 
 ```bash
-brew tap savage3/bad-apple https://github.com/savage3/homebrew-bad-apple
+brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
 brew install --cask bad-apple
 ```
 
