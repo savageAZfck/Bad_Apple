@@ -339,10 +339,12 @@ cargo clippy --release
   - `badapple-p2p pull <peer_addr:port> <model_id>` pulls the model from a listening peer
   - Transfers use AES-256-GCM over a dedicated TCP stream with per-chunk ACKs, resume support, and SHA-256 verification.
 - P2P is off by default. Enable with the menu bar `Mesh > P2P Sync`.
-- Consumer install: Homebrew Cask (`brew install --cask bad-apple`), or extract the
-  full release `Bad_Apple-<version>-full-unsigned.zip` and run `sudo ./install.sh`.
-- Legacy unsigned app-only zip: double-click `Install Bad Apple` from the release
-  zip, or run `src/platform/apple_desktop/install_badapple.sh`.
+- Consumer install: Homebrew Cask
+  (`brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple && brew install --cask bad-apple`)
+  or download the public release `Bad_Apple-<version>-unsigned.zip` from
+  `savageAZfck/bad-apple-releases` and run `sudo ./install.sh`.
+- Legacy unsigned app-only zip: double-click `Install Bad Apple` from an older
+  release zip, or run `src/platform/apple_desktop/install_badapple.sh`.
 - First-run onboarding and plain-English Status window in `BadAppleMenuBar.swift`.
 
 ## Latest features (new)
