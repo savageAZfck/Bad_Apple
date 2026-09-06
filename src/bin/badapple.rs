@@ -298,7 +298,7 @@ fn tts_worker(rx: Receiver<TtsMsg>) {
         if buf.len() < MIN_CHUNK {
             return false;
         }
-        if buf.ends_with(['.', '!', '?', '\n']) {
+        if buf.ends_with(['.', '!', '?', ',', '\n']) {
             return true;
         }
         false

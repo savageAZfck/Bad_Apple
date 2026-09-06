@@ -576,8 +576,10 @@ final class PiperTTSClient {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        // Match ., ?, ! followed by whitespace or end of string, or a line break.
-        let regex = try! NSRegularExpression(pattern: "[.!?]+(?:\\s+|$)|\\n+", options: [])
+        // Match sentence ends or clean clause breaks (", ") in long text. This
+        // lets long lists and long sentences split naturally instead of being
+        // speed-read as one wall of words.
+        let regex = try! NSRegularExpression(pattern: "[.!?]+(?:\\s+|$)|,+(?:\\s+|$)|\\n+", options: [])
 
         var chunks: [String] = []
         var remaining = trimmed
@@ -1447,23 +1449,27 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         switch ending {
         case "?":
             pitch = 1.03
-            postDelay = isLong ? 0.22 : (isShort ? 0.12 : 0.16)
-            rate = isLong ? 0.44 : 0.46
+            postDelay = isLong ? 0.26 : (isShort ? 0.12 : 0.18)
+            rate = isLong ? 0.40 : 0.44
         case "!":
             pitch = 1.02
-            postDelay = isLong ? 0.20 : (isShort ? 0.10 : 0.14)
-            rate = isLong ? 0.44 : 0.46
+            postDelay = isLong ? 0.24 : (isShort ? 0.11 : 0.16)
+            rate = isLong ? 0.40 : 0.44
         case "\n":
             pitch = 0.96
-            let extra = text.hasSuffix("\n\n") ? 0.10 : 0.0
-            postDelay = 0.18 + extra
-            rate = 0.46
+            let extra = text.hasSuffix("\n\n") ? 0.12 : 0.0
+            postDelay = 0.20 + extra
+            rate = 0.45
+        case ",":
+            pitch = 0.98
+            postDelay = isLong ? 0.16 : (isShort ? 0.06 : 0.10)
+            rate = isLong ? 0.40 : 0.44
         case ".":
             fallthrough
         default:
             pitch = 0.97
-            postDelay = isLong ? 0.18 : (isShort ? 0.08 : 0.12)
-            rate = isLong ? 0.44 : 0.46
+            postDelay = isLong ? 0.22 : (isShort ? 0.09 : 0.14)
+            rate = isLong ? 0.40 : 0.44
         }
 
         return ProsodyChunk(text: text, rate: rate, pitch: pitch, postDelay: postDelay)
@@ -1493,7 +1499,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             let c = chars[i]
             current.append(c)
 
-            if c == "?" || c == "!" || c == "." || c == "\n" {
+            if c == "?" || c == "!" || c == "." || c == "," || c == "\n" {
                 // only end a sentence if the next char is whitespace/EOL,
                 // so decimals like "3.14" and mid-word punctuation don't split.
                 let next = i + 1 < chars.count ? chars[i + 1] : nil

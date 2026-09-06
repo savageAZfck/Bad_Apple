@@ -59,7 +59,8 @@ private enum TTSError: LocalizedError {
 private final class TTSServer {
     private let socketPath: String
     private let defaultVoiceName: String
-    private let defaultLengthScale: Double
+    /// Optional env override for Piper length scale. 0 means "compute from word count".
+    private let envLengthScale: Double
     private let defaultVolume: Double
 
     private let synthesizer = AVSpeechSynthesizer()
@@ -78,7 +79,7 @@ private final class TTSServer {
     init() {
         socketPath = ProcessInfo.processInfo.environment["BADAPPLE_TTS_SOCKET"] ?? "/tmp/badapple_tts.sock"
         defaultVoiceName = ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOICE"] ?? "Best"
-        defaultLengthScale = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_LENGTH_SCALE"] ?? "0.8043") ?? 0.8043
+        envLengthScale = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_LENGTH_SCALE"] ?? "") ?? 0.0
         defaultVolume = Double(ProcessInfo.processInfo.environment["BADAPPLE_TTS_VOLUME"] ?? "1.0") ?? 1.0
         gTTSShouldStop = 0
         gTTSListenFd = -1
@@ -354,22 +355,30 @@ private final class TTSServer {
 
         let voiceName = request["voice"] as? String ?? defaultVoiceName
 
+        // Word-based prosody. Long phrases are slowed down, short punchy
+        // phrases stay natural, and the env var overrides everything.
+        let wordCount = cleanText.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .count
+        let isLong = wordCount > 18
+        let isShort = wordCount < 6
+
         let lengthScale: Double
         if let raw = request["length_scale"] as? Double {
             lengthScale = raw
         } else if let raw = request["lengthScale"] as? Double {
             lengthScale = raw
+        } else if envLengthScale > 0 {
+            lengthScale = envLengthScale
         } else {
-            lengthScale = defaultLengthScale
+            lengthScale = isLong ? 1.15 : (isShort ? 1.00 : 1.05)
         }
 
         let rate: Float
         if let raw = request["rate"] as? Double {
             rate = Float(clamp(raw, min: 0.0, max: 1.0))
-        } else if lengthScale > 0 {
-            rate = Float(clamp(0.5 / lengthScale, min: 0.0, max: 1.0))
         } else {
-            rate = 0.5
+            rate = isLong ? 0.42 : (isShort ? 0.50 : 0.46)
         }
 
         let volume: Float
@@ -484,8 +493,8 @@ private final class TTSServer {
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Context-aware silence between sentences. Short punchy phrases barely
-    /// breathe; long thoughts and paragraph breaks get more room.
+    /// Context-aware silence between sentences and clauses. Longer thoughts get
+    /// more room to breathe; short punchy phrases stay tight.
     private func sentenceSilenceFor(_ text: String) -> Double {
         let wordCount = text.components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
@@ -495,16 +504,18 @@ private final class TTSServer {
 
         switch text.last {
         case "?":
-            return isLong ? 0.22 : (isShort ? 0.10 : 0.16)
+            return isLong ? 0.28 : (isShort ? 0.12 : 0.18)
         case "!":
-            return isLong ? 0.20 : (isShort ? 0.09 : 0.14)
+            return isLong ? 0.26 : (isShort ? 0.11 : 0.16)
         case "\n":
-            let extra = text.hasSuffix("\n\n") ? 0.10 : 0.0
-            return 0.16 + extra
+            let extra = text.hasSuffix("\n\n") ? 0.12 : 0.0
+            return 0.18 + extra
         case ".":
+            return isLong ? 0.22 : (isShort ? 0.10 : 0.14)
+        case ",":
             return isLong ? 0.16 : (isShort ? 0.06 : 0.10)
         default:
-            return isLong ? 0.14 : (isShort ? 0.05 : 0.08)
+            return isLong ? 0.18 : (isShort ? 0.06 : 0.10)
         }
     }
 
