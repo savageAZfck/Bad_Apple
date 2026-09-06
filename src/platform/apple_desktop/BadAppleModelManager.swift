@@ -343,9 +343,14 @@ final class BadAppleModelManager {
         task.executableURL = helperURL
         task.arguments = [repoId]
 
-        // Inherit the parent environment; do not force HF_HUB_OFFLINE=0 so
-        // system/user offline settings and air-gap certification are respected.
-        task.environment = ProcessInfo.processInfo.environment
+        // Inherit the parent environment, then explicitly allow the fetch helper
+        // to reach the network. The daemon itself keeps HF_HUB_OFFLINE=1, but
+        // when the user opts in with BADAPPLE_ALLOW_DOWNLOADS=1, the helper
+        // must see HF_HUB_OFFLINE=0 or it will refuse immediately.
+        var taskEnv = ProcessInfo.processInfo.environment
+        taskEnv["HF_HUB_OFFLINE"] = "0"
+        taskEnv["BADAPPLE_ALLOW_DOWNLOADS"] = "1"
+        task.environment = taskEnv
 
         // Run the download in the background and poll isRunning (same pattern
         // BadAppleTools.runProcess uses; this works without a Foundation run loop).

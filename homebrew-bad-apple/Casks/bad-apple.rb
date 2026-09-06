@@ -61,6 +61,8 @@ cask "bad-apple" do
       xattr -dr com.apple.quarantine "/Applications/Bad Apple.app"
 
     The system daemons are installed during this cask. The 7B model is
-    downloaded on first use.
+    downloaded on first use only if you allow downloads in the menu bar or set
+    BADAPPLE_ALLOW_DOWNLOADS=1. For an air-gap install, seed the model cache
+    before the first query.
   EOS
 end
