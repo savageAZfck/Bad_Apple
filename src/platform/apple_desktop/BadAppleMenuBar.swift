@@ -859,6 +859,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     private var awaitingNextUtterance = false
     private var enabled = false
     private var currentSpeakID = 0
+    private var speechSafetyWorkItem: DispatchWorkItem?
     private var converter: AVAudioConverter?
     private let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
     // Tolerant wake pattern: allows the on-device recognizer to insert filler words
@@ -910,6 +911,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         guard shouldEnable else {
             awaitingNextUtterance = false
             stopRecognition()
+            cancelSpeechSafetyTimer()
             synthesizer.stopSpeaking(at: .immediate)
             pendingSpeechUtterances = 0
             state = .disabled
@@ -1446,6 +1448,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         // the counter to 0 BEFORE stopping so any in-flight delegate
         // callbacks are no-ops.
         pendingSpeechUtterances = 0
+        cancelSpeechSafetyTimer()
         synthesizer.stopSpeaking(at: .immediate)
         PiperTTSClient.shared.stop()
     }
@@ -1649,14 +1652,17 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         // Stop any in-flight audio so we do not stack responses.
         synthesizer.stopSpeaking(at: .immediate)
         PiperTTSClient.shared.stop()
+        cancelSpeechSafetyTimer()
 
-        if usePiperTTS {
+        let piperReachable = usePiperTTS && PiperTTSClient.shared.isReachable()
+        if piperReachable {
             let voice = selectedPiperVoice
             badAppleVoiceLog("speak using Piper TTS (id=\(id), voice=\(voice))")
             state = .speaking
             PiperTTSClient.shared.speak(spoken, voice: voice) { [weak self] success in
                 DispatchQueue.main.async {
                     guard let self = self, self.enabled, self.currentSpeakID == id else { return }
+                    self.cancelSpeechSafetyTimer()
                     if success {
                         self.scheduleRestart(after: 0.25)
                     } else {
@@ -1666,7 +1672,11 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
                 }
             }
         } else {
-            badAppleVoiceLog("speak using Apple TTS (id=\(id))")
+            if usePiperTTS {
+                badAppleVoiceLog("speak: Piper TTS not reachable, using Apple TTS (id=\(id))")
+            } else {
+                badAppleVoiceLog("speak using Apple TTS (id=\(id))")
+            }
             speakWithApple(spoken, id: id)
         }
     }
@@ -1687,6 +1697,26 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             synthesizer.speak(utterance)
         }
         pendingSpeechUtterances = chunks.count
+        startSpeechSafetyTimer(forID: id)
+    }
+
+    private func startSpeechSafetyTimer(forID id: Int) {
+        cancelSpeechSafetyTimer()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, self.enabled, self.currentSpeakID == id else { return }
+            guard self.state == .speaking || self.state == .processing else { return }
+            badAppleVoiceLog("speechSafetyTimer: TTS did not finish, forcing restart (id=\(id), pending=\(self.pendingSpeechUtterances))")
+            self.synthesizer.stopSpeaking(at: .immediate)
+            self.pendingSpeechUtterances = 0
+            self.scheduleRestart(after: 0.25)
+        }
+        speechSafetyWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7.0, execute: item)
+    }
+
+    private func cancelSpeechSafetyTimer() {
+        speechSafetyWorkItem?.cancel()
+        speechSafetyWorkItem = nil
     }
 
     func resumeAfterFailure() {
@@ -1694,7 +1724,12 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         scheduleRestart(after: 0.5)
     }
 
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        cancelSpeechSafetyTimer()
+    }
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        cancelSpeechSafetyTimer()
         pendingSpeechUtterances = max(0, pendingSpeechUtterances - 1)
         if pendingSpeechUtterances == 0 {
             // Only restart if we're in speaking state — if we already restarted
@@ -1702,6 +1737,14 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             if state == .speaking {
                 scheduleRestart(after: 0.25)
             }
+        }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        cancelSpeechSafetyTimer()
+        pendingSpeechUtterances = max(0, pendingSpeechUtterances - 1)
+        if state == .speaking, pendingSpeechUtterances == 0 {
+            scheduleRestart(after: 0.25)
         }
     }
 
@@ -1742,6 +1785,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
             self?.stopRecognition()
             self?.stopPromptTimer()
             self?.stopRecognitionTimer()
+            self?.cancelSpeechSafetyTimer()
             self?.stablePrompt = ""
             self?.lastTranscript = ""
             self?.state = .unavailable(reason)
@@ -4084,6 +4128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var lastPrompt = ""
     private var lastError: String?
     private var isSubmittingVoicePrompt = false
+    private var voicePromptTimeout: DispatchWorkItem?
     private var voiceStreamingTTSActive = false
     private var lastSpoken: String?
     private var openMenuCount = 0
@@ -5125,6 +5170,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         voiceStreamingTTSActive = voiceHost.streamingTTSAvailable
         rebuildMenu()
 
+        // Safety net: if the cognitive substrate or TTS never calls back,
+        // clear the lock and resume listening so the voice host doesn't die.
+        voicePromptTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isSubmittingVoicePrompt else { return }
+            badAppleVoiceLog("submitVoicePrompt: overall timeout, resuming listening")
+            self.isSubmittingVoicePrompt = false
+            self.lastError = "response took too long"
+            self.voiceHost.speak("Sorry, that took too long. Try again.")
+            self.rebuildMenu()
+        }
+        voicePromptTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45.0, execute: timeout)
+
         // Voice mode switch commands are handled without a daemon call.
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectivePrompt = trimmed
@@ -5135,6 +5194,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         if let local = BadAppleActionResolver.resolve(effectivePrompt) {
             badAppleVoiceLog("submitVoicePrompt resolved local action: \(local)")
             actionExecutor.confirmAndExecute(local)
+            isSubmittingVoicePrompt = false
+            voiceHost.resumeAfterFailure()
             return
         }
 
@@ -5159,6 +5220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 }
                 self.rebuildMenu()
             } onComplete: { finalText in
+                self.voicePromptTimeout?.cancel()
+                self.voicePromptTimeout = nil
                 self.isSubmittingVoicePrompt = false
                 if self.voiceStreamingTTSActive {
                     self.voiceHost.flushStreamingTTS()
@@ -5166,6 +5229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 self.completeVoiceResponse(finalText, streamed: self.voiceStreamingTTSActive)
                 self.rebuildMenu()
             } onError: { error in
+                self.voicePromptTimeout?.cancel()
+                self.voicePromptTimeout = nil
                 self.isSubmittingVoicePrompt = false
                 self.lastError = error
                 self.voiceHost.speak("Sorry, something went wrong. \(error)")
@@ -5209,6 +5274,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     }
                 }
                 await MainActor.run {
+                    self.voicePromptTimeout?.cancel()
+                    self.voicePromptTimeout = nil
                     if self.voiceStreamingTTSActive {
                         self.voiceHost.flushStreamingTTS()
                     }
@@ -5218,6 +5285,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             } catch {
                 badAppleVoiceLog("submitVoicePrompt error: \(error)")
                 await MainActor.run {
+                    self.voicePromptTimeout?.cancel()
+                    self.voicePromptTimeout = nil
                     self.lastError = error.localizedDescription
                     // Drop any partially-streamed audio before resuming so stale
                     // sentences do not play over the restarted listening session.
@@ -5502,21 +5571,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 process.environment = environment
 
                 let sync = NSLock()
-                var timeoutTimer: Timer?
-                timeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { _ in
-                    badAppleVoiceLog("runBadAppleCLIStreaming: timeout, terminating")
-                    process.terminate()
-                }
+                var finished = false
 
                 var buffer = ""
                 var fullText = ""
-                var resumed = false
+
+                let timeoutTimer = DispatchSource.makeTimerSource(queue: self.voiceQueue)
+                timeoutTimer.schedule(deadline: .now() + timeout)
+                timeoutTimer.setEventHandler { [weak process] in
+                    badAppleVoiceLog("runBadAppleCLIStreaming: timeout, terminating")
+                    process?.terminate()
+                }
+                timeoutTimer.resume()
 
                 func finish(result: Result<String, Error>) {
                     sync.lock()
-                    guard !resumed else { sync.unlock(); return }
-                    resumed = true
-                    timeoutTimer?.invalidate()
+                    guard !finished else { sync.unlock(); return }
+                    finished = true
+                    timeoutTimer.cancel()
                     outputPipe.fileHandleForReading.readabilityHandler = nil
                     sync.unlock()
                     switch result {
