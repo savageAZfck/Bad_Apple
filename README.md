@@ -51,6 +51,9 @@ menubar-plist rendering, source-free public release
 (`savageAZfck/bad-apple-releases`), and public Homebrew Cask
 (`savageAZfck/homebrew-bad-apple`).
 
+The public beta is now at **v0.1.1**, with Curious self-improvement wired to the
+autopilot toggle.
+
 **Hardware:** Apple Silicon Mac (M1 or newer). Bad Apple uses roughly 6 GB of
 unified memory once the 7B model is loaded, so 8 GB total is the practical
 floor and 16 GB is the comfortable recommendation.
