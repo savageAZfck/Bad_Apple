@@ -1,5 +1,5 @@
 cask "bad-apple" do
-  version "0.1.0"
+  version "0.1.1"
   # Update this sha256 for each release. package_homebrew_cask.sh does it automatically.
   sha256 "REPLACE_SHA256"
 

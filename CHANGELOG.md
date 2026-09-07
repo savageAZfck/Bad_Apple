@@ -2,6 +2,14 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.1] — 2026-09-06
+
+### Changed
+- Curious self-improvement autopilot is now wired to the same toggle as autopilot.
+  Enabling autopilot in the menu bar or settings starts periodic `curious_self_improve`
+  checks; it no longer requires a separate `curious` persona.
+- Menu bar and settings labels renamed from "Auto-Run Commands" to "Autopilot".
+
 ## [0.1.0] — 2026-08-29
 
 ### Added
