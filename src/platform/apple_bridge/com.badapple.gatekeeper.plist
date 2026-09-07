@@ -31,7 +31,7 @@
         <key>BADAPPLE_MLX_SOCKET_PATH</key>
         <string>/var/run/badapple/substrate_mlx.sock</string>
         <key>BADAPPLE_AUTOMATION_ROOTS</key>
-        <string>__CONSOLE_HOME__:__BADAPPLE_ROOT__:__CONSOLE_HOME__/Documents:__CONSOLE_HOME__/Downloads</string>
+        <string>__CONSOLE_HOME__:__CONSOLE_HOME__/Documents:__CONSOLE_HOME__/Downloads</string>
         <key>BADAPPLE_AUTOMATION_LOG</key>
         <string>__CONSOLE_HOME__/.badapple/automation.jsonl</string>
         <key>BADAPPLE_COGNITIVE</key>
