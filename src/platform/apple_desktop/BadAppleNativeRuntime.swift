@@ -491,6 +491,10 @@ public actor BadAppleNativeRuntime {
             + UInt64(statistics.inactive_count)
             + UInt64(statistics.speculative_count)
             + UInt64(statistics.purgeable_count)
+            // Compressor pages hold data that has already been swapped to the
+            // compressed store; the system can evict them under pressure, so
+            // they are effectively available for a new model allocation.
+            + UInt64(statistics.compressor_page_count)
         let reclaimableBytes = reclaimablePages.multipliedReportingOverflow(by: UInt64(vm_page_size))
         let available = reclaimableBytes.overflow ? total : min(total, reclaimableBytes.partialValue)
         let used = total - available
