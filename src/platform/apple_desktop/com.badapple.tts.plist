@@ -24,7 +24,7 @@
 	<key>Label</key>
 	<string>com.badapple.tts</string>
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Interactive</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>__REPO_ROOT__/target/release/badapple-tts</string>
