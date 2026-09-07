@@ -46,7 +46,11 @@ final class BadAppleEngine: @unchecked Sendable {
         )
         return BadAppleInference(config: config)
     }()
-    private var fastModelLoaded = false
+    private var _fastModelLoaded = false
+    private var fastModelLoaded: Bool {
+        get { stateLock.withLock { _fastModelLoaded } }
+        set { stateLock.withLock { _fastModelLoaded = newValue } }
+    }
     private var recentSignOffs: [String] = []
     let personaManager = BadApplePersonaManager()
     private let auditLedger = BadAppleAuditLedger()
@@ -69,6 +73,7 @@ final class BadAppleEngine: @unchecked Sendable {
     )
     private let rag = BadAppleRAG()
     private let runtime = BadAppleNativeRuntime()
+    private let modelOperationGate = BadAppleModelOperationGate()
     private let conversation = BadAppleConversation()
     let modelManager = BadAppleModelManager.shared
     private let conversationSessionId = "default"
@@ -138,6 +143,8 @@ final class BadAppleEngine: @unchecked Sendable {
     private let stateLock = NSLock()
     private var _isLoaded = false
     private var _isLoading = false
+    private var _mainModelBytes: UInt64 = 0
+    private var _fastModelBytes: UInt64 = 0
     private var _modelId: String = ""
     private var _lastTokensPerSecond: Float = 0
     private var _lastTokenCount: Int = 0
@@ -147,10 +154,16 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _airgapEnabled = false
     private var _privateModeEnabled = false
     private var _fastTierEnabled = false
+    private var _killed = false
     private var _workspaceWatcher: BadAppleWorkspaceWatcher?
 
     var isLoaded: Bool {
         return stateLock.withLock { _isLoaded }
+    }
+
+    var killed: Bool {
+        get { stateLock.withLock { _killed } }
+        set { stateLock.withLock { _killed = newValue } }
     }
 
     var isLoading: Bool {
@@ -507,25 +520,29 @@ final class BadAppleEngine: @unchecked Sendable {
         personaManager.handleCommand(command)
     }
 
-    // MARK: - Model Loading
-
-    /// Estimate the memory footprint of a model from its ID.
-    /// 4-bit quantized models use roughly 0.5 bytes per parameter.
-    private func estimateModelBytes(_ modelId: String) -> UInt64 {
-        let lower = modelId.lowercased()
-        // Extract parameter count from common naming patterns.
-        if lower.contains("70b") { return 40 * 1_073_741_824 }   // ~40 GB
-        if lower.contains("32b") { return 18 * 1_073_741_824 }   // ~18 GB
-        if lower.contains("9b") || lower.contains("8b") || lower.contains("7b") { return 6 * 1_073_741_824 }  // ~6 GB
-        if lower.contains("4b") || lower.contains("3b") { return 3 * 1_073_741_824 }   // ~3 GB
-        if lower.contains("1.5b") { return 1 * 1_073_741_824 }    // ~1 GB
-        if lower.contains("0.5b") || lower.contains("500m") { return 350 * 1_048_576 } // ~350 MB
-        // Default: assume 9B-class.
-        return 6 * 1_073_741_824
+    func modelLoadError() async -> String? {
+        let mid = stateLock.withLock { _modelId }
+        return await runtime.modelLoadError(mid)
     }
+
+    // MARK: - Model Loading
 
     /// Load the model. Call this at startup or when the model changes.
     func loadModel() async {
+        await modelOperationGate.withLock { [self] in
+            await loadMainModel(directory: nil)
+        }
+    }
+
+    func switchMainModel(modelId: String, revision: String = "main") async {
+        await modelOperationGate.withLock { [self] in
+            await unloadModels()
+            configureMainModel(modelId: modelId, revision: revision)
+            await loadMainModel(directory: nil)
+        }
+    }
+
+    private func loadMainModel(directory: URL?) async {
         let (alreadyLoaded, mid) = stateLock.withLock { () -> (Bool, String) in
             let loaded = _isLoaded || _isLoading
             if !loaded { _isLoading = true }
@@ -535,17 +552,19 @@ final class BadAppleEngine: @unchecked Sendable {
         await runtime.markModelLoading(mid)
 
         // VRAM admission check: refuse to load if the model won't fit.
-        let estimatedBytes = estimateModelBytes(mid)
-        if let reason = await runtime.canFitModel(estimatedBytes: estimatedBytes) {
-            print("[BadAppleEngine] VRAM admission denied for \(mid): \(reason)")
-            stateLock.withLock { _isLoaded = false; _isLoading = false }
-            await runtime.markModelFailed(mid, error: "VRAM admission denied: \(reason)")
-            return
+        let admission: @Sendable (UInt64) async throws -> Void = { [self] bytes in
+            if let reason = await runtime.reserveModelMemory(mid, bytes: bytes) {
+                throw BadAppleInference.InferenceError.modelLoadFailed("VRAM admission denied: \(reason)")
+            }
+            stateLock.withLock { _mainModelBytes = bytes }
         }
-
         do {
-            try await inference.loadModel()
-            await runtime.trackModelMemory(mid, bytes: estimatedBytes)
+            if let directory {
+                try await inference.loadModel(from: directory, admission: admission)
+            } else {
+                try await inference.loadModel(admission: admission)
+            }
+            guard await inference.ready else { throw BadAppleInference.InferenceError.modelNotLoaded }
             stateLock.withLock { _isLoaded = true }
             await runtime.markModelReady(mid)
             Task {
@@ -564,7 +583,12 @@ final class BadAppleEngine: @unchecked Sendable {
             }
         } catch {
             print("[BadAppleEngine] Failed to load model: \(error.localizedDescription)")
-            stateLock.withLock { _isLoaded = false }
+            let reserved = stateLock.withLock { () -> UInt64 in
+                _isLoaded = false
+                defer { _mainModelBytes = 0 }
+                return _mainModelBytes
+            }
+            await runtime.releaseModelMemory(reserved)
             await runtime.markModelFailed(mid, error: error.localizedDescription)
         }
         stateLock.withLock { _isLoading = false }
@@ -572,24 +596,9 @@ final class BadAppleEngine: @unchecked Sendable {
 
     /// Load from a local directory (e.g., HuggingFace cache).
     func loadModel(from directory: URL) async {
-        let (alreadyLoaded, mid) = stateLock.withLock { () -> (Bool, String) in
-            let loaded = _isLoaded || _isLoading
-            if !loaded { _isLoading = true }
-            return (loaded, _modelId)
+        await modelOperationGate.withLock { [self] in
+            await loadMainModel(directory: directory)
         }
-        if alreadyLoaded { return }
-        await runtime.markModelLoading(mid)
-
-        do {
-            try await inference.loadModel(from: directory)
-            stateLock.withLock { _isLoaded = true }
-            await runtime.markModelReady(mid)
-        } catch {
-            print("[BadAppleEngine] Failed to load model from \(directory): \(error.localizedDescription)")
-            stateLock.withLock { _isLoaded = false }
-            await runtime.markModelFailed(mid, error: error.localizedDescription)
-        }
-        stateLock.withLock { _isLoading = false }
     }
 
     // MARK: - Generation
@@ -799,6 +808,13 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
         let startedAt = Date()
+
+        let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
+        if killed && !isApproval {
+            onToken("")
+            onComplete("Bad Apple is paused. Say 'resume bad apple' to start again.")
+            return
+        }
 
         if let approval = takeApproval(from: prompt) {
             Task {
@@ -1012,7 +1028,7 @@ final class BadAppleEngine: @unchecked Sendable {
             let effectiveMaxTokens = maxTokens
             if let toolsText = toolRouter.toolsForPrompt(text: prompt) {
                 let example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>"
-                sysPrompt += "\n\nYou have these local tools available, written in plain English. If you need one, output ONLY one block like this: \(example). Do not wrap arguments inside a \"properties\" object. Put the actual arguments directly inside \"arguments\". Never invent a tool result.\n\n\(toolsText)"
+                sysPrompt += "\n\nThe user is asking for a local action. You MUST use one of the available tools below. Do not answer from memory or in prose. Output ONLY one block like this: \(example). Do not wrap arguments inside a \"properties\" object. Put the actual arguments directly inside \"arguments\". Never invent a tool result.\n\n\(toolsText)"
                 do {
                     let result = try await toolAwareGeneration(
                         prompt: prompt,
@@ -1135,6 +1151,11 @@ final class BadAppleEngine: @unchecked Sendable {
             return "The AI model is not loaded yet. Please wait a moment and try again."
         }
 
+        let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
+        if killed && !isApproval {
+            return "Bad Apple is paused. Say 'resume bad apple' to start again."
+        }
+
         if let approval = takeApproval(from: prompt) {
             let output = await toolExecutor.executeTool(
                 name: approval.name,
@@ -1211,7 +1232,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         let result: BadAppleInference.GenerationResult
         if let tools = toolRouter.toolSchemasForPrompt(text: prompt) {
-            sysPrompt += "\n\nIf a tool is needed, output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Never invent a tool result."
+            sysPrompt += "\n\nThe user is asking for a local action. You MUST use one of the available tools. Output only <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>. Do not answer from memory. Never invent a tool result."
             result = try await toolAwareGeneration(
                 prompt: prompt,
                 systemPrompt: sysPrompt,
@@ -1500,9 +1521,17 @@ final class BadAppleEngine: @unchecked Sendable {
         policyEngine.requiresApproval(toolName: name)
     }
 
-    /// Execute a tool call. Returns the tool output or an error message.
+    /// Execute a tool call. Returns the tool output, an approval prompt with an
+    /// id, or an error message.
     func executeTool(name: String, args: [String: String]) async -> String {
-        await toolExecutor.executeTool(name: name, args: args)
+        if killed {
+            return "Bad Apple is paused. Say 'resume bad apple' to start again."
+        }
+        if !autopilot, policyEngine.requiresApproval(toolName: name) {
+            let id = createApproval(name: name, args: args)
+            return "This action needs your approval. Reply with: approve \(id)"
+        }
+        return await toolExecutor.executeTool(name: name, args: args, approved: true)
     }
 
     /// Parse tool calls from model output.
@@ -1534,41 +1563,62 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     func unload() async {
+        await modelOperationGate.withLock { [self] in
+            await unloadModels()
+        }
+    }
+
+    private func unloadModels() async {
         stopCuriousAutopilotLoop()
         await inference.unload()
-        let mid = stateLock.withLock { () -> String in
+        let (mid, reserved) = stateLock.withLock { () -> (String, UInt64) in
             _isLoaded = false
-            return _modelId
+            defer { _mainModelBytes = 0 }
+            return (_modelId, _mainModelBytes)
         }
-        await runtime.releaseModelMemory(estimateModelBytes(mid))
+        await runtime.releaseModelMemory(reserved)
         await runtime.markModelUnloaded(mid)
         // Also unload the fast tier model if it was loaded.
         if fastModelLoaded, let fastInf = fastInference, let fastId = BadAppleInference.envFastModelId {
             await fastInf.unload()
             fastModelLoaded = false
-            await runtime.releaseModelMemory(estimateModelBytes(fastId))
+            let fastReserved = stateLock.withLock { () -> UInt64 in
+                defer { _fastModelBytes = 0 }
+                return _fastModelBytes
+            }
+            await runtime.releaseModelMemory(fastReserved)
             await runtime.markModelUnloaded(fastId)
         }
     }
 
     /// Lazily load the fast tier model on first use.
     private func ensureFastModelLoaded() async {
-        guard !fastModelLoaded, let fastInf = fastInference, let fastId = BadAppleInference.envFastModelId, !fastId.isEmpty else { return }
-        let estimatedBytes = estimateModelBytes(fastId)
-        if let reason = await runtime.canFitModel(estimatedBytes: estimatedBytes) {
-            print("[BadAppleEngine] VRAM admission denied for fast tier \(fastId): \(reason)")
-            await runtime.markModelFailed(fastId, error: "VRAM admission denied: \(reason)")
-            return
+        await modelOperationGate.withLock { [self] in
+            await loadFastModel()
         }
+    }
+
+    private func loadFastModel() async {
+        guard !fastModelLoaded, let fastInf = fastInference, let fastId = BadAppleInference.envFastModelId, !fastId.isEmpty else { return }
         await runtime.markModelLoading(fastId)
         do {
-            try await fastInf.loadModel()
+            try await fastInf.loadModel { [self] bytes in
+                if let reason = await runtime.reserveModelMemory(fastId, bytes: bytes) {
+                    throw BadAppleInference.InferenceError.modelLoadFailed("VRAM admission denied: \(reason)")
+                }
+                stateLock.withLock { _fastModelBytes = bytes }
+            }
+            guard await fastInf.ready else { throw BadAppleInference.InferenceError.modelNotLoaded }
             fastModelLoaded = true
-            await runtime.trackModelMemory(fastId, bytes: estimatedBytes)
             await runtime.markModelReady(fastId)
             print("[BadAppleEngine] Fast tier model loaded: \(fastId)")
         } catch {
             fastModelLoaded = false
+            let reserved = stateLock.withLock { () -> UInt64 in
+                defer { _fastModelBytes = 0 }
+                return _fastModelBytes
+            }
+            await runtime.releaseModelMemory(reserved)
             await runtime.markModelFailed(fastId, error: error.localizedDescription)
             print("[BadAppleEngine] Fast tier model failed: \(error.localizedDescription)")
         }
@@ -1583,7 +1633,17 @@ final class BadAppleEngine: @unchecked Sendable {
         status["fast_tier"] = fastTierEnabled
         status["fast_model_loaded"] = fastModelLoaded
         status["autopilot"] = autopilot
+        status["killed"] = killed
         status["vram"] = await runtime.vramStatus()
+        // Read safe-mode reason from the supervisor's runtime state if present.
+        let statePath = "/var/lib/bad_apple/runtime_state.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            status["safe_mode_reason"] = json["safe_mode_reason"] as? String ?? NSNull()
+            if let mode = json["mode"] as? String {
+                status["supervisor_mode"] = mode
+            }
+        }
         return status
     }
 

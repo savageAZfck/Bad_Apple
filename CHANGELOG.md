@@ -2,6 +2,33 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.2] — 2026-09-07
+
+### Fixed
+- Deterministic control-phrase handling for `kill switch`, `stop everything`, `resume bad apple`,
+  `resume`, `emergency stop`, and safe-mode exit phrases. These now bypass the model and
+  engage the engine kill-switch directly.
+- Deterministic natural-language tool invocation for `run shell ...`, `run command ...`,
+  `write a note ...`, and `generate an image of ...`. Requests are routed directly to the
+  tool cage and require approval when autopilot is off.
+- Tool-call prompt examples now produce valid `<tool_call>` XML without duplicated tool names.
+- Moved the tools and control phrases instruction to the top of `prompt.txt`.
+- Certification self-tests locate sibling binaries relative to the current executable, so
+  `badapple cert` passes from the installed CLI as well as from `cargo test`.
+- Replaced model-name-based memory cutoffs with estimates derived from the resolved
+  cached weights, model dimensions, configured KV cache, and prefill workspace.
+- Preserved live memory admission checks and released the original reservation
+  after unloading a model or a failed load.
+- Voice helper failures now preserve stderr and wait for both output streams to
+  drain; partial output no longer hides a failed request.
+- Model-loading failures report the underlying cause, and failed model switches
+  are no longer marked as loaded. Load/unload operations are serialized.
+- Manual installs keep runtime files in a persistent versioned location, stop
+  the menu bar before app replacement, and retain rollback backups.
+- Updates install the complete app and engine together and require SHA-256
+  verification. A compatibility archive supports the older updater layout.
+- Packaging rejects missing/stale runtime artifacts and private Swift/Rust source.
+
 ## [0.1.1] — 2026-09-06
 
 ### Changed

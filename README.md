@@ -51,12 +51,18 @@ menubar-plist rendering, source-free public release
 (`savageAZfck/bad-apple-releases`), and public Homebrew Cask
 (`savageAZfck/homebrew-bad-apple`).
 
-The public beta is now at **v0.1.1**, with Curious self-improvement wired to the
-autopilot toggle.
+The **v0.1.2 corrective beta** fixes deterministic control-phrase handling
+(`kill switch`, `resume bad apple`) and natural-language tool invocation
+(`run shell ...`, `write a note ...`, `generate an image of ...`). It also
+replaces model-name memory cutoffs with measured weight sizes and
+configuration-based context/workspace estimates, fixes voice helper error
+reporting, and makes the air-gap certification suite pass from the installed
+CLI. Curious self-improvement remains wired to the autopilot toggle.
 
-**Hardware:** Apple Silicon Mac (M1 or newer). Bad Apple uses roughly 6 GB of
-unified memory once the 7B model is loaded, so 8 GB total is the practical
-floor and 16 GB is the comfortable recommendation.
+**Hardware:** Apple Silicon Mac (M1 or newer). 8 GB unified memory is the practical
+floor and 16 GB is recommended. Runtime requirements vary with the selected
+weights, context settings, and other applications; installation does not reserve
+memory for Bad Apple.
 
 See [Bad_Apple_Ranking.md](Bad_Apple_Ranking.md) for the full ranking,
 benchmarks, and competitive placement.

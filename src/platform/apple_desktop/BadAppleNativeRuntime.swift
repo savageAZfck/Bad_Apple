@@ -1,6 +1,25 @@
 import Foundation
 import Darwin
 
+actor BadAppleModelOperationGate {
+    private var locked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func withLock(_ operation: @Sendable () async -> Void) async {
+        if locked {
+            await withCheckedContinuation { waiters.append($0) }
+        } else {
+            locked = true
+        }
+        await operation()
+        if waiters.isEmpty {
+            locked = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 /// Native, process-local ownership of model state, telemetry, memory pressure, and
 /// capability circuit breakers. Actor isolation makes every snapshot internally
 /// consistent without requiring callers to provide their own locking.
@@ -155,6 +174,19 @@ public actor BadAppleNativeRuntime {
         models[modelID]?.status ?? .unloaded
     }
 
+    public func modelLoadError(_ modelID: String) -> String? {
+        switch models[modelID]?.status ?? .unloaded {
+        case .ready:
+            return nil
+        case .loading:
+            return "The AI model is still loading. Please wait and try again."
+        case .failed:
+            return "Could not load \(modelID): \(models[modelID]?.error ?? "Unknown loading error")"
+        case .unloaded:
+            return "The AI model is not loaded. Please select a cached model and try again."
+        }
+    }
+
     public func activeModelIDs() -> [String] {
         models.compactMap { $0.value.status == .ready ? $0.key : nil }.sorted()
     }
@@ -244,13 +276,20 @@ public actor BadAppleNativeRuntime {
         guard vramAdmissionEnabled else { return nil }
         let memory = Self.readMemorySnapshot()
         let availableSystem = memory.totalBytes > memory.usedBytes ? memory.totalBytes - memory.usedBytes : 0
-        let projectedVRAM = vramUsedBytes + estimatedBytes
-        if projectedVRAM > vramBudgetBytes {
-            return "Model would exceed VRAM budget: \(projectedVRAM / 1_073_741_824)GB projected vs \(vramBudgetBytes / 1_073_741_824)GB budget"
+        let projected = vramUsedBytes.addingReportingOverflow(estimatedBytes)
+        guard !projected.overflow else { return "Model memory requirements exceed the VRAM budget" }
+        if projected.partialValue > vramBudgetBytes {
+            return String(format: "Model would exceed VRAM budget: %.2f GiB projected vs %.2f GiB budget", Double(projected.partialValue) / 1_073_741_824, Double(vramBudgetBytes) / 1_073_741_824)
         }
         if estimatedBytes > availableSystem {
-            return "Not enough system memory: \(estimatedBytes / 1_073_741_824)GB needed, \(availableSystem / 1_073_741_824)GB available"
+            return String(format: "Not enough memory available for weights and context: %.2f GiB estimated, %.2f GiB currently available", Double(estimatedBytes) / 1_073_741_824, Double(availableSystem) / 1_073_741_824)
         }
+        return nil
+    }
+
+    public func reserveModelMemory(_ modelID: String, bytes: UInt64) -> String? {
+        if let reason = canFitModel(estimatedBytes: bytes) { return reason }
+        trackModelMemory(modelID, bytes: bytes)
         return nil
     }
 
@@ -468,6 +507,15 @@ public actor BadAppleNativeRuntime {
         return values.reduce(0, +) / Double(values.count)
     }
 
+    static func availableMemoryBytes(_ statistics: vm_statistics64_data_t, totalBytes: UInt64, pageSize: UInt64) -> UInt64 {
+        let reclaimablePages = UInt64(statistics.free_count)
+            + UInt64(statistics.inactive_count)
+            + UInt64(statistics.speculative_count)
+            + UInt64(statistics.purgeable_count)
+        let bytes = reclaimablePages.multipliedReportingOverflow(by: pageSize)
+        return bytes.overflow ? 0 : min(totalBytes, bytes.partialValue)
+    }
+
     private static func readMemorySnapshot() -> MemorySnapshot {
         let total = ProcessInfo.processInfo.physicalMemory
         guard total > 0 else {
@@ -487,16 +535,7 @@ public actor BadAppleNativeRuntime {
             return MemorySnapshot(usedBytes: 0, totalBytes: total, ratio: 0, pressure: "unknown")
         }
 
-        let reclaimablePages = UInt64(statistics.free_count)
-            + UInt64(statistics.inactive_count)
-            + UInt64(statistics.speculative_count)
-            + UInt64(statistics.purgeable_count)
-            // Compressor pages hold data that has already been swapped to the
-            // compressed store; the system can evict them under pressure, so
-            // they are effectively available for a new model allocation.
-            + UInt64(statistics.compressor_page_count)
-        let reclaimableBytes = reclaimablePages.multipliedReportingOverflow(by: UInt64(vm_page_size))
-        let available = reclaimableBytes.overflow ? total : min(total, reclaimableBytes.partialValue)
+        let available = Self.availableMemoryBytes(statistics, totalBytes: total, pageSize: UInt64(vm_page_size))
         let used = total - available
         let ratio = Double(used) / Double(total)
 

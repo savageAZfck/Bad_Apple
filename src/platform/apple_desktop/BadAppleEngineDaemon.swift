@@ -355,6 +355,22 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return await BadAppleEngine.shared.executeTool(name: "image_generation", args: ["prompt": imagePrompt])
     }
+    if lower.hasPrefix("run shell ") {
+        let command = String(prompt.dropFirst("run shell ".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return await BadAppleEngine.shared.executeTool(name: "run_shell", args: ["command": command])
+    }
+    if lower.hasPrefix("run command ") {
+        let command = String(prompt.dropFirst("run command ".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return await BadAppleEngine.shared.executeTool(name: "run_shell", args: ["command": command])
+    }
+    if lower.hasPrefix("write a note ") {
+        let content = String(prompt.dropFirst("write a note ".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let notePath = NSHomeDirectory() + "/.bad_apple/notes/quick_note.md"
+        return await BadAppleEngine.shared.executeTool(name: "write_file", args: ["path": notePath, "content": content])
+    }
     switch lower {
     case "enable private mode", "private mode on":
         BadAppleEngine.shared.privateMode = true
@@ -396,6 +412,12 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
             args: ["include": "all"]
         )
         return result
+    case "kill switch", "stop everything", "emergency stop", "panic stop":
+        BadAppleEngine.shared.killed = true
+        return "Kill switch engaged. Bad Apple is paused. Say 'resume bad apple' to start again."
+    case "resume bad apple", "resume", "start again", "leave safe mode", "exit safe mode":
+        BadAppleEngine.shared.killed = false
+        return "Bad Apple is back online. No cap."
     case "list agent tasks", "agent tasks", "list tasks":
         let tasks = await BadAppleEngine.shared.listAgentTasks()
         let encoder = JSONEncoder()
@@ -543,16 +565,18 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
         } else {
             repoId = modelRef
         }
-        await BadAppleEngine.shared.unload()
-        BadAppleEngine.shared.configureMainModel(modelId: repoId)
-        await BadAppleEngine.shared.loadModel()
-        let loaded = BadAppleEngine.shared.isLoaded
+        await BadAppleEngine.shared.switchMainModel(modelId: repoId)
+        guard BadAppleEngine.shared.isLoaded else {
+            let message = await BadAppleEngine.shared.modelLoadError() ?? "Failed to load \(repoId)"
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: message)
+            return
+        }
         let matched = BadAppleEngine.shared.modelManager.listProfiles().first { $0.repoId == repoId }
         BadAppleEngine.shared.modelManager.markLoaded(modelId: matched?.id ?? repoId, localPath: nil)
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
-            "result": loaded ? "Switched to \(repoId)" : "Failed to load \(repoId)",
+            "result": "Switched to \(repoId)",
             "model": repoId,
-            "loaded": loaded,
+            "loaded": true,
         ], error: nil)
 
     case "verify_models":
@@ -940,7 +964,10 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
     // 7) Load model if needed, then generate.
     let loaded = await ensureModelLoaded()
     guard loaded else {
-        _ = writeJSON(fd, ["type": "error", "message": "The AI model is not loaded yet."])
+        let message = await BadAppleEngine.shared.modelLoadError() ?? "The AI model could not be loaded. Please try again."
+        writeQueue.sync {
+            _ = writeJSON(fd, ["type": "error", "message": message])
+        }
         return
     }
 

@@ -5759,10 +5759,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             voiceQueue.async {
                 let process = Process()
                 let outputPipe = Pipe()
+                let errorPipe = Pipe()
                 process.executableURL = binary
                 process.arguments = extraArgs + ["--max-tokens", String(maxTokens), prompt]
                 process.standardOutput = outputPipe
-                process.standardError = outputPipe
+                process.standardError = errorPipe
                 var environment: [String: String]
                 if minimalEnv {
                     // SECURITY/PERF: Build a minimal allow-list environment for
@@ -5792,27 +5793,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 }
                 process.environment = environment
 
-                let sync = NSLock()
+                let streamQueue = DispatchQueue(label: "com.badapple.cli-stream")
                 var finished = false
-
-                var buffer = ""
+                var outputEnded = false
+                var errorEnded = false
+                var exitCode: Int32?
+                var timedOut = false
+                var buffer = Data()
                 var fullText = ""
+                var errorData = Data()
+                let errorLimit = 16_384
+                var errorTruncated = false
 
-                let timeoutTimer = DispatchSource.makeTimerSource(queue: self.voiceQueue)
+                let timeoutTimer = DispatchSource.makeTimerSource(queue: streamQueue)
                 timeoutTimer.schedule(deadline: .now() + timeout)
                 timeoutTimer.setEventHandler { [weak process] in
+                    guard let process, process.isRunning else { return }
+                    timedOut = true
                     badAppleVoiceLog("runBadAppleCLIStreaming: timeout, terminating")
-                    process?.terminate()
+                    process.terminate()
                 }
-                timeoutTimer.resume()
 
                 func finish(result: Result<String, Error>) {
-                    sync.lock()
-                    guard !finished else { sync.unlock(); return }
+                    guard !finished else { return }
                     finished = true
                     timeoutTimer.cancel()
                     outputPipe.fileHandleForReading.readabilityHandler = nil
-                    sync.unlock()
+                    errorPipe.fileHandleForReading.readabilityHandler = nil
+                    process.terminationHandler = nil
                     switch result {
                     case .success(let text):
                         continuation.resume(returning: text)
@@ -5821,50 +5829,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     }
                 }
 
-                outputPipe.fileHandleForReading.readabilityHandler = { handle in
-                    guard let str = String(data: handle.availableData, encoding: .utf8) else { return }
-                    sync.lock()
-                    buffer += str
-                    var localFullText = ""
-                    while let newlineIndex = buffer.firstIndex(of: "\n") {
-                        let line = String(buffer[..<newlineIndex])
-                        buffer = String(buffer[buffer.index(after: newlineIndex)...])
-                        guard let data = line.data(using: .utf8) else { continue }
-                        do {
-                            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                                if let type = json["type"] as? String, type == "token", let text = json["text"] as? String {
-                                    fullText += text
-                                    localFullText += text
-                                } else if let type = json["type"] as? String, type == "done", let text = json["text"] as? String {
-                                    fullText = text
-                                }
-                            }
-                        } catch {
-                            badAppleVoiceLog("runBadAppleCLIStreaming: ignoring non-JSON line: \(line.prefix(100))")
+                func finishIfDrained() {
+                    guard outputEnded, errorEnded, let code = exitCode else { return }
+                    if timedOut || code != 0 {
+                        var message = timedOut
+                            ? "The Bad Apple helper timed out after \(Int(timeout)) seconds."
+                            : "The Bad Apple helper exited with code \(code)."
+                        let detail = String(decoding: errorData, as: UTF8.self)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !detail.isEmpty {
+                            message += "\n" + (errorTruncated ? "[stderr truncated]\n" : "") + detail
                         }
-                    }
-                    sync.unlock()
-                    if !localFullText.isEmpty {
-                        onChunk(localFullText)
+                        message += "\nCheck the daemon at \(environment["BADAPPLE_SOCKET_PATH"] ?? socketPath) and run badapple --doctor for diagnostics."
+                        finish(result: .failure(BadAppleMenuBarError(message)))
+                    } else {
+                        finish(result: .success(fullText))
                     }
                 }
 
-                process.terminationHandler = { _ in
-                    sync.lock()
-                    let code = process.terminationStatus
-                    let text = fullText
-                    sync.unlock()
-                    if code != 0, text.isEmpty {
-                        finish(result: .failure(BadAppleMenuBarError("The Bad Apple helper exited with code \(code).")))
-                    } else {
-                        finish(result: .success(text))
+                func consumeLine(_ data: Data) -> String {
+                    guard !data.isEmpty else { return "" }
+                    do {
+                        if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            if let type = json["type"] as? String, type == "token", let text = json["text"] as? String {
+                                fullText += text
+                                return text
+                            } else if let type = json["type"] as? String, type == "done", let text = json["text"] as? String {
+                                fullText = text
+                            }
+                        }
+                    } catch {
+                        let line = String(decoding: data, as: UTF8.self)
+                        badAppleVoiceLog("runBadAppleCLIStreaming: ignoring non-JSON line: \(line.prefix(100))")
+                    }
+                    return ""
+                }
+
+                outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    streamQueue.sync {
+                        guard !finished, !outputEnded else { return }
+                        buffer.append(data)
+                        var localFullText = ""
+                        while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                            localFullText += consumeLine(Data(buffer[..<newlineIndex]))
+                            buffer.removeSubrange(...newlineIndex)
+                        }
+                        if data.isEmpty {
+                            localFullText += consumeLine(buffer)
+                            buffer.removeAll()
+                            outputEnded = true
+                            handle.readabilityHandler = nil
+                        }
+                        if !localFullText.isEmpty {
+                            onChunk(localFullText)
+                        }
+                        finishIfDrained()
+                    }
+                }
+
+                errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    streamQueue.sync {
+                        guard !finished, !errorEnded else { return }
+                        errorData.append(data)
+                        if errorData.count > errorLimit {
+                            errorData = Data(errorData.suffix(errorLimit))
+                            errorTruncated = true
+                        }
+                        if data.isEmpty {
+                            errorEnded = true
+                            handle.readabilityHandler = nil
+                        }
+                        finishIfDrained()
+                    }
+                }
+
+                process.terminationHandler = { process in
+                    streamQueue.async {
+                        exitCode = process.terminationStatus
+                        timeoutTimer.cancel()
+                        finishIfDrained()
                     }
                 }
 
                 do {
                     try process.run()
+                    timeoutTimer.resume()
                 } catch {
-                    finish(result: .failure(error))
+                    streamQueue.async {
+                        timeoutTimer.resume()
+                        finish(result: .failure(BadAppleMenuBarError("Could not launch the Bad Apple helper at \(command): \(error.localizedDescription)")))
+                    }
                 }
             }
         }

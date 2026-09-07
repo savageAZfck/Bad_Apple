@@ -10,10 +10,12 @@ fail() {
     exit 1
 }
 
-CONSOLE_USER="${CONSOLE_USER:-$(stat -f %Su /dev/console)}"
+CONSOLE_USER="${CONSOLE_USER:-${SUDO_USER:-$(stat -f %Su /dev/console)}}"
 CONSOLE_UID="$(id -u "${CONSOLE_USER}")"
-CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-CONSOLE_HOME="${CONSOLE_HOME:-/Users/${CONSOLE_USER}}"
+[[ "${CONSOLE_UID}" -ne 0 ]] || fail "installation requires a logged-in non-root CONSOLE_USER"
+CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')"
+[[ -d "${CONSOLE_HOME}" ]] || fail "cannot resolve the console user's home"
+run_user() { launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" env HOME="${CONSOLE_HOME}" USER="${CONSOLE_USER}" "$@"; }
 CONSOLE_GROUP="$(id -gn "${CONSOLE_USER}")"
 
 # Pick default KV-cache and draft-token settings based on total unified memory.
@@ -111,7 +113,10 @@ fi
 install -d -o "${CONSOLE_USER}" -g "${CONSOLE_GROUP}" -m 770 /var/lib/bad_apple /var/run/badapple
 chown -R "${CONSOLE_USER}":"${CONSOLE_GROUP}" /var/lib/bad_apple
 [[ -f /var/lib/bad_apple/slicks.key ]] && chmod 600 /var/lib/bad_apple/slicks.key
-install -d -o root -g wheel -m 750 "${BACKUP_DIR}"
+install -d -o root -g wheel -m 750 "${BACKUP_ROOT}"
+BACKUP_DIR="$(mktemp -d "${BACKUP_ROOT}/${RELEASE_ID}.XXXXXX")"
+chmod 750 "${BACKUP_DIR}"
+launchctl print "gui/${CONSOLE_UID}" >/dev/null || fail "no GUI session for ${CONSOLE_USER}"
 touch /var/log/bad_apple_mlx_server.log
 chown "${CONSOLE_USER}":"${CONSOLE_GROUP}" /var/log/bad_apple_mlx_server.log
 chmod 644 /var/log/bad_apple_mlx_server.log
@@ -123,49 +128,104 @@ if [[ -d "${HF_CACHE}" ]]; then
     chown -R "${CONSOLE_USER}":"${CONSOLE_GROUP}" "${HF_CACHE}"
 fi
 
-for plist in com.badapple.gatekeeper.plist com.badapple.mlx.plist com.badapple.supervisor.plist; do
-    target="/Library/LaunchDaemons/${plist}"
-    [[ ! -f "${target}" ]] || cp -p "${target}" "${BACKUP_DIR}/${plist}"
-    incoming="${target}.incoming.$$"
-    render_plist "${REPO_ROOT}/src/platform/apple_bridge/${plist}" "${incoming}"
-    plutil -lint "${incoming}" >/dev/null
-    install -o root -g wheel -m 644 "${incoming}" "${target}"
-    rm -f "${incoming}"
+DAEMONS=(com.badapple.gatekeeper com.badapple.mlx com.badapple.supervisor)
+AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar)
+AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
+for label in "${DAEMONS[@]}"; do
+    target="/Library/LaunchDaemons/${label}.plist"
+    [[ ! -f "${target}" ]] || cp -p "${target}" "${BACKUP_DIR}/${label}.plist"
+    if launchctl print "system/${label}" >/dev/null 2>&1; then
+        touch "${BACKUP_DIR}/${label}.loaded"
+    fi
+done
+for label in "${AGENTS[@]}"; do
+    target="${AGENT_DIR}/${label}.plist"
+    [[ ! -f "${target}" ]] || cp -p "${target}" "${BACKUP_DIR}/${label}.plist"
+    if run_user launchctl list "${label}" >/dev/null 2>&1; then
+        touch "${BACKUP_DIR}/${label}.loaded"
+    fi
 done
 
 rollback() {
-    for plist in com.badapple.gatekeeper.plist com.badapple.mlx.plist com.badapple.supervisor.plist; do
-        backup="${BACKUP_DIR}/${plist}"
-        target="/Library/LaunchDaemons/${plist}"
-        [[ ! -f "${backup}" ]] || cp -p "${backup}" "${target}"
-    done
+    local status=$?
+    trap - EXIT
+    [[ "${status}" -ne 0 ]] || return 0
+    set +e
     unload_job system/com.badapple.supervisor
     unload_job system/com.badapple.mlx
     unload_job system/com.badapple.gatekeeper
-    sleep 1
-    launchctl load -w /Library/LaunchDaemons/com.badapple.gatekeeper.plist || true
-    launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist || true
-    fail "readiness failed; previous launchd configuration restored from ${BACKUP_DIR}"
+    for label in "${AGENTS[@]}"; do
+        run_user launchctl unload "${AGENT_DIR}/${label}.plist" 2>/dev/null
+        launchctl bootout "gui/${CONSOLE_UID}/${label}" 2>/dev/null
+        target="${AGENT_DIR}/${label}.plist"
+        if [[ -f "${BACKUP_DIR}/${label}.plist" ]]; then
+            cp -p "${BACKUP_DIR}/${label}.plist" "${target}"
+        else
+            rm -f "${target}"
+        fi
+        if [[ -f "${BACKUP_DIR}/${label}.loaded" ]]; then
+            run_user launchctl load -w "${target}"
+        fi
+    done
+    for label in "${DAEMONS[@]}"; do
+        target="/Library/LaunchDaemons/${label}.plist"
+        if [[ -f "${BACKUP_DIR}/${label}.plist" ]]; then
+            cp -p "${BACKUP_DIR}/${label}.plist" "${target}"
+        else
+            rm -f "${target}"
+        fi
+        if [[ -f "${BACKUP_DIR}/${label}.loaded" ]]; then
+            load_job "${label}"
+        fi
+    done
+    echo "error: platform installation failed; rollback attempted from ${BACKUP_DIR}. Inspect launchctl/logs if any restore command failed." >&2
+    exit "${status}"
 }
-trap rollback ERR
 
 # Fully unload any previously loaded jobs before re-loading. `bootout` is
 # sometimes not enough when launchd has the job in an orphaned/enabled state;
-# disable + remove ensures the next `load -w` succeeds.
+# unload plus remove with a bare label avoids leaving the service disabled.
 unload_job() {
-    local label="$1"
-    launchctl disable "${label}" 2>/dev/null || true
+    local service="$1" label="${1#system/}"
+    launchctl unload "/Library/LaunchDaemons/${label}.plist" 2>/dev/null || true
+    launchctl bootout "${service}" 2>/dev/null || true
     launchctl remove "${label}" 2>/dev/null || true
+    for _ in {1..30}; do
+        launchctl print "${service}" >/dev/null 2>&1 || return 0
+        sleep 1
+    done
+    echo "error: could not unload ${service}" >&2
+    return 1
+}
+load_job() {
+    local label="$1" target="/Library/LaunchDaemons/$1.plist"
+    launchctl enable "system/${label}"
+    if ! launchctl load -w "${target}"; then
+        launchctl print "system/${label}" >/dev/null 2>&1 || launchctl bootstrap system "${target}"
+    fi
+    launchctl print "system/${label}" >/dev/null
 }
 
+trap rollback EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 unload_job system/com.badapple.supervisor
 unload_job system/com.badapple.mlx
 unload_job system/com.badapple.gatekeeper
 sleep 2
 
-launchctl load -w /Library/LaunchDaemons/com.badapple.gatekeeper.plist
-launchctl load -w /Library/LaunchDaemons/com.badapple.mlx.plist
-launchctl load -w /Library/LaunchDaemons/com.badapple.supervisor.plist
+for label in "${DAEMONS[@]}"; do
+    target="/Library/LaunchDaemons/${label}.plist"
+    incoming="${BACKUP_DIR}/${label}.incoming"
+    render_plist "${REPO_ROOT}/src/platform/apple_bridge/${label}.plist" "${incoming}"
+    plutil -lint "${incoming}" >/dev/null
+    install -o root -g wheel -m 644 "${incoming}" "${target}"
+done
+
+run_user "${REPO_ROOT}/src/platform/apple_bridge/install_identity_agent.sh"
+for label in "${DAEMONS[@]}"; do
+    load_job "${label}"
+done
 
 ready=0
 for _ in {1..90}; do
@@ -177,17 +237,15 @@ for _ in {1..90}; do
     fi
     sleep 5
 done
-[[ "${ready}" -eq 1 ]] || rollback
-trap - ERR
-
-launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_bridge/install_identity_agent.sh"
+[[ "${ready}" -eq 1 ]] || fail "native platform readiness check failed"
 
 # Optional native TTS agent.
 if [[ -x "${REPO_ROOT}/target/release/badapple-tts" ]]; then
-    launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_tts_agent.sh"
+    run_user "${REPO_ROOT}/src/platform/apple_desktop/install_tts_agent.sh"
 fi
 
-launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
+run_user "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
+trap - EXIT INT TERM
 
 echo "Bad Apple platform ${RELEASE_ID} installed and verified."
 echo "Rollback snapshot: ${BACKUP_DIR}"

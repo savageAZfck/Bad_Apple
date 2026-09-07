@@ -11,6 +11,10 @@ enum BadAppleNativeRuntimeTests {
         )
 
         await testModelTransitions(runtime)
+        await testModelLoadFailure(runtime)
+        testAvailableMemory()
+        await testMemoryReservations()
+        await testModelOperationGate()
         await testMetrics(runtime)
         await testCircuitBreaker(runtime)
         await testResetAndJSON(runtime)
@@ -37,6 +41,73 @@ enum BadAppleNativeRuntimeTests {
         status = await runtime.runtimeStatus()
         let models = status["model_status"] as? [String: [String: Any]]
         expect(models?["brain"]?["status"] as? String == "unloaded", "snapshot has model status")
+    }
+
+    private static func testModelLoadFailure(_ runtime: BadAppleNativeRuntime) async {
+        let failure = "VRAM admission denied: Not enough system memory: 6GB needed, 5GB available"
+        await runtime.markModelFailed("brain", error: failure)
+        await runtime.markModelFailed("embedding", error: "unrelated failure")
+        expect(await runtime.modelLoadError("brain") == "Could not load brain: \(failure)", "load error preserves the selected model's failure")
+        await runtime.markModelLoading("brain")
+        expect(await runtime.modelLoadError("brain") == "The AI model is still loading. Please wait and try again.", "loading does not report stale failure")
+        await runtime.markModelReady("brain")
+        expect(await runtime.modelLoadError("brain") == nil, "ready model clears its load error")
+        await runtime.markModelUnloaded("brain")
+        expect(await runtime.modelLoadError("brain") == "The AI model is not loaded. Please select a cached model and try again.", "unloaded model does not report stale failure")
+        expect(await runtime.modelLoadError("unknown") != nil, "unknown model is not ready")
+    }
+
+    private static func testAvailableMemory() {
+        var stats = vm_statistics64_data_t()
+        stats.compressor_page_count = 400
+        expect(BadAppleNativeRuntime.availableMemoryBytes(stats, totalBytes: 16_000, pageSize: 16) == 0, "compressed pages are occupied memory")
+        stats.free_count = 100
+        stats.inactive_count = 200
+        stats.speculative_count = 50
+        stats.purgeable_count = 25
+        expect(BadAppleNativeRuntime.availableMemoryBytes(stats, totalBytes: 16_000, pageSize: 16) == 6_000, "compressed pages do not increase admission headroom")
+        expect(BadAppleNativeRuntime.availableMemoryBytes(stats, totalBytes: 1_000, pageSize: 16) == 1_000, "available memory is bounded by physical memory")
+        expect(BadAppleNativeRuntime.availableMemoryBytes(stats, totalBytes: UInt64.max, pageSize: UInt64.max) == 0, "overflow cannot admit a model")
+    }
+
+    private static func testMemoryReservations() async {
+        let runtime = BadAppleNativeRuntime()
+        await runtime.setVRAMBudget(16)
+        expect(await runtime.reserveModelMemory("main", bytes: 8) == nil, "first model reserves its measured bytes")
+        expect(await runtime.reserveModelMemory("fast", bytes: 9) != nil, "second model cannot exceed the shared budget")
+        var status = await runtime.vramStatus()
+        expect(status["used_bytes"] as? UInt64 == 8, "failed reservation does not consume budget")
+        expect(await runtime.canFitModel(estimatedBytes: UInt64.max) != nil, "overflow is rejected rather than crashing")
+        await runtime.releaseModelMemory(8)
+        status = await runtime.vramStatus()
+        expect(status["used_bytes"] as? UInt64 == 0, "unload releases the original measured reservation")
+        expect(await runtime.reserveModelMemory("fast", bytes: 16) == nil, "released budget is available again")
+    }
+
+    private actor OperationProbe {
+        var active = false
+        var overlapped = false
+        var completed = 0
+
+        func run() async {
+            if active { overlapped = true }
+            active = true
+            await Task.yield()
+            completed += 1
+            active = false
+        }
+    }
+
+    private static func testModelOperationGate() async {
+        let gate = BadAppleModelOperationGate()
+        let probe = OperationProbe()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<50 {
+                group.addTask { await gate.withLock { await probe.run() } }
+            }
+        }
+        expect(await probe.completed == 50, "all queued model operations complete")
+        expect(!(await probe.overlapped), "load and unload cannot overlap across suspensions")
     }
 
     private static func testMetrics(_ runtime: BadAppleNativeRuntime) async {

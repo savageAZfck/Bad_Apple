@@ -12,6 +12,25 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Return the directory containing the current executable, resolving symlinks,
+/// or the current working directory if it cannot be determined. Tests run from
+/// `target/release/deps` while the sibling binaries live in `target/release`,
+/// so the returned path is the parent of the executable's directory when the
+/// executable is in a `deps` folder.
+fn bin_dir() -> PathBuf {
+    let mut dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    if dir.file_name().and_then(|n| n.to_str()) == Some("deps") {
+        if let Some(parent) = dir.parent() {
+            dir = parent.to_path_buf();
+        }
+    }
+    dir
+}
+
 /// Result of a single air-gap certification check.
 #[derive(Debug, Clone, Serialize)]
 pub struct CertResult {
@@ -203,7 +222,7 @@ fn ledger_redacts_secrets() -> Result<(), String> {
 }
 
 fn p2p_and_mcp_off_by_default() -> Result<(), String> {
-    let p2p = Command::new("target/release/badapple-p2p")
+    let p2p = Command::new(bin_dir().join("badapple-p2p"))
         .args(["peers"])
         .env_remove("BADAPPLE_P2P_PEERS")
         .env("BADAPPLE_P2P_TCP_PORT", "0")
@@ -256,7 +275,7 @@ fn path_traversal_is_rejected() -> Result<(), String> {
         }
     }
 
-    let daemon = Path::new("target/release/badapple-engine");
+    let daemon = bin_dir().join("badapple-engine");
     if daemon.exists() {
         Ok(())
     } else {
@@ -332,7 +351,7 @@ fn vault_cli_round_trip() -> Result<(), String> {
         ("BADAPPLE_VAULT_KEY", "vault-cli-test-key"),
     ];
 
-    let mut set = Command::new("target/release/badapple");
+    let mut set = Command::new(bin_dir().join("badapple"));
     set.args(["vault", "set", "test_secret", "hello-world"]);
     for (k, v) in &env_vars {
         set.env(k, v);
@@ -341,7 +360,7 @@ fn vault_cli_round_trip() -> Result<(), String> {
         return Err("vault set failed".to_string());
     }
 
-    let mut get = Command::new("target/release/badapple");
+    let mut get = Command::new(bin_dir().join("badapple"));
     get.args(["vault", "get", "test_secret"]);
     for (k, v) in &env_vars {
         get.env(k, v);
@@ -358,7 +377,7 @@ fn vault_cli_round_trip() -> Result<(), String> {
         return Err(format!("vault round-trip mismatch: {json}"));
     }
 
-    let mut remove = Command::new("target/release/badapple");
+    let mut remove = Command::new(bin_dir().join("badapple"));
     remove.args(["vault", "remove", "test_secret"]);
     for (k, v) in &env_vars {
         remove.env(k, v);
@@ -367,7 +386,7 @@ fn vault_cli_round_trip() -> Result<(), String> {
         return Err("vault remove failed".to_string());
     }
 
-    let mut list = Command::new("target/release/badapple");
+    let mut list = Command::new(bin_dir().join("badapple"));
     list.args(["vault", "list"]);
     for (k, v) in &env_vars {
         list.env(k, v);

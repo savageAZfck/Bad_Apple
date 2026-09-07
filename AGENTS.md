@@ -567,6 +567,12 @@ and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.
 
 ## Latest hardening (this session)
 
+- Native runtime regression tests now require `BadAppleSecurity.swift`: `xcrun swiftc -swift-version 5 src/platform/apple_desktop/BadAppleNativeRuntime.swift src/platform/apple_desktop/BadAppleSecurity.swift tests/test_badapple_native_runtime.swift -o /tmp/badapple-native-runtime-tests && /tmp/badapple-native-runtime-tests`.
+- Compressed pages still occupy physical memory. Do not add `compressor_page_count` to model-admission headroom. A successful build or doctor report does not verify model loading or the menu-bar voice path.
+- Voice helper regression tests: `xcrun swift tests/test_badapple_cli_stream.swift`. They extract the actual streaming method and test process errors, UTF-8 splitting, timeouts, and output-drain races without Python.
+- The minimal packager accepts `CARGO_TARGET_DIR` and `BADAPPLE_SKIP_BUILD=1`, refuses existing output artifacts, and produces the normal ZIP, an identical-payload legacy `-full-unsigned.zip`, and `checksums.txt`. The full archive uses a `Bad_Apple-<version>-full/` root for 0.1.1 updater compatibility; never substitute a renamed normal ZIP.
+- The packaged installer places runtime files under `/Library/Application Support/Bad Apple/runtimes/<version>.<unique>`, retaining backups. The Homebrew preflight runs its `--stop-menu` option before the app artifact is replaced.
+
 - `badapple-dashboard` now supports optional bearer-token auth via `BADAPPLE_DASHBOARD_TOKEN`. When set, all `/api/*` endpoints require `Authorization: Bearer <token>`; static/index routes remain open. The dashboard still binds to loopback only by default.
 - `BadAppleTools` exposes a new `self_audit` tool. When approved, it runs `badapple cert` and `badapple --doctor` and returns a JSON summary. It is wired into the tool keyword map for prompts like "run a self audit", "health check", or "cert suite".
 - `BadAppleTools` now has `inspect_output_firewall` (read-only) and `update_output_firewall` (add/remove a pattern and reload) tools. The engine injects its live `BadAppleOutputFirewall` instance into the tool executor so the model can inspect and update `/var/lib/bad_apple/blocklist.txt` at runtime.

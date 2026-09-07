@@ -646,6 +646,18 @@ final class BadAppleToolRouter: @unchecked Sendable {
             ],
             requiresApproval: false
         ),
+        BadAppleTool(
+            name: "kill_switch",
+            description: "Engage the Bad Apple kill switch. Immediately pauses all generation, tools, and ambient actions until the user says 'resume bad apple'.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "resume",
+            description: "Disengage the Bad Apple kill switch and resume normal operation.",
+            parameters: [],
+            requiresApproval: false
+        ),
     ]
 
     /// Names in the native registry, exposed for discovery and logic tests.
@@ -688,6 +700,8 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "curious", "self improve", "improve yourself", "improve bad apple", "curious check",
         // Code
         "code", "function", "compile", "build",
+        // Kill switch / resume
+        "kill switch", "stop everything", "emergency stop", "resume", "resume bad apple", "start again", "leave safe mode", "exit safe mode",
     ]
 
     /// Maps keyword groups to the tools they suggest.
@@ -721,6 +735,8 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["undo", "delete last", "remove last"], ["undo_last"]),
         (["self audit", "self_audit", "run self audit", "audit bad apple", "run diagnostics", "health check", "cert suite", "air gap check"], ["self_audit"]),
         (["curious", "self improve", "improve yourself", "improve bad apple", "curious check"], ["curious_self_improve"]),
+        (["kill switch", "stop everything", "emergency stop", "panic stop"], ["kill_switch"]),
+        (["resume", "resume bad apple", "start again", "leave safe mode", "exit safe mode"], ["resume"]),
     ]
 
     // MARK: - Prompt Routing
@@ -879,13 +895,15 @@ final class BadAppleToolRouter: @unchecked Sendable {
             "self_audit": "\"include\":\"all\"",
             "curious_self_improve": "\"include\":\"all\"",
             "screen_capture": "",
+            "kill_switch": "",
+            "resume": "",
         ]
 
         let exampleArgs = argExamples[tool.name] ?? ""
         let args = exampleArgs.isEmpty ? "" : ",\"arguments\":{\(exampleArgs)}"
         let prefix = "<tool_call>{\"name\":\"" + tool.name + "\""
-        let suffix = "\"\(args)}</tool_call>"
-        return prefix + tool.name + suffix
+        let suffix = "\(args)}</tool_call>"
+        return prefix + suffix
     }
 
     /// Heuristic: should the model be offered tools for this prompt?
@@ -1595,7 +1613,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         "run_shell", "run_applescript", "run_shortcut", "set_workspace", "workspace_status",
         "describe_image", "image_generation", "search_local_files", "index_documents", "read_document",
         "translate_text", "consolidate_memory", "set_session_seed", "get_session_seed", "git_status",
-        "inspect_output_firewall", "update_output_firewall", "undo_last", "self_audit", "screen_capture"
+        "inspect_output_firewall", "update_output_firewall", "undo_last", "self_audit", "screen_capture",
+        "kill_switch", "resume"
     ]
 
     private func resolveToolName(_ name: String) -> String {
@@ -1616,6 +1635,19 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     /// Returns the tool result as a string (or an error message).
     func executeTool(name: String, args: [String: String], approved: Bool = false) async -> String {
         let resolved = resolveToolName(name)
+
+        // Kill switch and resume bypass the normal policy/approval flow.
+        switch resolved {
+        case "kill_switch":
+            BadAppleEngine.shared.killed = true
+            return "Kill switch engaged. Bad Apple is paused. Say 'resume bad apple' to start again."
+        case "resume":
+            BadAppleEngine.shared.killed = false
+            return "Bad Apple is back online. No cap."
+        default:
+            break
+        }
+
         // Check policy if a policy engine is attached.
         if !approved, let policy = policyEngine {
             let decision = policy.evaluate(toolName: resolved, args: args)

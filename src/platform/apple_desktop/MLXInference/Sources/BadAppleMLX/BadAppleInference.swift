@@ -260,7 +260,7 @@ public final class BadAppleInference: @unchecked Sendable {
 
     // MARK: - Model Loading
 
-    public func loadModel() async throws {
+    public func loadModel(admission: @Sendable (UInt64) async throws -> Void = { _ in }) async throws {
         guard await state.setLoading() else { return }
 
         do {
@@ -268,25 +268,33 @@ public final class BadAppleInference: @unchecked Sendable {
                 id: config.modelId,
                 revision: config.revision
             )
-
-            let container = try await LLMModelFactory.shared.loadContainer(
+            let resolved = try await resolve(
+                configuration: modelConfiguration,
                 from: HuggingFaceDownloader(client: HubClient.default),
-                using: TokenizersLoader(),
-                configuration: modelConfiguration
+                useLatest: false,
+                progressHandler: { _ in }
+            )
+            try await admission(Self.estimatedModelMemory(in: resolved.modelDirectory))
+            let container = try await LLMModelFactory.shared.loadContainer(
+                from: resolved.modelDirectory,
+                using: TokenizersLoader()
             )
 
             await state.setContainer(container)
         } catch {
             await state.setContainer(nil)
+            Memory.clearCache()
+            if let error = error as? InferenceError { throw error }
             throw InferenceError.modelLoadFailed(error.localizedDescription)
         }
     }
 
     /// Load from a local directory of already-downloaded model weights.
-    public func loadModel(from localDirectory: URL) async throws {
+    public func loadModel(from localDirectory: URL, admission: @Sendable (UInt64) async throws -> Void = { _ in }) async throws {
         guard await state.setLoading() else { return }
 
         do {
+            try await admission(Self.estimatedModelMemory(in: localDirectory))
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: localDirectory,
                 using: TokenizersLoader()
@@ -295,8 +303,96 @@ public final class BadAppleInference: @unchecked Sendable {
             await state.setContainer(container)
         } catch {
             await state.setContainer(nil)
+            Memory.clearCache()
+            if let error = error as? InferenceError { throw error }
             throw InferenceError.modelLoadFailed(error.localizedDescription)
         }
+    }
+
+    public static func estimatedModelMemory(
+        in directory: URL, kvSize: Int = envKVSize, prefillStepSize: Int = envPrefillStepSize
+    ) throws -> UInt64 {
+        func invalid(_ detail: String) -> InferenceError {
+            .modelLoadFailed("Cannot measure model memory: \(detail)")
+        }
+        func product(_ values: UInt64...) throws -> UInt64 {
+            try values.reduce(1) { result, value in
+                let next = result.multipliedReportingOverflow(by: value)
+                guard !next.overflow else { throw invalid("size overflow") }
+                return next.partialValue
+            }
+        }
+        func sum(_ values: UInt64...) throws -> UInt64 {
+            try values.reduce(0) { result, value in
+                let next = result.addingReportingOverflow(value)
+                guard !next.overflow else { throw invalid("size overflow") }
+                return next.partialValue
+            }
+        }
+        let fm = FileManager.default
+        let directory = directory.resolvingSymlinksInPath().standardizedFileURL
+        let configURL = directory.appendingPathComponent("config.json")
+        guard let configSize = try configURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              configSize <= 1_048_576,
+              let root = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+        else { throw invalid("invalid config.json") }
+        var config = root.merging(root["text_config"] as? [String: Any] ?? [:]) { _, nested in nested }
+        for (key, aliases) in [
+            "hidden_size": ["n_embd", "d_model"],
+            "num_attention_heads": ["n_head", "n_heads"],
+            "num_hidden_layers": ["n_layer", "n_layers"],
+            "intermediate_size": ["n_inner", "d_ff"],
+        ] where config[key] == nil {
+            if let alias = aliases.first(where: { config[$0] != nil }) { config[key] = config[alias] }
+        }
+        func dimension(_ key: String, fallback: UInt64? = nil) throws -> UInt64 {
+            if config[key] == nil, let fallback { return fallback }
+            guard let number = config[key] as? NSNumber,
+                  let value = UInt64(exactly: number.doubleValue), value > 0
+            else { throw invalid("missing or invalid \(key)") }
+            return value
+        }
+        guard kvSize > 0, prefillStepSize > 0 else { throw invalid("invalid context limits") }
+        let hidden = try dimension("hidden_size")
+        let heads = try dimension("num_attention_heads")
+        guard config["head_dim"] != nil || hidden % heads == 0 else {
+            throw invalid("head_dim is required when hidden_size is not divisible by num_attention_heads")
+        }
+        let headSize = try dimension("head_dim", fallback: hidden / heads)
+        guard headSize > 0 else { throw invalid("invalid attention dimensions") }
+        let kvHeads = try dimension("num_key_value_heads", fallback: heads)
+        let layers = try dimension("num_hidden_layers")
+        let intermediate = try dimension("intermediate_size")
+        let vocabulary = try dimension("vocab_size")
+        let scalarBytes: UInt64 = (config["torch_dtype"] as? String ?? config["dtype"] as? String) == "float32" ? 4 : 2
+        guard let enumerator = fm.enumerator(atPath: directory.path) else {
+            throw invalid("cannot enumerate cached weights")
+        }
+        let relativePaths = Set(enumerator.compactMap { $0 as? String }.filter { $0.hasSuffix(".safetensors") })
+        let files = relativePaths.map { directory.appendingPathComponent($0) }
+        guard !files.isEmpty else { throw invalid("no cached safetensors weights") }
+        let indexURL = directory.appendingPathComponent("model.safetensors.index.json")
+        if fm.fileExists(atPath: indexURL.path) {
+            guard let indexSize = try indexURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                  indexSize <= 16_777_216,
+                  let index = try JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any],
+                  let weights = index["weight_map"] as? [String: String], !weights.isEmpty,
+                  Set(weights.values).isSubset(of: relativePaths)
+            else { throw invalid("missing shards or invalid weight index") }
+        }
+        var weightBytes: UInt64 = 0
+        for file in files {
+            let info = try file.resolvingSymlinksInPath().resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard info.isRegularFile == true, let size = info.fileSize, size > 0 else {
+                throw invalid("missing or empty weight shard")
+            }
+            weightBytes = try sum(weightBytes, UInt64(size))
+        }
+        let kvBytes = try product(2, layers, kvHeads, headSize, UInt64(kvSize), scalarBytes)
+        let activationWidth = try sum(hidden, product(2, intermediate))
+        let workspaceBytes = try product(UInt64(prefillStepSize), activationWidth, 4)
+        let logitsBytes = try product(vocabulary, 4)
+        return try sum(weightBytes, kvBytes, workspaceBytes, logitsBytes)
     }
 
     public var ready: Bool {
