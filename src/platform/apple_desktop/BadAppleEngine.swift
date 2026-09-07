@@ -1454,9 +1454,11 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     /// Start or stop the background Curious autopilot loop based on
-    /// autopilot state and active persona.
+    /// autopilot state. Curious self-improvement is now wired to the same
+    /// toggle as autopilot, so enabling autopilot also enables periodic
+    /// self-audit and proposal generation.
     private func updateCuriousAutopilotLoop() {
-        let shouldRun = autopilot && activePersona == "curious" && curiousAutopilotInterval() > 0
+        let shouldRun = autopilot && curiousAutopilotInterval() > 0
         if shouldRun {
             startCuriousAutopilotLoop()
         } else {
@@ -1473,7 +1475,7 @@ final class BadAppleEngine: @unchecked Sendable {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled else { break }
-                guard self.autopilot, self.activePersona == "curious" else { continue }
+                guard self.autopilot, self.curiousAutopilotInterval() > 0 else { continue }
                 let result = await self.toolExecutor.executeTool(
                     name: "curious_self_improve",
                     args: ["include": "all"],

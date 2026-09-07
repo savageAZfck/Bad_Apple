@@ -364,7 +364,7 @@ cargo clippy --release
   menu bar persona editor and full control-center UI are not currently available
   from the web.
 - `curious_self_improve` is a native tool that runs a bounded self-check (cert suite, doctor, output firewall, git status, and source TODO/FIXME/HACK/XXX scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger it with `target/release/badapple "curious check"`.
-- Curious autopilot: when the active persona is `curious` and autopilot is on, the engine runs `curious_self_improve` on a loop. Set the interval in seconds with `BADAPPLE_CURIOUS_INTERVAL` (default 300; 0 disables).
+- Curious autopilot: it is wired to the same toggle as autopilot. When autopilot is on, the engine runs `curious_self_improve` on a loop. Set the interval in seconds with `BADAPPLE_CURIOUS_INTERVAL` (default 300; 0 disables).
 - Tool prompts are now generated in plain English with a concrete `<tool_call>` example for each relevant tool, and the executor recognizes common 7B-model misnames (e.g. `add_output_firewall_pattern` -> `update_output_firewall`, `run_diagnostics` -> `self_audit`).
 
 ## New web UI (SPA) and native splash

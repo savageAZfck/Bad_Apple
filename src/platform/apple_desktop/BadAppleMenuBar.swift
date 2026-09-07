@@ -6149,9 +6149,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         privateToggle.state = privateMode ? .on : .off
         privateToggle.toolTip = "Pause persistence and audit logging for this session."
         privacyMenu.addItem(privateToggle)
-        let autopilotItem = NSMenuItem(title: "Auto-Run Commands", action: #selector(toggleAutopilot), keyEquivalent: "")
+        let autopilotItem = NSMenuItem(title: "Autopilot", action: #selector(toggleAutopilot), keyEquivalent: "")
         autopilotItem.state = autopilotEnabled ? .on : .off
-        autopilotItem.toolTip = "Allow destructive tools to run without approval prompts."
+        autopilotItem.toolTip = "Allow destructive tools to run without approval prompts and run periodic Curious self-improvement checks."
         privacyMenu.addItem(autopilotItem)
         let focusItem = NSMenuItem(title: "Focus Mode", action: #selector(toggleFocus), keyEquivalent: "")
         focusItem.state = focusEnabled ? .on : .off
@@ -6984,8 +6984,8 @@ final class BadAppleSettingsWindow: NSObject {
         y -= 4
 
         let (autoRow, autoBtn, autoLbl) = toggleRow(
-            label: "Autopilot (skip approval prompts)",
-            description: "When on, destructive tools run without approval prompts.",
+            label: "Autopilot",
+            description: "When on, destructive tools run without approval prompts and Curious self-improvement checks run in the background.",
             action: #selector(autopilotToggled(_:)),
             isOn: boolSetting(autopilotKey, defaultValue: false),
             warningWhenOn: true

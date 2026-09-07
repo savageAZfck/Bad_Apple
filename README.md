@@ -104,10 +104,10 @@ coding benchmarks.
   MCP, vault, and audits.
 - **Persona system** — hot-reloadable `prompt.txt`, `personas.json`, and
   voice-specific prompts.
-- **Bounded Curious self-improvement autopilot** — when the `curious` persona is
-  active and autopilot is on, the engine runs a local self-check (cert, doctor,
-  output firewall, git status, source TODO/FIXME scan) and writes a proposal note
-  to `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple
+- **Bounded Curious self-improvement autopilot** — wired to the autopilot toggle.
+  When autopilot is on, the engine runs a local self-check (cert, doctor, output
+  firewall, git status, source TODO/FIXME scan) and writes a proposal note to
+  `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple
   "curious check"`.
 - **Air-gap certification** — `badapple cert` runs 15 runtime checks; Rust
   integration tests assert zero network sockets.
