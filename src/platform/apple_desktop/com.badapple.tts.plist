@@ -12,8 +12,6 @@
 		<string>0.93</string>
 		<key>BADAPPLE_TTS_VOLUME</key>
 		<string>1.0</string>
-		<key>BADAPPLE_VOICES_DIR</key>
-		<string>/Applications/Bad Apple.app/Contents/Resources/voices</string>
 		<key>HOME</key>
 		<string>__HOME__</string>
 		<key>PATH</key>

@@ -1,8 +1,8 @@
 // Bad Apple native TTS server.
 //
-// Replaces the Python badapple_tts_server.py. It first tries a local Piper ONNX
-// voice (e.g. en_US-amy-medium) for neural-quality speech, then falls back to
-// on-device AVSpeechSynthesizer. It returns a .wav or .caf path over a Unix socket.
+// Replaces the Python badapple_tts_server.py. Uses on-device AVSpeechSynthesizer
+// with the best installed voice (eloquence/premium first). It returns a .caf path
+// over a Unix socket.
 //
 // Socket protocol (line-delimited JSON):
 //   request : {"text": "hello", "voice": "Samantha", "rate": 0.5, "volume": 1.0}
@@ -365,22 +365,12 @@ private final class TTSServer {
         let isLong = wordCount > 18
         let isShort = wordCount < 6
 
-        let lengthScale: Double
-        if let raw = request["length_scale"] as? Double {
-            lengthScale = raw
-        } else if let raw = request["lengthScale"] as? Double {
-            lengthScale = raw
-        } else if envLengthScale > 0 {
-            lengthScale = envLengthScale
-        } else {
-            lengthScale = isLong ? 1.15 : (isShort ? 1.00 : 1.05)
-        }
-
         let rate: Float
         if let raw = request["rate"] as? Double {
             rate = Float(clamp(raw, min: 0.0, max: 1.0))
         } else {
-            rate = isLong ? 0.42 : (isShort ? 0.50 : 0.46)
+            let baseRate = isLong ? 0.42 : (isShort ? 0.50 : 0.46)
+            rate = envLengthScale > 0 ? Float(baseRate / envLengthScale) : Float(baseRate)
         }
 
         let volume: Float
@@ -397,21 +387,14 @@ private final class TTSServer {
             }
         }
 
-        // Prefer a local Piper ONNX model (neural TTS). Fall back to the native
-        // AVFoundation synthesizer only when no Piper voice is available.
-        let outputURL: URL
-        let result: SynthesisResult
-        let sentenceSilence = sentenceSilenceFor(cleanText)
-        if let piperResult = synthesizeWithPiperIfAvailable(text: cleanText, voice: voiceName, lengthScale: lengthScale, sentenceSilence: sentenceSilence, outputURL: URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).wav")), piperResult.error == nil {
-            outputURL = piperResult.url
-            result = piperResult
-        } else {
-            guard let voice = resolveVoice(voiceName) else {
-                throw TTSError.voiceNotFound(voiceName)
-            }
-            outputURL = URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).caf")
-            result = synthesizeToFile(text: cleanText, voice: voice, rate: rate, volume: volume, outputURL: outputURL)
+        // Use the native AVFoundation synthesizer. This keeps the TTS server
+        // free of Python/Piper binaries while still producing natural, local
+        // speech with the best installed voice (eloquence/premium first).
+        guard let voice = resolveVoice(voiceName) else {
+            throw TTSError.voiceNotFound(voiceName)
         }
+        let outputURL = URL(fileURLWithPath: "/tmp/badapple_tts_\(UUID().uuidString).caf")
+        let result = synthesizeToFile(text: cleanText, voice: voice, rate: rate, volume: volume, outputURL: outputURL)
 
         lastOutputURL = outputURL
 
