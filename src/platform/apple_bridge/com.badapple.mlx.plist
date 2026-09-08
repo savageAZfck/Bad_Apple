@@ -47,7 +47,7 @@
         <key>BADAPPLE_MAX_KV_SIZE</key>
         <string>__BADAPPLE_MAX_KV_SIZE__</string>
         <key>BADAPPLE_PREFILL_STEP_SIZE</key>
-        <string>4096</string>
+        <string>__BADAPPLE_PREFILL_STEP_SIZE__</string>
         <key>BADAPPLE_PROMPT_FILE</key>
         <string>__BADAPPLE_ROOT__/prompt.txt</string>
         <key>BADAPPLE_PERSONAS_FILE</key>

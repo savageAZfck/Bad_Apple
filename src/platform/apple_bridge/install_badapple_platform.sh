@@ -18,18 +18,21 @@ CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory | sed 's/
 run_user() { launchctl asuser "${CONSOLE_UID}" sudo -u "${CONSOLE_USER}" env HOME="${CONSOLE_HOME}" USER="${CONSOLE_USER}" "$@"; }
 CONSOLE_GROUP="$(id -gn "${CONSOLE_USER}")"
 
-# Pick default KV-cache and draft-token settings based on total unified memory.
-# These are written into the LaunchDaemon plists so first-run works out of the
-# box on 8 GB Macs without manual tuning.
+# Pick default KV-cache, prefill, and draft-token settings based on total unified
+# memory. These are written into the LaunchDaemon plists so first-run works out
+# of the box on 8 GB Macs without manual tuning.
 RAM_GB=$(($(sysctl -n hw.memsize) / 1024 / 1024 / 1024))
 if [[ "$RAM_GB" -ge 16 ]]; then
-    BADAPPLE_MAX_KV_SIZE=4096
-    BADAPPLE_NUM_DRAFT_TOKENS=4
+    BADAPPLE_MAX_KV_SIZE=2048
+    BADAPPLE_PREFILL_STEP_SIZE=2048
+    BADAPPLE_NUM_DRAFT_TOKENS=2
 elif [[ "$RAM_GB" -ge 8 ]]; then
     BADAPPLE_MAX_KV_SIZE=2048
+    BADAPPLE_PREFILL_STEP_SIZE=2048
     BADAPPLE_NUM_DRAFT_TOKENS=2
 else
     BADAPPLE_MAX_KV_SIZE=1024
+    BADAPPLE_PREFILL_STEP_SIZE=1024
     BADAPPLE_NUM_DRAFT_TOKENS=0
 fi
 
@@ -78,6 +81,7 @@ render_plist() {
         -e "s|__CONSOLE_HOME__|${CONSOLE_HOME}|g" \
         -e "s|__CONSOLE_GROUP__|${CONSOLE_GROUP}|g" \
         -e "s|__BADAPPLE_MAX_KV_SIZE__|${BADAPPLE_MAX_KV_SIZE}|g" \
+        -e "s|__BADAPPLE_PREFILL_STEP_SIZE__|${BADAPPLE_PREFILL_STEP_SIZE}|g" \
         -e "s|__BADAPPLE_NUM_DRAFT_TOKENS__|${BADAPPLE_NUM_DRAFT_TOKENS}|g" \
         "${src}" > "${dst}"
 }

@@ -217,6 +217,9 @@ private func writeAll(_ fd: Int32, data: Data) -> Bool {
             if n < 0 {
                 let err = errno
                 if err == EINTR { continue }
+                // EPIPE means the client closed the connection; this is normal for
+                // health probes and timed-out clients, so do not log it as an error.
+                if err == EPIPE { return false }
                 log("write error \(err)")
                 return false
             }
@@ -844,8 +847,12 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
     let reader = BufferedReader(fd: fd)
 
     // 1) Read Hello
-    guard let helloData = reader.readLine(),
-          let hello = try? JSONSerialization.jsonObject(with: helloData) as? [String: Any] else {
+    guard let helloData = reader.readLine() else {
+        // Client closed before sending a hello frame (e.g. a TCP/SOCK health probe
+        // that connects and immediately disconnects). Close silently.
+        return
+    }
+    guard let hello = try? JSONSerialization.jsonObject(with: helloData) as? [String: Any] else {
         _ = writeJSON(fd, ["type": "error", "message": "invalid or empty hello frame"])
         return
     }
@@ -1076,8 +1083,8 @@ private func printUsage() {
       BADAPPLE_FAST_MODEL           Fast tier model id (default: mlx-community/Qwen2.5-0.5B-Instruct-4bit)
       BADAPPLE_SPECULATIVE_DRAFT    Draft model id for speculative decoding (empty = disabled)
       BADAPPLE_NUM_DRAFT_TOKENS     Draft tokens per step (default: 2)
-      BADAPPLE_MAX_KV_SIZE          Max KV cache size (default: 4096)
-      BADAPPLE_PREFILL_STEP_SIZE    Prefill step size (default: 4096)
+      BADAPPLE_MAX_KV_SIZE          Max KV cache size (default: 4096; installer lowers it on 8/16 GB Macs)
+      BADAPPLE_PREFILL_STEP_SIZE    Prefill step size (default: 4096; installer lowers it on 8/16 GB Macs)
       BADAPPLE_VRAM_BUDGET_GB       VRAM budget in GB (default: 80% of physical memory)
     """)
 }

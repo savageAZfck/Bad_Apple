@@ -33,16 +33,16 @@ Observed ranges on a 16 GB Apple Silicon Mac with the 7B Coder brain loaded:
 
 | Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
 |---|---|---|---:|---:|---:|---:|
-| `Who are you?` | ~1800 | 0.00 s | 0 | — | 4.15 GB |
-| `What is the capital of France?` | ~1800 | 2.0–3.0 s | 20 | 18–25 | 4.15 GB |
-| `Tell me about Rome.` | ~1800 | 2.0–3.0 s | 20 | 18–25 | 4.15 GB |
-| `What do you think of Siri?` | ~1800 | 2.0–3.5 s | 66 | 18–25 | 4.15 GB |
-| `How does a car engine work?` | ~1800 | 2.5–3.5 s | 95 | 18–25 | 4.15 GB |
+| `Who are you?` | ~1160 | 14.22 s | 31 | 15.4 | 4.12 GB |
+| `What is the capital of France?` | ~1160 | 0.42 s | 16 | 14.6 | 4.12 GB |
+| `Tell me about Rome.` | ~1160 | 14.54 s | 76 | 12.3 | 4.12 GB |
+| `What do you think of Siri?` | ~1160 | 0.93 s | 16 | 17.3 | 4.12 GB |
+| `How does a car engine work?` | ~1160 | 14.40 s | 87 | 15.4 | 4.12 GB |
 
-- Typical first-token latency: **~2.0–4.0 s** for ~1800 token prompts once the system-prompt KV cache is loaded.
-- The `Who are you?` prompt is handled by fast meta-response logic, so it does not run the 7B brain and reports 0 output tokens.
-- Typical decode throughput: **~18–25 tok/s** on this quant.
-- Peak memory stays **~4.1–4.3 GB**.
+- Typical first-token latency: **~0.5–1.0 s** for warm cached prompts; **~14 s** for a cold cache start on a 16 GB Mac (full model load + prefill).
+- Typical decode throughput: **~12–17 tok/s**, with a suite average of **15.0 tok/s** on this quant.
+- Peak memory stays **~4.1 GB**.
+- The `Who are you?` and simple fact prompts are answered with the fast tier or a cached system-prompt KV, which is why their TTFT can be sub-second.
 
 ### Text mode (9B, switchable)
 
@@ -88,7 +88,7 @@ Voice uses the 7B brain by default. When fast tier is on, short voice greetings 
 - `BADAPPLE_DFLASH=0` — DFlash is off because it does not reliably beat plain `mlx-lm` on this quant.
 - `BADAPPLE_SPECULATIVE_DRAFT=auto` — when set, Bad Apple scans the HF cache for a small compatible draft model and uses it with `mlx-lm` speculative decoding.
 - `BADAPPLE_FAST_TIER=1` — the 0.5B fast model is enabled for appropriate queries.
-- `prefill_step_size=4096` and `max_kv_size=4096` keep prompt encoding in a single shot and bound KV-cache growth.
+- `prefill_step_size=2048` and `max_kv_size=2048` are the installer defaults on a 16 GB Mac; they keep prompt encoding in one or two shots and bound KV-cache growth. Set them higher if you have 32 GB+ and need longer context.
 - `prompt.txt` is hot-reloaded and kept compact; the 7B/9B chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
 
 ---
@@ -331,10 +331,12 @@ target/release/badapple -n 240 "Write me a poem about bare metal"
 
 | Variable | Default / Current | Purpose |
 |---|---|---|
-| `BADAPPLE_MAIN_MODEL` | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | Target model for all modes |
-| `BADAPPLE_DRAFT_MODEL` | `z-lab/Qwen3.5-9B-DFlash` | Legacy DFlash draft for the 9B target (unused) |
-| `BADAPPLE_SPECULATIVE_DRAFT` | `auto` | Enable `mlx-lm` speculative decoding with an auto-detected small draft |
+| `BADAPPLE_MAIN_MODEL` | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | Target model for all modes |
+| `BADAPPLE_DRAFT_MODEL` | (none) | Legacy DFlash draft for the 9B target (unused) |
+| `BADAPPLE_SPECULATIVE_DRAFT` | (none) | Enable `mlx-lm` speculative decoding with an auto-detected small draft |
 | `BADAPPLE_NUM_DRAFT_TOKENS` | `2` | Tokens to draft per verification step |
+| `BADAPPLE_MAX_KV_SIZE` | `2048` (installer default on 16 GB) | Max KV cache size in tokens |
+| `BADAPPLE_PREFILL_STEP_SIZE` | `2048` (installer default on 16 GB) | Max tokens to prefill in one step |
 | `BADAPPLE_DFLASH_QUANTIZE_KV` | `1` | Quantize key/value cache |
 | `BADAPPLE_PROMPT_FILE` | `prompt.txt` | Hot-reloadable system prompt |
 | `BADAPPLE_TTS_VOICE` | `en_US-amy-medium` | Default TTS voice |
@@ -345,6 +347,6 @@ target/release/badapple -n 240 "Write me a poem about bare metal"
 
 - **Speculative decoding is optional and requires a small compatible draft model**: without a cached draft, plain `mlx-lm` is used.
 - **Throughput is workload-dependent**: DFlash acceptance swings from ~45% to ~80%, so tok/s swings with it. Sustained 22–33 tok/s is possible on high-acceptance turns but not guaranteed for every prompt on this hardware.
-- **First-token latency is dominated by prefill**: long prompts or large knowledge chunks push the first token toward the 5–7 s range.
+- **First-token latency is dominated by prefill**: a cold model start can take ~14 s on a 16 GB Mac; warm cached prompts are usually sub-second.
 - **Max-token cutoffs are cleaned up**: if the model runs out of output tokens mid-sentence, the response is trimmed to the last complete sentence so it doesn't end on a dangling word.
 - `automation_cage` and `wasm_cage` are **not dead code** despite earlier docs claiming otherwise: `src/bin/gatekeeper.rs`'s `post_process_response()` runs on every single response, for both SLICKS v1 and v2 clients, scanning the model's output for ` ```badapple-action ` / ` ```badapple-wasm ` blocks and executing them in the respective sandbox. The 576-D `tensor_brain` classifier (`SemanticRouter`) and its `FastActionResolver` fast-path *are* effectively bypassed for SLICKS v2 clients (the default whenever the identity agent socket is present, i.e. the normal case on an installed machine) — v2 requests skip straight to `forward_v2_to_mlx`, which proxies the handshake end-to-end and only applies cage/wasm post-processing to the final text, without the native complexity classification or regex fast-action matching. That classify+fast-action path remains live for SLICKS v1 clients (`BADAPPLE_SLICKS2=0`, or no identity agent running). The active stack is the gatekeeper (proxy + cage/wasm post-processing, always; native classifier + fast actions, v1-only) + MLX server + CLI + TTS server + menu bar.

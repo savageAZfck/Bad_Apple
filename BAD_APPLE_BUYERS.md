@@ -39,13 +39,19 @@ All models are cached on disk after the first download. Nothing is re-downloaded
 
 ### 7B Qwen 2.5 Coder (default)
 
-Live 7B numbers on a 16 GB Apple Silicon Mac are in progress. Observed ranges so far:
+Live 7B numbers on a 16 GB Apple Silicon Mac after the v0.1.2 KV-cache and supervisor-health fixes:
 
-- Typical first-token latency: **~2.0–4.0 s** once the system-prompt KV cache is loaded.
-- Typical decode throughput: **~18–25 tok/s**.
-- Peak memory: **~4.1–4.3 GB**.
+| Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
+|---|---|---|---:|---:|---:|
+| `Who are you?` | ~1160 | 14.22 s | 31 | 15.4 | 4.12 GB |
+| `What is the capital of France?` | ~1160 | 0.42 s | 16 | 14.6 | 4.12 GB |
+| `Tell me about Rome.` | ~1160 | 14.54 s | 76 | 12.3 | 4.12 GB |
+| `What do you think of Siri?` | ~1160 | 0.93 s | 16 | 17.3 | 4.12 GB |
+| `How does a car engine work?` | ~1160 | 14.40 s | 87 | 15.4 | 4.12 GB |
 
-A full 5-prompt table will be measured and committed in the next benchmark run.
+- Typical first-token latency: **~0.5–1.0 s** for warm cached prompts; **~14 s** for a cold model start.
+- Typical decode throughput: **~12–17 tok/s**, with a 5-prompt suite average of **15.0 tok/s**.
+- Peak memory: **~4.1 GB**.
 
 ### 9B Qwen 3.5 (switchable)
 

@@ -262,12 +262,12 @@ The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`,
 Set in `src/platform/apple_bridge/com.badapple.mlx.plist`:
 
 - `BADAPPLE_DFLASH=0` — DFlash is off for this quant. DFlash's larger draft model is too heavy to beat the verification overhead, so plain `mlx-lm` is faster overall.
-- `BADAPPLE_SPECULATIVE_DRAFT=auto` — set to a cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft.
+- `BADAPPLE_SPECULATIVE_DRAFT=auto` — set to a cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft. Default is empty (no speculative decoding) to reduce memory.
 - `BADAPPLE_NUM_DRAFT_TOKENS=2` — number of tokens the draft model generates per verification step. Runtime command: `set draft tokens to 4`.
 
 In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple-engine` daemon):
 
-- `prefill_step_size=4096` and `max_kv_size=4096` keep prefill in one shot and bound the KV cache.
+- `prefill_step_size=4096` and `max_kv_size=4096` are the code defaults, but `install_badapple_platform.sh` lowers them to `2048` on 8 GB and 16 GB Macs to stay inside unified memory. This is the live default on a 16 GB machine.
 - System prompt is hot-reloaded from `prompt.txt`; keep it compact to minimize TTFT.
 
 ## Common gotchas
