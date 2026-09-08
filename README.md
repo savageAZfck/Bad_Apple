@@ -8,6 +8,18 @@
 
 ---
 
+## Download the public beta
+
+The latest public beta is **v0.1.2**:
+
+- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.2/Bad_Apple-0.1.2-unsigned.zip)** — unzip and run `sudo ./install.sh`
+- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.2)**
+- Or install via Homebrew:
+  ```bash
+  brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
+  brew install --cask bad-apple
+  ```
+
 ## What Bad Apple Is
 
 Bad Apple is a **local-first AI operating-system layer for macOS**. It is not a
