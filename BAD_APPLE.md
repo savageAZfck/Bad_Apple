@@ -33,16 +33,16 @@ Observed ranges on a 16 GB Apple Silicon Mac with the 7B Coder brain loaded:
 
 | Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
 |---|---|---|---:|---:|---:|---:|
-| `Who are you?` | ~1160 | 14.22 s | 31 | 15.4 | 4.12 GB |
-| `What is the capital of France?` | ~1160 | 0.42 s | 16 | 14.6 | 4.12 GB |
-| `Tell me about Rome.` | ~1160 | 14.54 s | 76 | 12.3 | 4.12 GB |
-| `What do you think of Siri?` | ~1160 | 0.93 s | 16 | 17.3 | 4.12 GB |
-| `How does a car engine work?` | ~1160 | 14.40 s | 87 | 15.4 | 4.12 GB |
+| `Who are you?` | ~1160 | 0.97 s | 16 | 19.2 | 4.12 GB |
+| `What is the capital of France?` | ~1160 | 0.43 s | 16 | 18.0 | 4.12 GB |
+| `Tell me about Rome.` | ~1160 | 0.40 s | 16 | 21.8 | 4.12 GB |
+| `What do you think of Siri?` | ~1160 | 0.40 s | 16 | 16.1 | 4.12 GB |
+| `How does a car engine work?` | ~1160 | 0.42 s | 16 | 22.8 | 4.12 GB |
 
-- Typical first-token latency: **~0.5–1.0 s** for warm cached prompts; **~14 s** for a cold cache start on a 16 GB Mac (full model load + prefill).
-- Typical decode throughput: **~12–17 tok/s**, with a suite average of **15.0 tok/s** on this quant.
+- Typical first-token latency: **~0.4–1.0 s** for warm cached prompts; **~14 s** for a cold cache/model-load start on a 16 GB Mac.
+- Typical decode throughput: **~16–23 tok/s**, with a suite average of **19.6 tok/s** on this quant once the model is warm and no build is running.
 - Peak memory stays **~4.1 GB**.
-- The `Who are you?` and simple fact prompts are answered with the fast tier or a cached system-prompt KV, which is why their TTFT can be sub-second.
+- **Important:** running `cargo build`, `swift build`, or packaging immediately before benchmarking will increase swap and can drop tok/s by 25-40%. Run the benchmark after the build has finished and the system has had ~30-60 s to settle.
 
 ### Text mode (9B, switchable)
 

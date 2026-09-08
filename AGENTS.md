@@ -215,6 +215,11 @@ tail -n 20 /var/log/bad_apple_mlx_server.log
 # memory pressure on macOS
 memory_pressure
 
+# benchmark the 5-prompt suite (avoid running right after a Rust/Swift build)
+# because compile pressure can reduce tok/s by 25-40% on a 16 GB Mac.
+time badapple --benchmark
+```
+
 ## SLICKS 2.0 identity
 
 The identity agent (`badapple-identity`) owns the Secure Enclave signing
