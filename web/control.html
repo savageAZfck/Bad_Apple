@@ -73,6 +73,15 @@
     <h2>Control Center</h2>
     <p class="subtitle">One place to steer, inspect, extend, and feed Bad Apple's memory.</p>
 
+    <div class="card" style="margin-bottom:1rem;">
+      <div class="form-row" style="flex-direction:row; gap:.75rem; align-items:end; margin-bottom:0;">
+        <div style="flex:1; min-width:160px;">
+          <label for="dashboard-token">Dashboard bearer token (optional; set if BADAPPLE_DASHBOARD_TOKEN is set)</label>
+          <input type="password" id="dashboard-token" placeholder="devin-test" onchange="localStorage.setItem('badapple_dashboard_token', this.value)">
+        </div>
+      </div>
+    </div>
+
     <div class="tabs">
       <button class="tab active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
       <button class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</button>
@@ -281,8 +290,15 @@
   <div id="toast" class="toast"></div>
 
   <script>
+    const tokenInput = document.getElementById('dashboard-token');
+    if (tokenInput) tokenInput.value = localStorage.getItem('badapple_dashboard_token') || '';
+
     function api(path, method, body) {
+      const token = localStorage.getItem('badapple_dashboard_token') || '';
       const opts = { method: method || 'GET', headers: {} };
+      if (token) {
+        opts.headers['Authorization'] = `Bearer ${token}`;
+      }
       if (body) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
