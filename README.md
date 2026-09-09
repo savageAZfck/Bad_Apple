@@ -5,6 +5,9 @@
 > On-device inference, hardware-rooted identity, fail-closed security, and a
 > native Swift menu bar — with zero cloud round-trips after the models are
 > downloaded once.
+>
+> The menu bar is the primary daily interface; the terminal is only needed for
+> install and advanced maintenance.
 
 ---
 
@@ -122,7 +125,7 @@ coding benchmarks.
   push/pull model transfer, off by default for air-gap certification.
 - **Native TTS** via `AVSpeechSynthesizer` and `badapple-tts`.
 - **CLI agent protocol** — full JSON-RPC control of runtime, models, tools, P2P,
-  MCP, vault, and audits.
+  MCP, vault, and audits (power users and scripting).
 - **Persona system** — hot-reloadable `prompt.txt`, `personas.json`, and
   voice-specific prompts.
 - **Bounded Curious self-improvement autopilot** — wired to the autopilot toggle.
