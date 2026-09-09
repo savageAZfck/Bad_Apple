@@ -10,10 +10,10 @@
 
 ## Download the public beta
 
-The latest public beta is **v0.1.2**:
+The latest public beta is **v0.1.3**:
 
-- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.2/Bad_Apple-0.1.2-unsigned.zip)** — unzip and run `sudo ./install.sh`
-- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.2)**
+- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.3/Bad_Apple-0.1.3-unsigned.zip)** — unzip and run `sudo ./install.sh`
+- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.3)**
 - Or install via Homebrew:
   ```bash
   brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
@@ -63,13 +63,13 @@ menubar-plist rendering, source-free public release
 (`savageAZfck/bad-apple-releases`), and public Homebrew Cask
 (`savageAZfck/homebrew-bad-apple`).
 
-The **v0.1.2 corrective beta** fixes deterministic control-phrase handling
-(`kill switch`, `resume bad apple`) and natural-language tool invocation
-(`run shell ...`, `write a note ...`, `generate an image of ...`). It also
-replaces model-name memory cutoffs with measured weight sizes and
-configuration-based context/workspace estimates, fixes voice helper error
-reporting, and makes the air-gap certification suite pass from the installed
-CLI. Curious self-improvement remains wired to the autopilot toggle.
+The **v0.1.3 Curious autopilot beta** makes `curious_self_improvement` actually
+think and act: it now feeds cert, doctor, firewall, git, and source-marker data
+to the local 7B model, proposes a concrete `{"patch":{...}}` or `{"no_patch":true}`,
+and — when Autopilot is on — applies the patch after jail-check, backup,
+verification, and a hard block on core control files. This version also creates
+the missing `/var/lib/bad_apple/blocklist.txt` automatically and tightens the
+output firewall check so the cert suite stays clean.
 
 **Hardware:** Apple Silicon Mac (M1 or newer). 8 GB unified memory is the practical
 floor and 16 GB is recommended. Runtime requirements vary with the selected

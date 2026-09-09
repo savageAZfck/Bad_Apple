@@ -2,6 +2,32 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.3] — 2026-09-08
+
+### Added
+- `curious_self_improvement` now reasons with the local 7B model. It analyzes cert,
+  doctor, output firewall, git status, and TODO/FIXME/HACK/XXX source markers and
+  outputs either a concrete `{"patch":{"file","old","new","why"}}` or
+  `{"no_patch":true}`.
+- Autopilot can apply its own bounded patches: jail-checks the path, requires the
+  exact `old` string, backs up the original, writes the replacement, and verifies
+  the result. New files are supported with `"old":""`.
+- Core control files (`BadAppleEngine.swift`, `BadAppleTools.swift`,
+  `BadAppleEngineDaemon.swift`, etc.) are protected from autopilot edits.
+- Output firewall automatically creates a missing `/var/lib/bad_apple/blocklist.txt`
+  so the cert suite no longer reports it absent.
+
+### Changed
+- `curious_self_improvement` now runs with a fixed engineering system prompt and
+  a structured JSON output format instead of a hand-wavy audit dump.
+- Self-improvement proposals are now logged with the model's actual patch
+  proposal and the apply result (applied, refused, or error).
+
+### Fixed
+- Empty-file verification in `applyProposedPatch` now handles `"new":""` correctly.
+- `curious_self_improvement` finds the project root from the running binary
+  instead of defaulting to `~`.
+
 ## [0.1.2] — 2026-09-07
 
 ### Fixed

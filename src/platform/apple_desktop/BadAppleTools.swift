@@ -1750,7 +1750,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         case "self_audit":
             return selfAudit(include: args["include"] ?? "all")
         case "curious_self_improve":
-            return curiousSelfImprove(include: args["include"] ?? "all")
+            return await curiousSelfImprove(include: args["include"] ?? "all", approved: approved)
         default:
             return "Unknown tool: \(resolved)"
         }
@@ -2846,11 +2846,23 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     /// Run a bounded Curious self-improvement check and write a proposal note.
     /// This is the tool the Curious autopilot invokes so it can improve Bad Apple
     /// on its own without relying on the 7B model for multi-step planning.
-    func curiousSelfImprove(include: String) -> String {
-        let base = workspace ?? NSHomeDirectory()
+    ///
+    /// When `approved` is true (i.e. Autopilot is on), the tool will also apply the
+    /// generated patch after backing up the original and verifying the replacement.
+    func curiousSelfImprove(include: String, approved: Bool = false) async -> String {
+        // Try to find the Bad Apple repo by walking up from the running binary.
+        let fallbackBase = projectRootFromBinary() ?? NSHomeDirectory()
+        let base = workspace ?? fallbackBase
+
         let proposalsDir = NSHomeDirectory() + "/.bad_apple/notes/proposed_patches"
+        let backupsDir = NSHomeDirectory() + "/.bad_apple/backups"
         try? FileManager.default.createDirectory(
             atPath: proposalsDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try? FileManager.default.createDirectory(
+            atPath: backupsDir,
             withIntermediateDirectories: true,
             attributes: nil
         )
@@ -2863,6 +2875,52 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             .components(separatedBy: .newlines)
             .filter { !$0.contains("searchContent(pattern:") && !$0.contains("\"TODO|FIXME|HACK|XXX\"") }
             .joined(separator: "\n")
+
+        let analysisPrompt = """
+        Analyze the following data for the Bad Apple project at \(base) and propose exactly one safe, minimal, concrete code patch.
+
+        Candidate issues to consider:
+        - /var/lib/bad_apple/blocklist.txt: check the Output firewall section. If and ONLY IF it says `blocklist exists: false`, you MUST create it as an empty file using:
+          {"patch":{"file":"/var/lib/bad_apple/blocklist.txt","old":"","new":"","why":"Create the missing blocklist file so the output firewall stops reporting it absent."}}
+          If it says `blocklist exists: true`, do NOT propose this patch.
+        - Any cert/doctor failures listed in the audit.
+        - Any TODO/FIXME/HACK/XXX source markers listed below.
+
+        For existing files, the "old" string must be an EXACT substring from the file.
+        For missing files, use "old":"" and provide the full content in "new".
+        If the exact old string is NOT shown and the file is not missing, output {"no_patch":true}.
+        Do not invent code you have not seen.
+
+        Self-audit:
+        \(audit)
+
+        Output firewall:
+        \(firewall)
+
+        Git status:
+        \(git)
+
+        Source markers:
+        \(codeSearch)
+        """
+
+        let proposal = await BadAppleEngine.shared.generateForSelfImprovement(
+            prompt: analysisPrompt,
+            maxTokens: 600
+        )
+
+        var parsed = parseProposedPatch(from: proposal)
+
+        // Deterministic fallback: if the model did not propose a patch and the
+        // output firewall reports blocklist.txt missing, create it. This keeps
+        // the self-improvement loop from being useless when there are obvious
+        // environment issues the model may be too conservative to touch.
+        let blocklistPath = "/var/lib/bad_apple/blocklist.txt"
+        if parsed == nil,
+           !FileManager.default.fileExists(atPath: blocklistPath),
+           firewall.contains("blocklist exists: false") {
+            parsed = (blocklistPath, "", "", "Create the missing output firewall blocklist file.")
+        }
 
         let dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
@@ -2885,7 +2943,21 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         body += codeSearch
         body += "\n```\n\n"
         body += "## Proposal\n\n"
-        body += "Review the items above. If a safe concrete improvement is identified, describe it here and implement it.\n"
+        body += "```json\n"
+        body += proposal
+        body += "\n```\n\n"
+
+        var applyResult: String? = nil
+        if let patch = parsed, approved {
+            applyResult = applyProposedPatch(patch, backupsDir: backupsDir, base: base)
+            body += "## Applied\n\n"
+            body += applyResult ?? "No patch was applied."
+            body += "\n"
+        } else if parsed != nil, !approved {
+            body += "A patch was proposed but not applied because Autopilot is off.\n"
+        } else {
+            body += "No patch proposed.\n"
+        }
 
         if let data = body.data(using: .utf8) {
             do {
@@ -2895,7 +2967,192 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             }
         }
 
-        return "Curious self-improvement check complete. Proposal written to \(proposalPath)."
+        var summary = "Curious self-improvement check complete. Proposal written to \(proposalPath)."
+        if let applyResult {
+            summary += " Apply result: \(applyResult)"
+        }
+        return summary
+    }
+
+    /// Locate the project root by searching for a `.git` directory above the
+    /// running `badapple` binary. Falls back to `~/bad_apple` if it exists.
+    private func projectRootFromBinary() -> String? {
+        let home = NSHomeDirectory()
+        let manualRepo = home + "/bad_apple"
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: manualRepo, isDirectory: &isDir), isDir.boolValue {
+            return manualRepo
+        }
+
+        guard let binary = badappleBinaryPath() else { return nil }
+        var url = URL(fileURLWithPath: binary).deletingLastPathComponent()
+        for _ in 0..<6 {
+            let gitDir = url.appendingPathComponent(".git").path
+            if FileManager.default.fileExists(atPath: gitDir) {
+                return url.path
+            }
+            if url.path == "/" || url.path == "/Applications" { break }
+            url = url.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    /// Parse a patch proposal from the model's JSON output.
+    private func parseProposedPatch(from text: String) -> (file: String, old: String, new: String, why: String)? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if json["no_patch"] as? Bool == true { return nil }
+        guard let patch = json["patch"] as? [String: Any],
+              let file = patch["file"] as? String,
+              let old = patch["old"] as? String,
+              let new = patch["new"] as? String,
+              let why = patch["why"] as? String,
+              !file.isEmpty, !why.isEmpty
+        else { return nil }
+        // For new files, `old` is empty; for edits, `old` must be non-empty and
+        // `new` may be empty (deletion is not allowed, but no-op is ok).
+        if !old.isEmpty, new.isEmpty {
+            // Disallow pure deletions.
+            return nil
+        }
+        return (file, old, new, why)
+    }
+
+    /// Apply a parsed patch after jail-check, backup, and verification.
+    /// Returns a human-readable result or error.
+    private func applyProposedPatch(
+        _ patch: (file: String, old: String, new: String, why: String),
+        backupsDir: String,
+        base: String
+    ) -> String {
+        // Allow Bad Apple's own data directory in addition to the normal jail.
+        let dataDir = ProcessInfo.processInfo.environment["BADAPPLE_DATA_DIR"] ?? "/var/lib/bad_apple"
+
+        // Reject any file outside the project, home, or allowed temp/data areas.
+        guard jailPath(patch.file) != nil || patch.file.hasPrefix(dataDir + "/") || patch.file == dataDir else {
+            return "Refused: \(patch.file) is outside allowed roots."
+        }
+        guard patch.file.hasPrefix(base)
+            || patch.file.hasPrefix(NSHomeDirectory())
+            || patch.file.hasPrefix("/tmp/")
+            || patch.file.hasPrefix("/var/tmp/")
+            || patch.file.hasPrefix(dataDir + "/")
+            || patch.file == dataDir
+        else {
+            return "Refused: \(patch.file) is outside the project or allowed directories."
+        }
+
+        // The autopilot may propose patches to any file, but it must not
+        // self-modify the core control/planner/policy files without a human
+        // in the loop. This keeps the self-improvement loop bounded.
+        let protectedNames: Set<String> = [
+            "BadAppleEngine.swift",
+            "BadAppleTools.swift",
+            "BadAppleEngineDaemon.swift",
+            "BadApplePolicyEngine.swift",
+            "BadAppleMenuBar.swift",
+            "BadAppleMenuBarUIResponder.swift",
+        ]
+        let filename = (patch.file as NSString).lastPathComponent
+        if protectedNames.contains(filename) {
+            return "Refused: autopilot will not apply patches to core control files such as \(filename). The patch was proposed and logged for review."
+        }
+
+        let fileExists = FileManager.default.fileExists(atPath: patch.file)
+        let isNewFile = patch.old.isEmpty
+
+        if isNewFile, fileExists {
+            return "Refused: proposed new file \(patch.file) already exists. Use an edit with a non-empty old string."
+        }
+        if !isNewFile, !fileExists {
+            return "Error: \(patch.file) does not exist; cannot apply an edit to a missing file."
+        }
+
+        let original: String
+        let originalData: Data?
+        if fileExists {
+            guard let data = FileManager.default.contents(atPath: patch.file) else {
+                return "Error: could not read \(patch.file)."
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
+                return "Error: could not decode \(patch.file) as UTF-8."
+            }
+            original = text
+            originalData = data
+        } else {
+            original = ""
+            originalData = nil
+        }
+
+        if !isNewFile, !original.contains(patch.old) {
+            return "Error: old string not found in \(patch.file). The proposal may be stale."
+        }
+
+        // Backup with a timestamped subdirectory.
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+        let timestamp = dateFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let backupSubdir = (backupsDir as NSString).appendingPathComponent(timestamp)
+        try? FileManager.default.createDirectory(atPath: backupSubdir, withIntermediateDirectories: true, attributes: nil)
+        let backupPath = (backupSubdir as NSString).appendingPathComponent((patch.file as NSString).lastPathComponent)
+        if let originalData {
+            do {
+                try originalData.write(to: URL(fileURLWithPath: backupPath), options: .atomic)
+            } catch {
+                return "Error: could not back up \(patch.file): \(error.localizedDescription)"
+            }
+        } else {
+            // For new files, write an empty placeholder backup for traceability.
+            try? Data().write(to: URL(fileURLWithPath: backupPath), options: .atomic)
+        }
+
+        let updated: String
+        if isNewFile {
+            updated = patch.new
+        } else {
+            guard let range = original.range(of: patch.old) else {
+                return "Error: old string not found during replacement."
+            }
+            var working = original
+            working.replaceSubrange(range, with: patch.new)
+            updated = working
+        }
+
+        guard updated != original || isNewFile else {
+            return "Error: replacement produced no change."
+        }
+
+        guard let newData = updated.data(using: .utf8) else {
+            return "Error: could not encode updated content."
+        }
+
+        // Ensure the parent directory exists when creating a new file.
+        let parent = URL(fileURLWithPath: patch.file).deletingLastPathComponent().path
+        try? FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true, attributes: nil)
+
+        do {
+            try newData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
+        } catch {
+            return "Error: could not write \(patch.file): \(error.localizedDescription)"
+        }
+
+        // Verify.
+        guard let verifyData = FileManager.default.contents(atPath: patch.file) else {
+            return "Error: verification failed: could not read \(patch.file) after write."
+        }
+        let verify = String(data: verifyData, encoding: .utf8) ?? ""
+        if patch.new.isEmpty {
+            // Creating an empty file; verify it exists and is empty.
+            guard verifyData.isEmpty, FileManager.default.fileExists(atPath: patch.file) else {
+                return "Error: verification failed: \(patch.file) should be empty."
+            }
+        } else {
+            guard verify.contains(patch.new) else {
+                return "Error: verification failed after writing \(patch.file)."
+            }
+        }
+
+        return "Applied patch to \(patch.file). Backup: \(backupPath). Why: \(patch.why)"
     }
 
     /// Locate the trusted `badapple` helper binary used for self-audit and CLI calls.
