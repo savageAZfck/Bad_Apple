@@ -1,7 +1,7 @@
 cask "bad-apple" do
-  version "0.1.3"
+  version "0.1.4"
   # Update this sha256 for each release. package_homebrew_cask.sh does it automatically.
-  sha256 "171c83eb71bfb888e0468820dbdebdb3fa6c91d23932535ff6ef40a1edaf7086"
+  sha256 "6b965d969df49d16dfa8826c3802c53c4268d933cc4c06a267012ca0d8a4e31c"
 
   url "https://github.com/savageAZfck/bad-apple-releases/releases/download/v#{version}/Bad_Apple-#{version}-unsigned.zip"
   name "Bad Apple"

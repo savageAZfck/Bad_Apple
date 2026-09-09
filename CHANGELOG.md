@@ -2,6 +2,34 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.4] — 2026-09-09
+
+### Added
+- **Control Center** (`/control`) is now a real web dashboard with three tabs:
+  Overview, Memory, and Workshop.
+- New dashboard routes: `/api/snapshot`, `/api/tail`, `/api/ledger`, `/api/audit`,
+  `/api/cert`, `/api/doctor`, `/api/voice`, `/api/capabilities`, `/api/control`,
+  `/api/workspace`, `/api/working_memory`, `/api/memory/facts`, and
+  `/api/workshop/personas` / `/api/workshop/custom_tools`.
+- **Automatic local fact extraction**: the dashboard reads text or workspace files,
+  asks the local 7B Qwen model for JSON `subject-predicate-object` triples, and
+  writes them atomically to `/var/lib/bad_apple/memory_graph/facts.json`.
+- **Memory tab**: working memory editor, searchable fact bank, manual fact
+  addition, single-file extraction, and bounded recursive directory indexing.
+- **Workshop tab**: create, edit, delete, and switch to local personas stored in
+  `~/.bad_apple/personas.json`; create and run declarative shell, AppleScript, or
+  macOS Shortcut tools stored in `~/.bad_apple/custom_tools.json`.
+- Dashboard status adapter now exposes `autopilot`, `fast_tier`, `private_mode`,
+  `airgap`, `killed`, and `workspace` at the top level for the UI.
+- New `generateRaw(prompt:systemPrompt:maxTokens:temperature:)` engine method for
+  deterministic, persona-free structured generation, used by fact extraction.
+- `inference` agent call accepts `system_prompt` and `temperature` parameters.
+- `/api/mcp_servers` and `/api/mcp_registry` aliases for the existing MCP routes.
+
+### Changed
+- `BadAppleEngine.switchPersona` now reloads persona files before switching so
+  workshop-created personas are active immediately.
+
 ## [0.1.3] — 2026-09-08
 
 ### Added

@@ -4,7 +4,47 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bad Apple — Control Center</title>
-  <link rel="stylesheet" href="/static/styles.css?v=8">
+  <link rel="stylesheet" href="/static/styles.css?v=9">
+  <style>
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+    .tab { background: transparent; border: 0; color: var(--text-secondary); padding: 0.6rem 1rem; cursor: pointer; border-radius: var(--radius-sm); font-weight: 500; }
+    .tab:hover, .tab.active { background: var(--surface-hover); color: var(--text); }
+    .section { display: none; }
+    .section.active { display: block; }
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+    .card { background: var(--surface); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 1rem; }
+    .card h3 { margin-top: 0; font-size: 1rem; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid var(--border-subtle); }
+    .toggle-row:last-child { border-bottom: 0; }
+    .toggle { display: flex; align-items: center; gap: 0.75rem; cursor: pointer; }
+    .toggle input { display: none; }
+    .slider { width: 40px; height: 22px; background: var(--border); border-radius: 22px; position: relative; transition: background .2s; }
+    .slider::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: var(--text); border-radius: 50%; transition: transform .2s; }
+    .toggle input:checked + .slider { background: var(--accent); }
+    .toggle input:checked + .slider::after { transform: translateX(18px); background: #000; }
+    .form-row { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem; }
+    .form-row label { font-size: 0.85rem; color: var(--text-secondary); }
+    input, textarea, select { background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.55rem 0.7rem; font: inherit; }
+    textarea { min-height: 120px; resize: vertical; }
+    .grow { flex: 1; }
+    .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    button { background: var(--accent); color: #000; border: 0; border-radius: var(--radius-sm); padding: 0.55rem 1rem; font-weight: 600; cursor: pointer; }
+    button.secondary { background: var(--bg-elevated-2); color: var(--text); border: 1px solid var(--border); }
+    button.danger { background: var(--danger); color: #fff; }
+    .muted { color: var(--text-tertiary); font-size: 0.85rem; }
+    .log { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.75rem; font-family: var(--font-mono); font-size: 0.8rem; white-space: pre-wrap; max-height: 300px; overflow: auto; }
+    .fact, .item { background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 0.75rem; margin-bottom: 0.5rem; }
+    .fact .spo { font-weight: 600; }
+    .fact .meta { color: var(--text-tertiary); font-size: 0.8rem; }
+    .item { display: flex; justify-content: space-between; align-items: center; }
+    .item .info { flex: 1; }
+    .item .name { font-weight: 600; }
+    .item .desc { color: var(--text-secondary); font-size: 0.85rem; }
+    .toast { position: fixed; bottom: 1rem; right: 1rem; background: var(--accent); color: #000; padding: 0.75rem 1rem; border-radius: var(--radius); font-weight: 600; opacity: 0; transform: translateY(1rem); transition: .2s; z-index: 100; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.error { background: var(--danger); color: #fff; }
+  </style>
 </head>
 <body>
   <aside class="sidebar">
@@ -22,7 +62,7 @@
       <a class="nav-item" href="/models">Models</a>
       <a class="nav-item" href="/agents">Agents</a>
       <a class="nav-item" href="/ambient">Ambient</a>
-      <a class="nav-item active" href="/control">Control</a>
+      <a class="nav-item active" href="/control">Control Center</a>
       <a class="nav-item" href="/mcp">MCP</a>
       <a class="nav-item" href="/settings">Settings</a>
       <a class="nav-item" href="/logs">Logs</a>
@@ -31,96 +71,627 @@
 
   <main class="content">
     <h2>Control Center</h2>
-    <p class="subtitle">Toggles and overrides for the local OS.</p>
+    <p class="subtitle">One place to steer, inspect, extend, and feed Bad Apple's memory.</p>
 
-    <section class="card" id="status-card">
-      <h3>Status</h3>
-      <pre id="status" class="json-box">Loading...</pre>
-    </section>
+    <div class="tabs">
+      <button class="tab active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
+      <button class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</button>
+      <button class="tab" data-tab="workshop" onclick="switchTab('workshop')">Workshop</button>
+    </div>
 
-    <section class="card">
-      <h3>Toggles</h3>
-      <div class="grid" id="toggles"></div>
-    </section>
+    <!-- Overview -->
+    <section class="section active" id="tab-overview">
+      <div class="grid-2">
+        <div class="card">
+          <h3>Runtime</h3>
+          <div id="runtime-status" class="muted">Loading...</div>
+          <div style="margin-top:1rem; display:flex; gap:.5rem; flex-wrap:wrap;">
+            <span id="runtime-mode" class="muted">—</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Toggles</h3>
+          <div class="toggle-row">
+            <span>Autopilot</span>
+            <label class="toggle"><input type="checkbox" id="toggle-autopilot" onchange="control(this.checked ? 'autopilot on' : 'autopilot off')"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
+            <span>Fast tier</span>
+            <label class="toggle"><input type="checkbox" id="toggle-fast" onchange="control(this.checked ? 'fast tier on' : 'fast tier off')"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
+            <span>Private mode</span>
+            <label class="toggle"><input type="checkbox" id="toggle-private" onchange="control(this.checked ? 'private mode on' : 'private mode off')"><span class="slider"></span></label>
+          </div>
+          <div class="toggle-row">
+            <span>Air-gap mode</span>
+            <label class="toggle"><input type="checkbox" id="toggle-airgap" onchange="control(this.checked ? 'airgap on' : 'airgap off')"><span class="slider"></span></label>
+          </div>
+        </div>
 
-    <section class="card">
-      <h3>Actions</h3>
-      <div class="form-row" style="flex-wrap: wrap; gap: 0.5rem;">
-        <button class="secondary" onclick="control('kill switch')">Kill switch</button>
-        <button class="secondary" onclick="control('resume bad apple')">Resume</button>
-        <button class="secondary" onclick="control('flush vram')">Flush VRAM</button>
-        <button class="secondary" onclick="control('unload all models')">Unload all</button>
-        <button class="secondary" onclick="control('set workspace to ' + prompt('Workspace path?'))">Set workspace</button>
+        <div class="card" style="grid-column: 1 / -1;">
+          <h3>Actions</h3>
+          <div class="actions">
+            <button class="secondary" onclick="control('kill switch')">Kill switch</button>
+            <button class="secondary" onclick="control('resume')">Resume</button>
+            <button class="secondary" onclick="control('flush vram')">Flush VRAM</button>
+            <button class="secondary" onclick="control('unload all models')">Unload all</button>
+            <button class="secondary" onclick="setWorkspace()">Set workspace</button>
+          </div>
+          <pre id="control-result" class="log" style="margin-top:1rem; min-height:3rem;">Result will appear here...</pre>
+        </div>
+
+        <div class="card">
+          <h3>Workspace / Memory snapshot</h3>
+          <div class="form-row">
+            <label>Workspace path</label>
+            <input type="text" id="workspace-path" placeholder="/Users/you/projects/my-app">
+          </div>
+          <div class="actions">
+            <button onclick="saveWorkspace()">Set workspace</button>
+          </div>
+          <div style="margin-top:1rem;">
+            <label class="muted">Working memory</label>
+            <div id="working-memory-snippet" class="log" style="margin-top:.5rem; min-height:4rem;">Loading...</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Audit &amp; Health</h3>
+          <div class="actions">
+            <button class="secondary" onclick="loadCert()">Cert</button>
+            <button class="secondary" onclick="loadDoctor()">Doctor</button>
+            <button class="secondary" onclick="loadAudit()">Full audit</button>
+          </div>
+          <pre id="audit-output" class="log" style="margin-top:1rem; min-height:6rem;">Click a button to run a diagnostic.</pre>
+        </div>
       </div>
     </section>
 
-    <section class="card">
-      <h3>CLI override</h3>
-      <div class="form-row">
-        <input type="text" id="cli-command" placeholder="enter safe mode" class="grow">
-        <button onclick="runCli()">Run</button>
+    <!-- Memory -->
+    <section class="section" id="tab-memory">
+      <div class="grid-2">
+        <div class="card" style="grid-column: 1 / -1;">
+          <h3>Working memory</h3>
+          <p class="muted">This is the assistant scratchpad. The model sees it in context.</p>
+          <div class="form-row">
+            <textarea id="working-memory" placeholder="Key facts, TODOs, context..."></textarea>
+          </div>
+          <div class="actions">
+            <button onclick="saveWorkingMemory('replace')">Replace</button>
+            <button class="secondary" onclick="saveWorkingMemory('append')">Append</button>
+            <button class="secondary" onclick="loadWorkingMemory()">Refresh</button>
+            <button class="danger" onclick="clearWorkingMemory()">Clear</button>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: 1 / -1;">
+          <h3>Memory facts</h3>
+          <p class="muted">Subject-predicate-object triples extracted from your workspace and notes. These feed the RAG context.</p>
+          <div class="form-row" style="flex-direction:row; gap:.75rem; align-items:end; flex-wrap:wrap;">
+            <div style="flex:1; min-width:200px;">
+              <label for="fact-search">Search facts</label>
+              <input type="text" id="fact-search" placeholder="project name, language, goal..." oninput="renderFacts()">
+            </div>
+            <button class="secondary" onclick="loadFacts()">Refresh</button>
+            <button class="danger" onclick="clearFacts()">Clear all</button>
+          </div>
+          <div id="facts-list" style="margin-top:1rem;"></div>
+        </div>
+
+        <div class="card">
+          <h3>Extract from text</h3>
+          <div class="form-row">
+            <textarea id="extract-text" placeholder="Paste notes, meeting transcript, or documentation here..."></textarea>
+          </div>
+          <button onclick="extractFromText()">Extract facts</button>
+          <pre id="extract-text-result" class="log" style="margin-top:1rem; min-height:3rem;"></pre>
+        </div>
+
+        <div class="card">
+          <h3>Extract from file or folder</h3>
+          <div class="form-row">
+            <label for="extract-path">Path (file or directory)</label>
+            <input type="text" id="extract-path" placeholder="/Users/you/Documents/notes.md">
+          </div>
+          <div class="actions">
+            <button onclick="extractFromPath()">Extract file</button>
+            <button class="secondary" onclick="indexPath()">Index folder</button>
+          </div>
+          <pre id="extract-path-result" class="log" style="margin-top:1rem; min-height:3rem;"></pre>
+        </div>
+
+        <div class="card" style="grid-column: 1 / -1;">
+          <h3>Add fact manually</h3>
+          <div style="display:grid; grid-template-columns: 1fr 1fr 2fr auto; gap:.75rem; align-items:end;">
+            <div class="form-row"><label>Subject</label><input id="fact-subject" type="text" placeholder="Bad Apple"></div>
+            <div class="form-row"><label>Predicate</label><input id="fact-predicate" type="text" placeholder="runs on"></div>
+            <div class="form-row"><label>Object</label><input id="fact-object" type="text" placeholder="Apple Silicon"></div>
+            <button onclick="addFact()">Add</button>
+          </div>
+        </div>
       </div>
-      <pre id="cli-result"></pre>
+    </section>
+
+    <!-- Workshop -->
+    <section class="section" id="tab-workshop">
+      <div class="grid-2">
+        <div class="card" style="grid-column: 1 / -1;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <h3 style="margin:0;">Personas</h3>
+            <button onclick="newPersona()">New persona</button>
+          </div>
+          <p class="muted">Create or edit local personas. They are saved to <code>~/.bad_apple/personas.json</code> and can be switched to at runtime.</p>
+          <div id="personas-list"></div>
+        </div>
+
+        <div class="card" id="persona-editor" style="grid-column: 1 / -1; display:none;">
+          <h3 id="persona-editor-title">New persona</h3>
+          <div class="form-row"><label for="persona-id">ID</label><input id="persona-id" type="text" placeholder="cali"></div>
+          <div class="form-row"><label for="persona-name">Name</label><input id="persona-name" type="text" placeholder="Cali"></div>
+          <div class="form-row"><label for="persona-description">Description</label><input id="persona-description" type="text" placeholder="A flirty California beach-girl AI..."></div>
+          <div class="form-row"><label for="persona-prompt">System prompt</label><textarea id="persona-prompt"></textarea></div>
+          <div class="form-row"><label for="persona-voice">Voice system prompt (optional)</label><textarea id="persona-voice"></textarea></div>
+          <div class="form-row"><label for="persona-roasts">Roast bank (one per line, optional)</label><textarea id="persona-roasts" placeholder="Siri? Stuck buffering..."></textarea></div>
+          <div class="actions">
+            <button onclick="savePersona()">Save &amp; switch</button>
+            <button class="secondary" onclick="hidePersonaEditor()">Cancel</button>
+            <button class="danger" id="persona-delete" style="display:none;" onclick="deletePersona()">Delete</button>
+          </div>
+          <pre id="persona-result" class="log" style="margin-top:1rem;"></pre>
+        </div>
+
+        <div class="card" style="grid-column: 1 / -1;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <h3 style="margin:0;">Custom tools</h3>
+            <button onclick="newCustomTool()">New custom tool</button>
+          </div>
+          <p class="muted">Define shell, AppleScript, or Shortcut commands the dashboard can run. Saved to <code>~/.bad_apple/custom_tools.json</code>.</p>
+          <div id="custom-tools-list"></div>
+        </div>
+
+        <div class="card" id="custom-tool-editor" style="grid-column: 1 / -1; display:none;">
+          <h3 id="custom-tool-editor-title">New custom tool</h3>
+          <div class="form-row"><label for="custom-tool-id">ID</label><input id="custom-tool-id" type="text" placeholder="open_workspace"></div>
+          <div class="form-row"><label for="custom-tool-name">Name</label><input id="custom-tool-name" type="text" placeholder="Open workspace in VS Code"></div>
+          <div class="form-row"><label for="custom-tool-description">Description</label><input id="custom-tool-description" type="text" placeholder="Opens the current workspace in VS Code:"></div>
+          <div class="form-row">
+            <label for="custom-tool-kind">Kind</label>
+            <select id="custom-tool-kind" onchange="updateToolHelp()">
+              <option value="shell">Shell command</option>
+              <option value="applescript">AppleScript</option>
+              <option value="shortcut">macOS Shortcut</option>
+            </select>
+          </div>
+          <div class="form-row"><label for="custom-tool-command">Command / script / shortcut name</label><input id="custom-tool-command" type="text" placeholder="code {{1}}"></div>
+          <div class="form-row"><label for="custom-tool-args">Default args (one per line)</label><textarea id="custom-tool-args" placeholder="{{1}} is the first argument passed at runtime."></textarea></div>
+          <p class="muted" id="custom-tool-help">Use <code>{{1}}</code>, <code>{{2}}</code> as placeholders for arguments.</p>
+          <div class="actions">
+            <button onclick="saveCustomTool()">Save</button>
+            <button class="secondary" onclick="runCustomToolFromEditor()">Run</button>
+            <button class="secondary" onclick="hideCustomToolEditor()">Cancel</button>
+            <button class="danger" id="custom-tool-delete" style="display:none;" onclick="deleteCustomTool()">Delete</button>
+          </div>
+          <pre id="custom-tool-result" class="log" style="margin-top:1rem;"></pre>
+        </div>
+      </div>
     </section>
   </main>
 
-  <script>
-    async function status() {
-      const r = await fetch('/api/status');
-      const data = await r.json();
-      document.getElementById('status').textContent = JSON.stringify(data, null, 2);
-      renderToggles(data);
-    }
+  <div id="toast" class="toast"></div>
 
-    function renderToggles(data) {
-      const container = document.getElementById('toggles');
-      container.innerHTML = '';
-      const rows = [
-        { label: 'Autopilot', key: 'autopilot', on: data.autopilot, cmdOn: 'enable autopilot', cmdOff: 'disable autopilot' },
-        { label: 'Fast tier', key: 'fast_tier', on: data.fast_tier, cmdOn: 'enable fast tier', cmdOff: 'disable fast tier' },
-        { label: 'Ambient', key: 'ambient_running', on: data.ambient_running, cmdOn: 'start ambient', cmdOff: 'stop ambient' },
-        { label: 'P2P', key: 'p2p_enabled', on: data.p2p_enabled, cmdOn: 'enable p2p', cmdOff: 'disable p2p' },
-        { label: 'Private mode', key: 'private', on: data.runtime?.private_mode, cmdOn: 'enable private mode', cmdOff: 'disable private mode' },
-      ];
-      rows.forEach(r => {
-        const div = document.createElement('div');
-        div.className = 'control-row';
-        div.innerHTML = `
-          <span class="toggle-label">${r.label}</span>
-          <label class="toggle"><input type="checkbox" ${r.on ? 'checked' : ''} onchange="control('${r.on ? r.cmdOff : r.cmdOn}')"> <span class="slider"></span></label>
-        `;
-        container.appendChild(div);
+  <script>
+    function api(path, method, body) {
+      const opts = { method: method || 'GET', headers: {} };
+      if (body) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      return fetch(path, opts).then(r => {
+        if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`);
+        return r.json();
       });
     }
 
-    function controlCsrfToken() {
-      return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
+    function toast(msg, type) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast show' + (type === 'error' ? ' error' : '');
+      setTimeout(() => t.classList.remove('show'), 3000);
     }
-    function controlCsrfHeaders() {
-      const token = controlCsrfToken();
-      return token ? { 'X-CSRF-Token': token } : {};
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+      document.querySelectorAll('.section').forEach(el => el.classList.toggle('active', el.id === 'tab-' + tab));
+      if (tab === 'memory') loadWorkingMemory();
+      if (tab === 'workshop') { loadPersonas(); loadCustomTools(); }
+      location.hash = tab;
     }
+
+    const initial = location.hash.replace('#', '') || 'overview';
+    switchTab(initial);
+
+    // Overview
     async function control(command) {
-      if (!command) return;
+      const pre = document.getElementById('control-result');
+      pre.textContent = 'Running: ' + command;
       try {
-        const headers = { 'Content-Type': 'application/json', ...controlCsrfHeaders() };
-        const res = await fetch('/api/control', { method: 'POST', headers, body: JSON.stringify({command, csrf_token: controlCsrfToken()}) });
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        document.getElementById('cli-result').textContent = JSON.stringify(data, null, 2);
+        const data = await api('/api/control', 'POST', { command });
+        pre.textContent = JSON.stringify(data, null, 2);
+        loadStatus();
       } catch (e) {
-        document.getElementById('cli-result').textContent = 'Error: ' + e.message;
+        pre.textContent = 'Error: ' + e.message;
+        toast(e.message, 'error');
       }
-      status();
     }
 
-    async function runCli() {
-      const cmd = document.getElementById('cli-command').value;
-      await control(cmd);
+    async function loadStatus() {
+      try {
+        const data = await api('/api/status');
+        document.getElementById('runtime-status').textContent = data.runtime?.mode || 'unknown';
+        const flags = [];
+        if (data.autopilot) flags.push('autopilot');
+        if (data.fast_tier) flags.push('fast tier');
+        if (data.private_mode) flags.push('private');
+        if (data.airgap) flags.push('air-gap');
+        if (data.killed) flags.push('killed');
+        document.getElementById('runtime-mode').textContent = flags.join(' · ') || 'normal';
+        document.getElementById('toggle-autopilot').checked = !!data.autopilot;
+        document.getElementById('toggle-fast').checked = !!data.fast_tier;
+        document.getElementById('toggle-private').checked = !!data.private_mode;
+        document.getElementById('toggle-airgap').checked = !!data.airgap;
+        if (data.workspace) document.getElementById('workspace-path').value = data.workspace;
+        loadWorkingMemorySnippet();
+      } catch (e) {
+        document.getElementById('runtime-status').textContent = 'unreachable';
+      }
     }
 
-    status();
-    setInterval(status, 3000);
+    async function setWorkspace() {
+      const p = prompt('Workspace path?', document.getElementById('workspace-path').value);
+      if (!p) return;
+      try {
+        const data = await api('/api/workspace', 'POST', { path: p });
+        toast('Workspace set');
+        loadStatus();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function saveWorkspace() {
+      const p = document.getElementById('workspace-path').value;
+      try {
+        await api('/api/workspace', 'POST', { path: p });
+        toast('Workspace set');
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function loadWorkingMemorySnippet() {
+      try {
+        const data = await api('/api/working_memory?limit=400');
+        document.getElementById('working-memory-snippet').textContent = data.content || '(empty)';
+      } catch (e) { document.getElementById('working-memory-snippet').textContent = 'Error: ' + e.message; }
+    }
+
+    async function loadCert() { runAudit('/api/cert', 'cert'); }
+    async function loadDoctor() { runAudit('/api/doctor', 'doctor'); }
+    async function loadAudit() { runAudit('/api/audit', 'audit'); }
+
+    async function runAudit(path, label) {
+      const pre = document.getElementById('audit-output');
+      pre.textContent = `Running ${label}...`;
+      try {
+        const data = await api(path);
+        pre.textContent = JSON.stringify(data, null, 2);
+      } catch (e) {
+        pre.textContent = `Error: ${e.message}`;
+      }
+    }
+
+    // Memory
+    let facts = [];
+
+    async function loadWorkingMemory() {
+      try {
+        const data = await api('/api/working_memory?limit=50000');
+        document.getElementById('working-memory').value = data.content || '';
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function saveWorkingMemory(mode) {
+      const content = document.getElementById('working-memory').value;
+      try {
+        await api('/api/working_memory', 'POST', { content, mode });
+        toast(`Working memory ${mode === 'append' ? 'appended' : 'saved'}`);
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function clearWorkingMemory() {
+      if (!confirm('Clear working memory?')) return;
+      await api('/api/working_memory', 'POST', { content: '', mode: 'replace' });
+      document.getElementById('working-memory').value = '';
+      toast('Working memory cleared');
+    }
+
+    async function loadFacts() {
+      try {
+        const data = await api('/api/memory/facts');
+        facts = data.facts || [];
+        renderFacts();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    function renderFacts() {
+      const q = document.getElementById('fact-search').value.toLowerCase();
+      const list = document.getElementById('facts-list');
+      const filtered = facts.filter(f => {
+        const text = `${f.subject} ${f.predicate} ${f.object} ${f.source}`.toLowerCase();
+        return text.includes(q);
+      }).slice(0, 100);
+      if (!filtered.length) { list.innerHTML = '<p class="muted">No facts yet. Add one or extract from text.</p>'; return; }
+      list.innerHTML = filtered.map(f => `
+        <div class="fact">
+          <div class="spo">${esc(f.subject)} &rarr; ${esc(f.predicate)} &rarr; ${esc(f.object)}</div>
+          <div class="meta">${esc(f.source || 'dashboard')} · ${f.timestamp ? new Date(f.timestamp).toLocaleString() : ''}</div>
+        </div>
+      `).join('');
+    }
+
+    async function clearFacts() {
+      if (!confirm('Delete all memory facts?')) return;
+      try {
+        await api('/api/memory/facts', 'DELETE');
+        toast('All facts cleared');
+        loadFacts();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function addFact() {
+      const s = document.getElementById('fact-subject').value.trim();
+      const p = document.getElementById('fact-predicate').value.trim();
+      const o = document.getElementById('fact-object').value.trim();
+      if (!s || !p || !o) { toast('fill all fields', 'error'); return; }
+      try {
+        await api('/api/memory/facts', 'POST', { subject: s, predicate: p, object: o });
+        toast('Fact added');
+        document.getElementById('fact-subject').value = '';
+        document.getElementById('fact-predicate').value = '';
+        document.getElementById('fact-object').value = '';
+        loadFacts();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function extractFromText() {
+      const text = document.getElementById('extract-text').value.trim();
+      const pre = document.getElementById('extract-text-result');
+      if (!text) { pre.textContent = 'paste some text first'; return; }
+      pre.textContent = 'Extracting with local model...';
+      try {
+        const data = await api('/api/memory/facts/extract', 'POST', { text });
+        pre.textContent = `Extracted ${data.extracted || 0} facts.\n` + JSON.stringify(data, null, 2);
+        loadFacts();
+      } catch (e) { pre.textContent = 'Error: ' + e.message; }
+    }
+
+    async function extractFromPath() {
+      const path = document.getElementById('extract-path').value.trim();
+      const pre = document.getElementById('extract-path-result');
+      if (!path) { pre.textContent = 'enter a path'; return; }
+      pre.textContent = 'Extracting...';
+      try {
+        const data = await api('/api/memory/facts/extract', 'POST', { path });
+        pre.textContent = `Extracted ${data.extracted || 0} facts from file.`;
+        loadFacts();
+      } catch (e) { pre.textContent = 'Error: ' + e.message; }
+    }
+
+    async function indexPath() {
+      const path = document.getElementById('extract-path').value.trim();
+      const pre = document.getElementById('extract-path-result');
+      if (!path) { pre.textContent = 'enter a folder path'; return; }
+      pre.textContent = 'Indexing...';
+      try {
+        const data = await api('/api/memory/facts/index', 'POST', { path });
+        pre.textContent = `Indexed ${data.extracted || 0} facts. Total: ${data.total_facts || 0}.`;
+        loadFacts();
+      } catch (e) { pre.textContent = 'Error: ' + e.message; }
+    }
+
+    // Workshop
+    let personas = {};
+    let customTools = {};
+    let editingPersona = null;
+    let editingTool = null;
+
+    async function loadPersonas() {
+      try {
+        const data = await api('/api/workshop/personas');
+        personas = {};
+        const list = document.getElementById('personas-list');
+        if (!data.personas || !data.personas.length) { list.innerHTML = '<p class="muted">No personas yet.</p>'; return; }
+        list.innerHTML = data.personas.map(p => {
+          personas[p.id] = p;
+          return `<div class="item"><div class="info"><div class="name">${esc(p.id)}</div><div class="desc">${esc(p.name || '')} · ${esc(p.description || '')}</div></div><div class="actions"><button class="secondary" onclick="editPersona('${esc(p.id)}')">Edit</button></div></div>`;
+        }).join('');
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    function newPersona() {
+      editingPersona = null;
+      document.getElementById('persona-editor-title').textContent = 'New persona';
+      document.getElementById('persona-id').value = '';
+      document.getElementById('persona-name').value = '';
+      document.getElementById('persona-description').value = '';
+      document.getElementById('persona-prompt').value = '';
+      document.getElementById('persona-voice').value = '';
+      document.getElementById('persona-roasts').value = '';
+      document.getElementById('persona-delete').style.display = 'none';
+      document.getElementById('persona-result').textContent = '';
+      document.getElementById('persona-editor').style.display = 'block';
+    }
+
+    function editPersona(id) {
+      editingPersona = id;
+      const p = personas[id];
+      if (!p) return;
+      document.getElementById('persona-editor-title').textContent = 'Edit ' + id;
+      document.getElementById('persona-id').value = id;
+      document.getElementById('persona-name').value = p.name || '';
+      document.getElementById('persona-description').value = p.description || '';
+      document.getElementById('persona-prompt').value = p.system_prompt || '';
+      document.getElementById('persona-voice').value = p.voice_system_prompt || '';
+      document.getElementById('persona-roasts').value = (p.roast_bank || []).join('\n');
+      document.getElementById('persona-delete').style.display = 'inline-block';
+      document.getElementById('persona-result').textContent = '';
+      document.getElementById('persona-editor').style.display = 'block';
+    }
+
+    function hidePersonaEditor() {
+      document.getElementById('persona-editor').style.display = 'none';
+    }
+
+    async function savePersona() {
+      const id = document.getElementById('persona-id').value.trim();
+      const body = {
+        id,
+        name: document.getElementById('persona-name').value.trim(),
+        description: document.getElementById('persona-description').value.trim(),
+        system_prompt: document.getElementById('persona-prompt').value,
+        voice_system_prompt: document.getElementById('persona-voice').value || null,
+        roast_bank: document.getElementById('persona-roasts').value.split('\n').map(s => s.trim()).filter(Boolean),
+      };
+      try {
+        const data = await api('/api/workshop/personas', 'POST', body);
+        document.getElementById('persona-result').textContent = 'Saved: ' + JSON.stringify(data);
+        loadPersonas();
+        hidePersonaEditor();
+        toast('Persona saved');
+      } catch (e) { document.getElementById('persona-result').textContent = 'Error: ' + e.message; }
+    }
+
+    async function deletePersona() {
+      if (!editingPersona) return;
+      if (!confirm(`Delete ${editingPersona}?`)) return;
+      try {
+        await api('/api/workshop/personas/' + encodeURIComponent(editingPersona), 'DELETE');
+        hidePersonaEditor();
+        loadPersonas();
+        toast('Persona deleted');
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function loadCustomTools() {
+      try {
+        const data = await api('/api/workshop/custom_tools');
+        customTools = {};
+        const list = document.getElementById('custom-tools-list');
+        if (!data.tools || !data.tools.length) { list.innerHTML = '<p class="muted">No custom tools yet.</p>'; return; }
+        list.innerHTML = data.tools.map(t => {
+          customTools[t.id] = t;
+          return `<div class="item"><div class="info"><div class="name">${esc(t.id)}</div><div class="desc">${esc(t.name || '')} · ${esc(t.kind || '')} · ${esc(t.description || '')}</div></div><div class="actions"><button class="secondary" onclick="editCustomTool('${esc(t.id)}')">Edit</button><button onclick="runCustomTool('${esc(t.id)}')">Run</button></div></div>`;
+        }).join('');
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    function newCustomTool() {
+      editingTool = null;
+      document.getElementById('custom-tool-editor-title').textContent = 'New custom tool';
+      document.getElementById('custom-tool-id').value = '';
+      document.getElementById('custom-tool-name').value = '';
+      document.getElementById('custom-tool-description').value = '';
+      document.getElementById('custom-tool-kind').value = 'shell';
+      document.getElementById('custom-tool-command').value = '';
+      document.getElementById('custom-tool-args').value = '';
+      document.getElementById('custom-tool-delete').style.display = 'none';
+      document.getElementById('custom-tool-result').textContent = '';
+      document.getElementById('custom-tool-editor').style.display = 'block';
+      updateToolHelp();
+    }
+
+    function editCustomTool(id) {
+      editingTool = id;
+      const t = customTools[id];
+      if (!t) return;
+      document.getElementById('custom-tool-editor-title').textContent = 'Edit ' + id;
+      document.getElementById('custom-tool-id').value = id;
+      document.getElementById('custom-tool-name').value = t.name || '';
+      document.getElementById('custom-tool-description').value = t.description || '';
+      document.getElementById('custom-tool-kind').value = t.kind || 'shell';
+      document.getElementById('custom-tool-command').value = t.command || '';
+      document.getElementById('custom-tool-args').value = (t.args || []).join('\n');
+      document.getElementById('custom-tool-delete').style.display = 'inline-block';
+      document.getElementById('custom-tool-result').textContent = '';
+      document.getElementById('custom-tool-editor').style.display = 'block';
+      updateToolHelp();
+    }
+
+    function hideCustomToolEditor() {
+      document.getElementById('custom-tool-editor').style.display = 'none';
+    }
+
+    function updateToolHelp() {
+      const kind = document.getElementById('custom-tool-kind').value;
+      const msg = {
+        shell: 'Shell command. Use {{1}}, {{2}} as placeholders for arguments.',
+        applescript: 'AppleScript source. Use {{1}}, {{2}} as placeholders for arguments.',
+        shortcut: 'Name of the macOS Shortcut to run. Only the first argument is passed as input.'
+      }[kind];
+      document.getElementById('custom-tool-help').textContent = msg;
+    }
+
+    async function saveCustomTool() {
+      const id = document.getElementById('custom-tool-id').value.trim();
+      const body = {
+        id,
+        name: document.getElementById('custom-tool-name').value.trim(),
+        description: document.getElementById('custom-tool-description').value.trim(),
+        kind: document.getElementById('custom-tool-kind').value,
+        command: document.getElementById('custom-tool-command').value,
+        args: document.getElementById('custom-tool-args').value.split('\n').map(s => s.trim()).filter(Boolean),
+      };
+      try {
+        const data = await api('/api/workshop/custom_tools', 'POST', body);
+        document.getElementById('custom-tool-result').textContent = 'Saved: ' + JSON.stringify(data);
+        loadCustomTools();
+        hideCustomToolEditor();
+        toast('Custom tool saved');
+      } catch (e) { document.getElementById('custom-tool-result').textContent = 'Error: ' + e.message; }
+    }
+
+    async function runCustomToolFromEditor() {
+      const id = editingTool || document.getElementById('custom-tool-id').value.trim();
+      if (!id) { toast('save the tool first', 'error'); return; }
+      const args = document.getElementById('custom-tool-args').value.split('\n').map(s => s.trim()).filter(Boolean);
+      await runCustomTool(id, args);
+    }
+
+    async function runCustomTool(id, args) {
+      const pre = document.getElementById('custom-tool-result');
+      pre.textContent = 'Running...';
+      try {
+        const data = await api('/api/workshop/custom_tools/' + encodeURIComponent(id) + '/run', 'POST', { args: args || [] });
+        pre.textContent = data.output || JSON.stringify(data);
+      } catch (e) { pre.textContent = 'Error: ' + e.message; }
+    }
+
+    async function deleteCustomTool() {
+      if (!editingTool) return;
+      if (!confirm(`Delete ${editingTool}?`)) return;
+      try {
+        await api('/api/workshop/custom_tools/' + encodeURIComponent(editingTool), 'DELETE');
+        hideCustomToolEditor();
+        loadCustomTools();
+        toast('Custom tool deleted');
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    function esc(s) {
+      if (!s) return '';
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // Polling
+    loadStatus();
+    setInterval(loadStatus, 3000);
   </script>
 </body>
 </html>

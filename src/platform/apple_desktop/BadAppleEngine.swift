@@ -489,11 +489,12 @@ final class BadAppleEngine: @unchecked Sendable {
 
     // MARK: - Persona Management
 
-    /// Switch to a named persona.
+    /// Switch to a named persona. Reload the persona file first so freshly
+    /// installed workshop packs are visible immediately.
     func switchPersona(_ name: String) -> Bool {
+        personaManager.reloadPersonas()
         let result = personaManager.switchPersona(name)
         if result {
-            personaManager.reloadPersonas()
             updateCuriousAutopilotLoop()
         }
         return result
@@ -1145,7 +1146,8 @@ final class BadAppleEngine: @unchecked Sendable {
     func generate(
         prompt: String,
         voiceMode: Bool = false,
-        maxTokens: Int = 300
+        maxTokens: Int = 300,
+        temperature: Float = 0.6
     ) async throws -> String {
         guard isLoaded else {
             return "The AI model is not loaded yet. Please wait a moment and try again."
@@ -1247,7 +1249,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 systemPrompt: sysPrompt,
                 history: history,
                 maxTokens: effectiveMaxTokens,
-                temperature: 0.6
+                temperature: temperature
             )
         }
         stateLock.withLock {
@@ -1331,6 +1333,37 @@ final class BadAppleEngine: @unchecked Sendable {
             return outputFirewall.check(postprocessOutput(result.text))
         } catch {
             return "Error: self-improvement generation failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Generate a response with a caller-supplied system prompt, no persona,
+    /// no semantic cache, and no ambient context. Used by the dashboard for
+    /// deterministic structured outputs such as fact extraction.
+    func generateRaw(
+        prompt: String,
+        systemPrompt: String,
+        maxTokens: Int = 500,
+        temperature: Float = 0
+    ) async -> String {
+        guard isLoaded else {
+            return "The AI model is not loaded yet. Please wait a moment and try again."
+        }
+        if killed {
+            return "Bad Apple is paused. Say 'resume bad apple' to start again."
+        }
+
+        do {
+            let result = try await inference.generate(
+                prompt: prompt,
+                systemPrompt: systemPrompt,
+                history: [],
+                tools: nil as [[String: any Sendable]]?,
+                maxTokens: maxTokens,
+                temperature: temperature
+            )
+            return outputFirewall.check(postprocessOutput(result.text))
+        } catch {
+            return "Error: raw generation failed: \(error.localizedDescription)"
         }
     }
 

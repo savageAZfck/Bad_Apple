@@ -650,12 +650,27 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
     case "inference":
         let inferencePrompt = params["prompt"] as? String ?? ""
         let maxTokens = params["max_new_tokens"] as? Int ?? 120
+        let temperature = params["temperature"] as? Float ?? 0.0
         if inferencePrompt.isEmpty {
             agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "inference requires prompt")
             return
         }
         do {
-            let text = try await BadAppleEngine.shared.generate(prompt: inferencePrompt, maxTokens: maxTokens)
+            let text: String
+            if let systemPrompt = params["system_prompt"] as? String, !systemPrompt.isEmpty {
+                text = await BadAppleEngine.shared.generateRaw(
+                    prompt: inferencePrompt,
+                    systemPrompt: systemPrompt,
+                    maxTokens: maxTokens,
+                    temperature: temperature
+                )
+            } else {
+                text = try await BadAppleEngine.shared.generate(
+                    prompt: inferencePrompt,
+                    maxTokens: maxTokens,
+                    temperature: temperature
+                )
+            }
             agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["text": text], error: nil)
         } catch {
             agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "inference failed: \(error.localizedDescription)")

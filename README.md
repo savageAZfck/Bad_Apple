@@ -13,10 +13,10 @@
 
 ## Download the public beta
 
-The latest public beta is **v0.1.3**:
+The latest public beta is **v0.1.4**:
 
-- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.3/Bad_Apple-0.1.3-unsigned.zip)** — unzip and run `sudo ./install.sh`
-- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.3)**
+- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.4/Bad_Apple-0.1.4-unsigned.zip)** — unzip and run `sudo ./install.sh`
+- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.4)**
 - Or install via Homebrew:
   ```bash
   brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
@@ -66,13 +66,12 @@ menubar-plist rendering, source-free public release
 (`savageAZfck/bad-apple-releases`), and public Homebrew Cask
 (`savageAZfck/homebrew-bad-apple`).
 
-The **v0.1.3 Curious autopilot beta** makes `curious_self_improvement` actually
-think and act: it now feeds cert, doctor, firewall, git, and source-marker data
-to the local 7B model, proposes a concrete `{"patch":{...}}` or `{"no_patch":true}`,
-and — when Autopilot is on — applies the patch after jail-check, backup,
-verification, and a hard block on core control files. This version also creates
-the missing `/var/lib/bad_apple/blocklist.txt` automatically and tightens the
-output firewall check so the cert suite stays clean.
+The **v0.1.4 Control Center, Memory, and Workshop beta** ships a real web
+Control Center, automatic local fact extraction into the memory graph, and a
+Tool & Persona Workshop for creating custom personas and declarative custom
+tools without touching the terminal. It also improves the dashboard status
+schema, adds `/api/control`, `/api/memory/facts`, and `/api/workshop/*` routes,
+and lets the engine switch to freshly installed workshop personas immediately.
 
 **Hardware:** Apple Silicon Mac (M1 or newer). **8 GB unified memory** is the
 practical minimum and **16 GB** is recommended for comfortable use. The 7B model
