@@ -52,13 +52,22 @@ sudo src/platform/apple_desktop/strip_quarantine.sh
 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
-Package an unsigned release zip with a consumer README and the quarantine stripper:
+Build the consumer release package (Homebrew Cask artifact) with the app bundle,
+a minimal source subset, and the platform installer:
+
+```bash
+src/platform/apple_desktop/package_minimal_release.sh
+```
+
+Produces `target/release/Bad_Apple-<version>-unsigned.zip` and `Bad_Apple-<version>-full-unsigned.zip`. The .app bundle includes `badapple-dashboard`, the `web/` Control Center assets, `update_bad_apple.sh`, `strip_quarantine.sh`, and the platform installer.
+
+For an app-only zip (no source subset), use:
 
 ```bash
 src/platform/apple_desktop/package_unsigned.sh
 ```
 
-Produces `target/release/Bad_Apple-<version>-unsigned.zip`. The .app bundle now includes `Contents/Resources/update_bad_apple.sh`, `strip_quarantine.sh`, the `badapple-dashboard` helper, and the `web/` Control Center assets.
+Produces `target/release/Bad_Apple-<version>-app-unsigned.zip`.
 
 ## Update Bad Apple
 
@@ -406,10 +415,22 @@ cargo clippy --release
 
 - No hardcoded `/Users/savag3` or dev paths remain in source. LaunchAgent plists use `__REPO_ROOT__` and `__HOME__` placeholders that installers substitute at install time.
 - `package_full_release.sh` excludes dev artifacts (`.cargo`, `.DS_Store`, `state.*`, `state-backup*`, `sapient_agi_soul*`, `test_*.wasm`, `test_cage`, `wild_workspace`, `strategy_db`, `data`, `voices`, `curriculum`, `com.badapple.substrate*` legacy plists, and `install_daemon.sh`).
-## v0.1.5 — Bundled dashboard and consumer packaging
+## v0.1.5 — Control Center tabs, Curious, MCP, CSRF, and consumer packaging
 
-- `badapple-dashboard` and the `web/` Control Center assets are now bundled into
-  the app bundle (`Bad Apple.app/Contents/Helpers/badapple-dashboard` and
+- The web Control Center at `/control` now has six tabs: Overview, Memory, Models,
+  MCP, Curious, and Workshop.
+- Dashboard data paths were unified with the engine: personas, custom tools, and
+  Curious proposals all live under `~/.bad_apple/`.
+- Model listing/switching/verification and MCP server add/remove are now available
+  from `/control` as well as the standalone `/models` and `/mcp` pages.
+- `POST /api/curious_proposals` with `action: list|apply|reject|dismiss|archive`
+  provides human-in-the-loop review of Curious autopilot proposals.
+- `POST /api/workshop/preview` and `POST /api/workshop/preview_tts` return
+  system-prompt, roast-bank, and TTS previews for a persona.
+- `GET /api/csrf` and the `X-CSRF-Token` header protect mutating `/api/*` routes
+  from cross-site requests.
+- `badapple-dashboard` and the `web/` Control Center assets are bundled into the
+  app bundle (`Bad Apple.app/Contents/Helpers/badapple-dashboard` and
   `Contents/Resources/web/`) and included in the release packages.
 - A new LaunchAgent `com.badapple.dashboard` is installed automatically by
   `install_badapple_platform.sh`. It binds to `127.0.0.1:8787` and loads the
@@ -424,7 +445,13 @@ cargo clippy --release
   ```bash
   src/platform/apple_desktop/package_minimal_release.sh
   ```
-  Produces `target/release/Bad_Apple-<version>-unsigned.zip`.
+  Produces `target/release/Bad_Apple-<version>-unsigned.zip` (Homebrew cask
+  artifact) and `Bad_Apple-<version>-full-unsigned.zip` (legacy updater package).
+- App-only zip (for people with a repo checkout):
+  ```bash
+  src/platform/apple_desktop/package_unsigned.sh
+  ```
+  Produces `target/release/Bad_Apple-<version>-app-unsigned.zip`.
 
 ## v0.1.4 — Control Center, Memory, and Workshop
 

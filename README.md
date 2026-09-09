@@ -13,10 +13,10 @@
 
 ## Download the public beta
 
-The latest public beta is **v0.1.4**:
+The latest public beta is **v0.1.5**:
 
-- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.4/Bad_Apple-0.1.4-unsigned.zip)** — unzip and run `sudo ./install.sh`
-- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.4)**
+- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.5/Bad_Apple-0.1.5-unsigned.zip)** — unzip and run `sudo ./install.sh`
+- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.5)**
 - Or install via Homebrew:
   ```bash
   brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
@@ -218,9 +218,10 @@ sudo src/platform/apple_desktop/strip_quarantine.sh
 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
-For release packaging and signing see `package_full_release.sh`,
+For release packaging and signing see `package_minimal_release.sh`
+(consumer/Homebrew cask artifact), `package_full_release.sh`,
 `package_homebrew_cask.sh`, `package_signed_release.sh`, and
-`package_unsigned.sh`.
+`package_unsigned.sh` (app-only zip).
 
 ## Quick Use
 

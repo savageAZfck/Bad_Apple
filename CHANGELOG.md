@@ -9,23 +9,25 @@ All notable changes to Bad Apple are documented in this file.
   tools from `~/.bad_apple/custom_tools.json`, exposes
   them in tool selection and model tool schemas, and executes shell, AppleScript,
   and macOS Shortcut custom tools through the existing policy cage.
-- **MCP page and API compatibility**: `/api/mcp_servers` now accepts `action`
-  dispatch (`list`, `tools`, `install`, `add`, `remove`, `invoke`) as well as
-  direct REST add/remove, and `web/mcp.html` has been updated to the new contract.
+- **MCP page and API compatibility**: `/api/mcp_servers` now supports direct
+  REST list/add/remove, and `web/mcp.html` has been rewritten to match.
 - **Curious autopilot proposal UI**: the Control Center now lists pending patch
   proposals from `~/.bad_apple/notes/proposed_patches/`, shows affected file,
   old/new text, reason, creation time, and status, and provides human-in-the-loop
   Approve/Reject/Dismiss/Refresh actions with safe old-string, backup, and path
   root checks.
 - **Control Center is the single cockpit**: model listing/switching and MCP
-  catalog, install, tool discovery, and invocation are now available from
-  `/control`.
+  server add/remove are now available from `/control` alongside Overview, Memory,
+  Curious, and Workshop.
 - **Persona voice and roast preview**: the Workshop persona editor adds a Preview
   panel for local system-prompt inference, roast-bank testing, and local TTS
   preview when TTS is available.
 - **Dashboard ships in the consumer package**: `badapple-dashboard` and `web/`
   assets are packaged with the unsigned release and installed/launched for
   normal users without a repository checkout.
+- **CSRF protection for the web dashboard**: all mutating `/api/*` routes require
+  a valid `X-CSRF-Token` header; `GET /api/csrf` supplies the token and the
+  bundled `csrf.js` refreshes it automatically for every page.
 
 ### Changed
 - Custom tool definitions are read from the same path the dashboard writes them

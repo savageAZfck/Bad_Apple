@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{Path, Request, State},
     http::header::AUTHORIZATION,
-    http::StatusCode,
+    http::{Method, StatusCode},
     middleware::{from_fn_with_state, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
@@ -32,6 +32,7 @@ struct DashboardState {
     helpers: HelperPaths,
     ocular: Arc<RwLock<OcularState>>,
     token: Option<String>,
+    csrf_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -100,15 +101,29 @@ fn main() -> Result<()> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let csrf_token = generate_csrf_token();
     let state = Arc::new(DashboardState {
         web_root: web_root.clone(),
         helpers,
         ocular: Arc::new(RwLock::new(OcularState::new())),
         token,
+        csrf_token,
     });
 
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     rt.block_on(run_server(port, state))
+}
+
+fn generate_csrf_token() -> Option<String> {
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
+    Some(
+        rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect(),
+    )
 }
 
 fn helper_paths() -> HelperPaths {
@@ -148,6 +163,31 @@ async fn require_token(
         }
     }
     Ok(next.run(req).await)
+}
+
+async fn csrf_middleware(
+    State(state): State<Arc<DashboardState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if let Some(expected) = &state.csrf_token {
+        let method = req.method();
+        if method != Method::GET && method != Method::HEAD && method != Method::OPTIONS {
+            let got = req
+                .headers()
+                .get("X-CSRF-Token")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("");
+            if got != expected {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+    Ok(next.run(req).await)
+}
+
+async fn csrf_handler(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
+    Json(json!({"csrf_token": state.csrf_token.as_deref().unwrap_or("")}))
 }
 
 async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
@@ -226,12 +266,14 @@ async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
             "/curious_proposals",
             get(curious_proposals_handler).post(curious_proposal_action_handler),
         )
+        .route("/csrf", get(csrf_handler))
         .route("/workshop/preview", post(workshop_preview_handler))
         .route("/workshop/preview_tts", post(workshop_preview_tts_handler))
         .route("/ambient", get(ambient_handler))
         .route("/ocular", get(ocular_handler))
         .route("/ocular", post(ocular_action_handler))
         .route("/ocular/screen.png", get(ocular_screen_handler))
+        .layer(from_fn_with_state(api_state.clone(), csrf_middleware))
         .layer(from_fn_with_state(api_state.clone(), require_token))
         .with_state(api_state);
 

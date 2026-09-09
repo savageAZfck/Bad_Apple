@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build Bad Apple.app unsigned and package it into a consumer .zip.
+# Build Bad Apple.app unsigned and package it into an app-only .zip.
+# This is a quick bundle for people who already have the source tree.
+# For the consumer/Homebrew package, use package_minimal_release.sh.
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "${REPO_ROOT}"
@@ -9,7 +11,7 @@ cd "${REPO_ROOT}"
 VERSION="$(awk -F'"' '/^\[package\]/{p=1} p && /^version = /{print $2; exit}' Cargo.toml)"
 BUILD_DIR="${REPO_ROOT}/target/release"
 APP_DIR="${BUILD_DIR}/Bad Apple.app"
-ZIP_PATH="${BUILD_DIR}/Bad_Apple-${VERSION}-unsigned.zip"
+ZIP_PATH="${BUILD_DIR}/Bad_Apple-${VERSION}-app-unsigned.zip"
 
 echo "Building release binaries..."
 cargo build --release

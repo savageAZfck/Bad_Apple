@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="">
   <title>Bad Apple — MCP Marketplace</title>
-  <link rel="stylesheet" href="/static/styles.css?v=8">
+  <link rel="stylesheet" href="/static/styles.css?v=9">
 </head>
 <body>
   <aside class="sidebar">
@@ -30,142 +31,121 @@
 
   <main class="content">
     <h2>Tool Marketplace (MCP)</h2>
-    <p class="subtitle">Register local MCP servers and call their tools through Bad Apple.</p>
+    <p class="subtitle">Register local MCP servers. They run on your Mac, not in the cloud.</p>
 
-    <section class="card">
-      <h3>Catalog</h3>
-      <div id="catalog"><span class="text-tertiary">Loading...</span></div>
-    </section>
-
-    <section class="card">
-      <h3>Installed servers</h3>
-      <div id="installed"><span class="text-tertiary">Loading...</span></div>
-    </section>
-
-    <section class="card">
+    <section class="card" style="margin-bottom:1.25rem;">
       <h3>Custom server</h3>
+      <p class="muted">Add a server by ID and command. The first word becomes the command; the rest become args.</p>
       <div class="form-row">
-        <input type="text" id="custom-name" placeholder="my_server" style="width:140px;">
-        <input type="text" id="custom-cmd" placeholder="npx -y @modelcontextprotocol/server-filesystem ~/Documents" class="grow">
+        <label for="mcp-id">ID</label>
+        <input type="text" id="mcp-id" placeholder="fs" style="width:140px;">
+      </div>
+      <div class="form-row">
+        <label for="mcp-name">Name (optional, defaults to ID)</label>
+        <input type="text" id="mcp-name" placeholder="Filesystem" class="grow">
+      </div>
+      <div class="form-row">
+        <label for="mcp-command">Command line</label>
+        <input type="text" id="mcp-command" placeholder="npx -y @modelcontextprotocol/server-filesystem /Users/you/Documents" class="grow">
+      </div>
+      <div class="form-row">
+        <label for="mcp-env">Env JSON (optional)</label>
+        <input type="text" id="mcp-env" placeholder='{"KEY":"value"}' class="grow">
+      </div>
+      <div class="form-row">
+        <label for="mcp-transport">Transport</label>
+        <select id="mcp-transport">
+          <option value="stdio">stdio</option>
+          <option value="sse">SSE</option>
+          <option value="socket">Unix socket</option>
+        </select>
+      </div>
+      <div class="actions">
         <button onclick="addServer()">Add</button>
       </div>
+      <pre id="mcp-add-result" class="log" style="margin-top:1rem;"></pre>
     </section>
 
-    <section class="card" id="tool-panel" style="display:none;">
-      <h3>Invoke tool</h3>
-      <div class="form-row">
-        <select id="tool-select"></select>
-        <input type="text" id="tool-args" placeholder='{"path": "/tmp"}' class="grow">
-        <button onclick="invokeTool()">Invoke</button>
-      </div>
-      <pre id="tool-result"></pre>
+    <section class="card">
+      <h3>Registered servers</h3>
+      <p class="muted">These servers are persisted to <code>~/.bad_apple/mcp_catalog.json</code>.</p>
+      <div id="mcp-list"><p class="muted">Loading...</p></div>
     </section>
   </main>
 
+  <script src="/static/csrf.js"></script>
   <script>
-    function mcpCsrfToken() {
-      return (window.csrfToken ? window.csrfToken() : document.querySelector('meta[name="csrf-token"]')?.content) || '';
+    function esc(s) {
+      if (!s) return '';
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
-    function mcpCsrfHeaders() {
-      const token = mcpCsrfToken();
-      return token ? { 'X-CSRF-Token': token } : {};
-    }
-    async function api(path, body) {
-      const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json', ...mcpCsrfHeaders()}, body: JSON.stringify({...body, csrf_token: mcpCsrfToken()}) });
-      if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+
+    async function api(path, method, body) {
+      const token = localStorage.getItem('badapple_dashboard_token') || '';
+      const opts = { method: method || 'GET', headers: {} };
+      if (token) opts.headers['Authorization'] = `Bearer ${token}`;
+      if (body) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      const r = await fetch(path, opts);
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
       return r.json();
     }
 
-    async function loadCatalog() {
-      const data = await fetch('/api/mcp_registry').then(r => r.json());
-      const div = document.getElementById('catalog');
-      div.innerHTML = '';
-      const servers = data.servers || [];
-      if (!servers.length) { div.innerHTML = '<p class="muted">No catalog entries.</p>'; return; }
-      servers.forEach(s => {
-        const d = document.createElement('div');
-        d.className = 'model-row';
-        d.innerHTML = `
-          <div class="model-info"><div class="name">${escapeHtml(s.name)}</div><div class="meta">${escapeHtml(s.description)} · ${escapeHtml(s.install_type)}</div></div>
-          <div class="actions"><button onclick="installServer('${s.name}')">Install</button></div>
-        `;
-        div.appendChild(d);
-      });
-    }
-
-    async function loadInstalled() {
-      const data = await api('/api/mcp_servers', {action: 'list'});
-      const div = document.getElementById('installed');
-      div.innerHTML = '';
-      const servers = data.servers || [];
-      if (!servers.length) { div.innerHTML = '<p class="muted">No MCP servers registered.</p>'; return; }
-
-      const panel = document.getElementById('tool-panel');
-      const select = document.getElementById('tool-select');
-      select.innerHTML = '';
-
-      for (const s of servers) {
-        const tools = await api('/api/mcp_servers', {action: 'tools', name: s.name});
-        const toolList = (tools.tools || []).map(t => t.name).join(', ');
-        const d = document.createElement('div');
-        d.className = 'model-row';
-        d.innerHTML = `
-          <div class="model-info"><div class="name">${escapeHtml(s.name)}</div><div class="meta">${escapeHtml(s.command.join(' '))}</div><div class="meta">Tools: ${toolList || 'none'}</div></div>
-          <div class="actions"><button class="secondary" onclick="removeServer('${s.name}')">Remove</button></div>
-        `;
-        div.appendChild(d);
-
-        (tools.tools || []).forEach(t => {
-          const opt = document.createElement('option');
-          opt.value = JSON.stringify({server: s.name, tool: t.name});
-          opt.textContent = `${s.name} / ${t.name}`;
-          select.appendChild(opt);
-        });
-      }
-      panel.style.display = select.options.length ? 'block' : 'none';
-    }
-
-    async function installServer(name) {
+    async function loadServers() {
+      const list = document.getElementById('mcp-list');
+      list.innerHTML = '<p class="muted">Loading...</p>';
       try {
-        const res = await api('/api/mcp_servers', {action: 'install', name});
-        alert(res.result || JSON.stringify(res));
-        loadInstalled();
-      } catch (e) { alert(e.message); }
+        const data = await api('/api/mcp_servers', 'GET');
+        const servers = data.servers || [];
+        if (!servers.length) { list.innerHTML = '<p class="muted">No MCP servers registered.</p>'; return; }
+        list.innerHTML = servers.map(s => `
+          <div class="item">
+            <div class="info">
+              <div class="name">${esc(s.id)} <span class="muted">${esc(s.name || '')}</span></div>
+              <div class="desc">${esc(s.command)} ${esc((s.args || []).join(' '))}</div>
+              <div class="desc">transport: ${esc(s.transport || 'stdio')} · enabled: ${s.enabled ? 'yes' : 'no'} · installed: ${s.installed ? 'yes' : 'no'}</div>
+            </div>
+            <div class="actions">
+              <button class="danger" onclick="removeServer('${esc(s.id)}')">Remove</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) { list.innerHTML = '<p class="muted">Error: ' + esc(e.message) + '</p>'; }
     }
 
     async function addServer() {
-      const name = document.getElementById('custom-name').value.trim();
-      const cmd = document.getElementById('custom-cmd').value.trim();
-      if (!name || !cmd) return;
+      const id = document.getElementById('mcp-id').value.trim();
+      const name = document.getElementById('mcp-name').value.trim() || id;
+      const line = document.getElementById('mcp-command').value.trim();
+      const parts = line.split(/\s+/).filter(Boolean);
+      if (!id || parts.length === 0) { alert('ID and command are required'); return; }
+      const command = parts[0];
+      const args = parts.slice(1);
+      const transport = document.getElementById('mcp-transport').value;
+      let env = {};
       try {
-        const res = await api('/api/mcp_servers', {action: 'add', name, command: cmd});
-        alert(res.result || JSON.stringify(res));
-        loadInstalled();
+        const raw = document.getElementById('mcp-env').value.trim();
+        if (raw) env = JSON.parse(raw);
+      } catch (e) { document.getElementById('mcp-add-result').textContent = 'Invalid env JSON: ' + e.message; return; }
+      try {
+        const res = await api('/api/mcp_servers', 'POST', { id, name, command, args, env, description: '', transport });
+        document.getElementById('mcp-add-result').textContent = res.status === 'ok' ? 'Added server.' : JSON.stringify(res);
+        loadServers();
+      } catch (e) { document.getElementById('mcp-add-result').textContent = 'Error: ' + e.message; }
+    }
+
+    async function removeServer(id) {
+      if (!confirm(`Remove MCP server ${id}?`)) return;
+      try {
+        await api('/api/mcp_servers/' + encodeURIComponent(id), 'DELETE');
+        loadServers();
       } catch (e) { alert(e.message); }
     }
 
-    async function removeServer(name) {
-      if (!confirm(`Remove ${name}?`)) return;
-      try {
-        await api('/api/mcp_servers', {action: 'remove', name});
-        loadInstalled();
-      } catch (e) { alert(e.message); }
-    }
-
-    async function invokeTool() {
-      const meta = JSON.parse(document.getElementById('tool-select').value);
-      const args = JSON.parse(document.getElementById('tool-args').value || '{}');
-      try {
-        const res = await api('/api/mcp_servers', {action: 'invoke', ...meta, args});
-        document.getElementById('tool-result').textContent = JSON.stringify(res, null, 2);
-      } catch (e) { document.getElementById('tool-result').textContent = e.message; }
-    }
-
-    function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
-    loadCatalog();
-    loadInstalled();
-    setInterval(loadInstalled, 5000);
+    loadServers();
+    setInterval(loadServers, 5000);
   </script>
 </body>
 </html>

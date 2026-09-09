@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="">
   <title>Bad Apple — Control Center</title>
   <link rel="stylesheet" href="/static/styles.css?v=9">
   <style>
@@ -333,24 +334,33 @@
 
   <div id="toast" class="toast"></div>
 
+  <script src="/static/csrf.js?v=9"></script>
   <script>
     const tokenInput = document.getElementById('dashboard-token');
     if (tokenInput) tokenInput.value = localStorage.getItem('badapple_dashboard_token') || '';
 
-    function api(path, method, body) {
+    async function api(path, method, body) {
       const token = localStorage.getItem('badapple_dashboard_token') || '';
-      const opts = { method: method || 'GET', headers: {} };
-      if (token) {
-        opts.headers['Authorization'] = `Bearer ${token}`;
-      }
-      if (body) {
-        opts.headers['Content-Type'] = 'application/json';
-        opts.body = JSON.stringify(body);
-      }
-      return fetch(path, opts).then(r => {
+      const call = async () => {
+        const opts = { method: method || 'GET', headers: {} };
+        if (token) opts.headers['Authorization'] = `Bearer ${token}`;
+        if (body) {
+          opts.headers['Content-Type'] = 'application/json';
+          opts.body = JSON.stringify(body);
+        }
+        const r = await fetch(path, opts);
         if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`);
         return r.json();
-      });
+      };
+      try {
+        return await call();
+      } catch (e) {
+        if (e.message && e.message.startsWith('403') && window.refreshCsrfToken) {
+          const ok = await window.refreshCsrfToken();
+          if (ok) return call();
+        }
+        throw e;
+      }
     }
 
     function toast(msg, type) {
