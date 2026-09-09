@@ -300,8 +300,9 @@ In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple
   `tier` toggle is available from the CLI: `fast tier on` / `fast tier off`.
   Working memory can be read/written via `read_working_memory` and
   `write_working_memory` tools.
-- The Swift menu bar persona editor and full control-center UI are not currently
-  available from the web dashboard.
+- The web dashboard now provides a full Control Center (`/control`) with Overview,
+  Memory, and Workshop tabs. The native Swift menu bar persona editor remains a
+  separate native interface.
 - Fast tiering is controlled by the `BADAPPLE_FAST_TIER` setting in
   `com.badapple.mlx.plist`, the CLI `fast tier on`/`off`, and the menu bar
   `Fast Tier Only` toggle. When on, simple math, identity, time, and greeting
@@ -364,7 +365,7 @@ cargo clippy --release
 - MCP marketplace is now available via `badapple mcp list|add|remove|install|uninstall|start|stop|status|init`. The catalog is stored at `BADAPPLE_MCP_CATALOG_PATH`.
 - The full unsigned release package builds successfully with `src/platform/apple_desktop/package_full_release.sh` (output `target/release/Bad_Apple-<version>-full-unsigned.zip`).
 - Signed packaging is supported via `src/platform/apple_desktop/package_signed_release.sh` with `CODESIGN_ID`. Self-signed dev certificates can be created with `src/platform/apple_desktop/create_dev_signing_cert.sh`. Notarization requires an Apple Developer ID.
-- Workspace file watching, MCP marketplace, dashboard ambient context, and ocular screen-stream endpoints are now available. Automatic fact extraction is being ported to Rust/Swift and is not currently available.
+- Workspace file watching, MCP marketplace, dashboard ambient context, and ocular screen-stream endpoints are now available. Automatic fact extraction is available through the dashboard's Memory tab and `/api/memory/facts/extract`.
 - The web dashboard is served by `badapple-dashboard` on port 8787. The Swift
   menu bar persona editor and full control-center UI are not currently available
   from the web.
@@ -380,7 +381,7 @@ cargo clippy --release
 - Chat view: streaming markdown, code blocks, tool-call cards, generated-image preview, scroll-to-bottom, auto-resize textarea.
 - Settings view: workspace setter, MCP server list/add/remove, active models, runtime toggles (autopilot, fast tier, P2P).
 - Dashboard view: status cards, P2P peers, latest perf, log tail.
-- Control center (`/control`): kill/resume, autopilot, fast tier, ambient, P2P, VRAM flush, CLI override.
+- Control center (`/control`): Overview tab (runtime status, toggles, audit/cert/doctor, workspace, working memory), Memory tab (working memory, fact bank, automatic extraction, directory indexing), and Workshop tab (persona and custom tool creation/editing/activation).
 - MCP marketplace (`/mcp`): install from catalog, register custom servers, list tools, invoke tools.
 - Onboarding modal shown once for new browsers.
 - Native boot splash: `BadAppleSplashWindow` in `BadAppleMenuBar.swift` shows a progress bar on macOS app launch and auto-closes.
@@ -396,6 +397,24 @@ cargo clippy --release
 
 - No hardcoded `/Users/savag3` or dev paths remain in source. LaunchAgent plists use `__REPO_ROOT__` and `__HOME__` placeholders that installers substitute at install time.
 - `package_full_release.sh` excludes dev artifacts (`.cargo`, `.DS_Store`, `state.*`, `state-backup*`, `sapient_agi_soul*`, `test_*.wasm`, `test_cage`, `wild_workspace`, `strategy_db`, `data`, `voices`, `curriculum`, `com.badapple.substrate*` legacy plists, and `install_daemon.sh`).
+## v0.1.4 — Control Center, Memory, and Workshop
+
+- The web Control Center at `/control` now has three tabs: Overview, Memory, and Workshop.
+- New dashboard API routes (all under `/api` and behind `BADAPPLE_DASHBOARD_TOKEN` bearer auth and CSRF):
+  - `POST /control` for runtime toggles and actions (`kill switch`, `resume`, `autopilot on/off`, `fast tier on/off`, `private mode on/off`, `airgap on/off`, `flush vram`, `unload all models`, `set workspace ...`).
+  - `GET /snapshot`, `GET /tail`, `GET /ledger`, `GET /audit`, `GET /cert`, `GET /doctor`, `GET /voice`, `GET /capabilities`.
+  - `GET/POST /workspace`, `GET/POST /working_memory`.
+  - `GET/POST/DELETE /memory/facts`, `POST /memory/facts/extract`, `POST /memory/facts/index`.
+  - `GET/POST /workshop/personas`, `GET/DELETE /workshop/personas/:id`.
+  - `GET/POST /workshop/custom_tools`, `GET/DELETE /workshop/custom_tools/:id`, `POST /workshop/custom_tools/:id/run`.
+  - `GET/POST /mcp_servers`, `GET /mcp_registry` as compatibility aliases for `/mcp/servers`.
+- Automatic local fact extraction: `POST /memory/facts/extract` with `text` or `path` (path must be inside home, `/tmp`, `/var/tmp`, or the workspace). The local 7B model extracts JSON `subject-predicate-object` triples and they are appended to `/var/lib/bad_apple/memory_graph/facts.json`.
+- `POST /memory/facts/index` walks a directory up to depth 4 and 50 text files and extracts facts from each.
+- Persona Workshop saves to `~/.bad_apple/personas.json` and seeds from `personas.json` in the repo. The engine reloads personas before switching, so new workshop personas are active immediately.
+- Custom Tool Workshop saves declarative shell / AppleScript / macOS Shortcut definitions to `~/.bad_apple/custom_tools.json` and runs them with argument interpolation (`{{1}}`, `{{2}}`, ...).
+- `inference` agent call now accepts `system_prompt` and `temperature` parameters; the dashboard uses `temperature: 0` for deterministic structured generation.
+- `BadAppleEngine.generate` now accepts an optional `temperature` parameter (default `0.6`). A new `generateRaw` method bypasses persona, ambient context, and cache for structured tasks.
+
 - CI-style suite:
   ```bash
   cargo fmt --check && cargo build --release && cargo test --release
