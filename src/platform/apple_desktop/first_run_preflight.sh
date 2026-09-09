@@ -54,7 +54,7 @@ fi
 ram_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
 ram_gb=$((ram_bytes / 1024 / 1024 / 1024))
 if [[ "$ram_gb" -lt "$MIN_RAM_GB" ]]; then
-  fail "Only $ram_gb GB RAM. Bad Apple needs at least ~$MIN_RAM_GB GB for the 7B model."
+  fail "Only $ram_gb GB RAM. Bad Apple needs at least ~$MIN_RAM_GB GB total (the 7B model uses about 4 GB at peak)."
   ((error_count++)) || true
 elif [[ "$ram_gb" -lt "$REC_RAM_GB" ]]; then
   warn "$ram_gb GB RAM. This is below the recommended $REC_RAM_GB GB. macOS may be tight."

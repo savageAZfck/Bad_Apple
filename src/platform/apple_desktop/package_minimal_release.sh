@@ -163,7 +163,10 @@ What the installer does:
 Requirements:
 - macOS 26.0 or later
 - Apple Silicon (M1 or newer)
-- 8 GB of unified memory minimum, 16 GB recommended
+- 8 GB of unified memory minimum, 16 GB recommended. The 7B model uses about
+  4 GB at peak.
+- 40 GB of free disk space for the OS, model cache, and swap. The 7B model
+  weights are about 4-6 GB on disk once cached.
 
 Model downloads (~4-6 GB for the default model) require explicit permission
 through the menu bar or BADAPPLE_ALLOW_DOWNLOADS=1. Cached weights are reused.

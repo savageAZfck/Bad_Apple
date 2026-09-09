@@ -82,8 +82,9 @@ it fails, fix the listed item:
 
 - **macOS version**: macOS 26.0 or later is required.
 - **Apple Silicon**: Bad Apple runs on arm64 only.
-- **RAM**: 8 GB is the practical minimum, 16 GB is comfortable. On 8 GB the
-  installer sets a smaller KV cache automatically.
+- **RAM**: 8 GB is the practical minimum, 16 GB is comfortable. The 7B model
+  uses about 4 GB at peak; the rest is for macOS. On 8 GB the installer sets a
+  smaller KV cache automatically.
 - **Disk**: Keep at least 40 GB free for the OS, model, and swap.
 - **Xcode / CLT**: Run `xcode-select --install`.
 - **Model cache**: First launch downloads the 7B model if it is not cached.

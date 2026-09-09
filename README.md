@@ -74,10 +74,10 @@ verification, and a hard block on core control files. This version also creates
 the missing `/var/lib/bad_apple/blocklist.txt` automatically and tightens the
 output firewall check so the cert suite stays clean.
 
-**Hardware:** Apple Silicon Mac (M1 or newer). 8 GB unified memory is the practical
-floor and 16 GB is recommended. Runtime requirements vary with the selected
-weights, context settings, and other applications; installation does not reserve
-memory for Bad Apple.
+**Hardware:** Apple Silicon Mac (M1 or newer). **8 GB unified memory** is the
+practical minimum and **16 GB** is recommended for comfortable use. The 7B model
+uses about **4 GB** at peak; the rest is for macOS and other apps. Keep at least
+**40 GB free** for the OS, model cache, and swap.
 
 See [Bad_Apple_Ranking.md](Bad_Apple_Ranking.md) for the full ranking,
 benchmarks, and competitive placement.

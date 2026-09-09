@@ -82,7 +82,9 @@ What the installer does:
 Requirements:
 - macOS 26.0 or later
 - Apple Silicon (M1 or newer)
-- 8 GB of unified memory minimum, 16 GB recommended
+- 8 GB of unified memory minimum, 16 GB recommended. The 7B model uses about
+  4 GB at peak.
+- 40 GB of free disk space for the OS, model cache, and swap.
 
 The first launch will download model weights (~4-6 GB) if they are not cached.
 For an air-gap install, seed the model cache before running the installer.
