@@ -73,6 +73,8 @@ BACKUP_DIR="${BACKUP_ROOT}/${RELEASE_ID}"
 [[ -f "${REPO_ROOT}/target/release/libBadAppleMLX.dylib" ]] || fail "MLX runtime dylib is missing"
 [[ -f "${REPO_ROOT}/target/release/mlx.metallib" ]] || fail "MLX metallib is missing"
 [[ -x "/Applications/Bad Apple.app/Contents/MacOS/BadApple" ]] || fail "menu bar app is not installed"
+[[ -x "/Applications/Bad Apple.app/Contents/Helpers/badapple-dashboard" ]] || fail "dashboard binary is missing from app bundle"
+[[ -d "/Applications/Bad Apple.app/Contents/Resources/web" ]] || fail "dashboard web assets are missing from app bundle"
 
 render_plist() {
     local src="$1" dst="$2"
@@ -133,7 +135,7 @@ if [[ -d "${HF_CACHE}" ]]; then
 fi
 
 DAEMONS=(com.badapple.gatekeeper com.badapple.mlx com.badapple.supervisor)
-AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar)
+AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard)
 AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 for label in "${DAEMONS[@]}"; do
     target="/Library/LaunchDaemons/${label}.plist"
@@ -249,6 +251,12 @@ if [[ -x "${REPO_ROOT}/target/release/badapple-tts" ]]; then
 fi
 
 run_user "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
+
+# Web Control Center (loopback-only dashboard).
+if [[ -x "/Applications/Bad Apple.app/Contents/Helpers/badapple-dashboard" ]]; then
+    run_user "${REPO_ROOT}/src/platform/apple_desktop/install_dashboard_agent.sh"
+fi
+
 trap - EXIT INT TERM
 
 echo "Bad Apple platform ${RELEASE_ID} installed and verified."

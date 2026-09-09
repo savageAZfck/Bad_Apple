@@ -10,6 +10,98 @@ import Dispatch
 import CommonCrypto
 import Darwin
 
+// MARK: - Custom Workshop Tools
+
+/// A user-defined tool created in the Control Center Workshop and stored in
+/// `~/.bad_apple/custom_tools.json`. The engine loads these and treats them as
+/// first-class tools the local 7B model can invoke.
+struct WorkshopCustomTool: Codable, Equatable {
+    let id: String
+    let name: String
+    let description: String
+    let kind: String
+    let command: String
+    let args: [String]
+
+    /// Parameter names exposed to the model. If `args` is empty the tool
+    /// takes no parameters.
+    var parameters: [BadAppleToolRouter.BadAppleTool.Parameter] {
+        args.map { .init(name: $0, description: "Argument \($0)", required: true) }
+    }
+
+    /// Convert to a native tool definition for prompt schema generation.
+    func asBadAppleTool() -> BadAppleToolRouter.BadAppleTool {
+        BadAppleToolRouter.BadAppleTool(
+            name: id,
+            description: description.isEmpty ? "Custom tool \(id)" : description,
+            parameters: parameters,
+            requiresApproval: true
+        )
+    }
+}
+
+/// On-disk shape of `~/.bad_apple/custom_tools.json`: the id is the map key.
+private struct WorkshopCustomToolValue: Codable, Equatable {
+    let name: String
+    let description: String
+    let kind: String
+    let command: String
+    let args: [String]
+}
+
+/// Shared, thread-unsafe cache for custom tools. Reads the JSON file on demand
+/// and caches by mtime. Callers must externally serialize or call from a single
+/// actor/queue.
+final class CustomToolStore {
+    static let shared = CustomToolStore()
+
+    private var lastMtime: Date?
+    private var tools: [WorkshopCustomTool] = []
+    private var fileURL: URL {
+        // Align with the dashboard's data directory (`dirs::data_dir()/bad_apple`).
+        // Use NSHomeDirectory() so the root daemon respects the HOME env var.
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        let appSupport = home.appendingPathComponent("Library/Application Support")
+        let dir = appSupport.appendingPathComponent("bad_apple")
+        return dir.appendingPathComponent("custom_tools.json")
+    }
+
+    /// Return the current list of custom tools, reloading if the file changed.
+    func reload() -> [WorkshopCustomTool] {
+        let fm = FileManager.default
+        let url = fileURL
+        guard fm.fileExists(atPath: url.path) else {
+            lastMtime = nil
+            tools = []
+            return []
+        }
+
+        do {
+            let attrs = try fm.attributesOfItem(atPath: url.path)
+            let mtime = attrs[.modificationDate] as? Date
+            if let mtime, let last = lastMtime, mtime <= last {
+                return tools
+            }
+            lastMtime = mtime
+            let data = try Data(contentsOf: url)
+            let decoded = try JSONDecoder().decode([String: WorkshopCustomToolValue].self, from: data)
+            tools = decoded.map { (id, value) in
+                WorkshopCustomTool(
+                    id: id,
+                    name: value.name,
+                    description: value.description,
+                    kind: value.kind,
+                    command: value.command,
+                    args: value.args
+                )
+            }
+            return tools
+        } catch {
+            return tools
+        }
+    }
+}
+
 // MARK: - Regex Helpers
 
 /// Replace all matches of a regex pattern in a string with a template.
@@ -380,14 +472,14 @@ func postprocessOutput(_ text: String) -> String {
 final class BadAppleToolRouter: @unchecked Sendable {
 
     /// A single tool definition.
-    struct BadAppleTool: Codable {
+    struct BadAppleTool: Codable, Equatable {
         let name: String
         let description: String
         let parameters: [Parameter]
         let requiresApproval: Bool
 
         /// A single named parameter for a tool.
-        struct Parameter: Codable {
+        struct Parameter: Codable, Equatable {
             let name: String
             let description: String
             let required: Bool
@@ -660,9 +752,56 @@ final class BadAppleToolRouter: @unchecked Sendable {
         ),
     ]
 
+    /// Workshop/custom tools loaded from `~/.bad_apple/custom_tools.json`.
+    /// Mutable so we can hot-reload without restarting the model.
+    private var customTools: [BadAppleTool] = []
+    private var customToolKeywords: [String] = []
+    private var customKeywordMap: [(keywords: [String], toolNames: [String])] = []
+    private var customToolExampleArgs: [String: String] = [:]
+
     /// Names in the native registry, exposed for discovery and logic tests.
     func registeredToolNames() -> [String] {
-        tools.map(\.name)
+        reloadCustomToolsIfNeeded()
+        return tools.map(\.name) + customTools.map(\.name)
+    }
+
+    /// Load or refresh the custom tool definitions from disk.
+    func reloadCustomToolsIfNeeded() {
+        let loaded = CustomToolStore.shared.reload()
+        let converted = loaded.map { $0.asBadAppleTool() }
+        guard converted != customTools else { return }
+        customTools = converted
+
+        customKeywordMap = converted.map { tool in
+            let nameWords = tool.name.split(separator: "_").map(String.init)
+            let descWords = tool.description
+                .lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty && $0.count > 2 }
+            let keywords = Array(Set(nameWords + descWords)).sorted()
+            return (keywords: keywords, toolNames: [tool.name])
+        }
+
+        customToolKeywords = customKeywordMap.flatMap { $0.keywords }
+
+        customToolExampleArgs = Dictionary(uniqueKeysWithValues: loaded.map { tool in
+            let pairs = tool.args.enumerated().map { index, arg in
+                "\"\(arg)\":\"value\(index + 1)\""
+            }
+            return (tool.id, pairs.joined(separator: ","))
+        })
+    }
+
+    /// All tool definitions, native + workshop, with a fresh custom-tool reload.
+    private func allTools() -> [BadAppleTool] {
+        reloadCustomToolsIfNeeded()
+        return tools + customTools
+    }
+
+    /// Keyword maps for both native and custom tools.
+    private func allKeywordMaps() -> [(keywords: [String], toolNames: [String])] {
+        reloadCustomToolsIfNeeded()
+        return keywordToolMap + customKeywordMap
     }
 
     // MARK: - Keyword Maps
@@ -756,10 +895,11 @@ final class BadAppleToolRouter: @unchecked Sendable {
     /// Return formatted definitions for all tools. Used by the agent, which
     /// may need to pick from any available tool for a planned step.
     func allToolsForPrompt() -> String? {
-        guard !tools.isEmpty else { return nil }
+        let everyTool = allTools()
+        guard !everyTool.isEmpty else { return nil }
 
         var lines: [String] = ["Available tools:"]
-        for tool in tools {
+        for tool in everyTool {
             lines.append("")
             lines.append("[\(tool.name)] \u{2014} \(tool.description)")
             if !tool.parameters.isEmpty {
@@ -784,7 +924,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
     func toolsForPrompt(text: String) -> String? {
         var selectedNames = Set<String>()
 
-        for (keywords, toolNames) in keywordToolMap {
+        for (keywords, toolNames) in allKeywordMaps() {
             if keywords.contains(where: { matchesKeyword($0, in: text) }) {
                 selectedNames.formUnion(toolNames)
             }
@@ -792,7 +932,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
 
         guard !selectedNames.isEmpty else { return nil }
 
-        let selected = tools.filter { selectedNames.contains($0.name) }
+        let selected = allTools().filter { selectedNames.contains($0.name) }
         guard !selected.isEmpty else { return nil }
 
         var lines: [String] = ["Available tools:"]
@@ -821,7 +961,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
     func toolSchemasForPrompt(text: String) -> [[String: Any]]? {
         var selectedNames = Set<String>()
 
-        for (keywords, toolNames) in keywordToolMap {
+        for (keywords, toolNames) in allKeywordMaps() {
             if keywords.contains(where: { matchesKeyword($0, in: text) }) {
                 selectedNames.formUnion(toolNames)
             }
@@ -829,7 +969,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
 
         guard !selectedNames.isEmpty else { return nil }
 
-        let selected = tools.filter { selectedNames.contains($0.name) }
+        let selected = allTools().filter { selectedNames.contains($0.name) }
         guard !selected.isEmpty else { return nil }
 
         return selected.map { tool in
@@ -899,7 +1039,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
             "resume": "",
         ]
 
-        let exampleArgs = argExamples[tool.name] ?? ""
+        let exampleArgs = argExamples[tool.name] ?? customToolExampleArgs[tool.name] ?? ""
         let args = exampleArgs.isEmpty ? "" : ",\"arguments\":{\(exampleArgs)}"
         let prefix = "<tool_call>{\"name\":\"" + tool.name + "\""
         let suffix = "\(args)}</tool_call>"
@@ -908,7 +1048,10 @@ final class BadAppleToolRouter: @unchecked Sendable {
 
     /// Heuristic: should the model be offered tools for this prompt?
     func shouldUseTools(prompt: String) -> Bool {
-        return toolKeywords.contains { matchesKeyword($0, in: prompt) }
+        let lowered = prompt.lowercased()
+        if toolKeywords.contains(where: { matchesKeyword($0, in: lowered) }) { return true }
+        reloadCustomToolsIfNeeded()
+        return customToolKeywords.contains(where: { matchesKeyword($0, in: lowered) })
     }
 
     // MARK: - Tool Call Extraction
@@ -1557,6 +1700,153 @@ final class BadApplePolicyEngine: @unchecked Sendable {
     }
 }
 
+// MARK: - Custom Tool Execution
+
+/// Standalone executor for user-defined workshop tools. Mirrors the dashboard's
+/// Rust runner and uses the same defensive boundaries.
+enum CustomToolExecutor {
+    /// Replace `{{1}}`, `{{2}}`, ... placeholders in a template with the
+    /// provided positional arguments.
+    static func interpolate(template: String, args: [String]) -> String {
+        var out = template
+        for (index, arg) in args.enumerated() {
+            let placeholder = String(repeating: "{", count: 2) + "\(index + 1)" + String(repeating: "}", count: 2)
+            out = out.replacingOccurrences(of: placeholder, with: arg)
+        }
+        return out
+    }
+
+    /// Shell-escape a string for use inside single quotes.
+    static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Run an interpolated shell command via `/bin/sh -c`. Rejects command
+    /// chaining metacharacters as a defensive boundary.
+    static func runShellCommand(_ command: String) -> String {
+        if command.contains(";") || command.contains("&&") || command.contains("||") || command.contains(">") {
+            return "Error: custom shell command contains disallowed metacharacters"
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        var stdoutData = Data()
+        var stderrData = Data()
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) {
+            stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+        DispatchQueue.global().async(group: group) {
+            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+
+        do {
+            try process.run()
+        } catch {
+            return "Error: \(error.localizedDescription)"
+        }
+
+        let timeout: TimeInterval = 30
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        if process.isRunning {
+            process.terminate()
+            group.wait()
+            return "Error: custom shell command timed out"
+        }
+
+        group.wait()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        if process.terminationStatus != 0, !stderr.isEmpty {
+            return "Error: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+        return stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "(no output)"
+            : String(stdout.prefix(10_000))
+    }
+
+    /// Run an interpolated AppleScript via `/usr/bin/osascript`. stdin is used
+    /// so multi-line scripts and quotes are preserved.
+    static func runAppleScript(_ script: String) -> String {
+        if script.count > 10_000 || script.contains("\0") {
+            return "Error: custom AppleScript is too large or contains invalid characters"
+        }
+        let lowered = script.lowercased()
+        let denied = [
+            "do shell script", "do script", "run script", "use framework",
+            "do javascript", "open location",
+            "current application", "current application's",
+            "keystroke", "key code",
+            "curl", "wget", "rm -rf",
+        ]
+        if let match = denied.first(where: { lowered.contains($0) }) {
+            return "Error: custom AppleScript contains denied operation '\(match)'"
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-"]
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let stdinPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.standardInput = stdinPipe
+
+        var stdoutData = Data()
+        var stderrData = Data()
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) {
+            stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+        DispatchQueue.global().async(group: group) {
+            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+
+        do {
+            try process.run()
+            stdinPipe.fileHandleForWriting.write(script.data(using: .utf8) ?? Data())
+            stdinPipe.fileHandleForWriting.closeFile()
+        } catch {
+            return "Error: \(error.localizedDescription)"
+        }
+
+        let timeout: TimeInterval = 30
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        if process.isRunning {
+            process.terminate()
+            group.wait()
+            return "Error: custom AppleScript timed out"
+        }
+
+        group.wait()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        if process.terminationStatus != 0, !stderr.isEmpty {
+            return "Error: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+        return stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "done"
+            : String(stdout.prefix(10_000))
+    }
+}
+
 // MARK: - BadAppleToolExecutor
 
 /// Executes tool calls with filesystem jail protection and policy enforcement.
@@ -1626,6 +1916,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         for real in allKnownToolNames.sorted(by: { $0.count > $1.count }) {
             if lower.contains(real) { return real }
         }
+
+        // Finally, check the workshop custom tools. They can shadow native names
+        // if the user created one with the same id.
+        let custom = CustomToolStore.shared.reload()
+        for tool in custom where tool.id == lower { return tool.id }
         return name
     }
 
@@ -1752,7 +2047,31 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         case "curious_self_improve":
             return await curiousSelfImprove(include: args["include"] ?? "all", approved: approved)
         default:
+            if let result = await executeCustomTool(name: resolved, args: args) {
+                return result
+            }
             return "Unknown tool: \(resolved)"
+        }
+    }
+
+    /// Run a workshop custom tool if it exists. Returns nil if no matching custom
+    /// tool is registered.
+    private func executeCustomTool(name: String, args: [String: String]) async -> String? {
+        let custom = CustomToolStore.shared.reload()
+        guard let tool = custom.first(where: { $0.id == name }) else { return nil }
+
+        let argList = tool.args.compactMap { args[$0] }
+        let interpolated = CustomToolExecutor.interpolate(template: tool.command, args: argList)
+
+        switch tool.kind.lowercased() {
+        case "shell":
+            return CustomToolExecutor.runShellCommand(interpolated)
+        case "applescript":
+            return CustomToolExecutor.runAppleScript(interpolated)
+        case "shortcut":
+            return runShortcut(name: tool.command, input: argList.first)
+        default:
+            return "Error: unknown custom tool kind '\(tool.kind)'"
         }
     }
 

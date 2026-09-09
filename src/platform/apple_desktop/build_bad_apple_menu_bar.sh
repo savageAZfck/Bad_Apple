@@ -224,6 +224,12 @@ echo "Installed badapple-engine and MLX runtime into ${BUILD_DIR}."
 install -d "${CONTENTS_DIR}/Helpers"
 install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev/null || true
 install -m 755 "${BUILD_DIR}/badapple-fetch" "${CONTENTS_DIR}/Helpers/badapple-fetch" 2>/dev/null || true
+if [[ -x "${BUILD_DIR}/badapple-dashboard" ]]; then
+    install -m 755 "${BUILD_DIR}/badapple-dashboard" "${CONTENTS_DIR}/Helpers/badapple-dashboard"
+    echo "Installed badapple-dashboard into app bundle."
+else
+    echo "warning: badapple-dashboard not found in ${BUILD_DIR}; dashboard will not be bundled." >&2
+fi
 
 # Screen capture helper runs as a child of the Bad Apple bundle so it uses
 # Bad Apple's Screen Recording permission instead of the Aqua helper.
@@ -272,6 +278,16 @@ install -d "${CONTENTS_DIR}/Resources"
 if [[ -d "${REPO_ROOT}/voices" ]]; then
     install -d "${CONTENTS_DIR}/Resources/voices"
     install -m 644 "${REPO_ROOT}/voices"/*.onnx* "${CONTENTS_DIR}/Resources/voices/" 2>/dev/null || true
+fi
+# Bundle the web dashboard (Control Center) and its static assets.
+if [[ -d "${REPO_ROOT}/web" ]]; then
+    install -d "${CONTENTS_DIR}/Resources/web"
+    cp -R "${REPO_ROOT}/web/." "${CONTENTS_DIR}/Resources/web/"
+    echo "Bundled web dashboard assets into ${CONTENTS_DIR}/Resources/web."
+fi
+# Seed personas for the dashboard workshop from the same file the engine uses.
+if [[ -f "${REPO_ROOT}/personas.json" ]]; then
+    install -m 644 "${REPO_ROOT}/personas.json" "${CONTENTS_DIR}/Helpers/personas.json"
 fi
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/update_bad_apple.sh" "${CONTENTS_DIR}/Resources/update_bad_apple.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${CONTENTS_DIR}/Resources/strip_quarantine.sh"

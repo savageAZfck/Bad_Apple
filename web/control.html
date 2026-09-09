@@ -84,6 +84,9 @@
     <div class="tabs">
       <button class="tab active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
       <button class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</button>
+      <button class="tab" data-tab="models" onclick="switchTab('models')">Models</button>
+      <button class="tab" data-tab="mcp" onclick="switchTab('mcp')">MCP</button>
+      <button class="tab" data-tab="curious" onclick="switchTab('curious')">Curious</button>
       <button class="tab" data-tab="workshop" onclick="switchTab('workshop')">Workshop</button>
     </div>
 
@@ -243,9 +246,13 @@
           <div class="form-row"><label for="persona-roasts">Roast bank (one per line, optional)</label><textarea id="persona-roasts" placeholder="Siri? Stuck buffering..."></textarea></div>
           <div class="actions">
             <button onclick="savePersona()">Save &amp; switch</button>
+            <button class="secondary" onclick="previewPersona('system')">Preview system</button>
+            <button class="secondary" onclick="previewPersona('roast')">Preview roast</button>
+            <button class="secondary" onclick="previewPersona('tts')">Preview TTS</button>
             <button class="secondary" onclick="hidePersonaEditor()">Cancel</button>
             <button class="danger" id="persona-delete" style="display:none;" onclick="deletePersona()">Delete</button>
           </div>
+          <pre id="persona-preview" class="log" style="margin-top:1rem; min-height:4rem;"></pre>
           <pre id="persona-result" class="log" style="margin-top:1rem;"></pre>
         </div>
 
@@ -284,6 +291,44 @@
         </div>
       </div>
     </section>
+
+    <!-- Models -->
+    <section class="section" id="tab-models">
+      <div class="card" style="grid-column: 1 / -1;">
+        <h3>Local model registry</h3>
+        <p class="muted">Switch active models, verify checksums, or re-scan the cache.</p>
+        <div id="models-list" style="margin-top:1rem;"></div>
+      </div>
+    </section>
+
+    <!-- MCP -->
+    <section class="section" id="tab-mcp">
+      <div class="grid-2">
+        <div class="card" style="grid-column: 1 / -1;">
+          <h3>MCP servers</h3>
+          <p class="muted">Add, remove, and inspect local MCP servers.</p>
+          <div id="mcp-list" style="margin-top:1rem;"></div>
+        </div>
+        <div class="card">
+          <h3>Add server</h3>
+          <div class="form-row"><label for="mcp-id">ID</label><input id="mcp-id" type="text" placeholder="fs"></div>
+          <div class="form-row"><label for="mcp-command">Command</label><input id="mcp-command" type="text" placeholder="npx -y @modelcontextprotocol/server-filesystem"></div>
+          <div class="form-row"><label for="mcp-args">Args (space-separated)</label><input id="mcp-args" type="text" placeholder="/Users/you/Documents"></div>
+          <div class="form-row"><label for="mcp-env">Env (JSON object, optional)</label><input id="mcp-env" type="text" placeholder='{"KEY":"value"}'></div>
+          <button onclick="addMcpServer()">Add</button>
+          <pre id="mcp-result" class="log" style="margin-top:1rem;"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Curious -->
+    <section class="section" id="tab-curious">
+      <div class="card" style="grid-column: 1 / -1;">
+        <h3>Autopilot proposals</h3>
+        <p class="muted">Review Curious self-improvement proposals. Apply safe patches, or archive rejected ones.</p>
+        <div id="curious-list" style="margin-top:1rem;"></div>
+      </div>
+    </section>
   </main>
 
   <div id="toast" class="toast"></div>
@@ -319,6 +364,9 @@
       document.querySelectorAll('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
       document.querySelectorAll('.section').forEach(el => el.classList.toggle('active', el.id === 'tab-' + tab));
       if (tab === 'memory') loadWorkingMemory();
+      if (tab === 'models') loadControlModels();
+      if (tab === 'mcp') loadMcpControl();
+      if (tab === 'curious') loadCurious();
       if (tab === 'workshop') { loadPersonas(); loadCustomTools(); }
       location.hash = tab;
     }
@@ -702,6 +750,154 @@
     function esc(s) {
       if (!s) return '';
       return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // Models
+    async function loadControlModels() {
+      const list = document.getElementById('models-list');
+      list.innerHTML = '<p class="muted">Loading models...</p>';
+      try {
+        const data = await api('/api/models');
+        if (!data.models || !data.models.length) { list.innerHTML = '<p class="muted">No models registered.</p>'; return; }
+        list.innerHTML = data.models.map(m => `
+          <div class="item">
+            <div class="info">
+              <div class="name">${esc(m.name || m.id)} <span class="muted">${esc(m.id)}</span></div>
+              <div class="desc">status: ${esc(m.status)} · size: ${m.size_gb} GB · active: ${m.active ? 'yes' : 'no'} · verified: ${m.verified ? 'yes' : 'no'}</div>
+            </div>
+            <div class="actions">
+              <button class="secondary" onclick="useModel('${esc(m.id)}')">Use</button>
+              <button class="secondary" onclick="verifyModel('${esc(m.id)}')">Verify</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) { list.innerHTML = '<p class="muted">Error: ' + esc(e.message) + '</p>'; }
+    }
+
+    async function useModel(id) {
+      try {
+        const data = await api('/api/models/' + encodeURIComponent(id) + '/use', 'POST', {});
+        toast(data.status === 'ok' ? 'Model active' : (data.result || JSON.stringify(data)));
+        loadControlModels();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function verifyModel(id) {
+      try {
+        const data = await api('/api/models/' + encodeURIComponent(id) + '/verify', 'POST', {});
+        toast(data.status === 'ok' ? 'Model verified' : (data.error || JSON.stringify(data)));
+        loadControlModels();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    // MCP
+    async function loadMcpControl() {
+      const list = document.getElementById('mcp-list');
+      list.innerHTML = '<p class="muted">Loading MCP servers...</p>';
+      try {
+        const data = await api('/api/mcp_servers');
+        if (!data.servers || !data.servers.length) { list.innerHTML = '<p class="muted">No MCP servers configured.</p>'; return; }
+        list.innerHTML = data.servers.map(s => `
+          <div class="item">
+            <div class="info">
+              <div class="name">${esc(s.id)} <span class="muted">${esc(s.command || '')}</span></div>
+              <div class="desc">${esc((s.args || []).join(' '))}</div>
+            </div>
+            <div class="actions">
+              <button class="danger" onclick="removeMcpServer('${esc(s.id)}')">Remove</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) { list.innerHTML = '<p class="muted">Error: ' + esc(e.message) + '</p>'; }
+    }
+
+    async function addMcpServer() {
+      const id = document.getElementById('mcp-id').value.trim();
+      const command = document.getElementById('mcp-command').value.trim();
+      const args = document.getElementById('mcp-args').value.split(/\s+/).map(s => s.trim()).filter(Boolean);
+      let env = {};
+      try {
+        const raw = document.getElementById('mcp-env').value.trim();
+        if (raw) env = JSON.parse(raw);
+      } catch (e) {
+        document.getElementById('mcp-result').textContent = 'Invalid env JSON: ' + e.message;
+        return;
+      }
+      try {
+        const data = await api('/api/mcp_servers', 'POST', { id, name: id, command, args, env, description: '', transport: 'stdio' });
+        document.getElementById('mcp-result').textContent = 'Saved: ' + JSON.stringify(data);
+        loadMcpControl();
+      } catch (e) { document.getElementById('mcp-result').textContent = 'Error: ' + e.message; }
+    }
+
+    async function removeMcpServer(id) {
+      if (!confirm(`Remove MCP server ${id}?`)) return;
+      try {
+        await api('/api/mcp_servers/' + encodeURIComponent(id), 'DELETE');
+        loadMcpControl();
+        toast('MCP server removed');
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    // Curious
+    async function loadCurious() {
+      const list = document.getElementById('curious-list');
+      list.innerHTML = '<p class="muted">Loading proposals...</p>';
+      try {
+        const data = await api('/api/curious_proposals');
+        if (!data.proposals || !data.proposals.length) { list.innerHTML = '<p class="muted">No pending proposals.</p>'; return; }
+        list.innerHTML = data.proposals.map(p => {
+          let body = '';
+          if (p.no_patch) body = '<p class="muted">No patch proposed.</p>';
+          else if (p.patch) body = `
+            <div class="fact"><strong>File:</strong> ${esc(p.patch.file)}</div>
+            <div class="fact"><strong>Why:</strong> ${esc(p.patch.why)}</div>
+            <details class="log"><summary>Diff</summary><pre class="log">old: ${esc(p.patch.old)}\nnew: ${esc(p.patch.new)}</pre></details>
+          `;
+          if (p.applied) body += '<div class="fact"><strong>Applied:</strong> ' + esc(p.error || 'ok') + '</div>';
+          return `
+            <div class="card" style="margin-bottom:1rem;">
+              <div style="display:flex; justify-content:space-between; align-items:start;">
+                <div><strong>${esc(p.id)}</strong> <span class="muted">${esc(p.timestamp)}</span></div>
+                <div class="actions">
+                  ${p.applied || p.rejected ? '' : `<button onclick="curiousAction('${esc(p.id)}', 'apply')">Apply</button><button class="secondary" onclick="curiousAction('${esc(p.id)}', 'reject')">Reject</button>`}
+                  <button class="secondary" onclick="curiousAction('${esc(p.id)}', 'archive')">Archive</button>
+                </div>
+              </div>
+              <p class="muted">Workspace: ${esc(p.workspace)}</p>
+              ${body}
+            </div>
+          `;
+        }).join('');
+      } catch (e) { list.innerHTML = '<p class="muted">Error: ' + esc(e.message) + '</p>'; }
+    }
+
+    async function curiousAction(id, action) {
+      try {
+        const data = await api('/api/curious_proposals', 'POST', { id, action });
+        if (data.error) throw new Error(data.error);
+        toast(action + ' ' + (data.result || 'ok'));
+        loadCurious();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    // Persona preview
+    async function previewPersona(kind) {
+      const id = document.getElementById('persona-id').value.trim();
+      if (!id) { toast('Enter a persona id first', 'error'); return; }
+      const previewEl = document.getElementById('persona-preview');
+      previewEl.textContent = 'Loading...';
+      try {
+        const data = await api('/api/workshop/preview', 'POST', { id, kind });
+        previewEl.textContent = data.preview || data.text || JSON.stringify(data);
+        if (kind === 'tts' && window.speechSynthesis) {
+          const text = data.preview || data.text || '';
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = 'en-US';
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(u);
+        }
+      } catch (e) { previewEl.textContent = 'Error: ' + e.message; }
     }
 
     // Polling

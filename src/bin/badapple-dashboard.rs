@@ -222,6 +222,12 @@ async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
         .route("/mcp/servers/:id", delete(mcp_remove_server_handler))
         .route("/mcp_servers/:id", delete(mcp_remove_server_handler))
         .route("/mcp_registry", get(mcp_registry_handler))
+        .route(
+            "/curious_proposals",
+            get(curious_proposals_handler).post(curious_proposal_action_handler),
+        )
+        .route("/workshop/preview", post(workshop_preview_handler))
+        .route("/workshop/preview_tts", post(workshop_preview_tts_handler))
         .route("/ambient", get(ambient_handler))
         .route("/ocular", get(ocular_handler))
         .route("/ocular", post(ocular_action_handler))
@@ -1016,9 +1022,8 @@ async fn ocular_worker(
 
 /// Path helpers for user data used by the dashboard.
 fn bad_apple_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from(std::env!("HOME")))
-        .join("bad_apple")
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| std::env!("HOME").to_string()))
+        .join(".bad_apple")
 }
 
 fn bad_apple_var_dir() -> PathBuf {
@@ -1747,10 +1752,13 @@ fn is_text_file(path: &std::path::Path) -> bool {
 struct WorkshopPersona {
     name: String,
     description: Option<String>,
-    system_prompt: String,
     #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default, rename = "system_prompt_file")]
+    system_prompt_file: Option<String>,
+    #[serde(default, rename = "voice_system_prompt")]
     voice_system_prompt: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "roast_bank")]
     roast_bank: Vec<String>,
 }
 
@@ -2014,4 +2022,463 @@ fn interpolate_args(template: &str, args: &[String]) -> String {
 async fn mcp_registry_handler() -> impl IntoResponse {
     let market = load_marketplace().await;
     Json(json!({"servers": market.list().await}))
+}
+
+// MARK: - Curious autopilot proposals
+
+fn proposed_patches_dir() -> PathBuf {
+    bad_apple_data_dir().join("notes").join("proposed_patches")
+}
+
+fn proposed_patches_archive_dir() -> PathBuf {
+    proposed_patches_dir().join("archive")
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PatchProposal {
+    file: String,
+    #[serde(default)]
+    old: String,
+    #[serde(default)]
+    new: String,
+    #[serde(default)]
+    why: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CuriousProposal {
+    id: String,
+    timestamp: String,
+    workspace: String,
+    #[serde(default)]
+    no_patch: bool,
+    #[serde(default)]
+    patch: Option<PatchProposal>,
+    #[serde(default)]
+    applied: bool,
+    #[serde(default)]
+    rejected: bool,
+    #[serde(default)]
+    error: String,
+}
+
+fn extract_proposal_from_markdown(text: &str) -> Option<Value> {
+    // Find the first ```json block under a "## Proposal" section.
+    let proposal_section = text.split("## Proposal").nth(1)?;
+    let block = proposal_section.split("```json").nth(1)?;
+    let json_text = block.split("```").next()?;
+    serde_json::from_str(json_text.trim()).ok()
+}
+
+fn extract_workspace_from_markdown(text: &str) -> String {
+    text.lines()
+        .find(|l| l.trim().starts_with("**Workspace:**"))
+        .map(|l| {
+            l.trim()
+                .strip_prefix("**Workspace:**")
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_proposal_file(path: &PathBuf) -> Option<CuriousProposal> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let id = path.file_stem()?.to_string_lossy().to_string();
+    let timestamp = text
+        .lines()
+        .find(|l| l.trim().starts_with("**When:**"))
+        .map(|l| {
+            l.trim()
+                .strip_prefix("**When:**")
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let workspace = extract_workspace_from_markdown(&text);
+    let applied = text.contains("## Applied");
+    let rejected = path
+        .parent()
+        .map(|p| p.ends_with("archive"))
+        .unwrap_or(false);
+
+    let mut error = String::new();
+    if applied {
+        if let Some(applied_section) = text.split("## Applied").nth(1) {
+            if applied_section.trim().starts_with("Error:") {
+                error = applied_section
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+
+    let mut proposal = CuriousProposal {
+        id,
+        timestamp,
+        workspace,
+        no_patch: false,
+        patch: None,
+        applied,
+        rejected,
+        error,
+    };
+
+    match extract_proposal_from_markdown(&text) {
+        Some(json) => {
+            if json
+                .get("no_patch")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                proposal.no_patch = true;
+            } else if let Some(patch) = json.get("patch") {
+                proposal.patch = serde_json::from_value(patch.clone()).ok();
+                if proposal.patch.is_none() {
+                    proposal.no_patch = true;
+                }
+            } else {
+                proposal.no_patch = true;
+            }
+        }
+        None => proposal.no_patch = true,
+    }
+
+    Some(proposal)
+}
+
+fn allowed_proposal_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        bad_apple_data_dir(),
+        PathBuf::from("/var/lib/bad_apple"),
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| String::from("/"))),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+    ];
+    if let Ok(root) = std::env::var("BADAPPLE_ROOT") {
+        roots.push(PathBuf::from(root));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // If binary is in target/release, repo root is two levels up.
+            let repo = dir
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| dir.to_path_buf());
+            roots.push(repo);
+        }
+    }
+    roots
+}
+
+fn is_path_under_allowed_root(path: &std::path::Path) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        // If the path does not exist yet, canonicalize its parent.
+        if let Some(parent) = path.parent() {
+            if let Ok(canonical_parent) = parent.canonicalize() {
+                for root in allowed_proposal_roots() {
+                    if let Ok(root_canonical) = root.canonicalize() {
+                        if canonical_parent.starts_with(&root_canonical) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    };
+    for root in allowed_proposal_roots() {
+        if let Ok(root_canonical) = root.canonicalize() {
+            if canonical.starts_with(&root_canonical) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn apply_proposal_patch(proposal: &CuriousProposal) -> Result<String> {
+    let Some(patch) = &proposal.patch else {
+        anyhow::bail!("no patch in proposal");
+    };
+    let target = PathBuf::from(&patch.file);
+    if !is_path_under_allowed_root(&target) {
+        anyhow::bail!("target path is outside allowed roots");
+    }
+
+    if patch.old.is_empty() {
+        if !target.exists() {
+            if let Some(parent) = target.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(&target, &patch.new).await?;
+            return Ok("created file".to_string());
+        }
+        let original = tokio::fs::read_to_string(&target).await.unwrap_or_default();
+        if original.trim().is_empty() {
+            tokio::fs::write(&target, &patch.new).await?;
+            return Ok("wrote empty file".to_string());
+        }
+        anyhow::bail!("old text is empty but target file already has content");
+    }
+
+    let original = tokio::fs::read_to_string(&target).await?;
+    if !original.contains(&patch.old) {
+        anyhow::bail!("old text not found in target file");
+    }
+    let replaced = original.replacen(&patch.old, &patch.new, 1);
+    let temp = target.with_extension("tmp");
+    tokio::fs::write(&temp, replaced).await?;
+    tokio::fs::rename(&temp, &target).await?;
+
+    // Verify.
+    let verify = tokio::fs::read_to_string(&target).await?;
+    if !verify.contains(&patch.new) {
+        anyhow::bail!("verification failed after writing");
+    }
+    Ok("patched file".to_string())
+}
+
+async fn archive_proposal_file(id: &str) -> Result<()> {
+    let dir = proposed_patches_dir();
+    let src = dir.join(format!("{id}.md"));
+    if !src.exists() {
+        anyhow::bail!("proposal file not found");
+    }
+    let archive = proposed_patches_archive_dir();
+    tokio::fs::create_dir_all(&archive).await?;
+    let dst = archive.join(format!("{id}.md"));
+    tokio::fs::rename(&src, &dst).await?;
+    Ok(())
+}
+
+async fn mark_proposal_applied(id: &str, result: &str) -> Result<()> {
+    let dir = proposed_patches_dir();
+    let path = dir.join(format!("{id}.md"));
+    let mut text = tokio::fs::read_to_string(&path).await?;
+    if !text.contains("## Applied") {
+        text.push_str("\n\n## Applied\n\n");
+        text.push_str(result);
+        text.push('\n');
+        tokio::fs::write(&path, text).await?;
+    }
+    Ok(())
+}
+
+async fn curious_proposals_handler() -> impl IntoResponse {
+    let dir = proposed_patches_dir();
+    let mut proposals = Vec::new();
+    if let Ok(entries) = tokio::fs::read_dir(&dir).await {
+        let mut entries = entries;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                if let Some(p) = parse_proposal_file(&path) {
+                    proposals.push(p);
+                }
+            }
+        }
+    }
+    // Also scan archive.
+    let archive = proposed_patches_archive_dir();
+    if let Ok(entries) = tokio::fs::read_dir(&archive).await {
+        let mut entries = entries;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                if let Some(mut p) = parse_proposal_file(&path) {
+                    p.rejected = true;
+                    proposals.push(p);
+                }
+            }
+        }
+    }
+    proposals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Json(json!({"proposals": proposals}))
+}
+
+#[derive(Deserialize)]
+struct CuriousProposalAction {
+    id: String,
+    action: String,
+}
+
+async fn curious_proposal_action_handler(
+    Json(body): Json<CuriousProposalAction>,
+) -> impl IntoResponse {
+    let dir = proposed_patches_dir();
+    let path = dir.join(format!("{}.md", body.id));
+    if !path.exists() {
+        let archive = proposed_patches_archive_dir().join(format!("{}.md", body.id));
+        if !archive.exists() {
+            return Json(json!({"error": "proposal not found"}));
+        }
+    }
+
+    match body.action.as_str() {
+        "apply" => {
+            let proposal = match parse_proposal_file(&path) {
+                Some(p) => p,
+                None => return Json(json!({"error": "could not parse proposal"})),
+            };
+            if proposal.no_patch {
+                let _ = mark_proposal_applied(&body.id, "No patch proposed.").await;
+                return Json(json!({"status": "ok", "result": "no patch"}));
+            }
+            match apply_proposal_patch(&proposal).await {
+                Ok(result) => {
+                    let _ = mark_proposal_applied(&body.id, &result).await;
+                    Json(json!({"status": "ok", "result": result}))
+                }
+                Err(e) => {
+                    let _ = mark_proposal_applied(&body.id, &format!("Error: {e}")).await;
+                    Json(json!({"error": e.to_string()}))
+                }
+            }
+        }
+        "reject" | "dismiss" | "archive" => match archive_proposal_file(&body.id).await {
+            Ok(()) => Json(json!({"status": "ok"})),
+            Err(e) => Json(json!({"error": e.to_string()})),
+        },
+        _ => Json(json!({"error": "unknown action"})),
+    }
+}
+
+// MARK: - Workshop preview
+
+const DEFAULT_ROASTS: &[&str] = &[
+    "Siri? More like Sorry. It's basically a glorified timer with an attitude problem.",
+    "Siri is what happens when you put a search bar in a microphone and call it AI.",
+    "ChatGPT is cool if you like your data on someone else's servers. I prefer to keep things local, if you know what I mean.",
+    "Copilot? The one that phones home to Microsoft every time you breathe? I'll pass.",
+];
+
+async fn resolve_prompt_text(persona: &WorkshopPersona) -> String {
+    if let Some(prompt) = persona.system_prompt.as_ref().filter(|s| !s.is_empty()) {
+        return prompt.clone();
+    }
+    if let Some(file) = persona
+        .system_prompt_file
+        .as_ref()
+        .filter(|s| !s.is_empty())
+    {
+        let path = if file.starts_with('/') {
+            PathBuf::from(file)
+        } else {
+            bad_apple_data_dir().join(file)
+        };
+        if let Ok(text) = tokio::fs::read_to_string(&path).await {
+            if !text.trim().is_empty() {
+                return text.trim().to_string();
+            }
+        }
+    }
+    for candidate in [
+        bad_apple_data_dir().join("prompt.txt"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt.txt"),
+    ] {
+        if let Ok(text) = tokio::fs::read_to_string(&candidate).await {
+            if !text.trim().is_empty() {
+                return text.trim().to_string();
+            }
+        }
+    }
+    String::from("You are Bad Apple, a local AI operating system layer for macOS.")
+}
+
+#[derive(Deserialize)]
+struct WorkshopPreviewInput {
+    id: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    text: String,
+}
+
+fn random_roast(persona: &WorkshopPersona, sample: &str) -> String {
+    use rand::seq::SliceRandom;
+    let mut rng = rand::thread_rng();
+    let bank = &persona.roast_bank;
+    if !bank.is_empty() {
+        return bank.choose(&mut rng).cloned().unwrap_or_default();
+    }
+    if !sample.is_empty() {
+        // Try to find a themed default roast; otherwise fall back.
+        let lower = sample.to_lowercase();
+        if lower.contains("siri") {
+            return DEFAULT_ROASTS[0].to_string();
+        } else if lower.contains("chatgpt") || lower.contains("gpt") {
+            return DEFAULT_ROASTS[2].to_string();
+        } else if lower.contains("copilot") {
+            return DEFAULT_ROASTS[3].to_string();
+        }
+    }
+    DEFAULT_ROASTS
+        .choose(&mut rng)
+        .copied()
+        .unwrap_or("")
+        .to_string()
+}
+
+async fn workshop_preview_handler(Json(body): Json<WorkshopPreviewInput>) -> impl IntoResponse {
+    let map = load_workshop_personas().await;
+    match map.get(&body.id) {
+        Some(persona) => {
+            let preview = match body.kind.as_str() {
+                "roast" => random_roast(persona, &body.text),
+                "voice" | "tts" => {
+                    let voice = persona
+                        .voice_system_prompt
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_default();
+                    if voice.is_empty() {
+                        resolve_prompt_text(persona).await
+                    } else {
+                        voice
+                    }
+                }
+                _ => resolve_prompt_text(persona).await,
+            };
+            Json(json!({"status": "ok", "preview": preview, "kind": body.kind}))
+        }
+        None => Json(json!({"error": "persona not found"})),
+    }
+}
+
+async fn workshop_preview_tts_handler(Json(body): Json<WorkshopPreviewInput>) -> impl IntoResponse {
+    let map = load_workshop_personas().await;
+    match map.get(&body.id) {
+        Some(persona) => {
+            let text = if !body.text.is_empty() {
+                body.text.clone()
+            } else {
+                resolve_prompt_text(persona).await
+            };
+            // Generate a local audio preview using macOS `say` and the default voice.
+            let out_path = bad_apple_data_dir().join("tts_preview.aiff");
+            let out_arg = format!("{}", out_path.display());
+            match tokio::process::Command::new("/usr/bin/say")
+                .args([&text, "-o", &out_arg])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() => Json(
+                    json!({"status": "ok", "text": text, "audio_url": "/api/workshop/preview_tts/audio"}),
+                ),
+                Ok(output) => Json(json!({
+                    "status": "ok",
+                    "text": text,
+                    "warning": String::from_utf8_lossy(&output.stderr).to_string()
+                })),
+                Err(e) => Json(json!({"status": "ok", "text": text, "warning": e.to_string()})),
+            }
+        }
+        None => Json(json!({"error": "persona not found"})),
+    }
 }

@@ -14,13 +14,15 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 /// On-disk catalog of MCP servers. Stored as JSON in the Bad Apple data dir.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -75,7 +77,9 @@ pub struct McpProcess {
     pub started_at: Instant,
     pub last_heartbeat: Instant,
     pub exit_status: Option<std::process::ExitStatus>,
+    pub initialized: bool,
     pub stderr_task: Option<tokio::task::JoinHandle<()>>,
+    pub stdout_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Manager for the MCP marketplace.
@@ -83,6 +87,8 @@ pub struct McpMarketplace {
     catalog_path: PathBuf,
     catalog: Arc<Mutex<McpCatalog>>,
     running: Arc<Mutex<HashMap<String, Arc<Mutex<McpProcess>>>>>,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
+    request_counter: AtomicUsize,
     max_log_lines: usize,
 }
 
@@ -92,6 +98,8 @@ impl McpMarketplace {
             catalog_path,
             catalog: Arc::new(Mutex::new(McpCatalog::default())),
             running: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            request_counter: AtomicUsize::new(0),
             max_log_lines,
         }
     }
@@ -234,17 +242,22 @@ impl McpMarketplace {
             }
         });
 
-        // Forward stdout to a line reader. In a full implementation this would
-        // deserialize JSON-RPC messages and route tool calls.
+        // Forward stdout to a line reader and route responses by JSON-RPC id.
         let id_clone = id.to_string();
-        tokio::spawn(async move {
+        let pending = self.pending.clone();
+        let stdout_task = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                // For now, drop server-to-client output. A real integration
-                // would parse JSON-RPC and dispatch to handlers.
-                let _ = line;
                 tracing::trace!("[mcp {id_clone} stdout] {line}");
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    if let Some(req_id) = json_value_to_id(&value) {
+                        let key = format!("{id_clone}:{req_id}");
+                        if let Some(tx) = pending.lock().await.remove(&key) {
+                            let _ = tx.send(line);
+                        }
+                    }
+                }
             }
         });
 
@@ -256,7 +269,9 @@ impl McpMarketplace {
             started_at: Instant::now(),
             last_heartbeat: Instant::now(),
             exit_status: None,
+            initialized: false,
             stderr_task: Some(stderr_task),
+            stdout_task: Some(stdout_task),
         };
 
         self.running
@@ -274,6 +289,10 @@ impl McpMarketplace {
             if let Some(stderr) = process.stderr_task.take() {
                 let _ = stderr.await;
             }
+            if let Some(stdout) = process.stdout_task.take() {
+                stdout.abort();
+            }
+            self.pending.lock().await.retain(|k, _| !k.starts_with(id));
         }
         Ok(())
     }
@@ -338,6 +357,119 @@ impl McpMarketplace {
         }
     }
 
+    fn next_request_id(&self) -> String {
+        self.request_counter
+            .fetch_add(1, Ordering::SeqCst)
+            .to_string()
+    }
+
+    /// Send a JSON-RPC request to a running stdio MCP server and await the
+    /// response matching the request id.
+    pub async fn request(&self, id: &str, method: &str, params: Value) -> Result<Value> {
+        let request_id = self.next_request_id();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": request_id.clone(),
+            "method": method,
+            "params": params,
+        });
+        let line = serde_json::to_string(&body)
+            .with_context(|| "failed to serialize MCP JSON-RPC request")?;
+        let raw = self.request_raw(id, &line, &request_id).await?;
+        serde_json::from_str(&raw).with_context(|| "failed to parse MCP JSON-RPC response")
+    }
+
+    /// Send a raw line to a running stdio MCP server and await the matching
+    /// stdout response.
+    pub async fn request_raw(&self, id: &str, line: &str, request_id: &str) -> Result<String> {
+        let handle = self
+            .running
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("MCP server {id} is not running"))?;
+        let mut process = handle.lock().await;
+        if process.transport != McpTransport::Stdio {
+            bail!("request is only supported for stdio MCP transports");
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let key = format!("{id}:{request_id}");
+        self.pending.lock().await.insert(key.clone(), tx);
+
+        process
+            .stdin
+            .write_all(line.as_bytes())
+            .await
+            .context("failed to write to MCP server stdin")?;
+        process
+            .stdin
+            .write_all(b"\n")
+            .await
+            .context("failed to write newline to MCP server stdin")?;
+        process.last_heartbeat = Instant::now();
+        drop(process);
+
+        match tokio::time::timeout(Duration::from_secs(30), rx).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&key);
+                bail!("MCP response channel closed")
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&key);
+                bail!("MCP request timed out")
+            }
+        }
+    }
+
+    /// Perform the MCP initialize handshake with a stdio server.
+    pub async fn initialize(&self, id: &str) -> Result<()> {
+        let handle = self
+            .running
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("MCP server {id} is not running"))?;
+        {
+            let process = handle.lock().await;
+            if process.initialized {
+                return Ok(());
+            }
+        }
+
+        let request_id = self.next_request_id();
+        let init = json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "bad_apple", "version": env!("CARGO_PKG_VERSION")},
+            },
+        });
+        let line = serde_json::to_string(&init)?;
+        let raw = self.request_raw(id, &line, &request_id).await?;
+        let resp: Value = serde_json::from_str(&raw)?;
+        if resp.get("error").is_some() {
+            bail!("MCP initialize failed: {}", resp["error"]);
+        }
+
+        // Send the initialized notification to complete the handshake.
+        let note = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        })
+        .to_string();
+        let _ = self.send(id, &note).await;
+
+        handle.lock().await.initialized = true;
+        Ok(())
+    }
+
     /// Load a built-in default catalog (e.g. filesystem, fetch, sqlite).
     pub fn default_catalog() -> McpCatalog {
         McpCatalog {
@@ -389,6 +521,14 @@ pub struct McpStatus {
     pub started_at: Option<Instant>,
     #[serde(skip)]
     pub exit_status: Option<std::process::ExitStatus>,
+}
+
+fn json_value_to_id(value: &Value) -> Option<String> {
+    value.get("id").map(|v| {
+        v.as_str()
+            .map(String::from)
+            .unwrap_or_else(|| v.to_string())
+    })
 }
 
 fn validate_server_id(id: &str) -> Result<()> {

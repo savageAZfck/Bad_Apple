@@ -25,6 +25,7 @@ BINS=(
     badapple-supervisor
     badapple-engine
     badapple-tts
+    badapple-dashboard
     gatekeeper
 )
 
@@ -49,8 +50,10 @@ BRIDGE_FILES=(
 DESKTOP_FILES=(
     src/platform/apple_desktop/com.badapple.menubar.plist
     src/platform/apple_desktop/com.badapple.tts.plist
+    src/platform/apple_desktop/com.badapple.dashboard.plist
     src/platform/apple_desktop/install_menu_bar_agent.sh
     src/platform/apple_desktop/install_tts_agent.sh
+    src/platform/apple_desktop/install_dashboard_agent.sh
     src/platform/apple_desktop/strip_quarantine.sh
 )
 
@@ -91,10 +94,10 @@ APP_SOURCE="${BUILD_DIR}/Bad Apple.app"
 [[ -x "${APP_SOURCE}/Contents/MacOS/BadApple" ]] || fail "Bad Apple.app executable missing"
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP_SOURCE}/Contents/Info.plist")"
 [[ "${APP_VERSION}" == "${VERSION}" ]] || fail "app version ${APP_VERSION} does not match package version ${VERSION}"
-for rel in Contents/Frameworks/libBadAppleBridge.dylib Contents/Frameworks/libbad_apple.dylib Contents/Libraries/libBadAppleMLX.dylib Contents/Libraries/mlx.metallib Contents/Resources/update_bad_apple.sh Contents/Resources/strip_quarantine.sh; do
+for rel in Contents/Frameworks/libBadAppleBridge.dylib Contents/Frameworks/libbad_apple.dylib Contents/Libraries/libBadAppleMLX.dylib Contents/Libraries/mlx.metallib Contents/Resources/update_bad_apple.sh Contents/Resources/strip_quarantine.sh Contents/Resources/web/index.html; do
     [[ -s "${APP_SOURCE}/${rel}" ]] || fail "required app resource missing: ${rel}"
 done
-for helper in badapple badapple-fetch BadAppleScreenCapture BadAppleAmbient BadAppleUI; do
+for helper in badapple badapple-fetch BadAppleScreenCapture BadAppleAmbient BadAppleUI badapple-dashboard; do
     [[ -x "${APP_SOURCE}/Contents/Helpers/${helper}" ]] || fail "required app helper missing: ${helper}"
 done
 cmp -s "${REPO_ROOT}/src/platform/apple_desktop/update_bad_apple.sh" "${APP_SOURCE}/Contents/Resources/update_bad_apple.sh" || fail "bundled updater is stale; rebuild the app"
@@ -135,6 +138,14 @@ for rel in "${CONFIG_FILES[@]}"; do
     copy_file "${REPO_ROOT}/${rel}" "${PKG_DIR}/bad_apple/${rel}"
 done
 
+# Bundle the web dashboard assets so the packaged runtime can serve /control.
+if [[ -d "${REPO_ROOT}/web" ]]; then
+    mkdir -p "${PKG_DIR}/bad_apple/web"
+    cp -R "${REPO_ROOT}/web/." "${PKG_DIR}/bad_apple/web/"
+    find "${PKG_DIR}/bad_apple/web" -type f -exec chmod 644 {} + 2>/dev/null || true
+    find "${PKG_DIR}/bad_apple/web" -type d -exec chmod 755 {} + 2>/dev/null || true
+fi
+
 # Top-level helpers for the manual path.
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/first_run_preflight.sh" "${PKG_DIR}/first_run_preflight.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${PKG_DIR}/strip_quarantine.sh"
@@ -159,6 +170,7 @@ What the installer does:
 - Installs the native system daemons (no Python venv required).
 - Tunes the KV cache and memory governor to your Mac's RAM.
 - Starts the menu bar.
+- Starts the local web Control Center at http://127.0.0.1:8787/control.
 
 Requirements:
 - macOS 26.0 or later

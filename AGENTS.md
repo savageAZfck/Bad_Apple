@@ -58,7 +58,7 @@ Package an unsigned release zip with a consumer README and the quarantine stripp
 src/platform/apple_desktop/package_unsigned.sh
 ```
 
-Produces `target/release/Bad_Apple-<version>-unsigned.zip`. The .app bundle now includes `Contents/Resources/update_bad_apple.sh` and `strip_quarantine.sh`.
+Produces `target/release/Bad_Apple-<version>-unsigned.zip`. The .app bundle now includes `Contents/Resources/update_bad_apple.sh`, `strip_quarantine.sh`, the `badapple-dashboard` helper, and the `web/` Control Center assets.
 
 ## Update Bad Apple
 
@@ -93,6 +93,15 @@ Install the user LaunchAgent after `/Applications/Bad Apple.app` exists. It star
 ```bash
 src/platform/apple_desktop/install_menu_bar_agent.sh
 launchctl print gui/$(id -u)/com.badapple.menubar
+```
+
+## Keep the dashboard (Control Center) running
+
+Install the dashboard LaunchAgent after `/Applications/Bad Apple.app` exists. It serves the web Control Center on `http://127.0.0.1:8787`:
+
+```bash
+src/platform/apple_desktop/install_dashboard_agent.sh
+launchctl print gui/$(id -u)/com.badapple.dashboard
 ```
 
 ## Test a query
@@ -397,6 +406,26 @@ cargo clippy --release
 
 - No hardcoded `/Users/savag3` or dev paths remain in source. LaunchAgent plists use `__REPO_ROOT__` and `__HOME__` placeholders that installers substitute at install time.
 - `package_full_release.sh` excludes dev artifacts (`.cargo`, `.DS_Store`, `state.*`, `state-backup*`, `sapient_agi_soul*`, `test_*.wasm`, `test_cage`, `wild_workspace`, `strategy_db`, `data`, `voices`, `curriculum`, `com.badapple.substrate*` legacy plists, and `install_daemon.sh`).
+## v0.1.5 — Bundled dashboard and consumer packaging
+
+- `badapple-dashboard` and the `web/` Control Center assets are now bundled into
+  the app bundle (`Bad Apple.app/Contents/Helpers/badapple-dashboard` and
+  `Contents/Resources/web/`) and included in the release packages.
+- A new LaunchAgent `com.badapple.dashboard` is installed automatically by
+  `install_badapple_platform.sh`. It binds to `127.0.0.1:8787` and loads the
+  bundled web assets, so the consumer build serves `/control` without a repo
+  checkout.
+- Install the dashboard agent manually after `/Applications/Bad Apple.app` exists:
+  ```bash
+  src/platform/apple_desktop/install_dashboard_agent.sh
+  launchctl print gui/$(id -u)/com.badapple.dashboard
+  ```
+- Consumer unsigned release (self-contained, no repo checkout):
+  ```bash
+  src/platform/apple_desktop/package_minimal_release.sh
+  ```
+  Produces `target/release/Bad_Apple-<version>-unsigned.zip`.
+
 ## v0.1.4 — Control Center, Memory, and Workshop
 
 - The web Control Center at `/control` now has three tabs: Overview, Memory, and Workshop.

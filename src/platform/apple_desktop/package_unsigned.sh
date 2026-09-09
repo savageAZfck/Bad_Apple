@@ -80,6 +80,8 @@ New in this build:
 - P2P edge mesh: discover peers and share signed model manifests with
   `badapple p2p <peers|sync|models|pull>`.
 - Swift menu-bar Troubleshooting menu (Restart Daemon, Open Log, Copy MCP Socket).
+- Local web Control Center served by the bundled `badapple-dashboard` on
+  http://127.0.0.1:8787/control.
 - All local IPC is authenticated with SLICKS v2 (Secure Enclave) with HMAC fallback.
 
 To update later, use Bad Apple > Check for Updates in the menu bar, or run:
