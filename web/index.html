@@ -26,7 +26,6 @@
         <a class="nav-item" href="/ambient"><span class="icon">◉</span> Ambient</a>
         <a class="nav-item" href="/control"><span class="icon">⌘</span> Control</a>
         <a class="nav-item" href="/mcp"><span class="icon">🛠</span> MCP</a>
-        <a class="nav-item" data-view="settings" href="/settings"><span class="icon">⚙</span> Settings</a>
         <a class="nav-item" data-view="logs" href="/logs"><span class="icon">⌘</span> Logs</a>
       </nav>
       <div class="sidebar-footer">
@@ -150,100 +149,6 @@
         </div>
       </section>
 
-      <!-- Settings -->
-      <section class="view hidden" id="view-settings">
-        <div class="panel" style="max-width: 900px;">
-          <h3>Appearance</h3>
-          <label class="toggle">
-            <input type="checkbox" id="theme-toggle" onchange="toggleTheme(this.checked)">
-            <span class="slider"></span>
-            <span class="label">Light mode</span>
-          </label>
-        </div>
-
-        <div class="panel" style="max-width: 900px;">
-          <h3>Runtime Toggles</h3>
-          <div class="toggle-row">
-            <label class="toggle">
-              <input type="checkbox" id="auto-pilot" onchange="toggleControl('autopilot', this.checked ? 'autopilot on' : 'autopilot off', this)">
-              <span class="slider"></span>
-              <span class="label">Autopilot</span>
-            </label>
-            <label class="toggle">
-              <input type="checkbox" id="fast-tier" onchange="toggleControl('fast tier', this.checked ? 'fast tier on' : 'fast tier off', this)">
-              <span class="slider"></span>
-              <span class="label">Fast tier</span>
-            </label>
-            <label class="toggle">
-              <input type="checkbox" id="p2p-enabled" onchange="toggleControl('p2p', this.checked ? 'p2p on' : 'p2p off', this)">
-              <span class="slider"></span>
-              <span class="label">P2P sync</span>
-            </label>
-            <label class="toggle">
-              <input type="checkbox" id="airgap" onchange="toggleAirgap(this.checked)">
-              <span class="slider"></span>
-              <span class="label">Air-gap mode</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="panel" style="max-width: 900px;">
-          <h3>Workspace</h3>
-          <div class="form-row">
-            <label for="ws-path">Workspace path</label>
-            <input id="ws-path" type="text" placeholder="/path/to/project">
-          </div>
-          <div class="form-actions">
-            <button onclick="saveWorkspace()">Set workspace</button>
-          </div>
-        </div>
-
-        <div class="panel" style="max-width: 900px;">
-          <h3>MCP Registry</h3>
-          <p class="text-tertiary" style="margin-bottom: 0.75rem;">One-click install community MCP servers. Python servers are installed into an isolated venv in <code>~/.bad_apple/mcp_venvs</code>.</p>
-          <table id="mcp-registry-table">
-            <thead><tr><th>Name</th><th>Publisher</th><th>Description</th><th>Type</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-
-        <div class="panel" style="max-width: 900px;">
-          <h3>MCP Marketplace</h3>
-          <div style="display: grid; grid-template-columns: 1fr 2fr auto; gap: 0.75rem; margin-bottom: 1rem; align-items: end;">
-            <div><label for="mcp-name">Name</label><input id="mcp-name" type="text" placeholder="time"></div>
-            <div><label for="mcp-command">Command</label><input id="mcp-command" type="text" placeholder="python3 -m mcp_server_time"></div>
-            <button onclick="addMcpServer()">Add server</button>
-          </div>
-          <table id="mcp-table">
-            <thead><tr><th>Name</th><th>Command</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-
-        <div class="panel" style="max-width: 900px;">
-          <h3>Active Models</h3>
-          <div id="model-list"><span class="text-tertiary">Loading...</span></div>
-          <div class="form-row" style="margin-top: 1rem;">
-            <label for="model-select">Switch model</label>
-            <select id="model-select"></select>
-          </div>
-          <div class="form-actions">
-            <button onclick="switchModel()">Switch model</button>
-          </div>
-        </div>
-
-        <div class="panel" style="max-width: 900px;">
-          <h3>Invoke MCP Tool</h3>
-          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 0.75rem; align-items: end;">
-            <div><label for="mcp-invoke-server">Server</label><input id="mcp-invoke-server" type="text" placeholder="time"></div>
-            <div><label for="mcp-invoke-tool">Tool</label><input id="mcp-invoke-tool" type="text" placeholder="get_time"></div>
-            <div><label for="mcp-invoke-arg">Argument</label><input id="mcp-invoke-arg" type="text" placeholder="UTC"></div>
-            <button onclick="invokeMcpTool()">Invoke</button>
-          </div>
-          <pre class="log" id="mcp-invoke-result" style="margin-top: 1rem; min-height: 3rem;">Result will appear here...</pre>
-        </div>
-      </section>
-
       <!-- Ocular -->
       <section class="view hidden" id="view-ocular">
         <div class="panel" style="max-width: 900px;">
@@ -299,8 +204,7 @@
         <li><strong>Cmd/Ctrl + 2</strong> — Chat</li>
         <li><strong>Cmd/Ctrl + 3</strong> — Ocular</li>
         <li><strong>Cmd/Ctrl + 4</strong> — Persona</li>
-        <li><strong>Cmd/Ctrl + 5</strong> — Settings</li>
-        <li><strong>Cmd/Ctrl + 6</strong> — Logs</li>
+        <li><strong>Cmd/Ctrl + 5</strong> — Logs</li>
         <li><strong>Cmd/Ctrl + N</strong> — New chat</li>
         <li><strong>Cmd/Ctrl + Enter</strong> — Send message</li>
         <li><strong>Esc</strong> — Close modals</li>
@@ -321,7 +225,7 @@
         <ul>
           <li><strong>Chat</strong> — ask questions, run local tools, generate images.</li>
           <li><strong>Persona</strong> — switch voices and edit the system prompt.</li>
-          <li><strong>Settings</strong> — set workspace, add MCP servers, toggle modes.</li>
+          <li><strong>Control</strong> — set workspace, manage memory, toggle modes, run the Workshop.</li>
           <li><strong>Dashboard</strong> — watch memory, models, P2P, and performance.</li>
         </ul>
         <div class="form-actions" style="justify-content: space-between;">
@@ -331,7 +235,7 @@
       </div>
       <div class="wizard-step hidden" data-step="1">
         <h2>Set your workspace</h2>
-        <p>Pick a project folder Bad Apple should know about. Leave it blank and set it later from Settings.</p>
+        <p>Pick a project folder Bad Apple should know about. Leave it blank and set it later from Control.</p>
         <div class="form-row">
           <label for="setup-workspace">Workspace path</label>
           <input id="setup-workspace" type="text" placeholder="/Users/YourName/projects/my-app">
@@ -343,7 +247,7 @@
       </div>
       <div class="wizard-step hidden" data-step="2">
         <h2>Choose your power-ups</h2>
-        <p>Enable the features you want. You can always change these in Settings later.</p>
+        <p>Enable the features you want. You can always change these in Control later.</p>
         <div class="wizard-toggles">
           <label class="toggle">
             <input type="checkbox" id="setup-fast-tier" checked>

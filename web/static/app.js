@@ -6,7 +6,6 @@ const ROUTES = {
   chat: 'Chat',
   ocular: 'Ocular',
   persona: 'Persona',
-  settings: 'Settings',
   logs: 'Logs',
 };
 
@@ -155,7 +154,7 @@ function setupKeyboard() {
     if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
     if (e.key >= '1' && e.key <= '6') {
       e.preventDefault();
-      const map = { '1': 'dashboard', '2': 'chat', '3': 'ocular', '4': 'persona', '5': 'settings', '6': 'logs' };
+      const map = { '1': 'dashboard', '2': 'chat', '3': 'ocular', '4': 'persona', '5': 'logs' };
       navigate(map[e.key]);
     }
   });
@@ -168,7 +167,7 @@ const tourSteps = [
   { title: 'Chat', body: 'Talk to Bad Apple. Conversations are saved locally, and you can copy code, retry, or delete messages.', view: 'chat' },
   { title: 'Ocular', body: 'Live screen capture and VLM description. Toggle the stream or capture a single frame.', view: 'ocular' },
   { title: 'Persona', body: 'Switch voices and edit the system prompt. Changes apply on the next query.', view: 'persona' },
-  { title: 'Settings', body: 'Set workspace, add MCP servers, switch models, toggle autopilot/fast-tier/P2P, and change theme.', view: 'settings' },
+  { title: 'Control', body: 'Set workspace, toggle runtime modes, inspect health, manage memory, and use the Workshop.', view: 'control' },
   { title: 'Logs', body: 'Tail the daemon log for debugging and performance details.', view: 'logs' },
 ];
 let tourIndex = 0;
@@ -317,7 +316,6 @@ function onViewEnter(view) {
   if (view === 'chat') setupChat();
   if (view === 'ocular') loadOcular();
   if (view === 'persona') loadPersona();
-  if (view === 'settings') loadSettings();
   if (view === 'logs') loadLogs();
 }
 
@@ -535,7 +533,7 @@ function setDashboardSkeletons(loading) {
 }
 
 function emptyState(title, body, action) {
-  const btn = action ? `<button class="secondary" onclick="navigate('${action.view}')">${action.text}</button>` : '';
+  const btn = action ? `<button class="secondary" onclick="window.location.href='/${action.view}'">${action.text}</button>` : '';
   return `<div class="empty-state"><div class="empty-title">${title}</div><div class="empty-body">${body}</div>${btn}</div>`;
 }
 
@@ -592,7 +590,7 @@ function renderDashboard(status, snap, tail, ledger, mcp, voice, capabilities, e
   if (peers.length) {
     peersEl.innerHTML = peers.map(p => `<span class="persona-pill">${p}</span>`).join(' ');
   } else if (!status.p2p_enabled) {
-    peersEl.innerHTML = emptyState('P2P is off', 'Enable P2P sync in Settings to discover peers on your local network.', { text: 'Open Settings', view: 'settings' });
+    peersEl.innerHTML = emptyState('P2P is off', 'Enable P2P sync in Control to discover peers on your local network.', { text: 'Open Control', view: 'control' });
   } else {
     peersEl.innerHTML = emptyState('No peers found', 'Bad Apple is listening on the local network. Peers will appear here when they join.');
   }
@@ -614,7 +612,7 @@ function renderDashboard(status, snap, tail, ledger, mcp, voice, capabilities, e
   } else if (mcpList.length) {
     mcpEl.innerHTML = mcpList.map(s => `<span class="persona-pill" title="${s.command.join(' ')}">${s.name}</span>`).join(' ');
   } else {
-    mcpEl.innerHTML = emptyState('No MCP servers', 'Add local MCP servers in Settings to expand Bad Apple’s tools.', { text: 'Add server', view: 'settings' });
+    mcpEl.innerHTML = emptyState('No MCP servers', 'Add local MCP servers in Control to expand Bad Apple’s tools.', { text: 'Open Control', view: 'control' });
   }
 
   const toolEvents = (ledger?.entries || []).filter(e => e.event_type === 'tool' || e.type === 'tool').slice(0, 12);
@@ -1146,211 +1144,6 @@ async function savePersona() {
     });
     toast('Persona saved. Active next query.');
     loadPersona();
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-  }
-}
-
-/* ---------- Settings ---------- */
-async function loadSettings() {
-  const status = await api('/api/status');
-  $('#ws-path').value = status.workspace || '';
-  $('#auto-pilot').checked = !!status.autopilot;
-  $('#fast-tier').checked = !!status.fast_tier;
-  $('#p2p-enabled').checked = !!status.p2p_enabled;
-  $('#airgap').checked = !!status.airgap;
-  renderModels(status.active_models || []);
-  await loadMcpServers();
-  await loadMcpRegistry();
-  await loadModelList(status.active_models?.[0]);
-}
-
-async function toggleAirgap(enabled) {
-  try {
-    const data = await api('/api/airgap', { method: 'POST', body: JSON.stringify({ enabled }) });
-    toast(data.airgap ? 'Air-gap mode on. Network MCP servers and downloads blocked.' : 'Air-gap mode off.');
-    await loadSettings();
-  } catch (e) {
-    toast('Air-gap toggle failed: ' + e.message, 'error');
-  }
-}
-
-function renderModels(models) {
-  const el = $('#model-list');
-  el.innerHTML = models.length
-    ? models.map(m => `<div class="persona-pill">${m}</div>`).join(' ')
-    : '<span class="text-tertiary">No active models</span>';
-}
-
-async function loadModelList(active) {
-  const sel = $('#model-select');
-  try {
-    const r = await api('/api/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'list models' }),
-    });
-    const lines = (r.result || '').split('\n');
-    const models = lines.map(l => l.trim()).filter(l => l && !l.startsWith('Local') && !l.startsWith('Available'));
-    sel.innerHTML = models.map(m => {
-      const id = m.split(' —')[0].trim();
-      return `<option value="${id}" ${id === active ? 'selected' : ''}>${m}</option>`;
-    }).join('');
-  } catch (e) {
-    sel.innerHTML = '<option>Error loading models</option>';
-  }
-}
-
-async function switchModel() {
-  const sel = $('#model-select');
-  try {
-    const r = await api('/api/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: `use model ${sel.value}` }),
-    });
-    toast(r.result || 'Model switched');
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-  }
-}
-
-async function invokeMcpTool() {
-  const server = $('#mcp-invoke-server').value.trim();
-  const tool = $('#mcp-invoke-tool').value.trim();
-  const arg = $('#mcp-invoke-arg').value.trim();
-  const out = $('#mcp-invoke-result');
-  if (!server || !tool) { out.textContent = 'Server and tool are required'; return; }
-  const command = arg ? `invoke mcp tool ${tool} on server ${server} with text ${arg}` : `invoke mcp tool ${tool} on server ${server}`;
-  try {
-    const r = await api('/api/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
-    });
-    out.textContent = r.result || 'No output';
-  } catch (e) {
-    out.textContent = 'Error: ' + e.message;
-  }
-}
-
-async function loadMcpServers() {
-  try {
-    const data = await api('/api/mcp_servers');
-    const tbody = $('#mcp-table tbody');
-    tbody.innerHTML = (data.servers || []).map(s => `
-      <tr>
-        <td>${s.name}</td>
-        <td>${s.command.join(' ')}</td>
-        <td><button class="secondary" onclick="removeMcpServer('${s.name}')">Remove</button></td>
-      </tr>
-    `).join('');
-  } catch (e) {
-    $('#mcp-table tbody').innerHTML = `<tr><td colspan="3" class="text-tertiary">${e.message}</td></tr>`;
-  }
-}
-
-async function loadMcpRegistry() {
-  try {
-    const data = await api('/api/mcp_registry');
-    const installed = (await api('/api/mcp_servers').catch(() => ({ servers: [] }))).servers || [];
-    const names = new Set(installed.map(s => s.name));
-    const tbody = $('#mcp-registry-table tbody');
-    const servers = data.servers || [];
-    if (!servers.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="text-tertiary">No registry entries yet.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = servers.map(s => `
-      <tr>
-        <td>${s.name}</td>
-        <td>${s.publisher || '-'}</td>
-        <td>${s.description || ''}</td>
-        <td>${s.install_type || 'command'}</td>
-        <td>
-          ${names.has(s.name)
-            ? '<span class="text-tertiary">Installed</span>'
-            : `<button class="secondary" onclick="installMcpRegistry('${s.name}')">Install</button>`}
-        </td>
-      </tr>
-    `).join('');
-  } catch (e) {
-    $('#mcp-registry-table tbody').innerHTML = `<tr><td colspan="5" class="text-tertiary">${e.message}</td></tr>`;
-  }
-}
-
-async function installMcpRegistry(name) {
-  try {
-    const res = await api('/api/mcp_servers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'install', name }),
-    });
-    toast(res.ok ? `Installed ${name}` : res);
-    loadMcpServers();
-    loadMcpRegistry();
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-  }
-}
-
-async function addMcpServer() {
-  const name = $('#mcp-name').value.trim();
-  const cmd = $('#mcp-command').value.trim();
-  if (!name || !cmd) return toast('Name and command required', 'error');
-  try {
-    await api('/api/mcp_servers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'add', name, command: cmd }),
-    });
-    toast('MCP server added');
-    $('#mcp-name').value = '';
-    $('#mcp-command').value = '';
-    loadMcpServers();
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-  }
-}
-
-async function removeMcpServer(name) {
-  if (!confirm(`Remove ${name}?`)) return;
-  try {
-    await api('/api/mcp_servers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'remove', name }),
-    });
-    toast('MCP server removed');
-    loadMcpServers();
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-  }
-}
-
-async function toggleControl(name, command, checkbox) {
-  try {
-    const r = await api('/api/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
-    });
-    toast(`${name}: ${r.result || 'ok'}`);
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-    if (checkbox) checkbox.checked = !checkbox.checked;
-  }
-}
-
-async function saveWorkspace() {
-  const path = $('#ws-path').value.trim();
-  try {
-    await api('/api/workspace', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path }),
-    });
-    toast('Workspace updated');
   } catch (e) {
     toast('Error: ' + e.message, 'error');
   }

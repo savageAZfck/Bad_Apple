@@ -231,6 +231,7 @@ async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
 
     let app = Router::new()
         .route("/", get(index_handler))
+        .route("/settings", get(settings_redirect_handler))
         .nest("/api", api)
         .nest_service("/static", ServeDir::new(state.web_root.join("static")))
         .fallback(static_handler)
@@ -258,6 +259,11 @@ async fn index_handler(State(state): State<Arc<DashboardState>>) -> impl IntoRes
         Ok(html) => Html(html),
         Err(e) => Html(format!("<h1>Dashboard unavailable</h1><pre>{}</pre>", e)),
     }
+}
+
+/// Redirect the legacy Settings view to the consolidated Control Center.
+async fn settings_redirect_handler() -> impl IntoResponse {
+    axum::response::Redirect::temporary("/control")
 }
 
 async fn static_handler(
