@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.badapple.dashboard</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__APP_BUNDLE__/Contents/Helpers/badapple-dashboard</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BADAPPLE_DASHBOARD_PORT</key>
+        <string>8787</string>
+        <key>BADAPPLE_WEB_ROOT</key>
+        <string>__APP_BUNDLE__/Contents/Resources/web</string>
+        <key>BADAPPLE_AMBIENT_HELPER</key>
+        <string>__APP_BUNDLE__/Contents/Helpers/BadAppleAmbient</string>
+        <key>BADAPPLE_SCREEN_CAPTURE_HELPER</key>
+        <string>__APP_BUNDLE__/Contents/Helpers/BadAppleScreenCapture</string>
+        <key>HOME</key>
+        <string>__CONSOLE_HOME__</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>__APP_BUNDLE__/Contents/Resources</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/badapple_dashboard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/badapple_dashboard.log</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
