@@ -1063,6 +1063,16 @@ fn builtin_personas_file() -> PathBuf {
     source
 }
 
+async fn is_private_mode() -> bool {
+    match daemon_call("runtime_status", None).await {
+        Ok(status) => status
+            .get("private_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 /// Call an agent method through the daemon.
 async fn daemon_call(method: &str, params: Option<Value>) -> Result<Value> {
     agent_call(method, params).await
@@ -1354,6 +1364,9 @@ fn default_working_memory_mode() -> String {
 }
 
 async fn set_working_memory_handler(Json(body): Json<WorkingMemoryInput>) -> impl IntoResponse {
+    if is_private_mode().await {
+        return Json(json!({"error": "private mode is enabled; working memory is not persisted"}));
+    }
     let file = working_memory_file();
     let _ = tokio::fs::create_dir_all(file.parent().unwrap_or(&PathBuf::from("."))).await;
     let content = if body.mode == "append" {
@@ -1425,6 +1438,9 @@ struct AddFactInput {
 }
 
 async fn add_fact_handler(Json(body): Json<AddFactInput>) -> impl IntoResponse {
+    if is_private_mode().await {
+        return Json(json!({"error": "private mode is enabled; facts are not persisted"}));
+    }
     let mut facts = load_facts().await;
     facts.push(MemoryFact {
         subject: body.subject,
@@ -1461,6 +1477,9 @@ fn default_extract_source() -> String {
 }
 
 async fn extract_facts_handler(Json(body): Json<ExtractFactsInput>) -> impl IntoResponse {
+    if is_private_mode().await {
+        return Json(json!({"error": "private mode is enabled; fact extraction is paused"}));
+    }
     let source_text = if !body.path.is_empty() {
         match read_jailed_text(&body.path).await {
             Ok(t) => t,
@@ -1495,6 +1514,9 @@ struct IndexFactsInput {
 }
 
 async fn index_facts_handler(Json(body): Json<IndexFactsInput>) -> impl IntoResponse {
+    if is_private_mode().await {
+        return Json(json!({"error": "private mode is enabled; fact indexing is paused"}));
+    }
     if body.path.is_empty() {
         return Json(json!({"error": "path is required"}));
     }
