@@ -2,6 +2,27 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.6] — 2026-09-10
+
+### Added
+- **Curious autopilot is now a product, not a feature**:
+  - Patches are verified with `cargo fmt`, `cargo clippy`, `cargo build --release`, and `cargo test --release` before they are allowed to stay applied.
+  - Any patch that fails verification is automatically rolled back to its backup.
+  - The dashboard and the daemon both run this verification pipeline, so autopilot and human apply are held to the same standard.
+- **Autopilot levels**: `off`, `suggest`, `safe-apply`, and `full`.
+  - `off` disables the loop.
+  - `suggest` writes proposals for human review.
+  - `safe-apply` auto-applies only non-control, verifiable patches.
+  - `full` auto-applies all verifiable patches.
+- **Curious feedback and few-shot learning**: accepted, rejected, and failed patches are recorded in `~/.bad_apple/curious_feedback.json`. New prompts include the last accepted examples and recent failure reasons so the model learns the project style and safety bounds.
+- **Control Center Curious tab refresh**: shows autopilot level, patch status badges, inline diff, and Rollback/Archive/Apply actions.
+- **Runtime self-repair signals**: `self_audit` now reports whether `/Applications/Bad Apple.app`, the identity agent, the dashboard agent, and the background engine are present and loaded.
+- **Manual Curious trigger**: `POST /api/curious_trigger` and a `Run Curious now` button let the user force a self-improvement cycle from the dashboard.
+- **Curious build log**: every applied/failed patch is appended to `~/.bad_apple/CURIOUS.md` for an auditable history.
+
+### Changed
+- Protected-file list for autopilot patches expanded to include `BadAppleConversation.swift`, `BadAppleTTS.swift`, `badapple-dashboard.rs`, and `lib.rs`.
+
 ## [0.1.5] — 2026-09-09
 
 ### Added

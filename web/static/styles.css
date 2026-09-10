@@ -664,3 +664,16 @@ pre.log {
   border-radius: 4px;
   transition: width 0.3s ease;
 }
+
+.tag {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--accent-bg);
+  color: var(--accent);
+  margin-left: 0.5rem;
+}
+.tag.success { background: var(--accent-bg); color: var(--accent); }
+.tag.error { background: var(--danger-bg); color: var(--danger); }

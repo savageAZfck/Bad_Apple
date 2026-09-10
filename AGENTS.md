@@ -415,6 +415,25 @@ cargo clippy --release
 
 - No hardcoded `/Users/savag3` or dev paths remain in source. LaunchAgent plists use `__REPO_ROOT__` and `__HOME__` placeholders that installers substitute at install time.
 - `package_full_release.sh` excludes dev artifacts (`.cargo`, `.DS_Store`, `state.*`, `state-backup*`, `sapient_agi_soul*`, `test_*.wasm`, `test_cage`, `wild_workspace`, `strategy_db`, `data`, `voices`, `curriculum`, `com.badapple.substrate*` legacy plists, and `install_daemon.sh`).
+## v0.1.6 — Curious becomes the product
+
+- Patches are now verified against `cargo fmt`, `cargo clippy --release --tests`,
+  `cargo build --release`, and `cargo test --release` before they are considered
+  applied. Failed patches are automatically rolled back from their backup.
+- Curious autopilot levels: `off`, `suggest`, `safe-apply`, `full`.
+- Curious feedback store at `~/.bad_apple/curious_feedback.json` and few-shot
+  accepted-patch examples are included in the prompt.
+- `POST /api/autopilot` and `POST /api/curious_trigger` let the dashboard read
+  and set the autopilot level and run a one-shot Curious check.
+- Control Center Curious tab shows autopilot level, status badges, diff viewer,
+  and Rollback/Archive/Apply actions.
+- `self_audit` includes a runtime health check (app install, daemon/agent load,
+  blocklist) so Curious can propose self-repair patches.
+- Curious build log at `~/.bad_apple/CURIOUS.md` records every applied and failed
+  patch.
+- Autopilot patch policy protects `BadAppleConversation.swift`, `BadAppleTTS.swift`,
+  `badapple-dashboard.rs`, and `lib.rs` in addition to the core engine files.
+
 ## v0.1.5 — Control Center tabs, Curious, MCP, CSRF, and consumer packaging
 
 - The web Control Center at `/control` now has six tabs: Overview, Memory, Models,

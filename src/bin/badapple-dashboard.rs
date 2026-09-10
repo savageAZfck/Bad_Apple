@@ -15,6 +15,8 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
+use chrono::Utc;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
@@ -266,6 +269,11 @@ async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
             "/curious_proposals",
             get(curious_proposals_handler).post(curious_proposal_action_handler),
         )
+        .route(
+            "/autopilot",
+            get(autopilot_get_handler).post(autopilot_set_handler),
+        )
+        .route("/curious_trigger", post(curious_trigger_handler))
         .route("/csrf", get(csrf_handler))
         .route("/workshop/preview", post(workshop_preview_handler))
         .route("/workshop/preview_tts", post(workshop_preview_tts_handler))
@@ -2088,6 +2096,17 @@ struct PatchProposal {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct CuriousFeedbackEntry {
+    id: String,
+    file: String,
+    why: String,
+    status: String,
+    timestamp: String,
+    #[serde(default)]
+    error: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct CuriousProposal {
     id: String,
     timestamp: String,
@@ -2218,6 +2237,130 @@ fn allowed_proposal_roots() -> Vec<PathBuf> {
     roots
 }
 
+fn protected_curious_files() -> std::collections::HashSet<String> {
+    [
+        "BadAppleEngine.swift",
+        "BadAppleTools.swift",
+        "BadAppleEngineDaemon.swift",
+        "BadApplePolicyEngine.swift",
+        "BadAppleMenuBar.swift",
+        "BadAppleMenuBarUIResponder.swift",
+        "badapple-dashboard.rs",
+        "BadAppleConversation.swift",
+        "BadAppleTTS.swift",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn is_curious_protected_file(path: &std::path::Path) -> bool {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    protected_curious_files().contains(name)
+}
+
+fn find_repo_root_for_patch(path: &std::path::Path) -> Option<PathBuf> {
+    // Walk up from the patch target looking for Cargo.toml.
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir.join("Cargo.toml").exists() {
+            return Some(dir.to_path_buf());
+        }
+        if dir.as_os_str() == "/" {
+            break;
+        }
+        current = dir.parent();
+    }
+    // Fall back to compile-time repo root or BADAPPLE_ROOT.
+    if let Ok(root) = std::env::var("BADAPPLE_ROOT") {
+        let root = PathBuf::from(root);
+        if root.join("Cargo.toml").exists() {
+            return Some(root);
+        }
+    }
+    let compile_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if compile_root.join("Cargo.toml").exists() {
+        return Some(compile_root);
+    }
+    None
+}
+
+async fn backup_path_for(path: &std::path::Path, backups_dir: &std::path::Path) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(backups_dir).await?;
+    let name = path.file_name().context("patch target has no file name")?;
+    let backup = backups_dir.join(name);
+    if path.exists() {
+        tokio::fs::copy(path, &backup).await?;
+    } else {
+        // For new files, create an empty placeholder backup for traceability.
+        tokio::fs::write(&backup, b"").await?;
+    }
+    Ok(backup)
+}
+
+async fn restore_from_backup(backup: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    if backup.exists() && backup.metadata()?.len() > 0 {
+        tokio::fs::copy(backup, target).await?;
+    } else {
+        tokio::fs::remove_file(target).await?;
+    }
+    Ok(())
+}
+
+async fn run_cargo_verification(
+    repo_root: &std::path::Path,
+    target_file: &std::path::Path,
+) -> Result<()> {
+    // Format the patched file in place. If the file contains invalid Rust,
+    // `cargo fmt` will fail and we will roll back before any build.
+    let rel = target_file.strip_prefix(repo_root).unwrap_or(target_file);
+    let fmt_output = Command::new("cargo")
+        .args(["fmt", "--", &rel.to_string_lossy()])
+        .current_dir(repo_root)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to run cargo fmt on patched file")?;
+    if !fmt_output.status.success() {
+        anyhow::bail!(
+            "cargo fmt on {} failed\n{}",
+            target_file.display(),
+            String::from_utf8_lossy(&fmt_output.stderr)
+        );
+    }
+
+    let checks = [
+        ("cargo", vec!["fmt", "--check"]),
+        ("cargo", vec!["clippy", "--release", "--tests"]),
+        ("cargo", vec!["build", "--release"]),
+        ("cargo", vec!["test", "--release"]),
+    ];
+    for (cmd, args) in checks {
+        let output = Command::new(cmd)
+            .args(&args)
+            .current_dir(repo_root)
+            .env("CARGO_TARGET_DIR", repo_root.join("target").as_os_str())
+            .env_remove("BADAPPLE_DASHBOARD_TOKEN")
+            .env_remove("BADAPPLE_DASHBOARD_PORT")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .with_context(|| format!("failed to run {} {}", cmd, args.join(" ")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            anyhow::bail!(
+                "{} {} failed\nstdout:\n{}\nstderr:\n{}",
+                cmd,
+                args.join(" "),
+                stdout,
+                stderr
+            );
+        }
+    }
+    Ok(())
+}
+
 fn is_path_under_allowed_root(path: &std::path::Path) -> bool {
     let Ok(canonical) = path.canonicalize() else {
         // If the path does not exist yet, canonicalize its parent.
@@ -2244,6 +2387,42 @@ fn is_path_under_allowed_root(path: &std::path::Path) -> bool {
     false
 }
 
+fn curious_feedback_path() -> PathBuf {
+    bad_apple_data_dir().join("curious_feedback.json")
+}
+
+async fn record_proposal_feedback(entry: CuriousFeedbackEntry) -> Result<()> {
+    let path = curious_feedback_path();
+    let mut entries = if path.exists() {
+        let text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        serde_json::from_str::<Vec<CuriousFeedbackEntry>>(&text).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    entries.retain(|e| e.id != entry.id);
+    entries.push(entry);
+    // Keep the last 100 entries to keep context reasonable.
+    if entries.len() > 100 {
+        entries = entries.split_off(entries.len() - 100);
+    }
+    let json = serde_json::to_string_pretty(&entries)?;
+    tokio::fs::write(&path, json).await?;
+    Ok(())
+}
+
+async fn append_curious_build_log(file: &str, why: &str, status: &str) -> Result<()> {
+    let path = bad_apple_data_dir().join("CURIOUS.md");
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let line = format!(
+        "- **{}** `{}` — {} — status: {}\n",
+        timestamp, file, why, status
+    );
+    let mut text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    text.push_str(&line);
+    tokio::fs::write(&path, text).await?;
+    Ok(())
+}
+
 async fn apply_proposal_patch(proposal: &CuriousProposal) -> Result<String> {
     let Some(patch) = &proposal.patch else {
         anyhow::bail!("no patch in proposal");
@@ -2252,38 +2431,124 @@ async fn apply_proposal_patch(proposal: &CuriousProposal) -> Result<String> {
     if !is_path_under_allowed_root(&target) {
         anyhow::bail!("target path is outside allowed roots");
     }
+    if is_curious_protected_file(&target) {
+        anyhow::bail!(
+            "refused: autopilot will not apply patches to core control files such as {}. Propose it for review instead.",
+            target.display()
+        );
+    }
 
-    if patch.old.is_empty() {
-        if !target.exists() {
-            if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+    let repo_root = find_repo_root_for_patch(&target);
+    let backups_dir = bad_apple_data_dir()
+        .join("backups")
+        .join("dashboard")
+        .join(proposal.id.replace(':', "_"));
+    let backup = backup_path_for(&target, &backups_dir).await?;
+
+    let is_new_file = patch.old.is_empty();
+    if is_new_file {
+        if target.exists() {
+            let original = tokio::fs::read_to_string(&target).await.unwrap_or_default();
+            if !original.trim().is_empty() {
+                anyhow::bail!("old text is empty but target file already has content");
             }
-            tokio::fs::write(&target, &patch.new).await?;
-            return Ok("created file".to_string());
         }
-        let original = tokio::fs::read_to_string(&target).await.unwrap_or_default();
-        if original.trim().is_empty() {
-            tokio::fs::write(&target, &patch.new).await?;
-            return Ok("wrote empty file".to_string());
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
-        anyhow::bail!("old text is empty but target file already has content");
+        tokio::fs::write(&target, &patch.new).await?;
+    } else {
+        let original = tokio::fs::read_to_string(&target).await?;
+        if !original.contains(&patch.old) {
+            anyhow::bail!("old text not found in target file");
+        }
+        let replaced = original.replacen(&patch.old, &patch.new, 1);
+        let temp = target.with_extension("tmp");
+        tokio::fs::write(&temp, replaced).await?;
+        tokio::fs::rename(&temp, &target).await?;
     }
 
-    let original = tokio::fs::read_to_string(&target).await?;
-    if !original.contains(&patch.old) {
-        anyhow::bail!("old text not found in target file");
-    }
-    let replaced = original.replacen(&patch.old, &patch.new, 1);
-    let temp = target.with_extension("tmp");
-    tokio::fs::write(&temp, replaced).await?;
-    tokio::fs::rename(&temp, &target).await?;
-
-    // Verify.
+    // Content verification.
     let verify = tokio::fs::read_to_string(&target).await?;
-    if !verify.contains(&patch.new) {
+    if patch.new.is_empty() {
+        if !verify.is_empty() {
+            restore_from_backup(&backup, &target).await?;
+            anyhow::bail!("verification failed: file should be empty");
+        }
+    } else if !verify.contains(&patch.new) {
+        restore_from_backup(&backup, &target).await?;
         anyhow::bail!("verification failed after writing");
     }
-    Ok("patched file".to_string())
+
+    // Build/test verification for source files.
+    if let Some(repo) = repo_root {
+        match run_cargo_verification(&repo, &target).await {
+            Ok(()) => Ok(format!(
+                "Applied and verified patch to {}. Backup: {}.",
+                target.display(),
+                backup.display()
+            )),
+            Err(e) => {
+                restore_from_backup(&backup, &target).await?;
+                anyhow::bail!("verification failed; patch was rolled back. {}", e)
+            }
+        }
+    } else {
+        Ok(format!(
+            "Applied patch to {} (no repo verification). Backup: {}.",
+            target.display(),
+            backup.display()
+        ))
+    }
+}
+
+fn extract_backup_path_from_markdown(text: &str) -> Option<PathBuf> {
+    let re = Regex::new(r"Backup:\s*([^\s]+)").ok()?;
+    re.captures(text)?.get(1)?.as_str().parse().ok()
+}
+
+async fn rollback_proposal_file(id: &str) -> Result<String> {
+    let dir = proposed_patches_dir();
+    let path = dir.join(format!("{id}.md"));
+    let text = tokio::fs::read_to_string(&path).await?;
+    let proposal = parse_proposal_file(&path).context("could not parse proposal")?;
+    let Some(patch) = proposal.patch else {
+        anyhow::bail!("no patch in proposal");
+    };
+    let target = PathBuf::from(&patch.file);
+    let backup = extract_backup_path_from_markdown(&text)
+        .or_else(|| {
+            // Fallback to the dashboard backup directory convention.
+            Some(
+                bad_apple_data_dir()
+                    .join("backups")
+                    .join("dashboard")
+                    .join(id.replace(':', "_"))
+                    .join(target.file_name()?),
+            )
+        })
+        .context("could not determine backup path")?;
+    if !backup.exists() {
+        anyhow::bail!("backup not found");
+    }
+
+    // Restore from backup.
+    if backup.metadata()?.len() > 0 {
+        tokio::fs::copy(&backup, &target).await?;
+    } else {
+        // Backup is a placeholder; the file was new, so remove it.
+        if target.exists() {
+            tokio::fs::remove_file(&target).await?;
+        }
+    }
+
+    // Append a rollback marker to the proposal file.
+    mark_proposal_applied(id, &format!("Rolled back from {}", backup.display())).await?;
+    Ok(format!(
+        "Rolled back {} from {}",
+        target.display(),
+        backup.display()
+    ))
 }
 
 async fn archive_proposal_file(id: &str) -> Result<()> {
@@ -2310,6 +2575,49 @@ async fn mark_proposal_applied(id: &str, result: &str) -> Result<()> {
         tokio::fs::write(&path, text).await?;
     }
     Ok(())
+}
+
+async fn autopilot_get_handler() -> impl IntoResponse {
+    let path = bad_apple_data_dir().join("autopilot_level");
+    let level = if path.exists() {
+        tokio::fs::read_to_string(&path)
+            .await
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    } else {
+        "off".to_string()
+    };
+    Json(json!({"level": level}))
+}
+
+#[derive(Deserialize)]
+struct AutopilotLevelInput {
+    level: String,
+}
+
+async fn autopilot_set_handler(Json(body): Json<AutopilotLevelInput>) -> impl IntoResponse {
+    let allowed = ["off", "suggest", "safe-apply", "full"];
+    if !allowed.contains(&body.level.as_str()) {
+        return Json(json!({"error": "invalid level"}));
+    }
+    let path = bad_apple_data_dir().join("autopilot_level");
+    if let Err(e) = tokio::fs::write(&path, body.level.as_bytes()).await {
+        return Json(json!({"error": e.to_string()}));
+    }
+    Json(json!({"status": "ok", "level": body.level}))
+}
+
+async fn curious_trigger_handler() -> impl IntoResponse {
+    match agent_call(
+        "curious_self_improve",
+        Some(json!({"include": "all", "approved": false})),
+    )
+    .await
+    {
+        Ok(result) => Json(result),
+        Err(e) => Json(json!({"error": e.to_string()})),
+    }
 }
 
 async fn curious_proposals_handler() -> impl IntoResponse {
@@ -2370,21 +2678,75 @@ async fn curious_proposal_action_handler(
             };
             if proposal.no_patch {
                 let _ = mark_proposal_applied(&body.id, "No patch proposed.").await;
+                let _ = record_proposal_feedback(CuriousFeedbackEntry {
+                    id: body.id.clone(),
+                    file: String::new(),
+                    why: "No patch proposed".to_string(),
+                    status: "no_patch".to_string(),
+                    timestamp: Utc::now().to_rfc3339(),
+                    error: String::new(),
+                })
+                .await;
                 return Json(json!({"status": "ok", "result": "no patch"}));
             }
             match apply_proposal_patch(&proposal).await {
                 Ok(result) => {
                     let _ = mark_proposal_applied(&body.id, &result).await;
+                    if let Some(p) = &proposal.patch {
+                        let _ = record_proposal_feedback(CuriousFeedbackEntry {
+                            id: body.id.clone(),
+                            file: p.file.clone(),
+                            why: p.why.clone(),
+                            status: "accepted".to_string(),
+                            timestamp: Utc::now().to_rfc3339(),
+                            error: String::new(),
+                        })
+                        .await;
+                        let _ = append_curious_build_log(&p.file, &p.why, "applied").await;
+                    }
                     Json(json!({"status": "ok", "result": result}))
                 }
                 Err(e) => {
-                    let _ = mark_proposal_applied(&body.id, &format!("Error: {e}")).await;
+                    let msg = format!("Error: {e}");
+                    let _ = mark_proposal_applied(&body.id, &msg).await;
+                    if let Some(p) = &proposal.patch {
+                        let _ = record_proposal_feedback(CuriousFeedbackEntry {
+                            id: body.id.clone(),
+                            file: p.file.clone(),
+                            why: p.why.clone(),
+                            status: "failed".to_string(),
+                            timestamp: Utc::now().to_rfc3339(),
+                            error: e.to_string(),
+                        })
+                        .await;
+                        let _ = append_curious_build_log(&p.file, &p.why, "failed").await;
+                    }
                     Json(json!({"error": e.to_string()}))
                 }
             }
         }
-        "reject" | "dismiss" | "archive" => match archive_proposal_file(&body.id).await {
-            Ok(()) => Json(json!({"status": "ok"})),
+        "reject" | "dismiss" | "archive" => {
+            let proposal = parse_proposal_file(&path);
+            match archive_proposal_file(&body.id).await {
+                Ok(()) => {
+                    if let Some(p) = proposal.as_ref().and_then(|p| p.patch.as_ref()) {
+                        let _ = record_proposal_feedback(CuriousFeedbackEntry {
+                            id: body.id.clone(),
+                            file: p.file.clone(),
+                            why: p.why.clone(),
+                            status: body.action.clone(),
+                            timestamp: Utc::now().to_rfc3339(),
+                            error: String::new(),
+                        })
+                        .await;
+                    }
+                    Json(json!({"status": "ok"}))
+                }
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
+        }
+        "rollback" => match rollback_proposal_file(&body.id).await {
+            Ok(result) => Json(json!({"status": "ok", "result": result})),
             Err(e) => Json(json!({"error": e.to_string()})),
         },
         _ => Json(json!({"error": "unknown action"})),

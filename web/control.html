@@ -327,6 +327,18 @@
       <div class="card" style="grid-column: 1 / -1;">
         <h3>Autopilot proposals</h3>
         <p class="muted">Review Curious self-improvement proposals. Apply safe patches, or archive rejected ones.</p>
+        <div style="display:flex; gap:0.5rem; align-items:center; margin-top:1rem; flex-wrap:wrap;">
+          <label for="autopilot-level"><strong>Autopilot level:</strong></label>
+          <select id="autopilot-level">
+            <option value="off">off — no autopilot</option>
+            <option value="suggest" selected>suggest — propose only</option>
+            <option value="safe-apply">safe-apply — auto-apply safe, non-control patches</option>
+            <option value="full">full — auto-apply all verified patches</option>
+          </select>
+          <button id="autopilot-save" onclick="saveAutopilotLevel()">Set level</button>
+          <button class="secondary" onclick="runCuriousNow()">Run Curious now</button>
+          <span id="autopilot-status" class="muted"></span>
+        </div>
         <div id="curious-list" style="margin-top:1rem;"></div>
       </div>
     </section>
@@ -854,23 +866,38 @@
       const list = document.getElementById('curious-list');
       list.innerHTML = '<p class="muted">Loading proposals...</p>';
       try {
-        const data = await api('/api/curious_proposals');
+        const [proposals, level] = await Promise.all([
+          api('/api/curious_proposals'),
+          api('/api/autopilot')
+        ]);
+        document.getElementById('autopilot-level').value = level.level || 'off';
+        const data = proposals;
         if (!data.proposals || !data.proposals.length) { list.innerHTML = '<p class="muted">No pending proposals.</p>'; return; }
         list.innerHTML = data.proposals.map(p => {
           let body = '';
           if (p.no_patch) body = '<p class="muted">No patch proposed.</p>';
-          else if (p.patch) body = `
+          else if (p.patch) {
+            const diff = p.patch.old
+              ? `<span class="tag">edit</span>\n<pre class="log"><code>--- ${esc(p.patch.file)}\n+++ ${esc(p.patch.file)}\n@@\n-${esc(p.patch.old)}\n+${esc(p.patch.new)}</code></pre>`
+              : `<span class="tag">new file</span>\n<pre class="log"><code>+ ${esc(p.patch.new)}</code></pre>`;
+            body = `
             <div class="fact"><strong>File:</strong> ${esc(p.patch.file)}</div>
             <div class="fact"><strong>Why:</strong> ${esc(p.patch.why)}</div>
-            <details class="log"><summary>Diff</summary><pre class="log">old: ${esc(p.patch.old)}\nnew: ${esc(p.patch.new)}</pre></details>
+            <details class="log"><summary>Diff</summary>${diff}</details>
           `;
-          if (p.applied) body += '<div class="fact"><strong>Applied:</strong> ' + esc(p.error || 'ok') + '</div>';
+          }
+          let status = '';
+          if (p.applied) status = '<span class="tag success">applied' + (p.error ? ': ' + esc(p.error) : '') + '</span>';
+          if (p.rejected) status = '<span class="tag error">archived</span>';
+          const canApply = !p.applied && !p.rejected;
+          const canRollback = p.applied && !p.error?.startsWith('Error');
           return `
             <div class="card" style="margin-bottom:1rem;">
               <div style="display:flex; justify-content:space-between; align-items:start;">
-                <div><strong>${esc(p.id)}</strong> <span class="muted">${esc(p.timestamp)}</span></div>
+                <div><strong>${esc(p.id)}</strong> <span class="muted">${esc(p.timestamp)}</span> ${status}</div>
                 <div class="actions">
-                  ${p.applied || p.rejected ? '' : `<button onclick="curiousAction('${esc(p.id)}', 'apply')">Apply</button><button class="secondary" onclick="curiousAction('${esc(p.id)}', 'reject')">Reject</button>`}
+                  ${canApply ? `<button onclick="curiousAction('${esc(p.id)}', 'apply')">Apply</button><button class="secondary" onclick="curiousAction('${esc(p.id)}', 'reject')">Reject</button>` : ''}
+                  ${canRollback ? `<button class="secondary" onclick="curiousAction('${esc(p.id)}', 'rollback')">Rollback</button>` : ''}
                   <button class="secondary" onclick="curiousAction('${esc(p.id)}', 'archive')">Archive</button>
                 </div>
               </div>
@@ -889,6 +916,33 @@
         toast(action + ' ' + (data.result || 'ok'));
         loadCurious();
       } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function runCuriousNow() {
+      const status = document.getElementById('autopilot-status');
+      status.textContent = 'running...';
+      try {
+        const data = await api('/api/curious_trigger', 'POST', {});
+        status.textContent = data.result || data.summary || 'done';
+        toast('Curious check complete');
+        loadCurious();
+      } catch (e) {
+        status.textContent = 'error: ' + e.message;
+        toast(e.message, 'error');
+      }
+    }
+
+    async function saveAutopilotLevel() {
+      const level = document.getElementById('autopilot-level').value;
+      const status = document.getElementById('autopilot-status');
+      try {
+        await api('/api/autopilot', 'POST', { level });
+        status.textContent = 'level saved: ' + level;
+        toast('Autopilot level set to ' + level);
+      } catch (e) {
+        status.textContent = 'error: ' + e.message;
+        toast(e.message, 'error');
+      }
     }
 
     // Persona preview

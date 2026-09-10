@@ -3132,6 +3132,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }
         let includeCert = parts.contains("all") || parts.contains("cert")
         let includeDoctor = parts.contains("all") || parts.contains("doctor")
+        let includeRuntime = parts.contains("all") || parts.contains("runtime")
 
         var result: [String: Any] = [:]
 
@@ -3153,6 +3154,21 @@ final class BadAppleToolExecutor: @unchecked Sendable {
                 "exit_code": r.exitCode,
                 "output": (r.stdout + r.stderr).prefix(20_000),
             ]
+        }
+
+        if includeRuntime {
+            var runtime: [String: Any] = [:]
+            let appPath = "/Applications/Bad Apple.app"
+            runtime["app_installed"] = FileManager.default.fileExists(atPath: appPath)
+            let badappleRunning = runProcess(launchPath: "/bin/ps", arguments: ["-ef"], timeout: 5)
+            runtime["badapple_engine_running"] = badappleRunning.stdout.contains("badapple-engine")
+            runtime["badapple_dashboard_running"] = badappleRunning.stdout.contains("badapple-dashboard")
+            let identityAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/$(id - u)/com.badapple.identity_agent"], timeout: 5)
+            runtime["identity_agent_loaded"] = identityAgentRunning.exitCode == 0
+            let dashboardAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/$(id - u)/com.badapple.dashboard"], timeout: 5)
+            runtime["dashboard_agent_loaded"] = dashboardAgentRunning.exitCode == 0
+            runtime["blocklist_exists"] = FileManager.default.fileExists(atPath: "/var/lib/bad_apple/blocklist.txt")
+            result["runtime"] = runtime
         }
 
         guard let data = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
@@ -3194,21 +3210,38 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             .components(separatedBy: .newlines)
             .filter { !$0.contains("searchContent(pattern:") && !$0.contains("\"TODO|FIXME|HACK|XXX\"") }
             .joined(separator: "\n")
+        let sourceContext = fullFileContextForMarkers(codeSearch, window: 5)
+        let acceptedExamples = recentAcceptedPatchExamples(limit: 5)
+        let feedbackSummary = loadCuriousFeedback()
+            .filter { ($0["status"] as? String) != nil }
+            .suffix(20)
+            .map { entry in
+                let status = entry["status"] as? String ?? "unknown"
+                let file = entry["file"] as? String ?? "unknown"
+                let why = entry["why"] as? String ?? ""
+                let error = entry["error"] as? String ?? ""
+                return "- \(status): \(file) — \(why) \(error.isEmpty ? "" : "(error: \(error))")"
+            }
+            .joined(separator: "\n")
 
         let analysisPrompt = """
-        Analyze the following data for the Bad Apple project at \(base) and propose exactly one safe, minimal, concrete code patch.
+        You are the Bad Apple Curious autopilot. Analyze the project at \(base) and propose exactly ONE safe, minimal, concrete patch.
 
-        Candidate issues to consider:
-        - /var/lib/bad_apple/blocklist.txt: check the Output firewall section. If and ONLY IF it says `blocklist exists: false`, you MUST create it as an empty file using:
-          {"patch":{"file":"/var/lib/bad_apple/blocklist.txt","old":"","new":"","why":"Create the missing blocklist file so the output firewall stops reporting it absent."}}
-          If it says `blocklist exists: true`, do NOT propose this patch.
-        - Any cert/doctor failures listed in the audit.
-        - Any TODO/FIXME/HACK/XXX source markers listed below.
+        Rules:
+        - Only one patch per response. If nothing safe is obvious, output exactly {"no_patch":true}.
+        - The patch must be tiny: prefer a single-line or single-function change. Never refactor more than 20 lines or 1000 characters.
+        - For existing files, the "old" string must be an EXACT substring you have seen in the Source context below.
+        - For new files, use "old":"" and provide the full content in "new".
+        - Do NOT invent code. Do NOT guess the contents of a file you have not seen.
+        - Do NOT modify core control files: BadAppleEngine.swift, BadAppleTools.swift, BadAppleEngineDaemon.swift, BadApplePolicyEngine.swift, BadAppleMenuBar.swift, BadAppleMenuBarUIResponder.swift, BadAppleConversation.swift, BadAppleTTS.swift, badapple-dashboard.rs, lib.rs.
+        - Patches are applied and then immediately verified with `cargo fmt`, `cargo clippy --release --tests`, `cargo build --release`, and `cargo test --release`. They MUST be valid Rust/Swift.
+        - If the patch is to /var/lib/bad_apple/blocklist.txt and the output firewall says `blocklist exists: false`, you MUST create it as an empty file.
 
-        For existing files, the "old" string must be an EXACT substring from the file.
-        For missing files, use "old":"" and provide the full content in "new".
-        If the exact old string is NOT shown and the file is not missing, output {"no_patch":true}.
-        Do not invent code you have not seen.
+        Recent accepted patch examples:
+        \(acceptedExamples)
+
+        Recent proposal feedback:
+        \(feedbackSummary)
 
         Self-audit:
         \(audit)
@@ -3219,8 +3252,16 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         Git status:
         \(git)
 
-        Source markers:
-        \(codeSearch)
+        Source markers with context:
+        \(sourceContext)
+
+        Output ONLY a JSON object in this exact form:
+        {"patch":{"file":"/absolute/path/to/file","old":"exact text to replace","new":"exact replacement text","why":"one sentence reason"}}
+
+        Example good patch:
+        {"patch":{"file":"/Users/savag3/bad_apple/src/Foo.swift","old":"let x = 1","new":"let x = 1\nlet y = 2","why":"Add missing secondary binding."}}
+
+        If no safe patch, output exactly: {"no_patch":true}
         """
 
         let proposal = await BadAppleEngine.shared.generateForSelfImprovement(
@@ -3266,14 +3307,22 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         body += proposal
         body += "\n```\n\n"
 
+        let level = loadAutopilotLevel()
+        let shouldAutoApply = approved && (level == "safe-apply" || level == "full")
+        let safeMode = level == "safe-apply"
+
         var applyResult: String? = nil
-        if let patch = parsed, approved {
-            applyResult = applyProposedPatch(patch, backupsDir: backupsDir, base: base)
-            body += "## Applied\n\n"
-            body += applyResult ?? "No patch was applied."
-            body += "\n"
-        } else if parsed != nil, !approved {
-            body += "A patch was proposed but not applied because Autopilot is off.\n"
+        if let patch = parsed, shouldAutoApply {
+            if safeMode, isCuriousProtectedFile(patch.file) {
+                body += "A patch was proposed but not applied because level is safe-apply and \(patch.file) is a protected control file.\n"
+            } else {
+                applyResult = applyProposedPatch(patch, backupsDir: backupsDir, base: base)
+                body += "## Applied\n\n"
+                body += applyResult ?? "No patch was applied."
+                body += "\n"
+            }
+        } else if parsed != nil, !shouldAutoApply {
+            body += "A patch was proposed but not applied because Curious autopilot is set to '\(level)'.\n"
         } else {
             body += "No patch proposed.\n"
         }
@@ -3291,6 +3340,33 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             summary += " Apply result: \(applyResult)"
         }
         return summary
+    }
+
+    private func isCuriousProtectedFile(_ path: String) -> Bool {
+        let protectedNames: Set<String> = [
+            "BadAppleEngine.swift",
+            "BadAppleTools.swift",
+            "BadAppleEngineDaemon.swift",
+            "BadApplePolicyEngine.swift",
+            "BadAppleMenuBar.swift",
+            "BadAppleMenuBarUIResponder.swift",
+            "BadAppleConversation.swift",
+            "BadAppleTTS.swift",
+            "badapple-dashboard.rs",
+            "lib.rs",
+        ]
+        let filename = (path as NSString).lastPathComponent
+        return protectedNames.contains(filename)
+    }
+
+    /// Load the current Curious autopilot level from disk.
+    /// Valid levels: off, suggest, safe-apply, full. Default is suggest.
+    private func loadAutopilotLevel() -> String {
+        let path = NSHomeDirectory() + "/.bad_apple/autopilot_level"
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return "suggest" }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     /// Locate the project root by searching for a `.git` directory above the
@@ -3337,6 +3413,97 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         return (file, old, new, why)
     }
 
+    /// Load the human feedback record for Curious proposals.
+    private func loadCuriousFeedback() -> [[String: Any]] {
+        let path = NSHomeDirectory() + "/.bad_apple/curious_feedback.json"
+        guard FileManager.default.fileExists(atPath: path),
+              let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        return json
+    }
+
+    /// Return a short few-shot string of the last N accepted patches.
+    private func recentAcceptedPatchExamples(limit: Int = 5) -> String {
+        let feedback = loadCuriousFeedback()
+            .filter { ($0["status"] as? String) == "accepted" }
+            .suffix(limit)
+        guard !feedback.isEmpty else { return "No accepted patches yet." }
+        return feedback.enumerated().map { idx, entry in
+            let file = entry["file"] as? String ?? "unknown"
+            let why = entry["why"] as? String ?? ""
+            let status = entry["status"] as? String ?? ""
+            return "Example \(idx + 1) (\(status)): file \(file), reason: \(why)"
+        }.joined(separator: "\n")
+    }
+
+    /// Read a window of lines around each TODO/FIXME/HACK/XXX marker.
+    private func fullFileContextForMarkers(_ searchOutput: String, window: Int = 5) -> String {
+        let lines = searchOutput.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        var contexts: [String] = []
+        var seen = Set<String>()
+        for line in lines.prefix(20) {
+            let parts = line.components(separatedBy: ":")
+            guard parts.count >= 2 else { continue }
+            let file = parts[0]
+            guard let lineNumber = Int(parts[1]) else { continue }
+            if seen.contains(file) { continue }
+            seen.insert(file)
+            guard let content = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
+            let all = content.components(separatedBy: .newlines)
+            let start = max(0, lineNumber - window - 1)
+            let end = min(all.count, lineNumber + window)
+            let windowLines = all[start..<end].enumerated().map { offset, l in
+                "\(start + offset + 1): \(l)"
+            }.joined(separator: "\n")
+            contexts.append("File: \(file)\n```\n\(windowLines)\n```")
+        }
+        return contexts.isEmpty ? "No source contexts." : contexts.joined(separator: "\n\n")
+    }
+
+    /// Append a line to the public Curious build log.
+    private func appendCuriousBuildLog(file: String, why: String, status: String) {
+        let path = NSHomeDirectory() + "/.bad_apple/CURIOUS.md"
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "- **\(timestamp)** `\(file)` — \(why) — status: \(status)\n"
+        var text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? "# Curious build log\n\n"
+        text += line
+        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// Run `cargo fmt`, `cargo clippy`, `cargo build --release`, and `cargo test --release`.
+    /// Returns an error string if any step fails, or nil on success.
+    private func runCargoVerification(repoRoot: String, targetFile: String) -> String? {
+        guard let cargo = resolveCommand("cargo") else {
+            return "cargo not found in PATH"
+        }
+
+        // Resolve the target file relative to the repo root.
+        let rel = targetFile.hasPrefix(repoRoot)
+            ? String(targetFile.dropFirst(repoRoot.count).trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+            : targetFile
+
+        var steps: [(String, [String])] = [
+            (cargo, ["fmt", "--", rel]),
+            (cargo, ["fmt", "--check"]),
+            (cargo, ["clippy", "--release", "--tests"]),
+            (cargo, ["build", "--release"]),
+            (cargo, ["test", "--release"]),
+        ]
+        // In consumer installs the repo may not exist; if so, skip verification.
+        if !FileManager.default.fileExists(atPath: repoRoot + "/Cargo.toml") {
+            steps = []
+        }
+
+        for (launchPath, args) in steps {
+            let result = runProcess(launchPath: launchPath, arguments: args, timeout: 600, workingDirectory: repoRoot)
+            if result.exitCode != 0 {
+                return "\(launchPath) \(args.joined(separator: " ")) failed:\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
+            }
+        }
+        return nil
+    }
+
     /// Apply a parsed patch after jail-check, backup, and verification.
     /// Returns a human-readable result or error.
     private func applyProposedPatch(
@@ -3371,6 +3538,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             "BadApplePolicyEngine.swift",
             "BadAppleMenuBar.swift",
             "BadAppleMenuBarUIResponder.swift",
+            "BadAppleConversation.swift",
+            "BadAppleTTS.swift",
+            "badapple-dashboard.rs",
+            "lib.rs",
         ]
         let filename = (patch.file as NSString).lastPathComponent
         if protectedNames.contains(filename) {
@@ -3467,11 +3638,54 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             }
         } else {
             guard verify.contains(patch.new) else {
-                return "Error: verification failed after writing \(patch.file)."
+                _ = try? FileManager.default.removeItem(atPath: patch.file)
+                if let originalData {
+                    try? originalData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
+                }
+                recordCuriousFeedback(file: patch.file, why: patch.why, status: "failed", error: "verification failed after writing")
+                return "Error: verification failed after writing \(patch.file); rolled back."
             }
         }
 
-        return "Applied patch to \(patch.file). Backup: \(backupPath). Why: \(patch.why)"
+        // Build/test verification for source files in the project.
+        if patch.file.hasPrefix(base) {
+            if let error = runCargoVerification(repoRoot: base, targetFile: patch.file) {
+                // Roll back.
+                try? FileManager.default.removeItem(atPath: patch.file)
+                if let originalData, originalData.count > 0 {
+                    try? originalData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
+                }
+                recordCuriousFeedback(file: patch.file, why: patch.why, status: "failed", error: error)
+                return "Error: verification failed; patch was rolled back. \(error)"
+            }
+        }
+
+        recordCuriousFeedback(file: patch.file, why: patch.why, status: "accepted")
+        appendCuriousBuildLog(file: patch.file, why: patch.why, status: "applied")
+
+        return "Applied and verified patch to \(patch.file). Backup: \(backupPath). Why: \(patch.why)"
+    }
+
+    private func recordCuriousFeedback(file: String, why: String, status: String, error: String = "") {
+        let path = NSHomeDirectory() + "/.bad_apple/curious_feedback.json"
+        var entries = loadCuriousFeedback()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+        let entry: [String: Any] = [
+            "id": UUID().uuidString,
+            "file": file,
+            "why": why,
+            "status": status,
+            "timestamp": formatter.string(from: Date()),
+            "error": error,
+        ]
+        entries.append(entry)
+        if entries.count > 100 {
+            entries = Array(entries.suffix(100))
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: entries, options: .prettyPrinted) {
+            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        }
     }
 
     /// Locate the trusted `badapple` helper binary used for self-audit and CLI calls.
@@ -3567,7 +3781,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     /// Resolve a command name to its full path by checking standard PATH dirs.
     private func resolveCommand(_ name: String) -> String? {
-        let searchPaths = ["/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+        let searchPaths = [
+            "/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin",
+            NSHomeDirectory() + "/.cargo/bin",
+            NSHomeDirectory() + "/.local/bin",
+        ]
         for dir in searchPaths {
             let candidate = "\(dir)/\(name)"
             if FileManager.default.isExecutableFile(atPath: candidate) {
@@ -3583,11 +3801,15 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         launchPath: String,
         arguments: [String],
         timeout: TimeInterval,
-        standardInput: Data? = nil
+        standardInput: Data? = nil,
+        workingDirectory: String? = nil
     ) -> (stdout: String, stderr: String, exitCode: Int) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
+        if let workingDirectory {
+            process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
+        }
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
