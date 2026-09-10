@@ -32,7 +32,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "Bad Apple MCP";
-const SERVER_VERSION: &str = "0.1.7";
+const SERVER_VERSION: &str = "0.1.8";
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_TOOL_NAME_LEN: usize = 256;
 const MAX_ARGUMENTS_DEPTH: usize = 8;

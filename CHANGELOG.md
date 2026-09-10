@@ -2,6 +2,14 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.8] — 2026-09-10
+
+### Fixed
+- Menu bar `autopilot` toggle now sets `full` (not `safe-apply`), so it matches the documented behavior of skipping approval prompts for all destructive tools. Use the dashboard for `suggest`/`safe-apply` levels.
+- `mcp.rs` server version now reports `0.1.8`.
+- `deriveRuntimeRepairs` no longer suggests a malformed `cp` command for a missing app install.
+- README and BAD_APPLE_BUYERS.md updated to reflect current features.
+
 ## [0.1.7] — 2026-09-10
 
 ### Fixed
