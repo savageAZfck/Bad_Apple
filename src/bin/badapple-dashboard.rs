@@ -2503,7 +2503,7 @@ async fn apply_proposal_patch(proposal: &CuriousProposal) -> Result<String> {
 }
 
 fn extract_backup_path_from_markdown(text: &str) -> Option<PathBuf> {
-    let re = Regex::new(r"Backup:\s*([^\s]+)").ok()?;
+    let re = Regex::new(r"Backup:\s*([^\s]+?)(?:\.\s|\s*$)").ok()?;
     re.captures(text)?.get(1)?.as_str().parse().ok()
 }
 
@@ -2609,9 +2609,9 @@ async fn autopilot_set_handler(Json(body): Json<AutopilotLevelInput>) -> impl In
 }
 
 async fn curious_trigger_handler() -> impl IntoResponse {
-    match agent_call(
+    match invoke_tool(
         "curious_self_improve",
-        Some(json!({"include": "all", "approved": false})),
+        json!({"include": "all", "approved": false}),
     )
     .await
     {
