@@ -2,6 +2,15 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.9] — 2026-09-10
+
+### Security
+- `badapple mcp init` no longer pre-populates the catalog with `npx`-based MCP
+  servers (`@modelcontextprotocol/server-filesystem` with root `/` and
+  `@modelcontextprotocol/server-fetch`). The product is air-gapped by default;
+  remote-download MCP servers should be added explicitly only after local
+  validation.
+
 ## [0.1.8] — 2026-09-10
 
 ### Fixed

@@ -1552,40 +1552,10 @@ fn run_mcp_subcommand(args: &[String]) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             }
             "init" => {
-                market
-                    .upsert(bad_apple::mcp_marketplace::McpServer {
-                        id: "filesystem".to_string(),
-                        name: "Filesystem MCP".to_string(),
-                        command: "npx".to_string(),
-                        args: vec![
-                            "-y".to_string(),
-                            "@modelcontextprotocol/server-filesystem".to_string(),
-                            "/".to_string(),
-                        ],
-                        env: std::collections::HashMap::new(),
-                        transport: bad_apple::mcp_marketplace::McpTransport::Stdio,
-                        installed: false,
-                        enabled: false,
-                        description: "Read and write files under a configured root.".to_string(),
-                    })
-                    .await?;
-                market
-                    .upsert(bad_apple::mcp_marketplace::McpServer {
-                        id: "fetch".to_string(),
-                        name: "Fetch MCP".to_string(),
-                        command: "npx".to_string(),
-                        args: vec![
-                            "-y".to_string(),
-                            "@modelcontextprotocol/server-fetch".to_string(),
-                        ],
-                        env: std::collections::HashMap::new(),
-                        transport: bad_apple::mcp_marketplace::McpTransport::Stdio,
-                        installed: false,
-                        enabled: false,
-                        description: "Fetch web content. Disabled by default in air-gapped mode."
-                            .to_string(),
-                    })
-                    .await?;
+                // Air-gap: do not ship npx-based remote-download servers or
+                // unrestricted filesystem roots as defaults. Users can add MCP
+                // servers explicitly with `badapple mcp add` once they have
+                // validated the command and arguments locally.
                 market.save().await?;
                 println!("{{\"status\": \"ok\", \"action\": \"initialized\"}}");
             }
