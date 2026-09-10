@@ -8,53 +8,61 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Compile a TTS sanitizer regex. If a static pattern somehow fails,
+/// fall back to a regex that matches nothing so the voice output still
+/// works rather than panicking.
+fn tts_regex(pattern: &str) -> regex::Regex {
+    regex::Regex::new(pattern)
+        .unwrap_or_else(|_| regex::Regex::new("a^").expect("static fallback regex must compile"))
+}
+
 fn sanitize_for_tts(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
 
     // Strip URLs.
-    let re = regex::Regex::new(r"https?://\S+").unwrap();
-    let mut s = re.replace_all(text, " ").to_string();
+    let mut s = tts_regex(r"https?://\S+")
+        .replace_all(text, " ")
+        .to_string();
 
     // Strip fenced code blocks, inline code, and markup that speech engines
     // read as literal punctuation.
-    let re = regex::Regex::new(r"```[\s\S]*?```").unwrap();
-    s = re.replace_all(&s, " ").to_string();
-    let re = regex::Regex::new(r"<tool_call>[\s\S]*?</tool_call>").unwrap();
-    s = re.replace_all(&s, " ").to_string();
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    s = re.replace_all(&s, " ").to_string();
-    let re = regex::Regex::new(r"`[^`]*`").unwrap();
-    s = re.replace_all(&s, " ").to_string();
+    s = tts_regex(r"```[\s\S]*?```")
+        .replace_all(&s, " ")
+        .to_string();
+    s = tts_regex(r"<tool_call>[\s\S]*?</tool_call>")
+        .replace_all(&s, " ")
+        .to_string();
+    s = tts_regex(r"<[^>]+>").replace_all(&s, " ").to_string();
+    s = tts_regex(r"`[^`]*`").replace_all(&s, " ").to_string();
 
     // Strip markdown emphasis/headers/list markers and turn links into text.
-    let re = regex::Regex::new(r"(\*+|_+|~+|#+|>\s*)").unwrap();
-    s = re.replace_all(&s, " ").to_string();
-    let re = regex::Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").unwrap();
-    s = re.replace_all(&s, "$1").to_string();
+    s = tts_regex(r"(\*+|_+|~+|#+|>\s*)")
+        .replace_all(&s, " ")
+        .to_string();
+    s = tts_regex(r"!?\[([^\]]*)\]\([^)]*\)")
+        .replace_all(&s, "$1")
+        .to_string();
 
     // Remove bullet characters and list markers.
-    let re = regex::Regex::new(r"\n\s*[•·*-]\s+").unwrap();
-    s = re.replace_all(&s, "\n").to_string();
-    let re = regex::Regex::new(r"(?m)^[•·*-]\s+").unwrap();
-    s = re.replace_all(&s, "").to_string();
-    let re = regex::Regex::new(r"[•·]").unwrap();
-    s = re.replace_all(&s, " ").to_string();
+    s = tts_regex(r"\n\s*[•·*-]\s+")
+        .replace_all(&s, "\n")
+        .to_string();
+    s = tts_regex(r"(?m)^[•·*-]\s+").replace_all(&s, "").to_string();
+    s = tts_regex(r"[•·]").replace_all(&s, " ").to_string();
 
     // Ellipses, em/en dashes and run-on hyphens become chunk breaks, not
     // punctuation the voice can read.
-    let re = regex::Regex::new(r"\.{3,}|…").unwrap();
-    s = re.replace_all(&s, "\n").to_string();
-    let re = regex::Regex::new(r"\s*[—–]\s*").unwrap();
-    s = re.replace_all(&s, "\n").to_string();
-    let re = regex::Regex::new(r"\s*-{2,}\s*").unwrap();
-    s = re.replace_all(&s, "\n").to_string();
+    s = tts_regex(r"\.{3,}|…").replace_all(&s, "\n").to_string();
+    s = tts_regex(r"\s*[—–]\s*").replace_all(&s, "\n").to_string();
+    s = tts_regex(r"\s*-{2,}\s*").replace_all(&s, "\n").to_string();
 
     // Clause-breaking colons and semicolons become chunk breaks when followed
     // by whitespace; colons in times/URLs are left for the allowlist pass.
-    let re = regex::Regex::new(r"(\s*)([:;])(\s+)").unwrap();
-    s = re.replace_all(&s, "$1\n$3").to_string();
+    s = tts_regex(r"(\s*)([:;])(\s+)")
+        .replace_all(&s, "$1\n$3")
+        .to_string();
 
     // Remove double quotes.
     s = s.replace('"', " ");
@@ -98,16 +106,11 @@ fn sanitize_for_tts(text: &str) -> String {
     s = out;
 
     // Tidy spaces before punctuation and collapse whitespace.
-    let re = regex::Regex::new(r"\s+([.,?!])").unwrap();
-    s = re.replace_all(&s, "$1").to_string();
-    let re = regex::Regex::new(r"\n\n+").unwrap();
-    s = re.replace_all(&s, "\n").to_string();
-    let re = regex::Regex::new(r"[ \t]+").unwrap();
-    s = re.replace_all(&s, " ").to_string();
-    let re = regex::Regex::new(r" \n").unwrap();
-    s = re.replace_all(&s, "\n").to_string();
-    let re = regex::Regex::new(r"\n ").unwrap();
-    s = re.replace_all(&s, "\n").to_string();
+    s = tts_regex(r"\s+([.,?!])").replace_all(&s, "$1").to_string();
+    s = tts_regex(r"\n\n+").replace_all(&s, "\n").to_string();
+    s = tts_regex(r"[ \t]+").replace_all(&s, " ").to_string();
+    s = tts_regex(r" \n").replace_all(&s, "\n").to_string();
+    s = tts_regex(r"\n ").replace_all(&s, "\n").to_string();
 
     // Return one clean line per chunk.
     s.lines()
@@ -822,25 +825,21 @@ fn run_doctor() -> Result<()> {
 
     // Sockets
     let _ = writeln!(report, "\n[sockets]");
-    for sock in [
-        "/var/run/badapple/substrate.sock",
-        "/var/run/badapple/substrate_mlx.sock",
-        "/var/run/badapple/identity.sock",
-        "/var/run/badapple/mcp.sock",
-        "/var/run/badapple/aqua_helper.sock",
-        "/tmp/badapple_tts.sock",
+    for (sock, note) in [
+        ("/var/run/badapple/substrate.sock", ""),
+        ("/var/run/badapple/substrate_mlx.sock", ""),
+        ("/var/run/badapple/identity.sock", ""),
+        ("/var/run/badapple/mcp.sock", " (MCP off by default)"),
+        ("/var/run/badapple/aqua_helper.sock", ""),
+        ("/tmp/badapple_tts.sock", ""),
     ] {
         let p = std::path::PathBuf::from(sock);
-        let _ = writeln!(
-            report,
-            "{}: {}",
-            sock,
-            if std::fs::metadata(&p).is_ok() {
-                "present"
-            } else {
-                "missing"
-            }
-        );
+        let status = if std::fs::metadata(&p).is_ok() {
+            "present"
+        } else {
+            "missing"
+        };
+        let _ = writeln!(report, "{}: {}{}", sock, status, note);
     }
 
     // Data / logs

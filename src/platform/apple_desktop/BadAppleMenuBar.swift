@@ -11,6 +11,12 @@ import Speech
 
 private let badAppleVoiceLogPath = "/tmp/badapple_voice_debug.log"
 
+/// Compile a regex pattern without crashing. Returns nil on an invalid pattern
+/// so the caller can fail gracefully.
+private func badAppleRegex(_ pattern: String) -> NSRegularExpression? {
+    try? NSRegularExpression(pattern: pattern)
+}
+
 /// Append a line to the voice debug log using a raw POSIX `open()` with
 /// `O_NOFOLLOW` and `O_EXCL` on first creation. `/tmp` is world-writable,
 /// so anything else running as this user could pre-create this path as a
@@ -871,9 +877,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     // such as "at", "my", "and" between "hey", "bad", and "apple".
     // Wake pattern: optional "hey"-like prefix, then "bad apple".
     // Case-insensitive and tolerant of filler words in between.
-    private var wakePattern = try! NSRegularExpression(
-        pattern: "(?i)^(?:(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+)?bad(?:\\s+\\w+){0,2}\\s+apple\\b"
-    )
+    private var wakePattern: NSRegularExpression? = nil
     private var promptTimer: Timer?
     private var stablePrompt = ""
     private var recognitionTimer: Timer?
@@ -901,6 +905,13 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     override init() {
         super.init()
         synthesizer.delegate = self
+        do {
+            wakePattern = try NSRegularExpression(
+                pattern: "(?i)^(?:(?:hey|he|hay|my)(?:\\s+\\w+){0,3}\\s+)?bad(?:\\s+\\w+){0,2}\\s+apple\\b"
+            )
+        } catch {
+            NSLog("[BadAppleVoice] failed to compile wake pattern: %@", error.localizedDescription)
+        }
         if let phrase = UserDefaults.standard.string(forKey: "BadAppleWakePhrase") {
             setWakePhrase(phrase)
         }
@@ -1319,6 +1330,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
     }
 
     private func wakeSuffix(in transcript: String) -> String? {
+        guard let wakePattern = wakePattern else { return nil }
         let range = NSRange(transcript.startIndex..<transcript.endIndex, in: transcript)
         guard let match = wakePattern.firstMatch(in: transcript, range: range),
               let swiftRange = Range(match.range, in: transcript) else { return nil }
@@ -2121,14 +2133,14 @@ private struct BadAppleActionParseResult {
 private enum BadAppleActionResolver {
     // The target is the word immediately before "workspace"/"folder" when one
     // of those appears.  This resists the recognizer stutter ("Open open my ...").
-    private static let openWorkspacePattern = try! NSRegularExpression(
-        pattern: "(?i)\\b([a-z0-9_\\-]+)\\s+(?:workspace|folder|repo|repository)\\b"
+    private static let openWorkspacePattern = badAppleRegex(
+        "(?i)\\b([a-z0-9_\\-]+)\\s+(?:workspace|folder|repo|repository)\\b"
     )
-    private static let openAppPattern = try! NSRegularExpression(
-        pattern: "(?i)\\b(open|launch)\\b(?:\\s+\\w+){0,2}\\s+(?:the\\s+)?([a-z0-9_\\-]+\\.?(?:app)?)"
+    private static let openAppPattern = badAppleRegex(
+        "(?i)\\b(open|launch)\\b(?:\\s+\\w+){0,2}\\s+(?:the\\s+)?([a-z0-9_\\-]+\\.?(?:app)?)"
     )
-    private static let createDirPattern = try! NSRegularExpression(
-        pattern: "(?i)\\bcreate\\b(?:\\s+\\w+){0,3}\\s+(?:directory|folder)\\s+(?:at\\s+)?([~/a-z0-9_\\.\\-\\s/]+)"
+    private static let createDirPattern = badAppleRegex(
+        "(?i)\\bcreate\\b(?:\\s+\\w+){0,3}\\s+(?:directory|folder)\\s+(?:at\\s+)?([~/a-z0-9_\\.\\-\\s/]+)"
     )
     private static let stopWords: Set<String> = ["open", "show", "launch", "my", "the", "a", "an", "this", "that", "please"]
 
@@ -2137,7 +2149,7 @@ private enum BadAppleActionResolver {
         let range = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
 
         if lower.contains("open") || lower.contains("show"), lower.contains("workspace") || lower.contains("folder") || lower.contains("repo") {
-            if let match = openWorkspacePattern.firstMatch(in: prompt, range: range),
+            if let match = openWorkspacePattern?.firstMatch(in: prompt, range: range),
                let r = Range(match.range(at: 1), in: prompt) {
                 let target = String(prompt[r]).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !target.isEmpty, !stopWords.contains(target.lowercased()) else { return nil }
@@ -2150,7 +2162,7 @@ private enum BadAppleActionResolver {
             }
         }
 
-        if let match = openAppPattern.firstMatch(in: prompt, range: range),
+        if let match = openAppPattern?.firstMatch(in: prompt, range: range),
            let r = Range(match.range(at: 2), in: prompt) {
             return BadAppleAction(
                 operation: .openApp,
@@ -2160,7 +2172,7 @@ private enum BadAppleActionResolver {
             )
         }
 
-        if let match = createDirPattern.firstMatch(in: prompt, range: range),
+        if let match = createDirPattern?.firstMatch(in: prompt, range: range),
            let r = Range(match.range(at: 1), in: prompt) {
             return BadAppleAction(
                 operation: .createDirectory,
@@ -2181,27 +2193,27 @@ private enum BadAppleActionParser {
     // Accept either the canonical `badapple-action` label or a `json` label,
     // because small local models sometimes emit the action object inside a
     // generic `json` fence.
-    private static let blockPattern = try! NSRegularExpression(
-        pattern: "(?m)^[ \\t]*```(?:badapple-action|json)[ \\t]*\\r?$\\n([\\s\\S]*?)^[ \\t]*```[ \\t]*\\r?$"
+    private static let blockPattern = badAppleRegex(
+        "(?m)^[ \\t]*```(?:badapple-action|json)[ \\t]*\\r?$\\n([\\s\\S]*?)^[ \\t]*```[ \\t]*\\r?$"
     )
-    private static let openerPattern = try! NSRegularExpression(
-        pattern: "(?m)^[ \\t]*```(?:badapple-action|json)[ \\t]*\\r?$"
+    private static let openerPattern = badAppleRegex(
+        "(?m)^[ \\t]*```(?:badapple-action|json)[ \\t]*\\r?$"
     )
     // Some small-context models emit a bare JSON object instead of a fenced
     // block.  This pattern finds the first well-formed badapple-action object.
-    private static let plainPattern = try! NSRegularExpression(
-        pattern: "\\{[^{}]*\\}"
+    private static let plainPattern = badAppleRegex(
+        "\\{[^{}]*\\}"
     )
 
     static func parse(_ response: String) -> BadAppleActionParseResult {
         let fullRange = NSRange(response.startIndex..<response.endIndex, in: response)
-        let matches = blockPattern.matches(in: response, range: fullRange)
-        let openerCount = openerPattern.numberOfMatches(in: response, range: fullRange)
-        let spoken = blockPattern.stringByReplacingMatches(
+        let matches = blockPattern?.matches(in: response, range: fullRange) ?? []
+        let openerCount = openerPattern?.numberOfMatches(in: response, range: fullRange) ?? 0
+        let spoken = (blockPattern?.stringByReplacingMatches(
             in: response,
             range: fullRange,
             withTemplate: ""
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        ) ?? response).trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard openerCount == matches.count else {
             return BadAppleActionParseResult(
@@ -2229,7 +2241,7 @@ private enum BadAppleActionParser {
         }
 
         // Fallback: a bare JSON object without fences.
-        if let match = plainPattern.firstMatch(in: response, range: fullRange),
+        if let match = plainPattern?.firstMatch(in: response, range: fullRange),
            let payloadRange = Range(match.range(at: 0), in: response) {
             let payload = String(response[payloadRange])
             if let action = parseActionPayload(payload, fence: payload) {
@@ -8668,9 +8680,9 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
     private static var inlineCodeBg: NSColor { NSColor(white: 0, alpha: 0.22) }
     private static var linkColor: NSColor { NSColor.controlAccentColor }
 
-    private static let headerRegex = try! NSRegularExpression(pattern: "^(#{1,3})\\s+(.+)$")
-    private static let inlineRegex = try! NSRegularExpression(
-        pattern: "\\*\\*([^*]+)\\*\\*|\\*([^*]+)\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)"
+    private static let headerRegex = badAppleRegex("^(#{1,3})\\s+(.+)$")
+    private static let inlineRegex = badAppleRegex(
+        "\\*\\*([^*]+)\\*\\*|\\*([^*]+)\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)"
     )
 
     /// Measures the wrapped size of an attributed string for a given max width.
@@ -8773,7 +8785,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
             if trimmed.isEmpty { continue }
 
             // Headers
-            if let m = headerRegex.firstMatch(in: trimmed, range: NSRange(location: 0, length: (trimmed as NSString).length)) {
+            if let m = headerRegex?.firstMatch(in: trimmed, range: NSRange(location: 0, length: (trimmed as NSString).length)) {
                 let hashes = (trimmed as NSString).substring(with: m.range(at: 1))
                 let content = (trimmed as NSString).substring(with: m.range(at: 2))
                 let level = hashes.count
@@ -8816,7 +8828,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         let result = NSMutableAttributedString()
         let ns = s as NSString
         var last = 0
-        inlineRegex.enumerateMatches(in: s, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+        inlineRegex?.enumerateMatches(in: s, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
             guard let match = match else { return }
             if match.range.location > last {
                 result.append(plain(ns.substring(with: NSRange(location: last, length: match.range.location - last)),
@@ -8933,7 +8945,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
             addSubview(bg)
         }
 
-        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        required init?(coder: NSCoder) { return nil }
 
         /// Rebuilds the bubble for the given max width and returns its height.
         func reconfigure(maxWidth: CGFloat) -> CGFloat {
@@ -9099,7 +9111,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
             addSubview(copyButton)
         }
 
-        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        required init?(coder: NSCoder) { return nil }
 
         private func setCopyTitle(_ t: String) {
             copyButton.attributedTitle = NSAttributedString(string: t, attributes: [

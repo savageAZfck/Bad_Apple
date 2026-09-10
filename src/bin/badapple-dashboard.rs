@@ -371,7 +371,9 @@ async fn serve_file(path: &std::path::Path) -> Response {
         Ok(bytes) => Response::builder()
             .header("Content-Type", content_type_for(path))
             .body(axum::body::Body::from(bytes))
-            .unwrap()
+            .unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "response build error").into_response()
+            })
             .into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
@@ -989,7 +991,9 @@ async fn ocular_screen_handler(State(state): State<Arc<DashboardState>>) -> impl
             .status(StatusCode::OK)
             .header("Content-Type", "image/png")
             .body(axum::body::Body::from(png.clone()))
-            .unwrap()
+            .unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "response build error").into_response()
+            })
             .into_response(),
         None => (StatusCode::NOT_FOUND, "no capture available").into_response(),
     }

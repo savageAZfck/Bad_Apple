@@ -324,14 +324,22 @@ fn main() {
 
     if once {
         let report = check_once(!no_repair);
-        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+        );
         return;
     }
 
     let interval = check_interval();
     loop {
         let report = check_once(!no_repair);
-        println!("{}", serde_json::to_string(&report).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string(&report)
+                .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+        );
         std::thread::sleep(Duration::from_secs(interval));
     }
 }

@@ -1259,7 +1259,6 @@ final class BadApplePolicyEngine: @unchecked Sendable {
 
     /// Policy file path.
     private let policyPath = "/var/lib/bad_apple/policy.yaml"
-    private let autopilotOverridePath = "/var/lib/bad_apple/autopilot"
 
     // MARK: - Init
 
@@ -1269,7 +1268,9 @@ final class BadApplePolicyEngine: @unchecked Sendable {
 
     // MARK: - Autopilot
 
-    /// When true, destructive tools run without asking for approval.
+    /// In-memory autopilot override. The canonical persistent level is
+    /// `~/.bad_apple/autopilot_level`; this property is used for the current
+    /// process lifetime only.
     var autopilot: Bool {
         get {
             lock.lock()
@@ -1280,13 +1281,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
             lock.lock()
             _autopilot = newValue
             lock.unlock()
-            persistAutopilot(newValue)
         }
-    }
-
-    private func persistAutopilot(_ value: Bool) {
-        let text = value ? "true" : "false"
-        _ = try? text.write(toFile: autopilotOverridePath, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Policy Checks
@@ -1624,12 +1619,8 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         toolPolicies = tools
         policyLoaded = true
 
-        // Apply any runtime autopilot override saved by a previous session.
-        if let saved = try? String(contentsOfFile: autopilotOverridePath, encoding: .utf8) {
-            let value = saved.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            _autopilot = (value == "true")
-        }
-
+        // Autopilot is intentionally in-memory only; the persistent level is
+        // kept in ~/.bad_apple/autopilot_level by BadAppleEngine.
         lock.unlock()
     }
 
@@ -2224,8 +2215,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return "Error: \(resolvedPath) is not a directory"
         }
 
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: resolvedPath) else {
-            return "Error: could not list \(resolvedPath)"
+        let entries: [String]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(atPath: resolvedPath)
+        } catch {
+            return "Error: could not list \(resolvedPath): \(error.localizedDescription)"
         }
 
         let sorted = entries.sorted()
@@ -2541,8 +2535,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return "Error: working memory path is outside allowed roots"
         }
         guard FileManager.default.fileExists(atPath: jailed) else { return "Working memory is empty." }
-        guard let text = try? String(contentsOfFile: jailed, encoding: .utf8) else {
-            return "Error: could not read working memory"
+        let text: String
+        do {
+            text = try String(contentsOfFile: jailed, encoding: .utf8)
+        } catch {
+            return "Error: could not read working memory: \(error.localizedDescription)"
         }
         if text.isEmpty { return "Working memory is empty." }
         return text.count > limit ? String(text.prefix(limit)) + "\n... (truncated)" : text
@@ -3343,16 +3340,20 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
         let proposalsDir = NSHomeDirectory() + "/.bad_apple/notes/proposed_patches"
         let backupsDir = NSHomeDirectory() + "/.bad_apple/backups"
-        try? FileManager.default.createDirectory(
-            atPath: proposalsDir,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
-        try? FileManager.default.createDirectory(
-            atPath: backupsDir,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
+        do {
+            try FileManager.default.createDirectory(
+                atPath: proposalsDir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            try FileManager.default.createDirectory(
+                atPath: backupsDir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+        } catch {
+            return "Error: could not create Curious directories: \(error.localizedDescription)"
+        }
 
         let audit = selfAudit(include: include)
 
@@ -3683,7 +3684,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let line = "- **\(timestamp)** `\(file)` — \(why) — status: \(status)\n"
         var text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? "# Curious build log\n\n"
         text += line
-        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+        do {
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            NSLog("[BadAppleTools] could not append CURIOUS.md: %@", error.localizedDescription)
+        }
     }
 
     /// Run `cargo fmt`, `cargo clippy`, `cargo build --release`, and `cargo test --release`.
@@ -3808,7 +3813,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             }
         } else {
             // For new files, write an empty placeholder backup for traceability.
-            try? Data().write(to: URL(fileURLWithPath: backupPath), options: .atomic)
+            do {
+                try Data().write(to: URL(fileURLWithPath: backupPath), options: .atomic)
+            } catch {
+                NSLog("[BadAppleTools] could not write empty backup placeholder: %@", error.localizedDescription)
+            }
         }
 
         let updated: String
@@ -3833,7 +3842,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
         // Ensure the parent directory exists when creating a new file.
         let parent = URL(fileURLWithPath: patch.file).deletingLastPathComponent().path
-        try? FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true, attributes: nil)
+        do {
+            try FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            return "Error: could not create parent directory for \(patch.file): \(error.localizedDescription)"
+        }
 
         do {
             try newData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
@@ -3853,9 +3866,17 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             }
         } else {
             guard verify.contains(patch.new) else {
-                _ = try? FileManager.default.removeItem(atPath: patch.file)
+                do {
+                    try FileManager.default.removeItem(atPath: patch.file)
+                } catch {
+                    NSLog("[BadAppleTools] could not remove malformed patch: %@", error.localizedDescription)
+                }
                 if let originalData {
-                    try? originalData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
+                    do {
+                        try originalData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
+                    } catch {
+                        return "Error: verification failed after writing \(patch.file); rollback also failed: \(error.localizedDescription)"
+                    }
                 }
                 recordCuriousFeedback(file: patch.file, why: patch.why, status: "failed", error: "verification failed after writing")
                 return "Error: verification failed after writing \(patch.file); rolled back."
@@ -3866,9 +3887,17 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         if patch.file.hasPrefix(base) {
             if let error = runCargoVerification(repoRoot: base, targetFile: patch.file) {
                 // Roll back.
-                try? FileManager.default.removeItem(atPath: patch.file)
+                do {
+                    try FileManager.default.removeItem(atPath: patch.file)
+                } catch {
+                    NSLog("[BadAppleTools] could not remove unverified patch: %@", error.localizedDescription)
+                }
                 if let originalData, originalData.count > 0 {
-                    try? originalData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
+                    do {
+                        try originalData.write(to: URL(fileURLWithPath: patch.file), options: .atomic)
+                    } catch let writeError {
+                        return "Error: verification failed; could not roll back \(patch.file): \(writeError.localizedDescription). Build error: \(error)"
+                    }
                 }
                 recordCuriousFeedback(file: patch.file, why: patch.why, status: "failed", error: error)
                 return "Error: verification failed; patch was rolled back. \(error)"
@@ -3898,8 +3927,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         if entries.count > 100 {
             entries = Array(entries.suffix(100))
         }
-        if let data = try? JSONSerialization.data(withJSONObject: entries, options: .prettyPrinted) {
-            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        do {
+            let data = try JSONSerialization.data(withJSONObject: entries, options: .prettyPrinted)
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        } catch {
+            NSLog("[BadAppleTools] could not write curious feedback: %@", error.localizedDescription)
         }
     }
 

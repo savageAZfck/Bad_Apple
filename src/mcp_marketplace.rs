@@ -142,10 +142,10 @@ impl McpMarketplace {
             .cloned()
     }
 
-    /// Add or update a server. Validates id, command, and environment.
+    /// Add or update a server. Validates id, command, args, and environment.
     pub async fn upsert(&self, server: McpServer) -> Result<()> {
         validate_server_id(&server.id)?;
-        validate_command(&server.command)?;
+        validate_command_and_args(&server.command, &server.args)?;
         validate_env(&server.env)?;
 
         let mut catalog = self.catalog.lock().await;
@@ -469,45 +469,6 @@ impl McpMarketplace {
         handle.lock().await.initialized = true;
         Ok(())
     }
-
-    /// Load a built-in default catalog (e.g. filesystem, fetch, sqlite).
-    pub fn default_catalog() -> McpCatalog {
-        McpCatalog {
-            version: 1,
-            servers: vec![
-                McpServer {
-                    id: "filesystem".to_string(),
-                    name: "Filesystem MCP".to_string(),
-                    command: "npx".to_string(),
-                    args: vec![
-                        "-y".to_string(),
-                        "@modelcontextprotocol/server-filesystem".to_string(),
-                        "/".to_string(),
-                    ],
-                    env: HashMap::new(),
-                    transport: McpTransport::Stdio,
-                    installed: false,
-                    enabled: false,
-                    description: "Read and write files under a configured root.".to_string(),
-                },
-                McpServer {
-                    id: "fetch".to_string(),
-                    name: "Fetch MCP".to_string(),
-                    command: "npx".to_string(),
-                    args: vec![
-                        "-y".to_string(),
-                        "@modelcontextprotocol/server-fetch".to_string(),
-                    ],
-                    env: HashMap::new(),
-                    transport: McpTransport::Stdio,
-                    installed: false,
-                    enabled: false,
-                    description: "Fetch web content. Disabled by default in air-gapped mode."
-                        .to_string(),
-                },
-            ],
-        }
-    }
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -544,9 +505,50 @@ fn validate_server_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_command(command: &str) -> Result<()> {
+/// Commands that download or execute remote code over the network. Bad Apple is
+/// air-gapped by default; these require explicit opt-in through other means.
+const DISALLOWED_MCP_COMMANDS: &[&str] = &[
+    "npx", "npm", "pip", "pip3", "curl", "wget", "git", "ssh", "scp", "ftp", "telnet",
+];
+
+/// Arg patterns that are too broad or dangerous for a local MCP server.
+fn disallowed_arg_pattern(arg: &str) -> bool {
+    let trimmed = arg.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Reject shell metacharacters.
+    if trimmed.contains(|c: char| ";&|`$(){}[]<>!\\*?\"'".contains(c)) {
+        return true;
+    }
+    // Reject ~ or .. anywhere in the argument.
+    if trimmed.starts_with('~') || trimmed.contains("..") {
+        return true;
+    }
+    // Reject the filesystem root as a single argument; it grants access to all
+    // user-visible files and undermines the automation cage.
+    if trimmed == "/" {
+        return true;
+    }
+    false
+}
+
+fn validate_command_and_args(command: &str, args: &[String]) -> Result<()> {
     if command.is_empty() {
         bail!("MCP server command cannot be empty");
+    }
+    let base = std::path::Path::new(command)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command);
+    if DISALLOWED_MCP_COMMANDS
+        .iter()
+        .any(|c| base.eq_ignore_ascii_case(c))
+    {
+        bail!(
+            "MCP server command '{}' is disallowed for air-gapped operation; add it explicitly only after local validation",
+            command
+        );
     }
     // Reject shell metacharacters and paths containing .. or ~
     if command.contains(|c: char| ";&|`$(){}[]<>!\\*?\"'".contains(c)) {
@@ -554,6 +556,11 @@ fn validate_command(command: &str) -> Result<()> {
     }
     if command.starts_with('~') || command.contains("..") {
         bail!("MCP server command cannot use ~ or .. paths");
+    }
+    for (idx, arg) in args.iter().enumerate() {
+        if disallowed_arg_pattern(arg) {
+            bail!("MCP server arg[{}] is disallowed: '{}'", idx, arg);
+        }
     }
     Ok(())
 }
@@ -626,10 +633,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_command_rejects_metacharacters() {
-        assert!(validate_command("npx").is_ok());
-        assert!(validate_command("rm -rf; echo").is_err());
-        assert!(validate_command("~/.local/bin/mcp").is_err());
+    fn validate_command_rejects_metacharacters_and_network_commands() {
+        assert!(validate_command_and_args("/usr/local/bin/mcp-server", &[]).is_ok());
+        assert!(validate_command_and_args("npx", &[]).is_err());
+        assert!(validate_command_and_args("npm", &[]).is_err());
+        assert!(
+            validate_command_and_args("/usr/bin/curl", &["http://example.com".to_string()])
+                .is_err()
+        );
+        assert!(validate_command_and_args("rm -rf; echo", &[]).is_err());
+        assert!(validate_command_and_args("~/.local/bin/mcp", &[]).is_err());
+        assert!(validate_command_and_args("mcp-server", &["/".to_string()]).is_err());
+        assert!(validate_command_and_args("mcp-server", &["..".to_string()]).is_err());
+        assert!(validate_command_and_args("mcp-server", &["~/.bad_apple".to_string()]).is_err());
     }
 
     #[test]
@@ -655,8 +671,8 @@ mod tests {
                 .upsert(McpServer {
                     id: "test".to_string(),
                     name: "Test Server".to_string(),
-                    command: "npx".to_string(),
-                    args: vec!["-y".to_string(), "@test".to_string()],
+                    command: "/usr/local/bin/mcp-server".to_string(),
+                    args: vec!["--base".to_string(), "/Users/test/.bad_apple".to_string()],
                     env: HashMap::new(),
                     transport: McpTransport::Stdio,
                     installed: false,

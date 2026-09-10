@@ -39,7 +39,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private var inference: BadAppleInference
     private lazy var fastInference: BadAppleInference? = {
         guard let fastModelId = BadAppleInference.envFastModelId, !fastModelId.isEmpty else {
-            print("[BadAppleEngine] Fast tier disabled: BADAPPLE_FAST_MODEL is empty or unset.")
+            NSLog("[BadAppleEngine] Fast tier disabled: BADAPPLE_FAST_MODEL is empty or unset.")
             return nil
         }
         let config = BadAppleInference.ModelConfig(
@@ -585,9 +585,9 @@ final class BadAppleEngine: @unchecked Sendable {
                 do {
                     try await embeddingEngine.loadModel()
                     await runtime.markModelReady(embeddingEngine.configuration.modelId)
-                    print("[BadAppleEngine] Native embedding model loaded")
+                    NSLog("[BadAppleEngine] Native embedding model loaded")
                 } catch {
-                    print("[BadAppleEngine] Native embedding model failed: \(error.localizedDescription)")
+                    NSLog("[BadAppleEngine] Native embedding model failed: %@", error.localizedDescription)
                     await runtime.markModelFailed(
                         embeddingEngine.configuration.modelId,
                         error: error.localizedDescription
@@ -595,7 +595,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 }
             }
         } catch {
-            print("[BadAppleEngine] Failed to load model: \(error.localizedDescription)")
+            NSLog("[BadAppleEngine] Failed to load model: %@", error.localizedDescription)
             let reserved = stateLock.withLock { () -> UInt64 in
                 _isLoaded = false
                 defer { _mainModelBytes = 0 }
@@ -1643,9 +1643,10 @@ final class BadAppleEngine: @unchecked Sendable {
         curiousAutopilotTask = nil
     }
 
-    /// Check if a tool requires user approval.
+    /// Check if a tool requires user approval. Autopilot-on (full) skips
+    /// approval even if policy would otherwise require it.
     func toolRequiresApproval(_ name: String) -> Bool {
-        policyEngine.requiresApproval(toolName: name)
+        !autopilot && policyEngine.requiresApproval(toolName: name)
     }
 
     /// Execute a tool call. Returns the tool output, an approval prompt with an
@@ -1738,7 +1739,7 @@ final class BadAppleEngine: @unchecked Sendable {
             guard await fastInf.ready else { throw BadAppleInference.InferenceError.modelNotLoaded }
             fastModelLoaded = true
             await runtime.markModelReady(fastId)
-            print("[BadAppleEngine] Fast tier model loaded: \(fastId)")
+            NSLog("[BadAppleEngine] Fast tier model loaded: %@", fastId)
         } catch {
             fastModelLoaded = false
             let reserved = stateLock.withLock { () -> UInt64 in
@@ -1747,7 +1748,7 @@ final class BadAppleEngine: @unchecked Sendable {
             }
             await runtime.releaseModelMemory(reserved)
             await runtime.markModelFailed(fastId, error: error.localizedDescription)
-            print("[BadAppleEngine] Fast tier model failed: \(error.localizedDescription)")
+            NSLog("[BadAppleEngine] Fast tier model failed: %@", error.localizedDescription)
         }
     }
 
@@ -1798,7 +1799,7 @@ final class BadAppleEngine: @unchecked Sendable {
         if mtime != lastPromptMtime {
             lastPromptMtime = mtime
             personaManager.reloadPersonas()
-            print("[BadAppleEngine] Prompt file changed, reloaded personas")
+            NSLog("[BadAppleEngine] Prompt file changed, reloaded personas")
         }
     }
 
@@ -1951,12 +1952,12 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Check model integrity and warn if the config hash has changed since last load.
     func verifyModelIntegrity(modelDir: URL) -> Bool {
         guard let hash = computeConfigHash(for: modelDir) else {
-            print("[BadAppleEngine] Warning: could not read config.json for integrity check")
+            NSLog("[BadAppleEngine] Warning: could not read config.json for integrity check")
             return false
         }
         if let previous = lastConfigHash {
             if previous != hash {
-                print("[BadAppleEngine] Warning: model config.json hash changed (was \(previous.prefix(8))..., now \(hash.prefix(8))...). KV cache may be stale.")
+                NSLog("[BadAppleEngine] Warning: model config.json hash changed (was %@..., now %@...). KV cache may be stale.", String(previous.prefix(8)), String(hash.prefix(8)))
                 return false
             }
         } else {

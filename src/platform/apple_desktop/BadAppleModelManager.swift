@@ -919,7 +919,7 @@ final class BadAppleModelManager {
                 }
             }
         } catch {
-            print("[BadAppleModelManager] could not load state: \(error.localizedDescription)")
+            NSLog("[BadAppleModelManager] could not load state: %@", error.localizedDescription)
         }
     }
 
@@ -932,7 +932,7 @@ final class BadAppleModelManager {
             try? FileManager.default.removeItem(at: statusFile)
             try FileManager.default.moveItem(at: tmp, to: statusFile)
         } catch {
-            print("[BadAppleModelManager] could not save state: \(error.localizedDescription)")
+            NSLog("[BadAppleModelManager] could not save state: %@", error.localizedDescription)
         }
     }
 
@@ -950,7 +950,7 @@ final class BadAppleModelManager {
             try? FileManager.default.removeItem(at: path)
             try FileManager.default.moveItem(at: tmp, to: path)
         } catch {
-            print("[BadAppleModelManager] could not save manifest: \(error.localizedDescription)")
+            NSLog("[BadAppleModelManager] could not save manifest: %@", error.localizedDescription)
         }
     }
 

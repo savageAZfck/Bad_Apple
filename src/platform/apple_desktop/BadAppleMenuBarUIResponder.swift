@@ -33,7 +33,7 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
             // local processes from writing UI action requests.
             try FileManager.default.createDirectory(at: requestDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         } catch {
-            print("UIResponder: could not create request dir: \(error)")
+            NSLog("UIResponder: could not create request dir: %@", String(describing: error))
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.poll()
@@ -75,7 +75,7 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
     private func writeResponse(id: String, result: [String: Any]) {
         // Validate the id to prevent path traversal (e.g. "../../etc/passwd").
         guard !id.isEmpty, id.unicodeScalars.allSatisfy({ safeIdCharset.contains($0) }), id.count <= 128 else {
-            print("UIResponder: rejecting unsafe response id: \(id)")
+            NSLog("UIResponder: rejecting unsafe response id: %@", id)
             return
         }
         let responseFile = requestDir.appendingPathComponent("ui_response_\(id).json")
@@ -85,7 +85,7 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
             // Owner-only response file.
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: responseFile.path)
         } catch {
-            print("UIResponder: could not write response: \(error)")
+            NSLog("UIResponder: could not write response: %@", String(describing: error))
         }
     }
 
@@ -204,7 +204,7 @@ final class BadAppleMenuBarUIResponder: @unchecked Sendable {
         do {
             try Data().write(to: requestFile, options: .atomic)
         } catch {
-            print("UIResponder: could not clear request: \(error)")
+            NSLog("UIResponder: could not clear request: %@", String(describing: error))
         }
     }
 }

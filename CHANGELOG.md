@@ -2,6 +2,25 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.2.0] — 2026-09-10
+
+### Security
+- `mcp_marketplace.rs` now rejects `npx`, `npm`, `pip`, `curl`, `wget`, `git`, `ssh`, `scp`, `ftp`, `telnet`, and any command containing shell metacharacters or `..`/`~` in arguments. This prevents the marketplace from being used to install remote-download or overly broad filesystem MCP servers without explicit local validation.
+- Removed the built-in `npx` filesystem/fetch MCP catalog defaults entirely.
+
+### Fixed
+- `BadAppleEngine.toolRequiresApproval` now respects the `autopilot` level, so full autopilot correctly skips approval prompts in the UI path as well.
+- Removed the dead `/var/lib/bad_apple/autopilot` override file. Autopilot is now derived from `~/.bad_apple/autopilot_level` consistently.
+- `badapple --doctor` now annotates the missing `mcp.sock` as "(MCP off by default)" instead of reporting a bare failure.
+- Curious `readWorkingMemory`, `listDirectory`, `recordCuriousFeedback`, `appendCuriousBuildLog`, and patch backup/parent-directory creation now surface errors instead of failing silently.
+- Curious rollback paths in `applyProposedPatch` now report rollback failures explicitly instead of swallowing them with `try?`.
+
+### Hardened
+- Replaced all `try!` and `fatalError` cases in `BadAppleMenuBar.swift` with safe optional regex compilation and `return nil` from unavailable `init(coder:)` paths.
+- Replaced production `print()` calls in `BadAppleEngine.swift`, `BadAppleModelManager.swift`, and `BadAppleMenuBarUIResponder.swift` with `NSLog` so logs are captured by the system instead of leaking to stdout.
+- Replaced hardcoded `Regex::new(...).unwrap()` chain in `sanitize_for_tts` with a single `tts_regex` helper that falls back to a non-matching regex if a static pattern ever fails to compile.
+- Hardened `badapple-dashboard` response builders and `badapple-supervisor` JSON serialization against panic on unexpected builder/serialization failures.
+
 ## [0.1.9] — 2026-09-10
 
 ### Security
