@@ -2,6 +2,18 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.1.7] — 2026-09-10
+
+### Added
+- **Real-world runtime repairs** — `self_audit` now detects common install/runtime issues (missing data dir, missing output firewall blocklist, unloaded identity/dashboard/TTS/menu bar agents, missing app install) and emits a ranked `repairs` list.
+- **`repair_runtime_issue` tool** — a bounded, allowlisted tool that can create the data dir, create the blocklist, or `launchctl bootstrap` a user LaunchAgent. Unsafe repairs (like app install) are surfaced for human approval.
+- **Curious now repairs before it patches** — in `safe-apply` and `full` levels, `curious_self_improve` attempts every safe runtime repair first, records the outcome, and only then proposes a source patch for the remaining issue.
+- **Event-driven Curious triggers** — the autopilot loop now wakes on `BadAppleCuriousTrigger` notifications instead of only a timer. Triggers fire on engine startup, model load failure, missing output firewall blocklist, and `self_audit` detecting runtime repairs.
+- **Autopilot loop sync** — calling `curious_self_improve` or toggling autopilot now keeps the background Curious loop in the right state so dashboard-level changes take effect without a restart.
+
+### Changed
+- `BadApple.app` version reported by `badapple --doctor` now reflects `0.1.7`.
+
 ## [0.1.6] — 2026-09-10
 
 ### Added

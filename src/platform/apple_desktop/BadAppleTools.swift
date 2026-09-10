@@ -734,9 +734,18 @@ final class BadAppleToolRouter: @unchecked Sendable {
             name: "curious_self_improve",
             description: "Run a bounded Curious self-improvement check: self-audit, output firewall, git status, search for TODO/FIXME/HACK/XXX in the source, and write a proposal note under ~/.bad_apple/notes/proposed_patches/.",
             parameters: [
-                .init(name: "include", description: "What to include in the self-audit: 'cert', 'doctor', or 'all' (default 'all').", required: false),
+                .init(name: "include", description: "What to include in the self-audit: 'cert', 'doctor', 'runtime', or 'all' (default 'all').", required: false),
             ],
             requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "repair_runtime_issue",
+            description: "Execute a bounded, allowlisted runtime repair such as loading a user LaunchAgent or creating a missing data file. Unknown issues are rejected.",
+            parameters: [
+                .init(name: "issue", description: "The repair issue id from self_audit repairs: data_dir_missing, blocklist_missing, identity_agent_not_loaded, dashboard_agent_not_loaded, tts_agent_not_loaded, menubar_agent_not_loaded, app_not_installed.", required: true),
+                .init(name: "target", description: "Optional target path for the repair.", required: false),
+            ],
+            requiresApproval: true
         ),
         BadAppleTool(
             name: "kill_switch",
@@ -1859,6 +1868,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     private let policyEngine: BadApplePolicyEngine?
     private let startedAt = Date()
     private var sessionSeed: String?
+    private var isRunningCurious = false
 
     /// Optional vision provider closure. When set, `describe_image` delegates
     /// to this closure with (path, prompt) and returns the description.
@@ -2046,6 +2056,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return selfAudit(include: args["include"] ?? "all")
         case "curious_self_improve":
             return await curiousSelfImprove(include: args["include"] ?? "all", approved: approved)
+        case "repair_runtime_issue":
+            return repairRuntimeIssue(issue: args["issue"] ?? "", target: args["target"])
         default:
             if let result = await executeCustomTool(name: resolved, args: args) {
                 return result
@@ -2984,6 +2996,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let path = BadAppleOutputFirewall.blocklistPath
         let exists = fm.fileExists(atPath: path)
 
+        if !exists, !isRunningCurious, BadAppleEngine.shared.curiousAutopilotLevel() != "off" {
+            BadAppleEngine.shared.triggerCuriousAutopilot(reason: "output firewall blocklist missing")
+        }
+
         let total = outputFirewall?.totalPatternCount() ?? 0
         let defaults = outputFirewall?.defaultPatternCount() ?? 0
         let blocklist = outputFirewall?.blocklistPatternCount() ?? 0
@@ -3120,6 +3136,120 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
     }
 
+    /// Derive a ranked list of actionable runtime repairs from the runtime health check.
+    /// `safe` means the repair is bounded to user-owned files or user LaunchAgents and can
+    /// be attempted automatically in `safe-apply` or `full` autopilot levels.
+    private func deriveRuntimeRepairs(runtime: [String: Any], dataDir: String) -> [[String: Any]] {
+        var repairs: [[String: Any]] = []
+        if let exists = runtime["data_dir_exists"] as? Bool, !exists {
+            repairs.append([
+                "issue": "data_dir_missing",
+                "safe": true,
+                "command": "mkdir -p \(dataDir)",
+                "why": "The Bad Apple data directory is missing; create it so notes, backups, and proposals have a home.",
+            ])
+        }
+        if let exists = runtime["blocklist_exists"] as? Bool, !exists {
+            repairs.append([
+                "issue": "blocklist_missing",
+                "safe": true,
+                "command": "touch /var/lib/bad_apple/blocklist.txt",
+                "why": "The output firewall blocklist is missing; create an empty file so the firewall stops reporting it absent.",
+            ])
+        }
+        if let loaded = runtime["identity_agent_loaded"] as? Bool, !loaded {
+            repairs.append([
+                "issue": "identity_agent_not_loaded",
+                "safe": true,
+                "command": "launchctl bootstrap gui/\(getuid())/com.badapple.identity_agent \\(NSHomeDirectory())/Library/LaunchAgents/com.badapple.identity_agent.plist",
+                "why": "The identity agent is not loaded; bootstrap it so SLICKS v2 hardware-rooted identity is available.",
+            ])
+        }
+        if let loaded = runtime["dashboard_agent_loaded"] as? Bool, !loaded {
+            repairs.append([
+                "issue": "dashboard_agent_not_loaded",
+                "safe": true,
+                "command": "launchctl bootstrap gui/\(getuid())/com.badapple.dashboard \\(NSHomeDirectory())/Library/LaunchAgents/com.badapple.dashboard.plist",
+                "why": "The dashboard agent is not loaded; bootstrap it so the web Control Center is available.",
+            ])
+        }
+        if let loaded = runtime["tts_agent_loaded"] as? Bool, !loaded {
+            repairs.append([
+                "issue": "tts_agent_not_loaded",
+                "safe": true,
+                "command": "launchctl bootstrap gui/\(getuid())/com.badapple.tts \\(NSHomeDirectory())/Library/LaunchAgents/com.badapple.tts.plist",
+                "why": "The TTS agent is not loaded; bootstrap it so spoken responses work.",
+            ])
+        }
+        if let loaded = runtime["menubar_agent_loaded"] as? Bool, !loaded {
+            repairs.append([
+                "issue": "menubar_agent_not_loaded",
+                "safe": true,
+                "command": "launchctl bootstrap gui/\(getuid())/com.badapple.menubar \\(NSHomeDirectory())/Library/LaunchAgents/com.badapple.menubar.plist",
+                "why": "The menu bar agent is not loaded; bootstrap it so the menu bar is available at login.",
+            ])
+        }
+        if let installed = runtime["app_installed"] as? Bool, !installed {
+            repairs.append([
+                "issue": "app_not_installed",
+                "safe": false,
+                "command": "sudo cp -R \"Bad Apple.app\" /Applications/",
+                "why": "The Bad Apple app bundle is not in /Applications; it must be installed before launchd agents can be loaded.",
+            ])
+        }
+        return repairs
+    }
+
+    /// Execute a bounded, allowlisted runtime repair. Unknown or unsafe issues are
+    /// rejected. Returns the command output or an error message.
+    private func repairRuntimeIssue(issue: String, target: String?) -> String {
+        let uid = String(getuid())
+        let home = NSHomeDirectory()
+        let dataDir = ProcessInfo.processInfo.environment["BADAPPLE_DATA_DIR"] ?? home + "/.bad_apple"
+
+        switch issue {
+        case "data_dir_missing":
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: dataDir,
+                    withIntermediateDirectories: true,
+                    attributes: nil
+                )
+                return "Created \(dataDir)."
+            } catch {
+                return "Error: could not create \(dataDir): \(error.localizedDescription)"
+            }
+        case "blocklist_missing":
+            let path = "/var/lib/bad_apple/blocklist.txt"
+            let parent = (path as NSString).deletingLastPathComponent
+            try? FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true, attributes: nil)
+            if FileManager.default.createFile(atPath: path, contents: Data(), attributes: nil) {
+                return "Created \(path)."
+            }
+            return "Error: could not create \(path)."
+        case "identity_agent_not_loaded":
+            let plist = home + "/Library/LaunchAgents/com.badapple.identity_agent.plist"
+            let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
+            return r.exitCode == 0 ? "Loaded identity agent." : "Error: \(r.stdout + r.stderr)"
+        case "dashboard_agent_not_loaded":
+            let plist = home + "/Library/LaunchAgents/com.badapple.dashboard.plist"
+            let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
+            return r.exitCode == 0 ? "Loaded dashboard agent." : "Error: \(r.stdout + r.stderr)"
+        case "tts_agent_not_loaded":
+            let plist = home + "/Library/LaunchAgents/com.badapple.tts.plist"
+            let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
+            return r.exitCode == 0 ? "Loaded TTS agent." : "Error: \(r.stdout + r.stderr)"
+        case "menubar_agent_not_loaded":
+            let plist = home + "/Library/LaunchAgents/com.badapple.menubar.plist"
+            let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
+            return r.exitCode == 0 ? "Loaded menu bar agent." : "Error: \(r.stdout + r.stderr)"
+        case "app_not_installed":
+            return "Cannot auto-repair: install /Applications/Bad Apple.app manually (requires administrator privileges)."
+        default:
+            return "Error: unknown or unsupported runtime issue '\(issue)'."
+        }
+    }
+
     /// Run the local cert suite and/or doctor diagnostic and return a JSON summary.
     func selfAudit(include: String) -> String {
         guard let binary = badappleBinaryPath() else {
@@ -3163,12 +3293,31 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             let badappleRunning = runProcess(launchPath: "/bin/ps", arguments: ["-ef"], timeout: 5)
             runtime["badapple_engine_running"] = badappleRunning.stdout.contains("badapple-engine")
             runtime["badapple_dashboard_running"] = badappleRunning.stdout.contains("badapple-dashboard")
-            let identityAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/$(id - u)/com.badapple.identity_agent"], timeout: 5)
+            let uid = String(getuid())
+            let identityAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/\(uid)/com.badapple.identity_agent"], timeout: 5)
             runtime["identity_agent_loaded"] = identityAgentRunning.exitCode == 0
-            let dashboardAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/$(id - u)/com.badapple.dashboard"], timeout: 5)
+            let dashboardAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/\(uid)/com.badapple.dashboard"], timeout: 5)
             runtime["dashboard_agent_loaded"] = dashboardAgentRunning.exitCode == 0
+            let ttsAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/\(uid)/com.badapple.tts"], timeout: 5)
+            runtime["tts_agent_loaded"] = ttsAgentRunning.exitCode == 0
+            let menubarAgentRunning = runProcess(launchPath: "/bin/launchctl", arguments: ["print", "gui/\(uid)/com.badapple.menubar"], timeout: 5)
+            runtime["menubar_agent_loaded"] = menubarAgentRunning.exitCode == 0
+            let dataDir = ProcessInfo.processInfo.environment["BADAPPLE_DATA_DIR"] ?? NSHomeDirectory() + "/.bad_apple"
+            runtime["data_dir_exists"] = FileManager.default.fileExists(atPath: dataDir)
             runtime["blocklist_exists"] = FileManager.default.fileExists(atPath: "/var/lib/bad_apple/blocklist.txt")
             result["runtime"] = runtime
+            result["repairs"] = deriveRuntimeRepairs(runtime: runtime, dataDir: dataDir)
+        }
+
+        // If this audit found real-world runtime repairs and we are not already
+        // inside a Curious run, wake the autopilot loop so it acts on the event
+        // rather than waiting for the next timer tick.
+        if !isRunningCurious,
+           let repairs = result["repairs"] as? [[String: Any]],
+           !repairs.isEmpty,
+           BadAppleEngine.shared.curiousAutopilotLevel() != "off" {
+            let issues = repairs.compactMap { $0["issue"] as? String }.joined(separator: ", ")
+            BadAppleEngine.shared.triggerCuriousAutopilot(reason: "self_audit repairs: \(issues)")
         }
 
         guard let data = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
@@ -3185,6 +3334,9 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     /// When `approved` is true (i.e. Autopilot is on), the tool will also apply the
     /// generated patch after backing up the original and verifying the replacement.
     func curiousSelfImprove(include: String, approved: Bool = false) async -> String {
+        isRunningCurious = true
+        defer { isRunningCurious = false }
+
         // Try to find the Bad Apple repo by walking up from the running binary.
         let fallbackBase = projectRootFromBinary() ?? NSHomeDirectory()
         let base = workspace ?? fallbackBase
@@ -3203,6 +3355,37 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         )
 
         let audit = selfAudit(include: include)
+
+        // Parse runtime repairs and attempt safe ones when the autopilot level allows.
+        let level = loadAutopilotLevel()
+        let shouldAttemptRepairs = level == "safe-apply" || level == "full"
+        var repairs: [[String: Any]] = []
+        var attemptedRepairs: [String] = []
+        if let auditData = audit.data(using: .utf8),
+           let auditDict = try? JSONSerialization.jsonObject(with: auditData) as? [String: Any],
+           let foundRepairs = auditDict["repairs"] as? [[String: Any]] {
+            repairs = foundRepairs
+            for repair in foundRepairs {
+                guard let issue = repair["issue"] as? String,
+                      let safe = repair["safe"] as? Bool
+                else { continue }
+                if shouldAttemptRepairs, safe {
+                    let result = repairRuntimeIssue(issue: issue, target: repair["target"] as? String)
+                    attemptedRepairs.append("- \(issue): \(result)")
+                    if result.hasPrefix("Loaded") || result.hasPrefix("Created") {
+                        recordCuriousFeedback(file: issue, why: repair["why"] as? String ?? "", status: "repaired")
+                    } else {
+                        recordCuriousFeedback(file: issue, why: repair["why"] as? String ?? "", status: "failed", error: result)
+                    }
+                } else if !safe && level == "full" {
+                    let result = repairRuntimeIssue(issue: issue, target: repair["target"] as? String)
+                    attemptedRepairs.append("- \(issue): \(result)")
+                } else {
+                    attemptedRepairs.append("- \(issue): needs approval or autopilot level is '\(level)'")
+                }
+            }
+        }
+
         let firewall = inspectOutputFirewall(showPatterns: "false")
         let git = gitStatus(path: base)
         let rawCodeSearch = searchContent(pattern: "TODO|FIXME|HACK|XXX", path: base, timeout: 30)
@@ -3236,6 +3419,16 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         - Do NOT modify core control files: BadAppleEngine.swift, BadAppleTools.swift, BadAppleEngineDaemon.swift, BadApplePolicyEngine.swift, BadAppleMenuBar.swift, BadAppleMenuBarUIResponder.swift, BadAppleConversation.swift, BadAppleTTS.swift, badapple-dashboard.rs, lib.rs.
         - Patches are applied and then immediately verified with `cargo fmt`, `cargo clippy --release --tests`, `cargo build --release`, and `cargo test --release`. They MUST be valid Rust/Swift.
         - If the patch is to /var/lib/bad_apple/blocklist.txt and the output firewall says `blocklist exists: false`, you MUST create it as an empty file.
+
+        Runtime repairs detected and any attempts made:
+        \(repairs.map { entry in
+            let issue = entry["issue"] as? String ?? "unknown"
+            let why = entry["why"] as? String ?? ""
+            let safe = entry["safe"] as? Bool ?? false
+            return "- [\(safe ? "safe" : "manual")] \(issue): \(why)"
+        }.joined(separator: "\n"))
+
+        \(attemptedRepairs.isEmpty ? "" : "Repairs already attempted:\n" + attemptedRepairs.joined(separator: "\n"))
 
         Recent accepted patch examples:
         \(acceptedExamples)
@@ -3293,6 +3486,25 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         body += "## Self-audit\n\n```json\n"
         body += audit.prefix(2_000)
         body += "\n```\n\n"
+        body += "## Runtime repairs\n\n"
+        if repairs.isEmpty {
+            body += "No runtime repairs detected.\n\n"
+        } else {
+            for repair in repairs {
+                let issue = repair["issue"] as? String ?? "unknown"
+                let why = repair["why"] as? String ?? ""
+                let safe = repair["safe"] as? Bool ?? false
+                body += "- [\(safe ? "safe" : "manual")] \(issue): \(why)\n"
+            }
+            body += "\n"
+            if !attemptedRepairs.isEmpty {
+                body += "### Attempted\n\n"
+                for entry in attemptedRepairs {
+                    body += "\(entry)\n"
+                }
+                body += "\n"
+            }
+        }
         body += "## Output firewall\n\n"
         body += firewall
         body += "\n\n"
@@ -3307,7 +3519,6 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         body += proposal
         body += "\n```\n\n"
 
-        let level = loadAutopilotLevel()
         let shouldAutoApply = approved && (level == "safe-apply" || level == "full")
         let safeMode = level == "safe-apply"
 
@@ -3334,6 +3545,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
                 return "Wrote findings, but could not save proposal: \(error.localizedDescription)\n\nAudit: \(audit.prefix(500))"
             }
         }
+
+        // If the dashboard or CLI just changed the autopilot level, make sure
+        // the background loop is in the right state.
+        BadAppleEngine.shared.updateCuriousAutopilotLoop()
 
         var summary = "Curious self-improvement check complete. Proposal written to \(proposalPath)."
         if let applyResult {

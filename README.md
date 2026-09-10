@@ -13,10 +13,10 @@
 
 ## Download the public beta
 
-The latest public beta is **v0.1.6**:
+The latest public beta is **v0.1.7**:
 
-- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.6/Bad_Apple-0.1.6-unsigned.zip)** — unzip and run `sudo ./install.sh`
-- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.6)**
+- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.1.7/Bad_Apple-0.1.7-unsigned.zip)** — unzip and run `sudo ./install.sh`
+- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.1.7)**
 - Or install via Homebrew:
   ```bash
   brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple

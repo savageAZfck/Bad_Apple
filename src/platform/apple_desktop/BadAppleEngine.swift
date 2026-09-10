@@ -5,6 +5,11 @@
 import Foundation
 import BadAppleMLX
 
+extension Notification.Name {
+    /// Posted when an event should force an immediate Curious self-improvement check.
+    static let curiousTrigger = Notification.Name("BadAppleCuriousTrigger")
+}
+
 /// The main AI engine. Loads the model, manages personas, and generates
 /// responses directly in-process — no subprocess, no daemon, no Python.
 final class BadAppleEngine: @unchecked Sendable {
@@ -465,6 +470,13 @@ final class BadAppleEngine: @unchecked Sendable {
             attributes: nil
         )
         updateCuriousAutopilotLoop()
+
+        // Defer an initial Curious check after the engine has had time to settle.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+            guard let self = self, self.curiousAutopilotLevel() != "off" else { return }
+            self.triggerCuriousAutopilot(reason: "engine startup")
+        }
     }
 
     /// Replace the default main-model configuration before any load. No-op if
@@ -591,6 +603,7 @@ final class BadAppleEngine: @unchecked Sendable {
             }
             await runtime.releaseModelMemory(reserved)
             await runtime.markModelFailed(mid, error: error.localizedDescription)
+            triggerCuriousAutopilot(reason: "model load failed: \(error.localizedDescription)")
         }
         stateLock.withLock { _isLoading = false }
     }
@@ -1526,10 +1539,15 @@ final class BadAppleEngine: @unchecked Sendable {
     // MARK: - Policy & Tools
 
     /// Toggle autopilot mode (skip approval prompts for destructive tools).
+    /// The legacy boolean is kept in sync with the `autopilot_level` file so
+    /// the menu bar toggle still turns Curious on and off in a safe way.
     var autopilot: Bool {
-        get { policyEngine.autopilot }
+        get { policyEngine.autopilot || curiousAutopilotLevel() == "full" }
         set {
             policyEngine.autopilot = newValue
+            let levelPath = NSHomeDirectory() + "/.bad_apple/autopilot_level"
+            let newLevel = newValue ? "safe-apply" : "off"
+            _ = try? newLevel.write(toFile: levelPath, atomically: true, encoding: .utf8)
             updateCuriousAutopilotLoop()
         }
     }
@@ -1546,12 +1564,18 @@ final class BadAppleEngine: @unchecked Sendable {
         return 300
     }
 
+    /// Returns the active Curious autopilot level from disk.
+    func curiousAutopilotLevel() -> String {
+        let path = NSHomeDirectory() + "/.bad_apple/autopilot_level"
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return "off" }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
     /// Start or stop the background Curious autopilot loop based on
-    /// autopilot state. Curious self-improvement is now wired to the same
-    /// toggle as autopilot, so enabling autopilot also enables periodic
-    /// self-audit and proposal generation.
-    private func updateCuriousAutopilotLoop() {
-        let shouldRun = autopilot && curiousAutopilotInterval() > 0
+    /// autopilot state and level. Runs on a timer and also wakes immediately
+    /// when a `BadAppleCuriousTrigger` notification is posted.
+    func updateCuriousAutopilotLoop() {
+        let shouldRun = curiousAutopilotLevel() != "off" && curiousAutopilotInterval() > 0
         if shouldRun {
             startCuriousAutopilotLoop()
         } else {
@@ -1566,9 +1590,9 @@ final class BadAppleEngine: @unchecked Sendable {
         curiousAutopilotTask = Task { [weak self] in
             guard let self = self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                _ = await self.waitForCuriousTriggerOrTimeout(interval: interval)
                 guard !Task.isCancelled else { break }
-                guard self.autopilot, self.curiousAutopilotInterval() > 0 else { continue }
+                guard self.curiousAutopilotLevel() != "off", self.curiousAutopilotInterval() > 0 else { continue }
                 let result = await self.toolExecutor.executeTool(
                     name: "curious_self_improve",
                     args: ["include": "all"],
@@ -1581,6 +1605,35 @@ final class BadAppleEngine: @unchecked Sendable {
                 )
             }
         }
+    }
+
+    /// Wait for either the base interval to elapse or a `BadAppleCuriousTrigger`
+    /// notification to be posted.
+    private func waitForCuriousTriggerOrTimeout(interval: TimeInterval) async -> Bool {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [weak self] in
+                guard self != nil else { return }
+                for await _ in NotificationCenter.default.notifications(named: .curiousTrigger) {
+                    return
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+            await group.next()
+            group.cancelAll()
+        }
+        return true
+    }
+
+    /// Post a trigger to wake the Curious autopilot loop and log the reason.
+    func triggerCuriousAutopilot(reason: String) {
+        auditLedger.append(
+            eventType: "curious_trigger",
+            data: ["reason": reason],
+            persona: activePersona
+        )
+        NotificationCenter.default.post(name: .curiousTrigger, object: nil, userInfo: ["reason": reason])
     }
 
     private func stopCuriousAutopilotLoop() {

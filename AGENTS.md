@@ -415,6 +415,18 @@ cargo clippy --release
 
 - No hardcoded `/Users/savag3` or dev paths remain in source. LaunchAgent plists use `__REPO_ROOT__` and `__HOME__` placeholders that installers substitute at install time.
 - `package_full_release.sh` excludes dev artifacts (`.cargo`, `.DS_Store`, `state.*`, `state-backup*`, `sapient_agi_soul*`, `test_*.wasm`, `test_cage`, `wild_workspace`, `strategy_db`, `data`, `voices`, `curriculum`, `com.badapple.substrate*` legacy plists, and `install_daemon.sh`).
+## v0.1.7 — Event-driven Curious with runtime self-repair
+
+- `self_audit` now reports `runtime` health and a ranked `repairs` list.
+- `repair_runtime_issue` is a bounded tool that can create data files and
+  `launchctl bootstrap` user agents. It refuses unknown or unsafe repairs.
+- `curious_self_improve` attempts safe runtime repairs first, records the
+  results, then falls back to a source patch.
+- The Curious autopilot loop wakes on `BadAppleCuriousTrigger` notifications
+  (startup, model-load failure, missing blocklist, `self_audit` repairs) in
+  addition to its base timer.
+- Menu bar `autopilot` toggle is kept in sync with `~/.bad_apple/autopilot_level`.
+
 ## v0.1.6 — Curious becomes the product
 
 - Patches are now verified against `cargo fmt`, `cargo clippy --release --tests`,
