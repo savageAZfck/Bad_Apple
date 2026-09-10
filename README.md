@@ -66,12 +66,11 @@ menubar-plist rendering, source-free public release
 (`savageAZfck/bad-apple-releases`), and public Homebrew Cask
 (`savageAZfck/homebrew-bad-apple`).
 
-The **v0.1.4 Control Center, Memory, and Workshop beta** ships a real web
-Control Center, automatic local fact extraction into the memory graph, and a
-Tool & Persona Workshop for creating custom personas and declarative custom
-tools without touching the terminal. It also improves the dashboard status
-schema, adds `/api/control`, `/api/memory/facts`, and `/api/workshop/*` routes,
-and lets the engine switch to freshly installed workshop personas immediately.
+The **v0.1.7 Event-Driven Curious and Runtime Self-Repair beta** ships a web
+Control Center with the Curious autopilot, event-driven self-improvement
+triggers, a bounded `repair_runtime_issue` tool that can `launchctl bootstrap`
+user agents and create missing data files, and a dashboard for reviewing,
+applying, rejecting, and rolling back source patches.
 
 **Hardware:** Apple Silicon Mac (M1 or newer). **8 GB unified memory** is the
 practical minimum and **16 GB** is recommended for comfortable use. The 7B model

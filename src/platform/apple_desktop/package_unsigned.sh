@@ -74,16 +74,14 @@ from a Bad Apple repository checkout instead, run:
 
 Replace /path/to/bad_apple with the path to your checkout if you moved it.
 
-New in this build:
-- One-click "Install Bad Apple" setup for non-technical users.
-- First-run onboarding window from the menu bar.
-- Plain-English Status window and friendly menu-bar tool tips.
-- Self-hosting model registry: manage local models with `badapple model <list|scan|info|use|verify|add|remove|recommend>`.
-- P2P edge mesh: discover peers and share signed model manifests with
-  `badapple p2p <peers|sync|models|pull>`.
-- Swift menu-bar Troubleshooting menu (Restart Daemon, Open Log, Copy MCP Socket).
-- Local web Control Center served by the bundled `badapple-dashboard` on
-  http://127.0.0.1:8787/control.
+New in v0.1.7:
+- Event-driven Curious autopilot that wakes on startup, model-load failure,
+  missing output-firewall blocklist, and self-audit runtime repairs.
+- Bounded `repair_runtime_issue` tool: auto-creates missing data files and
+  `launchctl bootstrap`s user LaunchAgents before Curious proposes a patch.
+- Web dashboard for Curious autopilot levels, "Run Curious now", and
+  proposal apply/reject/rollback.
+- Self-hosting model registry and encrypted P2P mesh (off by default).
 - All local IPC is authenticated with SLICKS v2 (Secure Enclave) with HMAC fallback.
 
 To update later, use Bad Apple > Check for Updates in the menu bar, or run:

@@ -39,7 +39,7 @@ All models are cached on disk after the first download. Nothing is re-downloaded
 
 ### 7B Qwen 2.5 Coder (default)
 
-Live 7B numbers on a 16 GB Apple Silicon Mac after the v0.1.2 KV-cache and supervisor-health fixes, measured once the model was warm and build pressure had settled:
+Live 7B numbers on a 16 GB Apple Silicon Mac after the v0.1.7 KV-cache, supervisor-health, and event-driven Curious self-repair fixes, measured once the model was warm and build pressure had settled:
 
 | Prompt | Prompt tokens | First token | Tokens out | Decode t/s | Peak memory |
 |---|---|---|---:|---:|---:|

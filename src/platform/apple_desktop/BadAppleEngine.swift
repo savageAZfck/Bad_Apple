@@ -1539,14 +1539,16 @@ final class BadAppleEngine: @unchecked Sendable {
     // MARK: - Policy & Tools
 
     /// Toggle autopilot mode (skip approval prompts for destructive tools).
-    /// The legacy boolean is kept in sync with the `autopilot_level` file so
-    /// the menu bar toggle still turns Curious on and off in a safe way.
+    /// The legacy boolean is kept in sync with the `autopilot_level` file.
+    /// Turning autopilot on now sets `full` (all safe actions run without
+    /// approval); turning it off sets `off`. For the granular `suggest` or
+    /// `safe-apply` levels, use the web dashboard.
     var autopilot: Bool {
         get { policyEngine.autopilot || curiousAutopilotLevel() == "full" }
         set {
             policyEngine.autopilot = newValue
             let levelPath = NSHomeDirectory() + "/.bad_apple/autopilot_level"
-            let newLevel = newValue ? "safe-apply" : "off"
+            let newLevel = newValue ? "full" : "off"
             _ = try? newLevel.write(toFile: levelPath, atomically: true, encoding: .utf8)
             updateCuriousAutopilotLoop()
         }

@@ -4,6 +4,12 @@ All notable changes to Bad Apple are documented in this file.
 
 ## [0.1.7] — 2026-09-10
 
+### Fixed
+- Menu bar `autopilot` toggle now sets `full` (not `safe-apply`), so it matches the documented behavior of skipping approval prompts for all destructive tools. Use the dashboard for `suggest`/`safe-apply` levels.
+- `mcp.rs` server version now reports `0.1.7`.
+- `deriveRuntimeRepairs` no longer suggests a malformed `cp` command for missing app installs.
+- README and BAD_APPLE_BUYERS.md updated to reflect v0.1.7 features.
+
 ### Added
 - **Real-world runtime repairs** — `self_audit` now detects common install/runtime issues (missing data dir, missing output firewall blocklist, unloaded identity/dashboard/TTS/menu bar agents, missing app install) and emits a ranked `repairs` list.
 - **`repair_runtime_issue` tool** — a bounded, allowlisted tool that can create the data dir, create the blocklist, or `launchctl bootstrap` a user LaunchAgent. Unsafe repairs (like app install) are surfaced for human approval.

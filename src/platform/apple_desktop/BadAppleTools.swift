@@ -3193,8 +3193,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             repairs.append([
                 "issue": "app_not_installed",
                 "safe": false,
-                "command": "sudo cp -R \"Bad Apple.app\" /Applications/",
-                "why": "The Bad Apple app bundle is not in /Applications; it must be installed before launchd agents can be loaded.",
+                "command": "",
+                "why": "The Bad Apple app bundle is not in /Applications; copy it from the package to /Applications and run the installer before launchd agents can be loaded.",
             ])
         }
         return repairs
