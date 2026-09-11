@@ -107,7 +107,7 @@ coding benchmarks.
 - **Hardware-rooted identity** with Secure Enclave key storage, signing, key
   pinning, and model-provenance verification.
 - **Hash-chained audit ledger** — SHA-256 chained, HMAC'd, secret-redacted logs.
-- **Declarative policy engine** — 60+ rules in `policy.yaml` with per-tool
+- **Declarative policy engine** — 37 rules in `policy.yaml` with per-tool
   argument enforcement, path allowlists, and human-in-the-loop approvals.
 - **Fail-closed automation cage** — `openat`-based file operations with
   `O_NOFOLLOW`, allowlisted roots, and symlink/hardlink rejection.
@@ -264,7 +264,7 @@ holds zero network sockets.
 | Output safety | Streaming Aho-Corasick firewall | `output_firewall_patterns_present` |
 | Audit integrity | SHA-256 chained, secret-redacted ledger | `ledger_hash_chain_is_valid`, `ledger_redacts_secrets` |
 | Network posture | Air-gap cert suite proves zero external sockets | `no_external_network_sockets` |
-| Policy coverage | Declarative `policy.yaml` covering 60+ tool rules | `policy_yaml_covers_dangerous_tools` |
+| Policy coverage | Declarative `policy.yaml` covering 37 tool rules | `policy_yaml_covers_dangerous_tools` |
 
 See [PRIVACY.md](PRIVACY.md) for the data posture.
 

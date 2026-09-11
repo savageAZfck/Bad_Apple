@@ -299,7 +299,7 @@ In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple
 - `BAD_APPLE_BUYERS.md` is the buyer-facing doc; commit it when the numbers change.
 - The 4B voice bundle has been removed in favor of the unified main brain; do not reintroduce it.
 - `cargo fmt --check` is now clean; run `cargo fmt` and `cargo build --release` after Rust changes.
-- Verification: `cargo fmt --check && cargo clippy --release --tests && cargo test --release` must all pass before committing. There are 102+ Rust library tests and 10 cert-suite integration tests.
+- Verification: `cargo fmt --check && cargo clippy --release --tests && cargo test --release` must all pass before committing. There are 103 Rust unit tests and 15 integration tests across `tests/*.rs`.
 - `cargo build --release` may emit a future-incompatibility warning from `block v0.1.6` (a transitive dep of `metal 0.29`). It cannot be fixed without migrating `metal` to `objc2-metal`.
 - The Swift menu-bar build (`build_bad_apple_menu_bar.sh`) requires a full Xcode SDK with linkable `CoreAudioTypes` and `SwiftUICore` clients. On the stripped CLT `MacOSX26.5.sdk`, linking may fail with `ld: warning: Could not find or use auto-linked framework 'CoreAudioTypes'`. If this happens, install the matching Xcode and `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`.
 - Natural-language tool invocation (e.g. "run shell ls /tmp") is driven by the explicit `<tool_call>` XML instructions and few-shot examples in `prompt.txt`. The model emits the block, the CLI prompts for approval, and the user replies `approve <id>` to execute.

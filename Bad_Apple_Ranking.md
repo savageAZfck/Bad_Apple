@@ -286,7 +286,7 @@ badapple CLI / menu bar / voice host
 - **VRAM admission** — refuses to load models that would exceed the memory budget.
 - **Air-gap certified** — `badapple cert` runs 15 runtime checks and integration tests assert zero network sockets on the daemon process.
 - **Persona-driven** — switchable, teachable personalities make the assistant entertaining and brandable.
-- **Built-in safety** — approvals, fail-closed paths, streaming firewall, audit ledger, and 60-rule policy engine by default.
+- **Built-in safety** — approvals, fail-closed paths, streaming firewall, audit ledger, and 37-rule policy engine by default.
 - **Mac-native** — uses MLX, Apple Silicon, launchd, AVSpeechSynthesizer, Secure Enclave, and a Swift menu bar.
 - **Extensible local RAG** — index your own files and query them privately.
 - **Open-ended tool use** — local shell, AppleScript, file tools, document reading, vision, daemon-native FSEvents workspace watcher, ambient/ocular context, MCP tools (stdio/socket/SSE), and a bounded Curious self-improvement loop gated by user approval.
@@ -350,8 +350,8 @@ open -a "Bad Apple"
 | Packaging & distribution | 2.75 / 3 | Unsigned full-release zip, drag-to-Applications DMG with `Install.command`, Homebrew Cask, and a signed release path (`package_signed_release.sh` with `CODESIGN_ID`) are all working. CI runs on every push/PR. A notarized default artifact would close the last 0.25. |
 | Installation UX | 1.5 / 2 | DMG `Install.command` and `brew install --cask bad-apple` are close to one-click, but both still require administrator approval and a quarantine strip for the unsigned app. Signed-but-not-notarized zip is available for CI/enterprise. |
 | First-run experience | 1.85 / 2 | Lazy startup with optional fast tier routes simple queries to the 0.5B model. Native chat window with streaming, persona/tier badges. Model selector, full model registry with SHA-256 provenance, P2P encrypted mesh toggle, MCP marketplace, ambient context and ocular screen-stream endpoints, `--doctor` diagnostics, and `badapple-dashboard` serving the `web/` SPA on port 8787. Image generation is available through the `image_generation` tool and the menu bar when `mflux-generate-flux2` is installed. A 5-step native onboarding wizard (welcome, privacy, model status, permissions, first query) is wired into the menu bar and shown on first launch; an install prompt is shown first if the platform has not been installed. A purchase-grade, fully polished first-launch flow still needs screen-recording permission guidance and a workspace-selection step. |
-| QA & reliability | 1.95 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy --all-targets --all-features --release -- -D warnings`, and `cargo audit` (0 vulnerabilities, one remaining `paste` unmaintained transitive warning) all pass. 103 Rust unit tests, 15 cert-suite integration tests, 6 red-team tests, and 4 mesh-sync tests pass. Air-gap certification tests assert zero network sockets and cover SLICKS replay, automation-cage traversal/symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. A clean-machine VM install + smoke test is still the last reliability gap. |
-| Security & trust posture | 1.8 / 2 | Strong internal controls plus an adversarial self-red-teaming harness (`src/red_team/`) with 12 built-in probes and a continuous `redteam watch` loop, encrypted cross-device document sync over the P2P mesh (personas, prompt, settings, model manifests), SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 60-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests, and a bounded Curious autopilot that runs local self-audits and writes improvement proposals under policy. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
+| QA & reliability | 1.95 / 2 | `cargo fmt`, `cargo build --release`, `cargo clippy --all-targets --all-features --release -- -D warnings`, and `cargo audit` (0 vulnerabilities, one remaining `paste` unmaintained transitive warning) all pass. 103 Rust unit tests and 15 integration tests pass. Air-gap certification tests assert zero network sockets and cover SLICKS replay, automation-cage traversal/symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage. Swift MLX module compiles and self-tests pass. Native TTS server and menu bar playback were fixed and verified end-to-end. A clean-machine VM install + smoke test is still the last reliability gap. |
+| Security & trust posture | 1.8 / 2 | Strong internal controls plus an adversarial self-red-teaming harness (`src/red_team/`) with 12 built-in probes and a continuous `redteam watch` loop, encrypted cross-device document sync over the P2P mesh (personas, prompt, settings, model manifests), SLICKS v2 with Secure Enclave, human-in-the-loop approvals, streaming output firewall, hash-chained audit ledger, 37-rule declarative policy engine, fail-closed filesystem cage, WASM sandbox, air-gap cert tests, and a bounded Curious autopilot that runs local self-audits and writes improvement proposals under policy. P2P mesh encrypts payloads with AES-256-GCM and signs them with HMAC-SHA256. Unsigned consumer package still means a Gatekeeper warning for first-time users; a notarized artifact is the last trust gap. |
 
 ### What moved the needle this pass (9.7 → 9.8)
 
@@ -399,7 +399,7 @@ open -a "Bad Apple"
 6. **Swift menu bar / daemon linker and build fixed** — `BadAppleMLX` public modifier issues resolved, `IFS` and dylib linking fixed in `build_bad_apple_menu_bar.sh`, and `badapple-engine` builds and bundles successfully.
 7. **Native TTS fixed and auto-starting** — `BadAppleMenuBar` `PiperTTSPlaybackController` now uses direct `afplay` for user-session playback, and `badapple` CLI auto-starts `badapple-tts` if its socket is missing.
 8. **Signed full-release packaging** — `package_signed_release.sh` produces a code-signed `Bad_Apple-<version>-full-signed.zip` with a self-signed or Apple Developer cert.
-9. **Test count and cert suite expanded** — 103 Rust tests and 15 cert-suite integration tests pass, including SLICKS replay, tool cage, path traversal, symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and network-isolation checks.
+9. **Test count and cert suite expanded** — 103 Rust unit tests and 15 integration tests pass, including SLICKS replay, tool cage, path traversal, symlink escape, policy coverage, P2P crypto, output firewall, ledger integrity, vault round-trip, and network-isolation checks.
 10. **Dead core modules removed** — `hyperdimensional_core.rs` and `connectome_mmap.rs` are deleted; `RustSynthesizer` is now a pure repair helper; `ReplayCache` moved into `bad_apple_ipc.rs`.
 11. **Ambient and ocular context wired into active prompts** — `BadAppleEngine` now refreshes app/window context and optional screen-capture + VLM description before every turn, with a 30-second background timer keeping it warm.
 12. **First-run onboarding flow fixed** — The compact install panel is shown first when the platform is not yet installed; the 5-step `BadAppleOnboardingWindow` runs once the platform is ready.
@@ -412,7 +412,7 @@ open -a "Bad Apple"
 - **Dual-process cognitive governor** — `governor.rs` was orphaned and deleted. No System 1 / System 2 architecture exists in the compiled product.
 - **FLUX image generation** — Ported to the native `image_generation` tool in `BadAppleTools.swift`. It calls the local `mflux-generate-flux2` binary when installed and writes PNGs to `/var/lib/bad_apple/generated_images`.
 - **Piper TTS** — Replaced by native `AVSpeechSynthesizer`. The "PiperTTSPlayback" class name is just the audio playback controller.
-- **171 tests** — Now 103 Rust tests plus 15 cert-suite integration tests. Red-team and security regression tests are in `tests/cert_suite.rs`.
+- **118 tests** — Now 103 Rust unit tests plus 15 integration tests. Red-team and security regression tests live in `tests/cert_suite.rs`, `tests/red_team.rs`, and `tests/mesh_sync.rs`.
 - **10,000-dimensional hyperdimensional computing** — `hyperdimensional_core.rs` has been removed. It was only used by a dead FFI path and the `RustSynthesizer` template map; `RustSynthesizer` is now a simple repair helper.
 - **Memory-mapped connectome persistence** — `connectome_mmap.rs` and the `MemoryGraphNode` struct have been removed. There was no runtime consumer.
 - **Metal UMA zero-copy memory management** — `metal_uma.rs` is wired into the gatekeeper's `CandleBrain` classifier through `tensor_brain.rs`; it is not used by the Swift MLX runtime, but it is not dead code.
@@ -507,7 +507,7 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **Bounded health supervisor** with restart budgets and safe mode
 - **Gatekeeper proxy** with Candle classifier brain, automation cage, and WASM sandbox
 - **APFS file scavenger** module with tokenized chunking
-- **128 Rust/cert/mesh/red-team tests (103 unit + 15 cert-suite + 4 mesh-sync + 6 red-team)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
+- **118 Rust tests (103 unit + 15 integration)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 OpenAGI has none of these. It's a proactive agent daemon; Bad Apple is an AI operating system layer.
 
@@ -551,7 +551,7 @@ Apple Intelligence, Google Gemini Nano, and Microsoft Copilot+ are shipped by th
 - **WebAssembly sandbox** in the gatekeeper for untrusted code execution
 - **Fail-closed filesystem automation cage** (allowlisted roots only)
 - **APFS file scavenger** module with tokenized chunking and redb persistence
-- **128 Rust/cert/mesh/red-team tests (103 unit + 15 cert-suite + 4 mesh-sync + 6 red-team)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
+- **118 Rust tests (103 unit + 15 integration)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
 ### Notarization stance
 
