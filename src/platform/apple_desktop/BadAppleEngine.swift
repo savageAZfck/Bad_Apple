@@ -1895,6 +1895,7 @@ final class BadAppleEngine: @unchecked Sendable {
             • Multi-step agent tasks with planning
             • Voice interaction with "Hey Bad Apple"
             • Continuous self-red teaming with adversarial probes across the cage, SLICKS, P2P, WASM, policy, and audit subsystems
+            • Curious bounded self-improvement and runtime repair: I audit my own runtime, detect safe repairs, attempt them when Autopilot allows, and propose minimal source patches with backup and verification
 
             \(autopilotNote) Everything runs locally on your Mac — no cloud, no data leaves your device.
             """
