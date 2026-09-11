@@ -35,15 +35,15 @@ use wasmi::{
 
 /// Maximum number of linear memory pages allowed per module.
 ///
-/// One Wasm page is 64 KiB.  `MAX_PAGES = 16` gives a 1 MiB upper bound.
-const MAX_PAGES: u64 = 16;
+/// One Wasm page is 64 KiB.  `MAX_PAGES = 8` gives a 512 KiB upper bound.
+const MAX_PAGES: u64 = 8;
 
 /// Maximum initial pages a module may declare.  Modules with `memory 2` or more
 /// are rejected so that untrusted payloads cannot reserve a large slab up front.
-const MAX_INITIAL_PAGES: u64 = 2;
+const MAX_INITIAL_PAGES: u64 = 1;
 
 /// Default fuel budget for a single call.
-const DEFAULT_FUEL: u64 = 1_000_000;
+const DEFAULT_FUEL: u64 = 500_000;
 
 /// Start of the host-side bump allocator in guest linear memory.  Everything
 /// below this offset (the first page) is left for the guest's static data.

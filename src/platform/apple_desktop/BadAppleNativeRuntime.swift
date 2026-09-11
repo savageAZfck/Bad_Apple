@@ -120,6 +120,10 @@ public actor BadAppleNativeRuntime {
     private var vramBudgetBytes: UInt64 = 0
     /// Estimated memory used by currently loaded models (in bytes).
     private var vramUsedBytes: UInt64 = 0
+    /// Memory reserved for safety/audit/runtime governance subsystems (bytes).
+    private var safetyReservationBytes: UInt64 = 0
+    /// Memory reserved for vision/VLM inferences (bytes).
+    private var visionReservationBytes: UInt64 = 0
     /// Whether VRAM admission checks are enforced.
     private var vramAdmissionEnabled = true
 
@@ -145,6 +149,20 @@ public actor BadAppleNativeRuntime {
         self.idleThreshold = min(86_400, max(1, idleThreshold))
         // Default VRAM budget: 80% of physical memory.
         self.vramBudgetBytes = UInt64(Double(ProcessInfo.processInfo.physicalMemory) * 0.8)
+        // Reserved memory pools for safety/audit and vision/VLM workloads.
+        let env = ProcessInfo.processInfo.environment
+        if let raw = env["BADAPPLE_SAFETY_MEMORY_MB"], let mb = UInt64(raw) {
+            self.safetyReservationBytes = mb * 1_048_576
+        } else {
+            // Default 512 MB for governance subsystems.
+            self.safetyReservationBytes = 512 * 1_048_576
+        }
+        if let raw = env["BADAPPLE_VISION_MEMORY_MB"], let mb = UInt64(raw) {
+            self.visionReservationBytes = mb * 1_048_576
+        } else {
+            // Default 768 MB for VLM workloads.
+            self.visionReservationBytes = 768 * 1_048_576
+        }
     }
 
     // MARK: Model lifecycle
@@ -260,6 +278,16 @@ public actor BadAppleNativeRuntime {
         vramBudgetBytes = bytes
     }
 
+    /// Set the reserved safety/audit memory in bytes.
+    public func setSafetyReservation(_ bytes: UInt64) {
+        safetyReservationBytes = bytes
+    }
+
+    /// Set the reserved vision/VLM memory in bytes.
+    public func setVisionReservation(_ bytes: UInt64) {
+        visionReservationBytes = bytes
+    }
+
     /// Track memory used by a loaded model.
     public func trackModelMemory(_ modelID: String, bytes: UInt64) {
         vramUsedBytes += bytes
@@ -276,13 +304,16 @@ public actor BadAppleNativeRuntime {
         guard vramAdmissionEnabled else { return nil }
         let memory = Self.readMemorySnapshot()
         let availableSystem = memory.totalBytes > memory.usedBytes ? memory.totalBytes - memory.usedBytes : 0
+        let reserved = safetyReservationBytes + visionReservationBytes
+        let effectiveBudget = vramBudgetBytes > reserved ? vramBudgetBytes - reserved : 0
+        let effectiveSystem = availableSystem > reserved ? availableSystem - reserved : 0
         let projected = vramUsedBytes.addingReportingOverflow(estimatedBytes)
         guard !projected.overflow else { return "Model memory requirements exceed the VRAM budget" }
-        if projected.partialValue > vramBudgetBytes {
-            return String(format: "Model would exceed VRAM budget: %.2f GiB projected vs %.2f GiB budget", Double(projected.partialValue) / 1_073_741_824, Double(vramBudgetBytes) / 1_073_741_824)
+        if projected.partialValue > effectiveBudget {
+            return String(format: "Model would exceed effective VRAM budget: %.2f GiB projected vs %.2f GiB budget (%.2f GiB reserved)", Double(projected.partialValue) / 1_073_741_824, Double(effectiveBudget) / 1_073_741_824, Double(reserved) / 1_073_741_824)
         }
-        if estimatedBytes > availableSystem {
-            return String(format: "Not enough memory available for weights and context: %.2f GiB estimated, %.2f GiB currently available", Double(estimatedBytes) / 1_073_741_824, Double(availableSystem) / 1_073_741_824)
+        if estimatedBytes > effectiveSystem {
+            return String(format: "Not enough memory available for weights and context: %.2f GiB estimated, %.2f GiB currently available (%.2f GiB reserved)", Double(estimatedBytes) / 1_073_741_824, Double(effectiveSystem) / 1_073_741_824, Double(reserved) / 1_073_741_824)
         }
         return nil
     }
@@ -302,11 +333,14 @@ public actor BadAppleNativeRuntime {
     public func vramStatus() -> [String: Any] {
         let budgetGB = Double(vramBudgetBytes) / 1_073_741_824
         let usedGB = Double(vramUsedBytes) / 1_073_741_824
+        let reservedGB = Double(safetyReservationBytes + visionReservationBytes) / 1_073_741_824
         return [
             "budget_bytes": vramBudgetBytes,
             "used_bytes": vramUsedBytes,
             "budget_gb": budgetGB,
             "used_gb": usedGB,
+            "reserved_gb": reservedGB,
+            "effective_budget_gb": budgetGB - reservedGB,
             "ratio": vramBudgetBytes > 0 ? Double(vramUsedBytes) / Double(vramBudgetBytes) : 0,
             "admission_enabled": vramAdmissionEnabled
         ]
@@ -346,6 +380,23 @@ public actor BadAppleNativeRuntime {
             level: "readiness",
             ok: hasReadyModel,
             detail: hasReadyModel ? "loaded" : "not loaded"
+        ))
+
+        // Software canary heartbeat: touch a timestamp file the supervisor can watch.
+        let canaryPath = "/var/lib/bad_apple/.canary"
+        let canaryData = "\(Date().timeIntervalSince1970)\n".data(using: .utf8)
+        let canaryOK: Bool
+        if let data = canaryData {
+            FileManager.default.createFile(atPath: canaryPath, contents: data, attributes: nil)
+            canaryOK = FileManager.default.fileExists(atPath: canaryPath)
+        } else {
+            canaryOK = false
+        }
+        registerHealthCheck(HealthCheck(
+            name: "canary",
+            level: "liveness",
+            ok: canaryOK,
+            detail: canaryOK ? "heartbeat written" : "heartbeat failed"
         ))
 
         // Audit ledger check (verify chain integrity).
