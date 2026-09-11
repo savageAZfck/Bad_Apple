@@ -34,7 +34,6 @@ rsync -a \
   --exclude='state.*' --exclude='state-backup*' --exclude='scavenger_paths.json' --exclude='tokenizer.json' \
   --exclude='.badapple_dev_cert.*' --exclude='sapient_agi_soul*' --exclude='test_*.wasm' \
   --exclude='test_cage' --exclude='wild_workspace' --exclude='*.defense' --exclude='*.network' --exclude='*.weights' \
-  --exclude='src/platform/apple_bridge/install_daemon.sh' --exclude='src/platform/apple_bridge/com.badapple.substrate*' \
   --exclude='src/platform/apple_desktop/.build' --exclude='src/platform/apple_desktop/.swiftpm' \
   --exclude='MLXInference/.build' --exclude='MLXInference/.swiftpm' \
   --exclude='.build' --exclude='.swiftpm' \

@@ -18,8 +18,6 @@ let package = Package(
             exclude: [
                 "Package.swift",
                 "build_apple_bridge.sh",
-                "install_daemon.sh",
-                "com.badapple.substrate.plist",
             ],
             swiftSettings: [
                 .enableExperimentalFeature("AccessLevelOnImport"),
