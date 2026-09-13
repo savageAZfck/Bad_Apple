@@ -92,8 +92,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (input, output, sovereign_seed, checkpoint_only) = parse_args();
 
     if !input.exists() {
-        eprintln!("input ledger not found: {}", input.display());
-        process::exit(1);
+        // Fresh installs have no ledger yet; a scheduled run with nothing
+        // to harden is a no-op, not an integrity failure.
+        println!("no ledger at {} yet; nothing to harden", input.display());
+        return Ok(());
     }
     if input == output {
         eprintln!("input and output paths must be different");

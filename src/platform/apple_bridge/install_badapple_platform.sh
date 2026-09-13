@@ -135,7 +135,7 @@ if [[ -d "${HF_CACHE}" ]]; then
 fi
 
 DAEMONS=(com.badapple.gatekeeper com.badapple.mlx com.badapple.supervisor)
-AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard)
+AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint)
 AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 for label in "${DAEMONS[@]}"; do
     target="/Library/LaunchDaemons/${label}.plist"
@@ -255,6 +255,12 @@ run_user "${REPO_ROOT}/src/platform/apple_desktop/install_menu_bar_agent.sh"
 # Web Control Center (loopback-only dashboard).
 if [[ -x "/Applications/Bad Apple.app/Contents/Helpers/badapple-dashboard" ]]; then
     run_user "${REPO_ROOT}/src/platform/apple_desktop/install_dashboard_agent.sh"
+fi
+
+# Daily sovereign-ledger checkpoint agent (hardened copy + Secure Enclave
+# checkpoints of the audit ledger).
+if [[ -x "${REPO_ROOT}/target/release/badapple-sovereign" ]]; then
+    run_user "${REPO_ROOT}/src/platform/apple_desktop/install_checkpoint_agent.sh"
 fi
 
 trap - EXIT INT TERM
