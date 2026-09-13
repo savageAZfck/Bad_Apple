@@ -48,6 +48,10 @@ path = "src/bin/badapple_fetch_metallib.rs"
 name = "badapple-fetch"
 path = "src/bin/badapple-fetch.rs"
 
+[[bin]]
+name = "badapple-sovereign"
+path = "src/bin/badapple-sovereign.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -98,6 +102,7 @@ hf-chat-template = "1.0.0"
 ureq = "3.4"
 urlencoding = "2.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+sovereign_ledger = { path = "../sovereign_ledger" }
 
 [build-dependencies]
 cbindgen = "0.29"
