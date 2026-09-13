@@ -188,6 +188,27 @@ available.
 Secrets, emails, SSNs, phones, API keys, and long random tokens are redacted
 before writing.
 
+## IFY watchdog
+
+`badapple-ify` tails the ledger, verifies each new line's hash chain, learns
+behavioral baselines, and files approval-gated proposals on anomalies.
+Design spec: `IFY.md`. State: `~/.bad_apple/ify/` (delete `state.json` to
+restart gestation).
+
+```bash
+target/release/badapple ify status     # phase + baseline summary
+target/release/badapple ify once       # single tail+detect pass
+target/release/badapple ify findings   # recent findings
+target/release/badapple-ify --once     # daemon binary direct
+src/platform/apple_desktop/install_ify_agent.sh   # install LaunchAgent
+```
+
+Env: `BADAPPLE_IFY=0` disables; `BADAPPLE_IFY_PHASE` forces a phase;
+`BADAPPLE_IFY_GESTATION_DAYS`/`BADAPPLE_IFY_SECONDARY_DAYS` (14/14 default);
+`BADAPPLE_IFY_NARRATE=0` skips model narration; `BADAPPLE_IFY_INTERVAL`
+(15s default poll); `BADAPPLE_IFY_DIR`/`BADAPPLE_LEDGER` override paths
+(tests).
+
 ## Sovereign ledger layer (defense in depth)
 
 `badapple-sovereign` (built from `src/bin/badapple-sovereign.rs`) is a thin

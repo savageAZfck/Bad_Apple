@@ -220,6 +220,10 @@ fn main() -> Result<()> {
         return run_redteam_subcommand(&prompt_parts[1..]);
     }
 
+    if prompt_parts.first().map(std::string::String::as_str) == Some("ify") {
+        return run_ify_subcommand(&prompt_parts[1..]);
+    }
+
     if prompt_parts.first().map(std::string::String::as_str) == Some("cert") {
         return run_cert();
     }
@@ -1679,6 +1683,71 @@ fn run_cert() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&summary)?);
     if failures > 0 {
         bail!("cert suite failed: {failures} check(s)");
+    }
+    Ok(())
+}
+
+fn run_ify_subcommand(args: &[String]) -> Result<()> {
+    let sub = args.first().map(String::as_str).unwrap_or("status");
+    match sub {
+        "status" => {
+            let state = bad_apple::ify::load_state();
+            let phase = bad_apple::ify::current_phase(&state);
+            let summary = serde_json::json!({
+                "phase": phase.as_str(),
+                "installed_days_ago": ((bad_apple::ify::now_secs() - state.installed_at) / 86400.0 * 10.0).round() / 10.0,
+                "events_seen": state.events_seen,
+                "event_types": state.event_types.len(),
+                "approvals": {"granted": state.approvals_granted, "denied": state.approvals_denied},
+                "firewall_hits": state.firewall_hits,
+                "kill_switch_events": state.kill_switch_events,
+                "state_dir": bad_apple::ify::ify_dir(),
+            });
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+        "once" => {
+            let secrets = bad_apple::ify::load_slicks_secrets();
+            let mut state = bad_apple::ify::load_state();
+            let report = bad_apple::ify::tail_ledger(&mut state, &secrets)?;
+            for f in &report.findings {
+                bad_apple::ify::dispatch(&state, f);
+            }
+            bad_apple::ify::save_state(&state);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "phase": bad_apple::ify::current_phase(&state).as_str(),
+                    "new_events": report.new_events,
+                    "findings": report.findings,
+                    "chain_broken": report.chain_broken,
+                    "truncated": report.truncated,
+                }))?
+            );
+        }
+        "findings" => {
+            let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let path = bad_apple::ify::findings_path();
+            let lines: Vec<String> = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(String::from)
+                .collect();
+            for line in lines.iter().rev().take(n).rev() {
+                println!("{line}");
+            }
+        }
+        "proposals" => {
+            let dir = bad_apple::ify::proposals_dir();
+            let mut paths: Vec<_> = std::fs::read_dir(&dir)
+                .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                .unwrap_or_default();
+            paths.sort();
+            for p in paths {
+                println!("{}", p.display());
+            }
+        }
+        _ => bail!("unknown ify subcommand: {sub}\nusage: badapple ify <status|once|findings [n]|proposals>"),
     }
     Ok(())
 }

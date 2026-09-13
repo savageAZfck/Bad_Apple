@@ -1,6 +1,6 @@
 [package]
 name = "bad_apple"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Adam Clark <savagetism@icloud.com>"]
 repository = "https://github.com/savageAZfck/Bad_Apple"
@@ -51,6 +51,10 @@ path = "src/bin/badapple-fetch.rs"
 [[bin]]
 name = "badapple-sovereign"
 path = "src/bin/badapple-sovereign.rs"
+
+[[bin]]
+name = "badapple-ify"
+path = "src/bin/badapple-ify.rs"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }

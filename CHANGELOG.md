@@ -2,6 +2,27 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.2.2] — 2026-09-13
+
+### Added
+- **IFY watchdog** (`badapple-ify`): a behavioral daemon that tails the
+  audit ledger, verifies each new line against the hash chain as it
+  arrives, and learns deterministic baselines (per-type hourly rates,
+  tool frequencies, approval outcomes). Anomalies become findings on a
+  severity ladder — findings log only, then approval-gated proposals and
+  notifications, then (in autopilot phase) a kill-switch brake plus
+  SAFE_MODE runtime state for critical events like a chain break or
+  ledger truncation. Detection is statistical, not model-based;
+  optional plain-English narration renders findings through the fast
+  tier. See `IFY.md`.
+- Phases: 14-day `gestation` (silent learning) → 14-day `secondary`
+  (proposals + notifications) → `autopilot` (brake unlocked). Tunable
+  via `BADAPPLE_IFY_GESTATION_DAYS`/`BADAPPLE_IFY_SECONDARY_DAYS`;
+  `BADAPPLE_IFY_PHASE` forces a phase; `BADAPPLE_IFY=0` disables.
+- `com.badapple.ify` LaunchAgent installed by
+  `install_badapple_platform.sh`; state in `~/.bad_apple/ify/`.
+- `badapple ify <status|once|findings|proposals>` CLI verb.
+
 ## [0.2.1] — 2026-09-13
 
 ### Added

@@ -205,6 +205,7 @@ Built-in persona packs (in `personas.json`) include Wicket (witty Londoner), Gen
 |---|---|---|
 | Output firewall | Streaming Aho-Corasick blocklist on generated text | `badapple-engine` |
 | Audit | Append-only SHA-256–chained JSONL with secret/PII redaction; independent HMAC-SHA256 sovereign copy + Secure Enclave checkpoints via `badapple-sovereign` | `/var/lib/bad_apple/ledger.jsonl` |
+| Watchdog | IFY (`badapple-ify`): verifies each new ledger line as it arrives, learns event/tool/approval baselines over a 14-day gestation, surfaces anomalies as approval-gated proposals, and in autopilot phase can pull the kill switch on critical findings (chain break, ledger truncation). See `IFY.md` | `~/.bad_apple/ify/` |
 | Approvals | Proposal/approve workflow for `run_shell`, `run_applescript`, `write_file`, `index_documents` | `badapple-engine` |
 | Cache | Persona-scoped semantic cache; no cache for tool queries or voice | `badapple-engine` |
 

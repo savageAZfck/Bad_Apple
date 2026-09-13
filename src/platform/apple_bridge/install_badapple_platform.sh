@@ -135,7 +135,7 @@ if [[ -d "${HF_CACHE}" ]]; then
 fi
 
 DAEMONS=(com.badapple.gatekeeper com.badapple.mlx com.badapple.supervisor)
-AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint)
+AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint com.badapple.ify)
 AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 for label in "${DAEMONS[@]}"; do
     target="/Library/LaunchDaemons/${label}.plist"
@@ -261,6 +261,11 @@ fi
 # checkpoints of the audit ledger).
 if [[ -x "${REPO_ROOT}/target/release/badapple-sovereign" ]]; then
     run_user "${REPO_ROOT}/src/platform/apple_desktop/install_checkpoint_agent.sh"
+fi
+
+# IFY watchdog agent (behavioral baselines over the audit ledger; see IFY.md).
+if [[ -x "${REPO_ROOT}/target/release/badapple-ify" ]]; then
+    run_user "${REPO_ROOT}/src/platform/apple_desktop/install_ify_agent.sh"
 fi
 
 trap - EXIT INT TERM

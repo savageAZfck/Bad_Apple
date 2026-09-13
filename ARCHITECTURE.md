@@ -76,6 +76,8 @@ Binaries (`src/bin/`):
 - `badapple-supervisor.rs` — health supervisor.
 - `badapple-dashboard.rs` — web dashboard.
 - `badapple-fetch.rs` / `badapple_fetch_metallib.rs` — artifact and Metal cache fetch helpers.
+- `badapple-sovereign.rs` — hardened independent audit-ledger copy + Secure Enclave checkpoints.
+- `badapple-ify.rs` — IFY watchdog daemon: tails and verifies the audit ledger, learns behavioral baselines, surfaces findings, and can pull the kill-switch brake in autopilot phase. See `IFY.md`.
 - `train_gatekeeper.rs` — gatekeeper classifier training.
 
 ## Data flow
