@@ -2997,6 +2997,7 @@ dependencies = [
 [[package]]
 name = "sovereign_ledger"
 version = "0.2.0"
+source = "git+https://github.com/savageAZfck/sovereign_ledger?rev=93b52c92cbec539cf0ef01a351a1ec92c92fbb45#93b52c92cbec539cf0ef01a351a1ec92c92fbb45"
 dependencies = [
  "base64 0.22.1",
  "chrono",
