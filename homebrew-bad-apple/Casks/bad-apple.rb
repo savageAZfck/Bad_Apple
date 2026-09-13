@@ -1,7 +1,7 @@
 cask "bad-apple" do
-  version "0.2.0"
+  version "0.2.1"
   # Update this sha256 for each release. package_minimal_release.sh prints the final hash.
-  sha256 "db5e354ecc939c2859f9eae3505276ed511eb5e4646acce62bfb9f3488ba004a"
+  sha256 "52e6c807ce874f9cd466fd0c936f58468cf5070b4c2f7a9ef0e3d8606cf6eec7"
 
   url "https://github.com/savageAZfck/bad-apple-releases/releases/download/v#{version}/Bad_Apple-#{version}-unsigned.zip"
   name "Bad Apple"
@@ -50,6 +50,17 @@ cask "bad-apple" do
     run "/bin/rm",
         args: ["-f", "/usr/local/bin/badapple", "/usr/local/bin/badapple-fetch"],
         sudo: true, must_succeed: false
+    # User LaunchAgents live in the console user's gui domain; boot them out
+    # and remove the plists so no agent keeps pointing at a deleted payload.
+    ["com.badapple.tts", "com.badapple.menubar", "com.badapple.dashboard",
+     "com.badapple.checkpoint", "com.badapple.identity_agent"].each do |label|
+      run "/bin/launchctl",
+          args: ["bootout", "gui/#{Process.uid}/#{label}"],
+          must_succeed: false
+      run "/bin/rm",
+          args: ["-f", "#{Dir.home}/Library/LaunchAgents/#{label}.plist"],
+          must_succeed: false
+    end
   end
 
   zap trash: [
