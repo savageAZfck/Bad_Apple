@@ -61,6 +61,14 @@ src/platform/apple_desktop/package_minimal_release.sh
 
 Produces `target/release/Bad_Apple-<version>-unsigned.zip` and `Bad_Apple-<version>-full-unsigned.zip`. The .app bundle includes `badapple-dashboard`, the `web/` Control Center assets, `update_bad_apple.sh`, `strip_quarantine.sh`, and the platform installer.
 
+Release flow: bump `version` in `Cargo.toml` (the app bundle version
+derives from it), build + package, upload the zips and `checksums.txt` to
+the `savageAZfck/bad-apple-releases` release for `v<version>`, then run
+`src/platform/apple_desktop/publish_cask.sh`. It updates the vendored cask
+(`homebrew-bad-apple/Casks/bad-apple.rb`) with the new version+sha256 and
+pushes it to the public tap repo `savageAZfck/homebrew-bad-apple` — the tap
+is a separate repo, and the vendored copy and published copy must match.
+
 For an app-only zip (no source subset), use:
 
 ```bash
