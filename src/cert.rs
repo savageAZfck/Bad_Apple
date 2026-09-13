@@ -58,6 +58,10 @@ pub fn run() -> Vec<CertResult> {
             output_firewall_patterns_present,
         ),
         run_check("ledger_hash_chain_is_valid", ledger_hash_chain_is_valid),
+        run_check(
+            "sovereign_checkpoint_is_fresh",
+            sovereign_checkpoint_is_fresh,
+        ),
         run_check("vault_cli_round_trip", vault_cli_round_trip),
         run_check(
             "replay_cache_rejects_replayed_slicks_proofs",
@@ -335,6 +339,51 @@ fn ledger_hash_chain_is_valid() -> Result<(), String> {
             }
         }
         prev_hash = Some(hash.to_string());
+    }
+    Ok(())
+}
+
+/// The daily `com.badapple.checkpoint` agent re-verifies the ledger, rewrites
+/// the hardened sovereign copy, and re-signs both tips through the identity
+/// agent. If that job silently stops running, the hardened copy and its
+/// checkpoints go stale while everything still looks fine. Fail when the
+/// sovereign checkpoint is missing, unparseable, or older than 36 hours.
+fn sovereign_checkpoint_is_fresh() -> Result<(), String> {
+    let ledger = Path::new("/var/lib/bad_apple/ledger.jsonl");
+    if !ledger.exists() {
+        return Err("ledger not present; skipping sovereign check".to_string());
+    }
+    let checkpoint = Path::new("/var/lib/bad_apple/ledger.sovereign.checkpoint.json");
+    if !checkpoint.exists() {
+        return Err(
+            "sovereign checkpoint missing; run badapple-sovereign or check com.badapple.checkpoint"
+                .to_string(),
+        );
+    }
+    let text = std::fs::read_to_string(checkpoint)
+        .map_err(|e| format!("cannot read sovereign checkpoint: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("sovereign checkpoint is not valid JSON: {e}"))?;
+    let signed_at = parsed["signed_at"]
+        .as_str()
+        .ok_or_else(|| "sovereign checkpoint has no signed_at".to_string())?;
+    let ts = chrono::DateTime::parse_from_rfc3339(signed_at)
+        .map_err(|e| format!("sovereign checkpoint signed_at is not RFC 3339: {e}"))?;
+    let age = chrono::Utc::now().signed_duration_since(ts);
+    if age.num_hours() < -1 {
+        return Err(format!(
+            "sovereign checkpoint signed_at is {}h in the future",
+            -age.num_hours()
+        ));
+    }
+    if age.num_hours() > 36 {
+        return Err(format!(
+            "sovereign checkpoint is {}h old; com.badapple.checkpoint agent may have stopped",
+            age.num_hours()
+        ));
+    }
+    if parsed["entry_count"].as_u64().unwrap_or(0) == 0 {
+        return Err("sovereign checkpoint covers zero entries".to_string());
     }
     Ok(())
 }

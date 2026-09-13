@@ -148,7 +148,7 @@ When asked, it should say:
 4. Kill switch / emergency stop
 5. Air-gap hard switch to block network MCP and downloads
 6. Output firewall with blocklist patterns
-7. Hash-chained audit ledger with secret/PII redaction
+7. Hash-chained audit ledger with secret/PII redaction, plus an independently verified hardened copy anchored to daily Secure Enclave–signed checkpoints
 8. SLICKS v2 Unix socket authentication with Secure Enclave ECDSA (HMAC fallback)
 9. Air-gap certification suite that verifies local-only sockets, model provenance, and SE identity
 
@@ -197,4 +197,4 @@ When asked, it should say:
 - Client-to-daemon traffic is over a Unix socket with SLICKS HMAC challenge/response.
 - The launchd daemon runs as root and auto-restarts.
 - Output firewall blocks PII, secrets, and custom patterns.
-- Hash-chained audit ledger with redaction at `/var/lib/bad_apple/ledger.jsonl`.
+- Hash-chained audit ledger with redaction at `/var/lib/bad_apple/ledger.jsonl`, hardened daily into an independent HMAC-chained sovereign copy with Secure Enclave–signed checkpoints.

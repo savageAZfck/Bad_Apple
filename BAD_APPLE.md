@@ -121,7 +121,7 @@ When asked, it can say:
 - **Persona packs** (`personas.json`): switch at runtime with `switch to <persona>`
 - **Teachable quips** with `teach <line>`
 - **Streaming output firewall** (Aho-Corasick blocklist) for PII, secrets, and custom patterns
-- **Hash-chained audit ledger** (`/var/lib/bad_apple/ledger.jsonl`) with PII redaction
+- **Hash-chained audit ledger** (`/var/lib/bad_apple/ledger.jsonl`) with PII redaction, plus a hardened sovereign copy (`ledger.sovereign.jsonl`) re-verified daily and anchored to Secure Enclave–signed checkpoints
 - **Semantic cache** (`BAAI/bge-small-en-v1.5`) for instant repeated-answer hits
 - **Human-in-the-loop approvals** for destructive tools
 - **Bounded Curious self-improvement autopilot** — when `curious` persona is active and autopilot is on, the engine runs a local self-check (cert suite, doctor, output firewall, git status, source TODO/FIXME scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple "curious check"`.
@@ -204,7 +204,7 @@ Built-in persona packs (in `personas.json`) include Wicket (witty Londoner), Gen
 | Layer | Mechanism | Where it lives |
 |---|---|---|
 | Output firewall | Streaming Aho-Corasick blocklist on generated text | `badapple-engine` |
-| Audit | Append-only SHA-256–chained JSONL with secret/PII redaction | `/var/lib/bad_apple/ledger.jsonl` |
+| Audit | Append-only SHA-256–chained JSONL with secret/PII redaction; independent HMAC-SHA256 sovereign copy + Secure Enclave checkpoints via `badapple-sovereign` | `/var/lib/bad_apple/ledger.jsonl` |
 | Approvals | Proposal/approve workflow for `run_shell`, `run_applescript`, `write_file`, `index_documents` | `badapple-engine` |
 | Cache | Persona-scoped semantic cache; no cache for tool queries or voice | `badapple-engine` |
 

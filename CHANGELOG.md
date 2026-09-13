@@ -2,6 +2,24 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.2.1] — 2026-09-13
+
+### Added
+- **Sovereign ledger layer** (`badapple-sovereign`): an independent, hardened
+  copy of the audit ledger built on the public `sovereign_ledger` crate. Each
+  run re-verifies the primary ledger (all three historical formats) and
+  rewrites `/var/lib/bad_apple/ledger.sovereign.jsonl` as an HMAC-SHA256
+  hash chain with Merkle roots, then signs checkpoints for both chains via
+  the identity agent (Secure Enclave).
+- `com.badapple.checkpoint` LaunchAgent: runs the sovereign hardening pass
+  daily; installed automatically by `install_badapple_platform.sh`.
+- `badapple cert` now fails when the sovereign checkpoint is missing, stale
+  (>36 h), or future-dated, so a stopped checkpoint agent is loud.
+
+### Changed
+- `sovereign_ledger` dependency is pinned to a git rev on the public repo
+  instead of a local path, so packaged and CI builds resolve identically.
+
 ## [0.2.0] — 2026-09-10
 
 ### Security

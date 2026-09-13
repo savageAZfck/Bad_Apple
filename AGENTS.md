@@ -180,6 +180,31 @@ available.
 Secrets, emails, SSNs, phones, API keys, and long random tokens are redacted
 before writing.
 
+## Sovereign ledger layer (defense in depth)
+
+`badapple-sovereign` (built from `src/bin/badapple-sovereign.rs`) is a thin
+wrapper over the public `sovereign_ledger` crate (pinned by git rev in
+`Cargo.toml`). It re-verifies the primary ledger — including all three
+historical formats — and writes an independent HMAC-SHA256–chained copy at
+`/var/lib/bad_apple/ledger.sovereign.jsonl`, then signs checkpoints for both
+chains through the identity agent (Secure Enclave):
+
+- `/var/lib/bad_apple/ledger_checkpoint.json` — source chain tip + Merkle root
+- `/var/lib/bad_apple/ledger.sovereign.checkpoint.json` — sovereign chain tip + Merkle root
+
+The `com.badapple.checkpoint` LaunchAgent runs it daily (installed by
+`install_badapple_platform.sh` via `install_checkpoint_agent.sh`; logs to
+`/var/lib/bad_apple/checkpoint.log`). `badapple cert` fails if the sovereign
+checkpoint is missing or older than 36 h — a stale checkpoint means the agent
+has stopped. On fresh installs with no ledger yet the run is a clean no-op.
+
+Manual run:
+
+```bash
+target/release/badapple-sovereign            # verify + harden + checkpoint
+target/release/badapple-sovereign --checkpoint   # verify + re-sign only
+```
+
 ## Semantic cache
 
 The first response to a question is embedded with `BAAI/bge-small-en-v1.5` and
