@@ -102,7 +102,7 @@ hf-chat-template = "1.0.0"
 ureq = "3.4"
 urlencoding = "2.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
-sovereign_ledger = { git = "https://github.com/savageAZfck/sovereign_ledger", rev = "93b52c92cbec539cf0ef01a351a1ec92c92fbb45" }
+sovereign_ledger = { git = "https://github.com/savageAZfck/sovereign_ledger", tag = "v0.3.0" }
 
 [build-dependencies]
 cbindgen = "0.29"

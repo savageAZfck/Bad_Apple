@@ -137,6 +137,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         };
         ledger.verify()?;
+        // Seal under the Secure Enclave identity when the agent is up:
+        // the rebuilt ledger becomes publicly verifiable end-to-end —
+        // a third party needs only the agent's public key to audit it.
+        if agent.is_available() {
+            match ledger.seal(&agent) {
+                Ok(Some(seq)) => println!("sealed sovereign segment at seq {seq}"),
+                Ok(None) => {}
+                Err(e) => eprintln!("warning: sovereign seal failed: {e}"),
+            }
+        }
         ledger.sync()?;
         (report, ledger.last_hash(), ledger.merkle_root()?)
     };
