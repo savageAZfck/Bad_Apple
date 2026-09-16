@@ -28,6 +28,7 @@ BINS=(
     badapple-dashboard
     badapple-sovereign
     badapple-ify
+    badapple-respawn
     gatekeeper
 )
 
@@ -55,11 +56,13 @@ DESKTOP_FILES=(
     src/platform/apple_desktop/com.badapple.dashboard.plist
     src/platform/apple_desktop/com.badapple.checkpoint.plist
     src/platform/apple_desktop/com.badapple.ify.plist
+    src/platform/apple_desktop/com.badapple.respawn.plist
     src/platform/apple_desktop/install_menu_bar_agent.sh
     src/platform/apple_desktop/install_tts_agent.sh
     src/platform/apple_desktop/install_dashboard_agent.sh
     src/platform/apple_desktop/install_checkpoint_agent.sh
     src/platform/apple_desktop/install_ify_agent.sh
+    src/platform/apple_desktop/install_respawn_agent.sh
     src/platform/apple_desktop/strip_quarantine.sh
 )
 
