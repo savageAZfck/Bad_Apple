@@ -56,6 +56,10 @@ path = "src/bin/badapple-sovereign.rs"
 name = "badapple-ify"
 path = "src/bin/badapple-ify.rs"
 
+[[bin]]
+name = "badapple-respawn"
+path = "src/bin/badapple-respawn.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -107,6 +111,7 @@ ureq = "3.4"
 urlencoding = "2.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 sovereign_ledger = { git = "https://github.com/savageAZfck/sovereign_ledger", tag = "v0.3.0" }
+respawn = { git = "https://github.com/savageAZfck/respawn", tag = "v0.2.1" }
 
 [build-dependencies]
 cbindgen = "0.29"

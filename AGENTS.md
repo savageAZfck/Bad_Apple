@@ -234,6 +234,29 @@ target/release/badapple-sovereign            # verify + harden + checkpoint
 target/release/badapple-sovereign --checkpoint   # verify + re-sign only
 ```
 
+## Respawn state snapshots (undo layer)
+
+`badapple-respawn` (built from `src/bin/badapple-respawn.rs`) is a thin
+wrapper over the public `respawn` crate (pinned by git tag in `Cargo.toml`).
+It versions `/var/lib/bad_apple` into a content-addressed store at
+`/var/lib/bad_apple/.respawn`, so platform state — ledgers, checkpoints,
+IFY state, semantic cache — can be reverted to any prior snapshot.
+
+The `com.badapple.respawn` LaunchAgent runs it daily (installed by
+`install_badapple_platform.sh` via `install_respawn_agent.sh`; logs to
+`/var/lib/bad_apple/respawn.log`). Runs are no-ops when state is unchanged
+since HEAD. Unreadable entries (e.g. root-owned `install_backups/`) are
+skipped with a warning rather than aborting the snapshot.
+
+Manual run:
+
+```bash
+target/release/badapple-respawn                    # snapshot if drifted
+target/release/badapple-respawn --status           # drift report vs HEAD
+target/release/badapple-respawn --status --full    # forged-mtime-safe rehash
+target/release/badapple-respawn --revert head      # restore state root
+```
+
 ## Semantic cache
 
 The first response to a question is embedded with `BAAI/bge-small-en-v1.5` and
