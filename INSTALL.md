@@ -123,6 +123,25 @@ cd Bad_Apple-<version>-unsigned
 sudo ./install.sh
 ```
 
+### Verify the release first (recommended)
+
+Every release asset carries a Sigstore bundle (`<asset>.sigstore.json`) signed
+with the project's pinned release key. Download `cosign.pub`,
+`checksums.txt`, and the matching bundles from the same release, then:
+
+```bash
+shasum -a 256 -c checksums.txt
+cosign verify-blob --key cosign.pub \
+  --bundle Bad_Apple-<version>-unsigned.zip.sigstore.json \
+  Bad_Apple-<version>-unsigned.zip
+cosign verify-blob --key cosign.pub \
+  --bundle checksums.txt.sigstore.json checksums.txt
+```
+
+`cosign.pub` is also pinned inside the auto-updater
+(`update_bad_apple.sh`), which signature-verifies every update before
+installing and refuses artifacts not signed by that key.
+
 This:
 
 1. Copies `Bad Apple.app` into `/Applications`.

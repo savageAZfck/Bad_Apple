@@ -18,6 +18,14 @@ REPO="${BADAPPLE_GH_REPO:-savageAZfck/bad-apple-releases}"
 TAG="${BADAPPLE_TAG:-latest}"
 APP="/Applications/Bad Apple.app"
 
+# Release-signing public key (cosign, ECDSA-P256). Pinned here — never
+# fetched — so a compromised release repo cannot substitute its own key.
+# cosign.pub in the source repo and on each release must match this.
+COSIGN_PUBKEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYY34ZvQukW2U/Wb5pK+hl565k9H7
+sA0iPnKZpqck92Rpwj/ALZ6YtJrWH7LNB2W0YKU+fHi4h/XIeyk1L7P1sg==
+-----END PUBLIC KEY-----'
+
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 command -v curl >/dev/null || fail "curl is required"
@@ -50,6 +58,25 @@ verify_asset() {
     echo "Checksum verified for ${name}." >&2
 }
 
+verify_signature() {
+    local out="$1" tag="$2" name bundle pubkey_file
+    name="$(basename "${out}")"
+    bundle="${work}/${name}.sigstore.json"
+    if ! curl -fsSL "https://github.com/${REPO}/releases/download/${tag}/${name}.sigstore.json" -o "${bundle}"; then
+        echo "warning: no signature bundle for ${name}; falling back to checksum-only verification" >&2
+        return 0
+    fi
+    if ! command -v cosign >/dev/null; then
+        echo "warning: cosign not installed; checksum verified but signature not checked (brew install cosign for full verification)" >&2
+        return 0
+    fi
+    pubkey_file="${work}/cosign.pub.pinned"
+    printf '%s\n' "${COSIGN_PUBKEY}" > "${pubkey_file}"
+    cosign verify-blob --key "${pubkey_file}" --bundle "${bundle}" "${out}" >/dev/null 2>&1 \
+        || fail "signature verification FAILED for ${name}; refusing to install an artifact not signed by the pinned release key"
+    echo "Signature verified for ${name} (pinned release key)." >&2
+}
+
 download_asset() {
     local tag="$1" version="${1#v}" name url out
     local tried=()
@@ -61,6 +88,7 @@ download_asset() {
         tried+=("${url}")
         if curl -fsSL "${url}" -o "${out}"; then
             verify_asset "${out}" "${checksums_file}"
+            verify_signature "${out}" "${tag}"
             echo "${out}"
             return
         fi

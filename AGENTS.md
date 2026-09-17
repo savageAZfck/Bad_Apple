@@ -64,6 +64,11 @@ Produces `target/release/Bad_Apple-<version>-unsigned.zip` and `Bad_Apple-<versi
 Release flow: bump `version` in `Cargo.toml` (the app bundle version
 derives from it), build + package, upload the zips and `checksums.txt` to
 the `savageAZfck/bad-apple-releases` release for `v<version>`, then run
+`src/platform/apple_desktop/sign_release.sh --tag v<version>` to cosign-sign
+every artifact (private key lives in the macOS Keychain under
+`com.badapple.release-sign`; `cosign.pub` at the repo root is the trust root,
+also pinned inside `update_bad_apple.sh` which signature-verifies before
+installing), then run
 `src/platform/apple_desktop/publish_cask.sh`. It updates the vendored cask
 (`homebrew-bad-apple/Casks/bad-apple.rb`) with the new version+sha256 and
 pushes it to the public tap repo `savageAZfck/homebrew-bad-apple` — the tap
