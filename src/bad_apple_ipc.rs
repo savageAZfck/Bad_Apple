@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const SLICKS_VERSION: u8 = 1;
@@ -653,6 +653,63 @@ pub fn call_agent(method: &str, params: Option<Value>, max_new_tokens: usize) ->
     }
 }
 
+/// Connect to the daemon, waiting briefly if it is still starting up.
+///
+/// After login the LaunchDaemons need tens of seconds to bind sockets and
+/// load the model; a query in that window used to die on a bare ENOENT or
+/// ECONNREFUSED. Retry while the socket is absent or refusing connections
+/// (up to ~90s, disable with BADAPPLE_NO_WAIT=1), and translate terminal
+/// errors into something a person can act on.
+/// How long the client waits for the daemon socket — and the model behind
+/// it — to come up after boot before surfacing an error to the user.
+const CONNECT_WAIT_BUDGET: Duration = Duration::from_secs(90);
+
+fn connect_daemon() -> Result<UnixStream> {
+    let path = socket_path();
+    let started = Instant::now();
+    let mut announced = false;
+    loop {
+        match UnixStream::connect(&path) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                let retryable = matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                );
+                if retryable
+                    && started.elapsed() < CONNECT_WAIT_BUDGET
+                    && std::env::var_os("BADAPPLE_NO_WAIT").is_none()
+                {
+                    if !announced {
+                        eprintln!("waiting for Bad Apple to start…");
+                        announced = true;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                return Err(match e.kind() {
+                    std::io::ErrorKind::NotFound => anyhow!(
+                        "Bad Apple is not running — open Bad Apple.app (or click \
+                         the menu-bar icon) and try again. ({e})"
+                    ),
+                    std::io::ErrorKind::PermissionDenied => anyhow!(
+                        "Bad Apple is running but this account cannot reach its \
+                         socket at {} — the socket directory has the wrong \
+                         ownership. Run `badapple --doctor` for a diagnostic, or \
+                         reinstall. ({e})",
+                        path.display()
+                    ),
+                    std::io::ErrorKind::ConnectionRefused => anyhow!(
+                        "Bad Apple's daemon is not accepting connections — it may \
+                         still be starting up, try again in a few seconds. ({e})"
+                    ),
+                    _ => e.into(),
+                });
+            }
+        }
+    }
+}
+
 pub fn query_with_metrics<F>(
     prompt: &str,
     max_new_tokens: usize,
@@ -663,19 +720,50 @@ where
 {
     validate_request(prompt, max_new_tokens)?;
     let mode = resolve_slicks_mode()?;
+    // The model takes tens of seconds to load after boot. A query arriving
+    // in that window gets a transient "not loaded yet" error — wait for the
+    // daemon instead of making the user retry by hand.
+    let started = Instant::now();
+    let mut announced = false;
+    loop {
+        match query_once(&mode, prompt, max_new_tokens, &mut on_token) {
+            Err(e)
+                if e.to_string().contains("not loaded yet")
+                    && started.elapsed() < CONNECT_WAIT_BUDGET
+                    && std::env::var_os("BADAPPLE_NO_WAIT").is_none() =>
+            {
+                if !announced {
+                    eprintln!("waiting for the model to finish loading…");
+                    announced = true;
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn query_once<F>(
+    mode: &SlicksMode,
+    prompt: &str,
+    max_new_tokens: usize,
+    on_token: &mut F,
+) -> Result<(String, Option<Metrics>)>
+where
+    F: FnMut(&str),
+{
     let timestamp_ms = now_unix_ms()?;
     let client_nonce = random_nonce();
-    let mut stream =
-        UnixStream::connect(socket_path()).context("unable to connect to Bad Apple")?;
+    let mut stream = connect_daemon()?;
     stream.set_read_timeout(Some(Duration::from_mins(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
 
-    let hello = build_hello(&mode, timestamp_ms, client_nonce.clone())?;
+    let hello = build_hello(mode, timestamp_ms, client_nonce.clone())?;
     write_frame(&mut stream, &hello)?;
 
     let challenge: ServerFrame = read_frame(&mut reader)?;
-    let server_nonce = match (challenge, &mode) {
+    let server_nonce = match (challenge, mode) {
         (
             ServerFrame::Challenge {
                 version,
@@ -726,7 +814,7 @@ where
     };
 
     let execute = build_execute(
-        &mode,
+        mode,
         timestamp_ms,
         client_nonce,
         server_nonce,

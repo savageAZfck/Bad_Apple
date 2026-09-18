@@ -313,7 +313,7 @@ public actor BadAppleNativeRuntime {
             return String(format: "Model would exceed effective VRAM budget: %.2f GiB projected vs %.2f GiB budget (%.2f GiB reserved)", Double(projected.partialValue) / 1_073_741_824, Double(effectiveBudget) / 1_073_741_824, Double(reserved) / 1_073_741_824)
         }
         if estimatedBytes > effectiveSystem {
-            return String(format: "Not enough memory available for weights and context: %.2f GiB estimated, %.2f GiB currently available (%.2f GiB reserved)", Double(estimatedBytes) / 1_073_741_824, Double(effectiveSystem) / 1_073_741_824, Double(reserved) / 1_073_741_824)
+            return String(format: "Not enough free memory to load the model — it needs %.2f GiB but only %.2f GiB is available (%.2f GiB held in reserve). Close some apps to free memory, then try again; Bad Apple loads the model automatically on the next query.", Double(estimatedBytes) / 1_073_741_824, Double(effectiveSystem) / 1_073_741_824, Double(reserved) / 1_073_741_824)
         }
         return nil
     }

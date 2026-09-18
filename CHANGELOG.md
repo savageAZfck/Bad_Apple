@@ -2,6 +2,48 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.2.3] — 2026-09-17
+
+### Security
+- **Tool-jail hardening.** `runShell` path-like arguments are now confined
+  through `jailPath` with the working directory pinned to the user home —
+  previously an approved `cat`/`find`/`grep` call could read files outside
+  the jail (including the v1 SLICKS key). `runAppleScript` now also denies
+  native file verbs (`open for access`, `read file`, `POSIX file`,
+  `load/store script`) that bypassed the shell filter entirely.
+- **Replay cache.** The cache now FIFO-evicts the oldest entry at capacity
+  instead of clearing all entries — a flood inside the skew window could
+  previously make captured frames replayable.
+- **Resource bounds.** MCP request lines are read through a bounded
+  `Read::take` (an unterminated line could exhaust memory before the size
+  check ran), and both the gatekeeper and MCP server cap concurrent
+  connections with a panic-safe decrement guard.
+- **Installer plist escaping.** Values substituted into LaunchDaemon
+  plists are XML- and sed-escaped before rendering (`plutil -lint`
+  validation retained).
+
+### Fixed
+- **Boot-time socket lockout.** When the gatekeeper LaunchDaemon started
+  before login, `/dev/console` was still root-owned, console-user
+  resolution failed, and a freshly created `/var/run/badapple` stayed
+  `root:daemon` — locking out the identity agent, MLX daemon, and CLI
+  until restart. Console-user resolution now falls back to scutil's
+  `State:/Users/ConsoleUser`, the last resort hands the directory to the
+  `staff` group, and a periodic repair pass converges ownership once a
+  session exists.
+
+### Added
+- **`badapple status`** — a three-line "is it working?" check for humans
+  (daemon reachability, identity agent, version), distinct from the
+  machine-readable `cert` suite and the full `--doctor` report.
+- **Startup wait.** `badapple` now waits up to ~90s for the daemon socket
+  and the model to come up instead of failing instantly after boot/login
+  (`BADAPPLE_NO_WAIT=1` restores fail-fast behavior).
+- **Plain-language errors.** Connection failures now say what happened and
+  what to do (app not running vs. socket permissions vs. still starting),
+  and the VRAM admission error tells the user to close apps and retry —
+  the model loads automatically on the next query.
+
 ## [0.2.2] — 2026-09-13
 
 ### Added

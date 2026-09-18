@@ -228,8 +228,12 @@ fn main() -> Result<()> {
         return run_cert();
     }
 
+    if prompt_parts.first().map(std::string::String::as_str) == Some("status") {
+        return run_status();
+    }
+
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple cert");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple cert");
     } else {
         prompt_parts.join(" ")
     };
@@ -1687,6 +1691,41 @@ fn run_cert() -> Result<()> {
     Ok(())
 }
 
+/// `badapple status` — a three-line "is it working?" for humans, unlike the
+/// machine-readable `cert` suite or the full `--doctor` report.
+fn run_status() -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    println!("Bad Apple v{}", env!("CARGO_PKG_VERSION"));
+
+    let sock = bad_apple::bad_apple_ipc::socket_path();
+    match UnixStream::connect(&sock) {
+        Ok(_) => println!("daemon:    running    ({})", sock.display()),
+        Err(e) => {
+            let state = match e.kind() {
+                std::io::ErrorKind::NotFound => "not running — open Bad Apple.app and try again",
+                std::io::ErrorKind::PermissionDenied => {
+                    "running but unreachable — socket permissions are wrong"
+                }
+                std::io::ErrorKind::ConnectionRefused => "starting up — try again in a few seconds",
+                _ => "unreachable",
+            };
+            println!("daemon:    {state}");
+            println!("\nRun `badapple --doctor` for a full diagnostic report.");
+            bail!("Bad Apple is not reachable");
+        }
+    }
+
+    let id_sock = bad_apple::bad_apple_ipc::identity_agent_socket_path();
+    if UnixStream::connect(&id_sock).is_ok() {
+        println!("identity:  running    (Secure Enclave signing)");
+    } else if id_sock.exists() {
+        println!("identity:  present but not accepting connections");
+    } else {
+        println!("identity:  not running (SLICKS v1 still works)");
+    }
+    Ok(())
+}
+
 fn run_ify_subcommand(args: &[String]) -> Result<()> {
     let sub = args.first().map(String::as_str).unwrap_or("status");
     match sub {
@@ -1755,7 +1794,7 @@ fn run_ify_subcommand(args: &[String]) -> Result<()> {
 fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
-         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n\n\
+         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n  badapple status          Is Bad Apple working? Three-line human check\n  badapple cert            Machine-readable air-gap certification\n\n\
          Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 500)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (cali, curious, drill, genz, midwest, wicket, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: Best; Piper voices in voices/ take priority, then AVFoundation voices)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
     );
