@@ -240,8 +240,14 @@ pub fn validate_request(prompt: &str, max_new_tokens: usize) -> Result<()> {
 
 /// Thread-safe replay cache: stores consumed (client_nonce, server_nonce) pairs
 /// to reject replayed Execute frames within the freshness window.
+///
+/// Eviction is FIFO: when the cache is full, only the OLDEST entry is removed.
+/// (The previous implementation cleared the whole cache at capacity, which let
+/// an attacker flush every seen nonce by flooding the cache and then replay a
+/// captured frame inside the freshness window.)
 pub struct ReplayCache {
     seen: Mutex<HashSet<(String, String)>>,
+    order: Mutex<std::collections::VecDeque<(String, String)>>,
     max: usize,
 }
 
@@ -250,6 +256,7 @@ impl ReplayCache {
     pub fn new(max: usize) -> Self {
         Self {
             seen: Mutex::new(HashSet::new()),
+            order: Mutex::new(std::collections::VecDeque::new()),
             max,
         }
     }
@@ -258,15 +265,21 @@ impl ReplayCache {
     /// Returns `true` if the pair is fresh (not a replay).
     pub fn check_and_insert(&self, client_nonce: &str, server_nonce: &str) -> bool {
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
         let key = (client_nonce.to_string(), server_nonce.to_string());
         if seen.contains(&key) {
             return false; // replay
         }
-        // Evict oldest entries if cache is full (simple cap, not LRU).
-        if seen.len() >= self.max {
-            seen.clear();
+        while seen.len() >= self.max {
+            match order.pop_front() {
+                Some(oldest) => {
+                    seen.remove(&oldest);
+                }
+                None => break,
+            }
         }
-        seen.insert(key);
+        seen.insert(key.clone());
+        order.push_back(key);
         true
     }
 }
@@ -1156,10 +1169,11 @@ mod tests {
         assert!(cache.check_and_insert(&other_client, &server_nonce));
     }
 
-    /// When the replay cache hits its configured bound it must reset and
-    /// continue accepting fresh pairs without panicking.
+    /// When the replay cache hits its configured bound it must evict ONLY the
+    /// oldest entry — flooding the cache must not make recent nonces
+    /// replayable.
     #[test]
-    fn replay_cache_resets_at_capacity() {
+    fn replay_cache_evicts_oldest_at_capacity() {
         let cache = ReplayCache::new(2);
         let n1 = random_nonce();
         let n2 = random_nonce();
@@ -1167,8 +1181,13 @@ mod tests {
 
         assert!(cache.check_and_insert(&n1, &n2));
         assert!(cache.check_and_insert(&n2, &n3));
-        // Third insert should reset and still succeed because the cache is full.
+        // Third insert evicts the oldest pair (n1, n2) and succeeds.
         assert!(cache.check_and_insert(&n3, &n1));
+        // The evicted pair may be reinserted, but the still-cached pair must
+        // still be rejected — the cache was not wiped.
+        assert!(!cache.check_and_insert(&n2, &n3));
+        // The oldest pair was evicted, so it is fresh again.
+        assert!(cache.check_and_insert(&n1, &n2));
     }
 
     /// Reusing a server nonce with a different client nonce must produce a

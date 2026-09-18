@@ -2337,7 +2337,31 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return "Error: denied argument '\(denied)'"
         }
 
-        let result = runProcess(launchPath: resolved, arguments: restArgs, timeout: TimeInterval(timeout))
+        // Confine filesystem arguments to the jail roots. Without this the
+        // allowlisted readers (cat/find/grep/head/tail/ls) can read ANY file
+        // the daemon can — including /var/lib/bad_apple/slicks.key — with one
+        // careless approval. Args that look like paths (leading / or ~,
+        // containing / or ..) are jail-checked; bare words pass because the
+        // process runs with cwd = home so relatives resolve inside the jail.
+        for arg in restArgs where !arg.hasPrefix("-") {
+            let looksLikePath = arg.hasPrefix("/") || arg.hasPrefix("~")
+                || arg.contains("/") || arg == "." || arg == ".."
+            if looksLikePath {
+                let check = arg.hasPrefix("/") || arg.hasPrefix("~")
+                    ? arg
+                    : NSHomeDirectory() + "/" + arg
+                guard jailPath(check) != nil else {
+                    return "Error: path '\(arg)' is outside allowed roots"
+                }
+            }
+        }
+
+        let result = runProcess(
+            launchPath: resolved,
+            arguments: restArgs,
+            timeout: TimeInterval(timeout),
+            workingDirectory: NSHomeDirectory()
+        )
 
         if result.exitCode != 0 {
             let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2394,6 +2418,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             "current application", "current application's",
             "keystroke", "key code",
             "curl", "wget", "rm -rf",
+            // AppleScript's own file verbs bypass the path jail entirely —
+            // `read file "/var/lib/bad_apple/slicks.key"` and
+            // `open for access`/`write ... to file`/`set eof` need no shell.
+            "open for access", "read file", " to file", "set eof",
+            "posix file", "load script", "store script",
         ]
         if let match = denied.first(where: { lowered.contains($0) }) {
             return "Error: AppleScript contains denied operation '\(match)'"

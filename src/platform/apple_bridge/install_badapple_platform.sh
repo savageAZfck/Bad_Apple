@@ -76,12 +76,28 @@ BACKUP_DIR="${BACKUP_ROOT}/${RELEASE_ID}"
 [[ -x "/Applications/Bad Apple.app/Contents/Helpers/badapple-dashboard" ]] || fail "dashboard binary is missing from app bundle"
 [[ -d "/Applications/Bad Apple.app/Contents/Resources/web" ]] || fail "dashboard web assets are missing from app bundle"
 
+# Two escaping layers are required for every substituted value:
+#   1. XML — so a value containing & < > " ' cannot break or inject plist keys.
+#   2. sed replacement — & | and \ are special in the replacement side and must
+#      be escaped or a value like a home dir containing '&' corrupts output.
+xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' \
+        -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+        -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
+
 render_plist() {
     local src="$1" dst="$2"
-    sed -e "s|__BADAPPLE_ROOT__|${REPO_ROOT}|g" \
-        -e "s|__CONSOLE_USER__|${CONSOLE_USER}|g" \
-        -e "s|__CONSOLE_HOME__|${CONSOLE_HOME}|g" \
-        -e "s|__CONSOLE_GROUP__|${CONSOLE_GROUP}|g" \
+    local eroot euser ehome egroup
+    eroot=$(sed_escape "$(xml_escape "${REPO_ROOT}")")
+    euser=$(sed_escape "$(xml_escape "${CONSOLE_USER}")")
+    ehome=$(sed_escape "$(xml_escape "${CONSOLE_HOME}")")
+    egroup=$(sed_escape "$(xml_escape "${CONSOLE_GROUP}")")
+    sed -e "s|__BADAPPLE_ROOT__|${eroot}|g" \
+        -e "s|__CONSOLE_USER__|${euser}|g" \
+        -e "s|__CONSOLE_HOME__|${ehome}|g" \
+        -e "s|__CONSOLE_GROUP__|${egroup}|g" \
         -e "s|__BADAPPLE_MAX_KV_SIZE__|${BADAPPLE_MAX_KV_SIZE}|g" \
         -e "s|__BADAPPLE_PREFILL_STEP_SIZE__|${BADAPPLE_PREFILL_STEP_SIZE}|g" \
         -e "s|__BADAPPLE_NUM_DRAFT_TOKENS__|${BADAPPLE_NUM_DRAFT_TOKENS}|g" \

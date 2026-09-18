@@ -37,6 +37,7 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_TOOL_NAME_LEN: usize = 256;
 const MAX_ARGUMENTS_DEPTH: usize = 8;
 const CALL_AGENT_TIMEOUT: u64 = 120;
+const MAX_CONNECTIONS: u64 = 64;
 
 /// Tools that require human approval or can mutate the system outside the
 /// daemon's policy gate. They are listed but calls are rejected unless the
@@ -83,11 +84,22 @@ impl McpServer {
                 self.socket_path.display()
             )
         })?;
+        let active = Arc::new(AtomicU64::new(0));
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    // Bound concurrent connections: without a cap a local client
+                    // can exhaust threads/memory by opening floods of sockets.
+                    if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        tracing::warn!("MCP connection refused: at capacity");
+                        drop(stream);
+                        continue;
+                    }
+                    let active = Arc::clone(&active);
                     std::thread::spawn(move || {
                         let _ = handle_stream(stream);
+                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
                 Err(e) => tracing::warn!("MCP accept failed: {}", e),
@@ -211,16 +223,30 @@ async fn message_handler(
 fn handle_stream(stream: UnixStream) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
-    let mut line = String::new();
-    while reader.read_line(&mut line)? > 0 {
+    loop {
+        let mut line = String::new();
+        // Bound the read BEFORE allocation: take() caps how many bytes are
+        // pulled off the wire, so a client that streams gigabytes without a
+        // newline cannot exhaust memory. (The old loop read the full line
+        // first and checked MAX_REQUEST_BYTES afterwards — too late.)
+        let mut limited = std::io::Read::take(&mut reader, (MAX_REQUEST_BYTES + 1) as u64);
+        let read = limited.read_line(&mut line)?;
+        if read == 0 {
+            return Ok(());
+        }
+        if read > MAX_REQUEST_BYTES || !line.ends_with('\n') {
+            let resp = error_response(None, -32700, "request too large or unterminated");
+            let text = serde_json::to_string(&resp)?;
+            writeln!(writer, "{}", text)?;
+            writer.flush()?;
+            return Ok(());
+        }
         if let Some(response) = handle_request(&line) {
             let text = serde_json::to_string(&response)?;
             writeln!(writer, "{}", text)?;
             writer.flush()?;
         }
-        line.clear();
     }
-    Ok(())
 }
 
 #[derive(Deserialize, Debug)]

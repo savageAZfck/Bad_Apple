@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 const MLX_SOCKET_PATH: &str = "/var/run/badapple/substrate_mlx.sock";
 const LOW_COMPLEXITY_THRESHOLD: f64 = 0.62;
 const REPLAY_CACHE_MAX: usize = 4096;
+const MAX_CONNECTIONS: usize = 128;
 
 /// One classification request sent to the brain worker thread.
 struct ClassifyRequest {
@@ -909,10 +910,44 @@ fn handle_client(
     Ok(())
 }
 
+/// Decrements the active-connection counter when the handler thread exits —
+/// including on panic — so the cap cannot leak.
+fn scopeguard(counter: Arc<std::sync::atomic::AtomicUsize>) -> impl Drop {
+    struct Guard(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    Guard(counter)
+}
+
+fn uid_gid(user: &str) -> Option<(u32, u32)> {
+    let uid = Command::new("id").args(["-u", user]).output().ok()?;
+    let gid = Command::new("id").args(["-g", user]).output().ok()?;
+    Some((
+        String::from_utf8_lossy(&uid.stdout).trim().parse().ok()?,
+        String::from_utf8_lossy(&gid.stdout).trim().parse().ok()?,
+    ))
+}
+
+/// Primary gid of the `staff` group — the group every local macOS account
+/// belongs to — parsed from /etc/group rather than hardcoded.
+fn staff_gid() -> Option<u32> {
+    fs::read_to_string("/etc/group")
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with("staff:"))?
+        .split(':')
+        .nth(2)?
+        .parse()
+        .ok()
+}
+
 /// Detect the console user (the owner of `/dev/console`) so the gatekeeper
 /// — which runs as root — can hand the socket directory back to the user-owned
-/// MLX daemon after a restart. Falls back to the parent directory's current
-/// owner if `/dev/console` cannot be read.
+/// MLX daemon after a restart. Falls back to scutil's console-session state
+/// when `/dev/console` is still root-owned, then to the staff group.
 fn console_user() -> Option<(String, u32, u32)> {
     // Primary: `stat -f %Su /dev/console` (macOS-specific).
     if let Ok(out) = Command::new("stat")
@@ -922,28 +957,33 @@ fn console_user() -> Option<(String, u32, u32)> {
         if out.status.success() {
             let user = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !user.is_empty() && user != "root" {
-                if let (Ok(uid_out), Ok(gid_out)) = (
-                    Command::new("id").args(["-u", &user]).output(),
-                    Command::new("id").args(["-g", &user]).output(),
-                ) {
-                    let uid = String::from_utf8_lossy(&uid_out.stdout)
-                        .trim()
-                        .parse::<u32>()
-                        .ok();
-                    let gid = String::from_utf8_lossy(&gid_out.stdout)
-                        .trim()
-                        .parse::<u32>()
-                        .ok();
-                    if let (Some(uid), Some(gid)) = (uid, gid) {
-                        return Some((user, uid, gid));
-                    }
+                if let Some((uid, gid)) = uid_gid(&user) {
+                    return Some((user, uid, gid));
                 }
             }
         }
     }
-    // Fallback: inherit the existing owner/group of the socket directory's
-    // parent if it was already created with the correct ownership by the
-    // installer. This keeps restarts from clobbering a working setup.
+    // Secondary: scutil's ConsoleUser state. /dev/console is still root-owned
+    // when a LaunchDaemon starts at boot before the login window claims the
+    // console, so this catches the user as soon as a session exists.
+    if let Ok(out) = Command::new("sh")
+        .args(["-c", "echo 'show State:/Users/ConsoleUser' | scutil"])
+        .output()
+    {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let user = text
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("Name :").map(str::trim))
+                .find(|name| !name.is_empty() && *name != "root")
+                .map(str::to_string);
+            if let Some(user) = user {
+                if let Some((uid, gid)) = uid_gid(&user) {
+                    return Some((user, uid, gid));
+                }
+            }
+        }
+    }
     None
 }
 
@@ -964,15 +1004,17 @@ fn ensure_socket_dir() -> Result<()> {
         if let Some((_user, uid, gid)) = console_user() {
             // `std::os::unix::fs::chown` sets ownership without needing libc.
             let _ = chown(parent, Some(uid), Some(gid));
-        } else {
-            // Last-resort fallback: shell out to `chown` using the parent
-            // directory's current group so the daemon (a member of that group)
-            // retains write access even if we could not resolve the console
-            // user. Ownership stays root but the group is preserved.
-            if let Ok(meta) = fs::metadata(parent) {
-                let parent_gid = meta.gid();
-                let _ = chown(parent, None, Some(parent_gid));
-            }
+        } else if let Some(gid) = staff_gid() {
+            // No console session yet (e.g. this LaunchDaemon started at boot
+            // before login). Keep root ownership but hand the directory to the
+            // staff group — every local account belongs to it — so user-level
+            // services (identity agent, MLX daemon, CLI) can still bind and
+            // connect. Preserving the pre-existing group here is wrong: a
+            // freshly created directory would stay root:daemon and lock out
+            // every user process until the next restart. The periodic repair
+            // in main() refines ownership to the console user once a session
+            // exists.
+            let _ = chown(parent, None, Some(gid));
         }
     }
     Ok(())
@@ -982,6 +1024,14 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     ensure_socket_dir()?;
+    // The console user may not exist when this daemon starts at boot, leaving
+    // the socket directory staff-owned at best. Re-run the repair periodically
+    // so ownership converges to the console user after login instead of
+    // requiring a daemon restart.
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let _ = ensure_socket_dir();
+    });
     let path = socket_path();
     if path.exists() {
         std::fs::remove_file(&path).ok();
@@ -997,6 +1047,7 @@ fn main() -> Result<()> {
     eprintln!("[gatekeeper] automation cage roots: {:?}", cage.roots());
 
     let replay_cache = Arc::new(ReplayCache::new(REPLAY_CACHE_MAX));
+    let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("cannot bind Bad Apple socket at {path:?}"))?;
@@ -1013,11 +1064,23 @@ fn main() -> Result<()> {
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                // Bound concurrent connections: without a cap a local client
+                // can exhaust threads/memory by opening floods of sockets.
+                if active_connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    >= MAX_CONNECTIONS
+                {
+                    active_connections.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    eprintln!("[gatekeeper] connection refused: at capacity");
+                    drop(stream);
+                    continue;
+                }
                 let router = router.clone();
                 let resolver = resolver.clone();
                 let cage = cage.clone();
                 let replay_cache = Arc::clone(&replay_cache);
+                let active = Arc::clone(&active_connections);
                 std::thread::spawn(move || {
+                    let _active_guard = scopeguard(active);
                     if let Err(e) = handle_client(stream, &router, &resolver, &cage, &replay_cache)
                     {
                         if is_benign_disconnect(&e) {
