@@ -40,7 +40,7 @@ fn main() {
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        anyhow::bail!("usage: badapple-p2p <peers|sync|sync-doc <kind>|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
+        anyhow::bail!("usage: badapple-p2p <peers|sync|sync-doc <kind>|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]|ask <peer_id> <prompt...>>");
     }
 
     match args[0].as_str() {
@@ -73,6 +73,13 @@ fn run() -> Result<()> {
             let peer_id = args.get(1).map(String::as_str);
             let model_id = args.get(2).map(String::as_str);
             receive_model(peer_id, model_id)
+        }
+        "ask" => {
+            if args.len() < 3 {
+                anyhow::bail!("usage: badapple-p2p ask <peer_id> <prompt...>");
+            }
+            let prompt = args[2..].join(" ");
+            ask_peer(&args[1], &prompt)
         }
         _ => anyhow::bail!("unknown p2p subcommand: {}", args[0]),
     }
@@ -416,6 +423,40 @@ fn send_model(peer_id: &str, model_id: &str) -> Result<()> {
             match svc.push(&peer_addr, &model_id).await {
                 Ok(()) => {
                     println!("{{\"status\": \"ok\", \"peer\": \"{peer_addr}\", \"model\": \"{model_id}\"}}");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("{{\"status\": \"error\", \"message\": \"{e:#}\"}}");
+                    bail!("{e:#}");
+                }
+            }
+        })
+    })
+}
+
+/// Delegated inference: send a prompt to a trusted peer's engine and print
+/// its answer. The peer must serve with `BADAPPLE_P2P_INFER=1`; the action is
+/// attested on the serving machine's ledger under this machine's peer label.
+fn ask_peer(peer_id: &str, prompt: &str) -> Result<()> {
+    let peer_id = peer_id.to_string();
+    let prompt = prompt.to_string();
+    with_runtime(move || {
+        let rt = Runtime::new().context("tokio runtime")?;
+        rt.block_on(async {
+            let svc = transfer_service()?;
+            let peer_addr = if peer_id.contains(':') {
+                peer_id
+            } else {
+                format!("{peer_id}:9878")
+            };
+            match svc.infer(&peer_addr, &prompt, 512, &hostname()).await {
+                Ok(resp) => {
+                    println!("{}", resp.text);
+                    eprintln!(
+                        "\n[served by {peer_addr}{} in {} ms — attested on the serving peer's ledger]",
+                        resp.tier.map(|t| format!(" · tier {t}")).unwrap_or_default(),
+                        resp.elapsed_ms
+                    );
                     Ok(())
                 }
                 Err(e) => {

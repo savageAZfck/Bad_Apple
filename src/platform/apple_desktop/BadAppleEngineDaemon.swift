@@ -368,6 +368,19 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return await BadAppleEngine.shared.executeTool(name: "run_shell", args: ["command": command])
     }
+    if lower == "council" {
+        return "The Council of Minds — fourteen seats: Buffett · Dalio · Musk · Jobs · "
+            + "Sun Tzu · Clausewitz · Musashi · Machiavelli · Napoleon · Hannibal · "
+            + "Aurelius · Boyd · Genghis · Patton.\n\n"
+            + "Ask with `council <question>` — each seat speaks, then the council tallies. "
+            + "On gated actions the council votes deterministically; its verdict rides on "
+            + "every approval prompt and holds the gate under autopilot."
+    }
+    if lower.hasPrefix("council ") {
+        let question = String(prompt.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return "Ask the council something: `council <question>`." }
+        return await BadAppleEngine.shared.runCouncilSession(question: question)
+    }
     if lower.hasPrefix("write a note ") {
         let content = String(prompt.dropFirst("write a note ".count))
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -504,6 +517,31 @@ private func agentRespond(_ fd: Int32, writeQueue: DispatchQueue, reqId: String?
     }
     writeQueue.sync {
         _ = writeJSON(fd, frame)
+    }
+}
+
+/// Delegated inference from a trusted mesh peer. Runs through the engine's
+/// inference-only path — no meta commands, no tools, no approvals — and is
+/// attested on this machine's ledger under the requester's peer label.
+private func handleDelegatedRequest(_ raw: String, fd: Int32, writeQueue: DispatchQueue) async {
+    let jsonStr = String(raw.dropFirst("__BADAPPLE_DELEGATED__ ".count))
+    guard let jsonData = jsonStr.data(using: .utf8),
+          let req = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+          let prompt = req["prompt"] as? String else {
+        writeQueue.sync {
+            _ = writeJSON(fd, ["type": "done", "text": "error: malformed delegated request", "metrics": makeMetrics()])
+        }
+        return
+    }
+    let fromPeer = req["from_peer"] as? String ?? "unknown-peer"
+    let maxTokens = req["max_tokens"] as? Int ?? 512
+    let text = await BadAppleEngine.shared.generateDelegated(
+        prompt: prompt,
+        fromPeer: fromPeer,
+        maxTokens: maxTokens
+    )
+    writeQueue.sync {
+        _ = writeJSON(fd, ["type": "done", "text": text, "metrics": makeMetrics()])
     }
 }
 
@@ -959,6 +997,18 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
             _ = writeJSON(fd, ["type": "accepted"])
         }
         await handleAgentRequest(prompt, fd: fd, writeQueue: writeQueue)
+        return
+    }
+
+    // 3b) Delegated inference: a trusted mesh peer asks this engine's brain.
+    // Inference-only — the delegated prompt never reaches meta, tool, or
+    // approval paths.
+    if prompt.hasPrefix("__BADAPPLE_DELEGATED__ ") {
+        let writeQueue = DispatchQueue(label: "badapple-engine.write.\(fd)")
+        writeQueue.sync {
+            _ = writeJSON(fd, ["type": "accepted"])
+        }
+        await handleDelegatedRequest(prompt, fd: fd, writeQueue: writeQueue)
         return
     }
 

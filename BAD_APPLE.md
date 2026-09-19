@@ -124,6 +124,7 @@ When asked, it can say:
 - **Hash-chained audit ledger** (`/var/lib/bad_apple/ledger.jsonl`) with PII redaction, plus a hardened sovereign copy (`ledger.sovereign.jsonl`) re-verified daily and anchored to Secure Enclave–signed checkpoints
 - **Semantic cache** (`BAAI/bge-small-en-v1.5`) for instant repeated-answer hits
 - **Human-in-the-loop approvals** for destructive tools
+- **Council of Minds**: 14 deterministic strategist/financial seats vote on every gated action — passed votes execute under autopilot, failed votes escalate to the human; semantic `council <question>` sessions voice all seats; deliberations journaled on the ledger
 - **Bounded Curious self-improvement autopilot** — when `curious` persona is active and autopilot is on, the engine runs a local self-check (cert suite, doctor, output firewall, git status, source TODO/FIXME scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple "curious check"`.
 
 ### Tools (local, no cloud)
@@ -163,6 +164,7 @@ The current build covers the following roadmap phases:
 - **Phase 14 — Adversarial output classifier** ✅: `StreamingFirewall` blocks PII, secrets, and custom blocklist patterns in generated output with a streaming Aho-Corasick automaton.
 - **Phase 15 — Self-hosting model registry** ✅: `badapple model <list|scan|info|use|verify|add|remove|recommend>` manages the local cache, records SHA-256 provenance, and signs manifests with the Secure Enclave.
 - **Phase 16 — P2P model manifest gossip + file transfer** ✅: the link-local mesh shares signed model manifests and streams the actual model weight files between peers. `badapple p2p <peers|sync|models|pull|send|receive>` discovers neighbors, syncs memory, pulls a manifest, and sends/receives the full model over encrypted local TCP.
+- **Phase 17 — Council of Minds** ✅: a 14-seat deterministic council (4 financial minds + 10 strategists) votes on every gated action before execution. Under autopilot, passed votes run and failed votes escalate to the human as proposals; in manual mode the verdict advises the approval prompt. `badapple "council <question>"` runs the semantic session — the local model voices all fourteen seats and returns a verdict. Every deliberation is journaled on the audit ledger.
 
 ### Menu bar app
 
@@ -207,6 +209,7 @@ Built-in persona packs (in `personas.json`) include Wicket (witty Londoner), Gen
 | Audit | Append-only SHA-256–chained JSONL with secret/PII redaction; independent HMAC-SHA256 sovereign copy + Secure Enclave checkpoints via `badapple-sovereign` | `/var/lib/bad_apple/ledger.jsonl` |
 | Watchdog | IFY (`badapple-ify`): verifies each new ledger line as it arrives, learns event/tool/approval baselines over a 14-day gestation, surfaces anomalies as approval-gated proposals, and in autopilot phase can pull the kill switch on critical findings (chain break, ledger truncation). See `IFY.md` | `~/.bad_apple/ify/` |
 | Approvals | Proposal/approve workflow for `run_shell`, `run_applescript`, `write_file`, `index_documents` | `badapple-engine` |
+| Council | 14 deterministic seats (4 financial minds + 10 strategists) vote on every gated action via an 8-feature action encoder (destructiveness, irreversibility, blast radius, sensitivity, privilege, scope, cost, novelty); under autopilot, passed votes execute and failed votes escalate to a human proposal; every deliberation is journaled as `council_deliberation` with per-seat votes and rationales | `BadAppleCouncil.swift` |
 | Cache | Persona-scoped semantic cache; no cache for tool queries or voice | `badapple-engine` |
 
 ---

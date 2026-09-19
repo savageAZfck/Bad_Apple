@@ -39,6 +39,7 @@ This document describes the current structure, data flow, and invariants of the 
 │  ├── `BadAppleEngine` — prompt handling, tool routing, RAG, cache           │
 │  ├── `BadAppleModelManager` — model registry and memory admission           │
 │  ├── `BadAppleTools` — policy enforcement and native tool invocation        │
+│  ├── `BadAppleCouncil` — 14-seat deterministic action-vote council          │
 │  ├── `BadAppleNativeRuntime` — UMA reservations and health checks           │
 │  ├── `BadAppleSecurity` — SLICKS v2 Secure Enclave identity client          │
 │  ├── `BadAppleConversation` — chat history and streaming                    │
@@ -85,7 +86,7 @@ Binaries (`src/bin/`):
 1. The user sends a prompt through the `badapple` CLI or the menu bar.
 2. The Rust CLI SLICKS-authenticates to the `gatekeeper` and forwards to `badapple-engine` over the Unix socket.
 3. The Swift daemon loads the active model, merges `prompt.txt`, persona, and workspace context, then streams a response.
-4. If the model emits a `<tool_call>`, `BadAppleTools` enforces `policy.yaml` limits and asks for approval for destructive tools unless autopilot is enabled.
+4. If the model emits a `<tool_call>`, `BadAppleTools` enforces `policy.yaml` limits and asks for approval for destructive tools unless autopilot is enabled. Gated actions are first deliberated by `BadAppleCouncil`: all 14 seats vote on an encoded action feature vector, and under autopilot a passed vote executes while a failed or contested vote escalates to a human approval proposal. Every deliberation is journaled as a `council_deliberation` ledger event.
 5. Filesystem and shell tools run through the `automation_cage` (`openat`/`O_NOFOLLOW`).
 6. Untrusted tool synthesis runs in the `wasm_cage` with bounded fuel, memory, and output.
 7. Every query, tool call, cache hit, and response is appended to the hash-chained audit ledger (`/var/lib/bad_apple/ledger.jsonl`).

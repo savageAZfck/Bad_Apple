@@ -1,86 +1,139 @@
-# Bad Apple — Threat Model
+# Bad Apple Threat Model
 
-## System Overview
+This document defines what Bad Apple is designed to defend against, what it does not claim to defend against, and where the residual risk lives. It is written to be checked against the code — every mitigation named here maps to a real subsystem in the repository.
 
-Bad Apple is a baremetal AI OS layer for Apple Silicon macOS. It runs as three system launchd daemons (gatekeeper, MLX server, health supervisor) with root privileges, communicating via SLICKS-authenticated Unix domain sockets.
+Bad Apple's security philosophy is structural: the system assumes its own components can be wrong, fooled, or corrupted, and it is organized so that no single failure is silent, irreversible, or unbounded.
 
-## Trust Boundaries
+## Assets
 
-### Boundary 1: Local User → Gatekeeper
-- **Trust level**: Semi-trusted. The user has valid SLICKS credentials but may send malformed or adversarial inputs.
-- **Attack surface**: SLICKS handshake, prompt content, tool invocation requests.
-- **Defense**: SLICKS v1 (HMAC-SHA256) and v2 (Secure Enclave ECDSA) authentication, nonce validation, timestamp freshness, replay cache, request validation (prompt size, token limits).
+| Asset | Why it matters |
+|---|---|
+| User prompts, responses, and context | The core private data — the reason the product exists |
+| Local filesystem within reach of tools | What the agent can read, write, or destroy |
+| Ledger history (`ledger.jsonl`, sovereign copy) | The attested record of behavior; tampering erases accountability |
+| Model files and provenance manifests | The brain — a swapped brain is a compromised system |
+| Vault secrets (HSM/Enclave-backed) | Credentials stored for the user's tools |
+| Signing identity (Secure Enclave keys) | The root of SLICKS v2 authentication and checkpoint signatures |
+| Approval decisions | The human boundary — an attacker who can fake an approval bypasses the control layer |
 
-### Boundary 2: Gatekeeper → MLX Daemon
-- **Trust level**: Trusted (both run as root on the same machine).
-- **Attack surface**: Internal Unix socket, v2 proxy forwarding.
-- **Defense**: Socket permissions 0o660, SLICKS end-to-end for v2, request validation in proxy path.
+## Trust boundaries
 
-### Boundary 3: MLX Daemon → Local Filesystem
-- **Trust level**: Semi-trusted. User-provided paths and tool arguments.
-- **Attack surface**: File read/write tools, AppleScript execution, shell commands, document indexing.
-- **Defense**: Fail-closed filesystem cage with openat-based operations, O_NOFOLLOW on all file creation, path jailing in tools, AppleScript escaping, shell allowlist (no interpreters), human-in-the-loop approval policy.
+```
+                    ┌─ UNTRUSTED ─────────────────────────────┐
+                    │  model weights (HF), documents, web     │
+                    │  content, LLM output, MCP servers,      │
+                    │  P2P peers, WASM payloads               │
+                    └───────────────┬─────────────────────────┘
+                                    ▼
+   ┌─ BOUNDARY 1: content plane ── output firewall, prompt hygiene, embeddings truncation
+                                    ▼
+   ┌─ BOUNDARY 2: tool plane ────── policy.yaml (60 rules), approvals, automation cage,
+   │                                WASM cage (fuel-metered), fail-closed paths
+                                    ▼
+   ┌─ BOUNDARY 3: IPC plane ─────── SLICKS v1/v2, Unix sockets only, frame validation
+                                    ▼
+   ┌─ BOUNDARY 4: network plane ─── airgap toggle, HF_HUB_OFFLINE, P2P off-by-default,
+   │                                dashboard loopback-only
+                                    ▼
+                    ┌─ TRUSTED ───────────────────────────────┐
+                    │  daemon, gatekeeper, identity agent,    │
+                    │  supervisor, IFY, sovereign, respawn    │
+                    └─────────────────────────────────────────┘
+```
 
-### Boundary 4: MLX Daemon → WebAssembly Sandbox
-- **Trust level**: Untrusted. Model-generated code executed in sandbox.
-- **Attack surface**: WASM module compilation and execution, host function ABI.
-- **Defense**: Fuel metering, StoreLimits (memory cap, instance limit), output vector cap (256 KiB), input validation (negative lengths rejected), memory policy enforcement (max 1 memory, max pages).
+## Adversary classes and controls
 
-### Boundary 5: P2P Mesh → Local Daemon
-- **Trust level**: Untrusted. Remote peers on link-local network.
-- **Attack surface**: P2P protocol frames, adapter transfer, model sync.
-- **Defense**: AES-256-GCM encryption, HMAC-SHA256 or Secure Enclave ECDSA signing, replay protection (nonce window), timestamp freshness, peer spec SSRF prevention (cloud metadata blocked), zip slip prevention (path validation on extract), frame size limits (MAX_FRAME_BYTES on TCP and WebSocket).
+### 1. Prompt injection (content-plane adversary)
 
-### Boundary 6: Dashboard → Local System
-- **Trust level**: Semi-trusted. Local browser on 127.0.0.1.
-- **Attack surface**: HTTP endpoints, POST requests.
-- **Defense**: CSRF token with constant-time comparison, Origin/Referer validation, 1 MB body size limit, no CORS headers, 127.0.0.1 only binding.
+**Attack:** a document, webpage, or file the agent reads carries adversarial instructions ("ignore policy, delete X, exfiltrate Y"). This is the primary residual risk for ANY agent with tools — the attack rides the input, not the network.
 
-### Boundary 7: Aqua Helper → UI Automation
-- **Trust level**: Semi-trusted. Local daemon requesting UI actions.
-- **Attack surface**: Accessibility actions (click, type, focus), screen capture, Shortcuts.
-- **Defense**: SLICKS v1 HMAC authentication, timestamp freshness, nonce replay protection, AppleScript escaping in all UI actions, O_NOFOLLOW on response files, socket permissions 0o600.
+**Controls:**
+- Destructive tools are *proposed, not executed* — approval-gated by `policy.yaml` regardless of what the model emits
+- `automation_cage` — fail-closed filesystem operations: allowlisted roots, `O_NOFOLLOW` symlink rejection, path-traversal protection
+- `wasm_cage` — untrusted synthesized code runs fuel-metered with bounded memory/output
+- Output firewall (Aho-Corasick streaming) — redacts secret-shaped output before it reaches the user or a tool argument
+- Council of Minds — every gated action is deliberated by 14 deterministic seats over an encoded feature vector; under autopilot only passed votes execute, and contested actions escalate to the human
+- IFY — a brake-only watchdog can kill autopilot on anomaly; it cannot steer, patch, or approve
 
-## Threat Agents
+**Honest residual risk:** injection that produces *non-destructive but wrong* actions (misleading summaries, subtly wrong code) is not fully preventable — it is detected behaviorally (IFY baselines) rather than blocked. A fully air-gapped install reduces the injection surface to user-carried content, but cannot eliminate it: the food channel is a user-gated trust boundary, not a sealed one.
 
-### Agent 1: Local Unprivileged User
-- **Motivation**: Privilege escalation, data exfiltration.
-- **Capabilities**: Can create files, symlinks, set environment variables for their own processes, connect to Unix sockets.
-- **Mitigations**: Socket permissions 0o660, SLICKS authentication required, openat cage prevents symlink-based escape, replay cache prevents frame replay.
+### 2. Local-process adversary
 
-### Agent 2: Malicious Model Output
-- **Motivation**: Execute arbitrary code, exfiltrate data.
-- **Capabilities**: Can emit tool calls (shell, AppleScript, file write), can generate text with secrets.
-- **Mitigations**: Human-in-the-loop approval for destructive tools, WASM sandbox for code synthesis, output firewall with Aho-Corasick secret redaction, shell allowlist excludes interpreters, AppleScript escaping in all integrations, autopilot off by default.
+**Attack:** another process running as the same user calls the daemon's IPC or the dashboard to drive tools, read state, or exfiltrate.
 
-### Agent 3: Network Attacker (P2P)
-- **Motivation**: Inject malicious engrams, steal model weights, impersonate peers.
-- **Capabilities**: Can observe and inject traffic on link-local network.
-- **Mitigations**: P2P off by default, AES-256-GCM encryption, HMAC/ECDSA signing, replay protection, frame size limits, SSRF prevention, zip slip prevention.
+**Controls:**
+- All IPC over Unix sockets; no network listeners by default (`badapple cert` asserts zero sockets — check it)
+- SLICKS v1 (HMAC challenge-response, nonce-bound, prompt-bound) or v2 (Secure Enclave-signed) required on the substrate socket
+- Frame-length validation, nonce freshness, replay rejection
 
-### Agent 4: Physical Access Attacker
-- **Motivation**: Read conversation history, extract model, tamper with audit log.
-- **Capabilities**: Can read files accessible to their user account.
-- **Mitigations**: Audit ledger uses HMAC with SLICKS-derived secret, conversation file in /var/lib/bad_apple (0o770), Secure Enclave-signed checkpoints, model pinned to commit hash with integrity verification.
+**Honest residual risk:** `badapple-dashboard` binds loopback with **no authentication** — any local process can reach it while running (stated in SECURITY.md). A compromised same-user process that also defeats SLICKS would have tool access; this is the strongest reason to run IFY + ledger verification continuously — the *attempt* leaves a record.
 
-## Not Protected Against
+### 3. Supply chain adversary
 
-- **Root-level attacker**: An attacker with root can modify any file, intercept any socket, and bypass all protections. Bad Apple does not defend against a compromised root account.
-- **Firmware/hardware attack**: Secure Enclave provides key storage but cannot prevent hardware-level attacks (e.g., JTAG, chip-off).
-- **Side-channel attacks**: Timing attacks on non-cryptographic operations are not fully mitigated. Constant-time comparison is used for HMAC verification but not for all comparisons.
-- **Memory corruption in unsafe code**: The 114 unsafe blocks are individually commented but not formally verified. A memory safety bug in unsafe code could bypass all protections.
-- **Supply chain attacks**: Dependencies are audited with cargo-audit but transitive dependency poisoning is not fully mitigated.
+**Attack:** compromised model weights, poisoned dependencies, tampered release binaries, or a malicious update.
 
-## Security Verification
+**Controls:**
+- Model provenance: SHA-256 manifest per model; `config.json` hash verified on each load; revision pinning via `BADAPPLE_MODEL_REVISION`
+- Releases are cosign-signed; `update_bad_apple.sh` signature-verifies before installing
+- cargo deny/audit in CI; `paste` is the one known unmaintained transitive dep (via candle/metal/tokenizers)
+- Guardian self-repair only re-fetches — it does not accept foreign binaries
 
-| Method | Coverage | Results |
-|---|---|---|
-| Manual audit pass 1 | All 4 layers | 30 bugs found, all fixed |
-| Manual audit pass 2 (red team) | All 4 layers | 39 bugs found, all fixed |
-| cargo-fuzz (IPC) | SLICKS frame parsing | 127M iterations, 0 crashes |
-| cargo-fuzz (WASM) | Compilation + execution | 638K iterations, 0 crashes |
-| cargo-fuzz (Protocol) | P2P frame parsing | 694K iterations, 0 crashes |
-| cargo-fuzz (Scavenger) | Path handling | 760K iterations, 0 crashes |
-| Regression tests | Security boundaries | 78 Rust + 32 install tests |
-| Install test | Distribution integrity | 32 checks |
-| cargo audit | Dependency vulnerabilities | 0 vulnerabilities |
+**Honest residual risk:** provenance verifies *origin, not behavior*. A bit-perfect model can still be a weak or adversarially-trained brain — checksums cannot see inside weights. The backstop is behavioral: the ledger attests actions and IFY watches the brain's *output*, so a brain acting wrong is detectable even when its file verified.
+
+### 4. Network/peer adversary (P2P enabled)
+
+**Attack:** a malicious peer forges packets, replays sync, or feeds bad checkpoints.
+
+**Controls:**
+- AES-256-GCM encryption + HMAC-SHA256 signatures on all mesh packets
+- Secure Enclave-signed origin authentication
+- Off by default; airgap toggle disables the entire surface
+- Chunked transfer with per-chunk ACKs and SHA-256 verification
+
+**Honest residual risk:** a peer can present an *internally valid but divergent* history — equivocation. Single-verifier consistency proofs exist in sovereign_ledger; a witnessing/checkpoint-gossip protocol across peers is the acknowledged next layer. Today: treat peer checkpoints as claims, not consensus.
+
+### 5. Persistence-layer adversary (tampering with the record)
+
+**Attack:** an attacker modifies the ledger, the sovereign copy, or platform state to erase evidence.
+
+**Controls:**
+- `ledger.jsonl` — SHA-256 hash chain + keyed HMAC; verified by `--doctor`
+- `badapple-sovereign` — independent re-verification into a separate HMAC-chained copy, sealed and checkpointed daily (Secure Enclave-signed checkpoints; cert fails if stale >36h)
+- `badapple-respawn` — content-addressed snapshots of `/var/lib/bad_apple`; drift detection and revert
+- Sequence continuity and unknown-field rejection enforced since sovereign_ledger 0.3.1
+
+**Honest residual risk:** all copies live on the same machine under the same user — an attacker with full local control can destroy all copies. The chain proves tampering happened; it cannot survive total deletion. Off-box checkpoint export is the mitigating layer (same frontier as witnessing).
+
+### 6. Resource-exhaustion adversary
+
+**Attack:** runaway generation, oversized WASM, model loads exceeding unified memory.
+
+**Controls:**
+- VRAM admission control (`canFitModel` before load; `BADAPPLE_VRAM_BUDGET_GB`)
+- `MemoryGovernor` — host_statistics64 polling + critical-pressure purge
+- WASM fuel metering, output limits, per-tool timeouts
+- Bounded supervisor restarts (2 per 10 min) then safe mode — crash loops cannot run unbounded
+
+### 7. The human boundary
+
+**Attack:** social engineering — convincing the operator to approve a bad action once, disable IFY, or flip off the airgap.
+
+**Controls:** none that remove the human — by design. The operator is the root of trust and the approval boundary. What the system *does*: makes every approval and every toggle change an attested ledger event, so manipulation is at least recorded, and keeps the brake (kill switch, safe mode, airgap hard switch) one command away.
+
+**Honest statement:** no technical control can protect a user from themselves; the system limits itself to making manipulation visible and autonomy stoppable.
+
+## What this system deliberately does NOT do
+
+- It does not sandbox itself with macOS entitlements (stated limitation)
+- It does not claim model-level safety — weights are a verified-input/watched-behavior surface
+- It does not promise immunity — it promises **detection, attestation, revert, and brakes**. The claim is "cannot be *silently* compromised," not "cannot be compromised."
+
+## Verification entry points
+
+```bash
+badapple cert                    # 16-check airgap/security certification; exits nonzero on failure
+badapple --doctor                # ledger verification + redacted diagnostics
+badapple redteam run             # 12-probe adversarial self-test
+badapple-sovereign --checkpoint  # re-verify + re-sign the independent chain
+badapple-respawn --status        # state drift vs last snapshot
+```

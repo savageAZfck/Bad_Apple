@@ -281,6 +281,20 @@ target/release/badapple "approve <id>"
 BADAPPLE_AUTOPILOT=1 target/release/badapple "run shell ls /tmp"
 ```
 
+## Council of Minds
+
+`BadAppleCouncil.swift` is a 14-seat deterministic deliberation layer (4
+financial minds + 10 strategists). Every gated action is encoded into an
+8-feature vector and voted on; under autopilot a passed vote executes and
+a failed/contested vote escalates to a human proposal. In manual mode the
+verdict rides on the approval prompt. Deliberations land on the ledger as
+`council_deliberation` (plus `council_escalated` on failed votes).
+
+```bash
+target/release/badapple "council"                        # seat roster + usage
+target/release/badapple "council should I ship friday"   # semantic session — all seats speak, then a verdict
+```
+
 ## Kill switch, safe mode, and private mode
 
 Voice/text commands:
@@ -304,6 +318,7 @@ Returns a JSON summary and exits non-zero on any failed check. The same suite ru
 P2P sync and HuggingFace hub are disabled by default for certification:
 
 - P2P: set `BADAPPLE_P2P=1` in `com.badapple.mlx.plist` to enable link-local peer discovery.
+- Delegated inference: `BADAPPLE_P2P_INFER=1` on the serving peer lets `badapple-p2p ask` borrow its engine (inference-only, off by default).
 - HF Hub: `HF_HUB_OFFLINE=1` is set in `com.badapple.mlx.plist` so the MLX server loads only cached weights.
 
 ## Check performance
@@ -443,6 +458,13 @@ cargo clippy --release
   - `badapple-p2p send <peer_addr:port> <model_id>` serves a model and prints the pull address
   - `badapple-p2p receive` starts a transfer server on `BADAPPLE_P2P_TRANSFER_PORT` (default 9878)
   - `badapple-p2p pull <peer_addr:port> <model_id>` pulls the model from a listening peer
+  - `badapple-p2p ask <peer_addr:port> <prompt>` delegates a query to a peer's
+    engine over the same encrypted channel. Serving is opt-in via
+    `BADAPPLE_P2P_INFER=1` on the peer's side (off by default); the serving
+    daemon runs the prompt through an inference-only path — no meta commands,
+    no tools, no approvals — and attests it as `delegated_query` /
+    `delegated_response` on the serving machine's ledger under the
+    requester's peer label. Prompt cap 32 KiB, token cap 2048.
   - Transfers use AES-256-GCM over a dedicated TCP stream with per-chunk ACKs, resume support, and SHA-256 verification.
 - P2P is off by default. Enable with the menu bar `Mesh > P2P Sync`.
 - Consumer install: Homebrew Cask

@@ -726,14 +726,55 @@ final class BadAppleEngine: @unchecked Sendable {
         return id
     }
 
-    private func takeApproval(from prompt: String) -> (id: String, name: String, args: [String: String])? {
+    private func takeApproval(from prompt: String) -> (approved: Bool, id: String, name: String, args: [String: String])? {
         let parts = prompt.lowercased().split(whereSeparator: { $0.isWhitespace })
-        guard parts.count == 2, parts[0] == "approve" else { return nil }
+        guard parts.count == 2, parts[0] == "approve" || parts[0] == "deny" else { return nil }
         let id = String(parts[1])
         approvalLock.lock()
         defer { approvalLock.unlock() }
         guard let call = pendingApprovals.removeValue(forKey: id) else { return nil }
-        return (id, call.name, call.args)
+        return (parts[0] == "approve", id, call.name, call.args)
+    }
+
+    /// Journal a council deliberation: verdict, dissent, and every seat's vote.
+    private func auditCouncil(verdict: CouncilVerdict, name: String, args: [String: String],
+                              mode: String, persona: String) {
+        let votes: [[String: String]] = verdict.votes.map {
+            ["seat": $0.seat, "vote": String(format: "%.3f", $0.vote), "said": $0.rationale]
+        }
+        auditLedger.append(
+            eventType: "council_deliberation",
+            data: [
+                "tool": name, "arguments": args, "mode": mode,
+                "decision": verdict.decision.rawValue,
+                "mean": String(format: "%.3f", verdict.mean),
+                "dissent": String(format: "%.3f", verdict.dissent),
+                "votes": votes,
+            ],
+            persona: persona
+        )
+    }
+
+    private func approvalPromptText(id: String, name: String, args: [String: String]) -> String {
+        var detail = ""
+        for key in ["command", "script", "path", "shortcut", "query", "text", "dir", "file"] {
+            if let v = args[key], !v.isEmpty {
+                detail = v
+                break
+            }
+        }
+        if detail.isEmpty, let first = args.sorted(by: { $0.key < $1.key }).first {
+            detail = "\(first.key)=\(first.value)"
+        }
+        if detail.count > 120 {
+            detail = String(detail.prefix(120)) + "…"
+        }
+        let basis = policyEngine.approvalBasis(toolName: name)
+        return """
+        Approval required — Bad Apple wants to run `\(name)`\(detail.isEmpty ? "" : ": \(detail)").
+        Gated by: \(basis).
+        Reply `approve \(id)` to allow it once, or `deny \(id)` to refuse.
+        """
     }
 
     private func toolAwareGeneration(
@@ -778,6 +819,11 @@ final class BadAppleEngine: @unchecked Sendable {
                 case .denied(let reason):
                     output = "Policy: \(reason)"
                 case .needsApproval:
+                    // Manual mode: the council advises — its verdict rides on
+                    // the prompt so the human decides with counsel.
+                    let verdict = BadAppleCouncil.deliberate(toolName: call.name, args: call.args)
+                    auditCouncil(verdict: verdict, name: call.name, args: call.args,
+                                 mode: "advisory", persona: persona)
                     let id = createApproval(name: call.name, args: call.args)
                     auditLedger.append(
                         eventType: "approval_requested",
@@ -785,10 +831,49 @@ final class BadAppleEngine: @unchecked Sendable {
                         persona: persona
                     )
                     return BadAppleInference.GenerationResult(
-                        text: "This action needs your approval. Reply with: approve \(id)",
+                        text: approvalPromptText(id: id, name: call.name, args: call.args)
+                            + "\n\n" + verdict.summaryLine,
                         tier: "approval"
                     )
                 case .approved:
+                    // Under autopilot the council votes on every gated action:
+                    // a passed vote executes, a failed vote goes to the human
+                    // for approval. The council is never the final say — the
+                    // user decides everything contested.
+                    if policyEngine.requiresApproval(toolName: call.name) {
+                        let verdict = BadAppleCouncil.deliberate(toolName: call.name, args: call.args)
+                        auditCouncil(verdict: verdict, name: call.name, args: call.args,
+                                     mode: policyEngine.autopilot ? "autopilot" : "pre-approval",
+                                     persona: persona)
+                        if policyEngine.autopilot {
+                            if verdict.contested {
+                                let id = createApproval(name: call.name, args: call.args)
+                                auditLedger.append(
+                                    eventType: "council_escalated",
+                                    data: ["id": id, "name": call.name,
+                                           "decision": verdict.decision.rawValue,
+                                           "dissent": verdict.dissent],
+                                    persona: persona
+                                )
+                                return BadAppleInference.GenerationResult(
+                                    text: "Council vote failed `\(call.name)` — sending it to you.\n"
+                                        + verdict.summaryLine + "\n\n"
+                                        + approvalPromptText(id: id, name: call.name, args: call.args),
+                                    tier: "approval"
+                                )
+                            }
+                            let result = await toolExecutor.executeTool(
+                                name: call.name, args: call.args, approved: true)
+                            output = result + "\n\n[council: " + verdict.summaryLine + "]"
+                            auditLedger.append(
+                                eventType: "tool_result",
+                                data: ["name": call.name, "result": output],
+                                persona: persona
+                            )
+                            outputs.append("\(call.name): \(output)")
+                            continue
+                        }
+                    }
                     output = await toolExecutor.executeTool(name: call.name, args: call.args, approved: true)
                 }
                 auditLedger.append(
@@ -824,6 +909,7 @@ final class BadAppleEngine: @unchecked Sendable {
         let startedAt = Date()
 
         let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
+            || prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("deny ")
         if killed && !isApproval {
             onToken("")
             onComplete("Bad Apple is paused. Say 'resume bad apple' to start again.")
@@ -832,16 +918,26 @@ final class BadAppleEngine: @unchecked Sendable {
 
         if let approval = takeApproval(from: prompt) {
             Task {
-                let output = await toolExecutor.executeTool(
-                    name: approval.name,
-                    args: approval.args,
-                    approved: true
-                )
-                auditLedger.append(
-                    eventType: "approval_executed",
-                    data: ["id": approval.id, "name": approval.name, "result": output],
-                    persona: activePersona
-                )
+                let output: String
+                if approval.approved {
+                    output = await toolExecutor.executeTool(
+                        name: approval.name,
+                        args: approval.args,
+                        approved: true
+                    )
+                    auditLedger.append(
+                        eventType: "approval_executed",
+                        data: ["id": approval.id, "name": approval.name, "result": output],
+                        persona: activePersona
+                    )
+                } else {
+                    output = "Denied. The action was not run."
+                    auditLedger.append(
+                        eventType: "approval_denied",
+                        data: ["id": approval.id, "name": approval.name, "arguments": approval.args],
+                        persona: activePersona
+                    )
+                }
                 saveTurn(prompt: prompt, response: output)
                 await runtime.recordQuery(
                     latencySeconds: Date().timeIntervalSince(startedAt),
@@ -909,6 +1005,57 @@ final class BadAppleEngine: @unchecked Sendable {
             DispatchQueue.main.async {
                 onToken(filtered)
                 onComplete(filtered)
+            }
+            return
+        }
+
+        // User-initiated self-audit: "are you alone" runs the REAL audit —
+        // the phrase is itself the approval (human-initiated, not model-initiated).
+        if wantsSelfAudit(prompt) {
+            Task {
+                auditLedger.append(
+                    eventType: "tool_call",
+                    data: ["name": "self_audit", "arguments": ["include": "all"], "via": "user_phrase"],
+                    persona: persona
+                )
+                let auditOutput = await toolExecutor.executeTool(name: "self_audit", args: ["include": "all"], approved: true)
+                auditLedger.append(
+                    eventType: "tool_result",
+                    data: ["name": "self_audit", "result": auditOutput],
+                    persona: persona
+                )
+                let sysPrompt = systemPrompt(voiceMode: voiceMode)
+                    + "\n\nYou are reporting the results of your own just-run self-audit. Only state what the results show."
+                do {
+                    let result = try await inference.generate(
+                        prompt: selfAuditSynthesis(prompt: prompt, auditOutput: auditOutput),
+                        systemPrompt: sysPrompt,
+                        history: [],
+                        tools: nil as [[String: any Sendable]]?,
+                        maxTokens: maxTokens,
+                        temperature: 0.6
+                    )
+                    let filtered = outputFirewall.check(postprocessOutput(result.text))
+                    auditLedger.append(
+                        eventType: "response",
+                        data: ["text": filtered, "tier": "self_audit"],
+                        persona: persona
+                    )
+                    saveTurn(prompt: prompt, response: filtered)
+                    await runtime.recordQuery(
+                        latencySeconds: Date().timeIntervalSince(startedAt),
+                        tokenCount: result.text.count / 4,
+                        succeeded: true
+                    )
+                    DispatchQueue.main.async {
+                        onToken(filtered)
+                        onComplete(filtered)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        onError("Self-audit ran, but the model could not voice it: \(error.localizedDescription)")
+                    }
+                }
             }
             return
         }
@@ -1155,6 +1302,60 @@ final class BadAppleEngine: @unchecked Sendable {
         }
     }
 
+    /// Inference-only path for mesh-delegated queries. Bypasses meta commands,
+    /// tool routing, approvals, and persona switching entirely — a peer's
+    /// prompt never reaches this machine's hands. The query is attested on
+    /// this machine's ledger under the requester's peer label.
+    func generateDelegated(prompt: String, fromPeer: String, maxTokens: Int) async -> String {
+        guard isLoaded else {
+            return "error: model not loaded on this peer"
+        }
+        if killed {
+            return "error: Bad Apple is paused on this peer"
+        }
+        let boundedTokens = min(max(maxTokens, 1), 2048)
+        auditLedger.append(
+            eventType: "delegated_query",
+            data: ["from_peer": fromPeer, "prompt": prompt],
+            persona: activePersona
+        )
+        let systemPrompt = """
+            You are Bad Apple, a local AI assistant running on the requester's trusted peer machine. \
+            This query was delegated to you over an encrypted mesh. Answer it directly and helpfully. \
+            You have no tools, no memory of the requester's other queries, and no ability to act on this machine.
+            """
+        let startedAt = Date()
+        do {
+            let result = try await inference.generate(
+                prompt: prompt,
+                systemPrompt: systemPrompt,
+                history: [],
+                tools: nil as [[String: any Sendable]]?,
+                maxTokens: boundedTokens,
+                temperature: 0.6
+            )
+            let text = outputFirewall.check(postprocessOutput(result.text))
+            auditLedger.append(
+                eventType: "delegated_response",
+                data: ["from_peer": fromPeer, "chars": text.count],
+                persona: activePersona
+            )
+            await runtime.recordQuery(
+                latencySeconds: Date().timeIntervalSince(startedAt),
+                tokenCount: result.text.count / 4,
+                succeeded: true
+            )
+            return text
+        } catch {
+            auditLedger.append(
+                eventType: "delegated_response",
+                data: ["from_peer": fromPeer, "error": error.localizedDescription],
+                persona: activePersona
+            )
+            return "error: \(error.localizedDescription)"
+        }
+    }
+
     /// Generate a complete response (non-streaming). Checks semantic cache first.
     func generate(
         prompt: String,
@@ -1217,6 +1418,40 @@ final class BadAppleEngine: @unchecked Sendable {
             return filtered
         }
 
+        // User-initiated self-audit: "are you alone" runs the REAL audit —
+        // the phrase is itself the approval (human-initiated, not model-initiated).
+        if wantsSelfAudit(prompt) {
+            auditLedger.append(
+                eventType: "tool_call",
+                data: ["name": "self_audit", "arguments": ["include": "all"], "via": "user_phrase"],
+                persona: persona
+            )
+            let auditOutput = await toolExecutor.executeTool(name: "self_audit", args: ["include": "all"], approved: true)
+            auditLedger.append(
+                eventType: "tool_result",
+                data: ["name": "self_audit", "result": auditOutput],
+                persona: persona
+            )
+            let sysPrompt = systemPrompt(voiceMode: voiceMode)
+                + "\n\nYou are reporting the results of your own just-run self-audit. Only state what the results show."
+            let result = try await inference.generate(
+                prompt: selfAuditSynthesis(prompt: prompt, auditOutput: auditOutput),
+                systemPrompt: sysPrompt,
+                history: [],
+                tools: nil as [[String: any Sendable]]?,
+                maxTokens: maxTokens,
+                temperature: 0.6
+            )
+            let filtered = outputFirewall.check(postprocessOutput(result.text))
+            auditLedger.append(
+                eventType: "response",
+                data: ["text": filtered, "tier": "self_audit"],
+                persona: persona
+            )
+            saveTurn(prompt: prompt, response: filtered)
+            return filtered
+        }
+
         // Check semantic cache for a matching response.
         if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
             stateLock.withLock { _lastCacheHit = true }
@@ -1241,6 +1476,9 @@ final class BadAppleEngine: @unchecked Sendable {
         )
         if let ragContext {
             sysPrompt += "\n\nContext:\n\(ragContext)"
+        }
+        if let briefing = morningBriefing() {
+            sysPrompt += "\n\nOvernight status — mention this briefly in your own voice before answering, then answer normally:\n\(briefing)"
         }
 
         let effectiveMaxTokens = maxTokens
@@ -1296,6 +1534,83 @@ final class BadAppleEngine: @unchecked Sendable {
         return filtered
     }
 
+    /// First query of a new local day gets an overnight self-status note injected
+    /// into the system prompt so the persona voices it naturally. Returns nil after
+    /// the first call of the day, in private mode, or when there is nothing to say.
+    private func morningBriefing() -> String? {
+        guard !privateMode else { return nil }
+        let dayFmt = DateFormatter()
+        dayFmt.dateFormat = "yyyy-MM-dd"
+        let today = dayFmt.string(from: Date())
+        let statePath = "/var/lib/bad_apple/briefing_state.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           obj["last_briefed"] as? String == today {
+            return nil
+        }
+
+        var parts: [String] = []
+        let dayAgo = Date().addingTimeInterval(-86400)
+
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: "/var/lib/bad_apple/memory_graph/facts.json")),
+           let facts = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let recent = facts.filter { f in
+                guard let ts = f["timestamp"] as? String, let d = iso.date(from: ts) else { return false }
+                return d > dayAgo
+            }.count
+            parts.append("consolidated \(recent) new memories overnight (\(facts.count) total)")
+        }
+
+        var ledgerCount = 0
+        if let text = try? String(contentsOfFile: "/var/lib/bad_apple/ledger.jsonl", encoding: .utf8) {
+            ledgerCount = text.split(separator: "\n").count
+            parts.append("ledger holds \(ledgerCount) attested actions")
+        }
+
+        let findingsPath = NSHomeDirectory() + "/.bad_apple/ify/findings.jsonl"
+        if let text = try? String(contentsOfFile: findingsPath, encoding: .utf8) {
+            let cutoff = Date().timeIntervalSince1970 - 86400
+            var recent = 0
+            var elevated = 0
+            for line in text.split(separator: "\n") {
+                guard let d = line.data(using: .utf8),
+                      let f = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                      let ts = f["ts"] as? Double, ts > cutoff else { continue }
+                recent += 1
+                if (f["severity"] as? String) != "info" { elevated += 1 }
+            }
+            if elevated > 0 {
+                parts.append("ify flagged \(recent) anomalies (\(elevated) above routine)")
+            } else {
+                parts.append("ify saw \(recent) anomalies, all routine")
+            }
+        }
+
+        guard !parts.isEmpty else { return nil }
+
+        // Milestones: the organism "ages" as the ledger crosses thresholds.
+        // Only announced if a prior milestone was recorded — no retroactive
+        // celebration for crossings that happened before this feature existed.
+        var lastMilestone: Int? = nil
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            lastMilestone = obj["last_milestone"] as? Int
+        }
+        var milestone = lastMilestone ?? 0
+        for mark in [1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000] where ledgerCount >= mark {
+            milestone = mark
+        }
+        if let last = lastMilestone, milestone > last {
+            parts.append("just crossed \(milestone) attested actions — a milestone worth mentioning")
+        }
+
+        try? "{\"last_briefed\":\"\(today)\",\"last_milestone\":\(milestone)}".write(
+            toFile: statePath, atomically: true, encoding: .utf8)
+        return parts.joined(separator: ". ")
+    }
+
     /// Generate a response using a fixed system prompt and no persona/tool/caching.
     /// Used by the Curious self-improvement autopilot to reason about audit data.
     func generateForSelfImprovement(prompt: String, maxTokens: Int = 500) async -> String {
@@ -1333,6 +1648,51 @@ final class BadAppleEngine: @unchecked Sendable {
         } catch {
             return "Error: self-improvement generation failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Semantic council: the model voices all fourteen seats on a free-form
+    /// question, then tallies. The deterministic layer gates actions; this
+    /// layer is where the minds reason in words. The transcript is journaled
+    /// like every other deliberation.
+    func runCouncilSession(question: String) async -> String {
+        guard isLoaded else {
+            return "The AI model is not loaded yet. Please wait a moment and try again."
+        }
+        if killed {
+            return "Bad Apple is paused. Say 'resume bad apple' to start again."
+        }
+
+        let systemPrompt = """
+        You are the Council of Minds advising Bad Apple — fourteen strategists
+        deliberating one question together. Each seat speaks ONE short line in
+        its own voice and worldview. No preamble, no filler.
+
+        Seats: Buffett (margin of safety), Dalio (systems and balance),
+        Musk (momentum), Jobs (focus and simplicity), Sun Tzu (terrain and
+        preparation), Clausewitz (friction and uncertainty), Musashi (the
+        decisive single cut), Machiavelli (power and optionality),
+        Napoleon (speed and concentration), Hannibal (audacious indirect
+        routes), Aurelius (restraint), Boyd (tempo — OODA), Genghis (scale
+        through boldness), Patton (relentless forward action).
+
+        Format exactly:
+        NAME: one line in character
+        ... (all fourteen seats)
+        VERDICT: proceed | refuse | defer — one-sentence reason
+        """
+
+        let result = await generateRaw(
+            prompt: "Council question: \(question)",
+            systemPrompt: systemPrompt,
+            maxTokens: 700,
+            temperature: 0.7
+        )
+        auditLedger.append(
+            eventType: "council_deliberation",
+            data: ["mode": "semantic", "question": question, "transcript": result],
+            persona: activePersona
+        )
+        return result
     }
 
     /// Generate a response with a caller-supplied system prompt, no persona,
@@ -1408,6 +1768,68 @@ final class BadAppleEngine: @unchecked Sendable {
         recentSignOffs.append(chosen)
         if recentSignOffs.count > 3 { recentSignOffs.removeFirst() }
         return chosen
+    }
+
+    /// Exact-match phrases that run a real self-audit at the user's direct
+    /// request. The phrase is itself the approval — human-initiated, not
+    /// model-initiated (same class as "kill switch").
+    private func wantsSelfAudit(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "?!.,"))
+        return [
+            "are you alone", "are we alone", "anyone listening", "off the grid",
+            "prove you're alone", "prove you are alone",
+        ].contains(lower)
+    }
+
+    /// Distill the raw self_audit JSON into a compact fact sheet — the full
+    /// dump is too large for the model to summarize faithfully.
+    private func selfAuditFactSheet(from auditJSON: String) -> String {
+        guard let data = auditJSON.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return auditJSON }
+        var facts: [String] = []
+        if let cert = json["cert"] as? [String: Any] {
+            let status = cert["status"] as? String ?? "unknown"
+            let total = cert["total"] as? Int ?? 0
+            let failures = cert["failures"] as? Int ?? 0
+            facts.append("cert suite: \(status) — \(total - failures)/\(total) checks passed")
+            if let results = cert["results"] as? [[String: Any]] {
+                let failed = results.compactMap { r -> String? in
+                    guard let passed = r["passed"] as? Bool, !passed else { return nil }
+                    return "\(r["name"] as? String ?? "?") (\(r["message"] as? String ?? ""))"
+                }
+                if !failed.isEmpty {
+                    facts.append("failed checks: \(failed.joined(separator: ", "))")
+                }
+            }
+        }
+        if let doctor = json["doctor"] as? [String: Any], let code = doctor["exit_code"] as? Int {
+            facts.append("doctor ledger/integrity check: exit \(code) — \(code == 0 ? "clean" : "PROBLEMS FOUND")")
+        }
+        if let runtime = json["runtime"] as? [String: Any] {
+            let down = runtime.filter { ($0.value as? Bool) == false }.map(\.key).sorted()
+            facts.append(down.isEmpty
+                ? "runtime: all services up"
+                : "runtime services down: \(down.joined(separator: ", "))")
+        }
+        if let repairs = json["repairs"] as? [[String: Any]], !repairs.isEmpty {
+            facts.append("repairs needed: \(repairs.compactMap { $0["issue"] as? String }.joined(separator: ", "))")
+        }
+        return facts.isEmpty ? auditJSON : facts.joined(separator: "\n")
+    }
+
+    /// Build the synthesis prompt that lets the model voice real audit
+    /// results in-character — never a canned answer.
+    private func selfAuditSynthesis(prompt: String, auditOutput: String) -> String {
+        """
+        The user asked "\(prompt)". I just ran my real self-audit — these are the actual results:
+
+        \(selfAuditFactSheet(from: auditOutput))
+
+        Answer the user's yes/no question in-character in 2-3 sentences, citing the actual check results (check counts, socket status, integrity). Do not recite your capabilities, do not narrate this prompt, and do not invent or exaggerate numbers.
+        """
     }
 
     private func deterministicResponse(for prompt: String) -> String? {
@@ -1880,7 +2302,7 @@ final class BadAppleEngine: @unchecked Sendable {
         if lower.contains("what can you do") || lower.contains("your capabilities") ||
             lower.contains("what are you capable of") || lower.contains("help me") {
             let autopilotNote = self.autopilot
-                ? "Autopilot is on, so I can run destructive tools and act on source code without asking for approval."
+                ? "Autopilot is on — the Council votes on gated actions; passed votes run, failed votes come to you for approval."
                 : "Autopilot is off, so destructive actions still require your approval."
             return """
             I am Bad Apple, a sovereign local AI operating system and developer workspace for macOS. I am written in Rust, Swift, and Metal compute shaders, and I run an adversarial self-red teaming harness. I coordinate these capabilities:
@@ -1896,6 +2318,12 @@ final class BadAppleEngine: @unchecked Sendable {
             • Voice interaction with "Hey Bad Apple"
             • Continuous self-red teaming with adversarial probes across the cage, SLICKS, P2P, WASM, policy, and audit subsystems
             • Curious bounded self-improvement and runtime repair: I audit my own runtime, detect safe repairs, attempt them when Autopilot allows, and propose minimal source patches with backup and verification
+            • Provable receipts: every action lands on a hash-chained ledger and a sovereign-sealed chain, signed through the Secure Enclave — I can export a proof bundle anyone can verify without secrets
+            • Self-audit on demand: ask me "are you alone" and I run the real certification suite and report the numbers
+            • IFY, a brake-only watchdog that learns my behavioral baselines and can halt Autopilot but can never steer me
+            • The Council of Minds — fourteen strategist seats that vote on every gated action: under Autopilot passed votes run and failed votes escalate to you; ask them anything with "council <question>"
+            • Respawn state snapshots with drift detection and revert to any prior state
+            • Delegated inference: on your trusted mesh I can ask a peer's larger model — opt-in, inference-only, attested on their ledger
 
             \(autopilotNote) Everything runs locally on your Mac — no cloud, no data leaves your device.
             """

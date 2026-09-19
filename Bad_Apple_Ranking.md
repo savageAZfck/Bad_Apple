@@ -149,7 +149,7 @@ Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_document
 
 ### 15. Air-Gap Certification
 
-- **Certification CLI** — `badapple cert` runs 15 runtime air-gap checks from `src/cert.rs` and prints a JSON summary; it exits non-zero on failure and is also exposed as `tests/cert_suite.rs` for CI.
+- **Certification CLI** — `badapple cert` runs 16 runtime air-gap checks from `src/cert.rs` and prints a JSON summary; it exits non-zero on failure and is also exposed as `tests/cert_suite.rs` for CI.
 - **Integration test** (`tests/bad_apple_daemon.rs`) — spawns the release daemon, waits for the SLICKS heartbeat, runs a CLI query, then asserts via `lsof -i` that the daemon process holds zero network sockets.
 - **In-process test** (`tests/ane_brain_perf.rs`) — asserts the ANE core opens zero network sockets during inference.
 - P2P sync and HuggingFace hub are disabled by default: `HF_HUB_OFFLINE=1` is set in the launchd plist so the MLX server loads only cached weights. P2P requires `BADAPPLE_P2P=1` to enable.
@@ -284,7 +284,7 @@ badapple CLI / menu bar / voice host
 - **Fast tier routing** — simple queries route to the 0.5B model for lower latency.
 - **Speculative decoding** — optional draft model for faster generation throughput, with live acceptance telemetry in daemon metrics.
 - **VRAM admission** — refuses to load models that would exceed the memory budget.
-- **Air-gap certified** — `badapple cert` runs 15 runtime checks and integration tests assert zero network sockets on the daemon process.
+- **Air-gap certified** — `badapple cert` runs 16 runtime checks and integration tests assert zero network sockets on the daemon process.
 - **Persona-driven** — switchable, teachable personalities make the assistant entertaining and brandable.
 - **Built-in safety** — approvals, fail-closed paths, streaming firewall, audit ledger, and 37-rule policy engine by default.
 - **Mac-native** — uses MLX, Apple Silicon, launchd, AVSpeechSynthesizer, Secure Enclave, and a Swift menu bar.
@@ -359,7 +359,7 @@ open -a "Bad Apple"
 2. **P2P encrypted model transfer now supports push and pull** — `p2p_model.rs` and `badapple-p2p send|receive|pull` implement symmetric AES-256-GCM chunked transfer with resume, per-chunk ACKs, and SHA-256 verification.
 3. **Native FSEvents workspace watcher wired into the daemon** — `BadAppleWorkspaceWatcher.swift` watches the active workspace and calls `index_documents` directly on changes, without manual CLI `badapple workspace watch` or approval prompts.
 4. **Real speculative decoding telemetry** — `BadAppleMLX` now reads `proposedDraftTokens` and `acceptedDraftTokens` from `GenerateCompletionInfo`, so daemon metrics report an honest `draft_accept_pct` instead of a hard-coded 0.
-5. **Air-gap certification exposed as a CLI command** — `badapple cert` runs the 15-check suite and emits a JSON summary; failures return a non-zero exit code for CI/release verification.
+5. **Air-gap certification exposed as a CLI command** — `badapple cert` runs the 16-check suite and emits a JSON summary; failures return a non-zero exit code for CI/release verification.
 6. **MCP marketplace now supports stdio, Unix socket, and HTTP+SSE transports** — `badapple-mcp [stdio|socket|sse [addr]]` serves the Model Context Protocol over the requested transport, and `McpMarketplace` will start/stop servers using any of the three.
 
 ### What moved the needle this pass (9.8 → 9.85)

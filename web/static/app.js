@@ -486,6 +486,7 @@ async function updateDashboard() {
     { key: 'mcp', path: '/api/mcp_servers' },
     { key: 'voice', path: '/api/voice?n=12' },
     { key: 'capabilities', path: '/api/capabilities' },
+    { key: 'organism', path: '/api/organism' },
   ];
   const settled = await Promise.allSettled(endpoints.map(e => api(e.path)));
   const data = {};
@@ -499,7 +500,7 @@ async function updateDashboard() {
     }
   });
   setDashboardSkeletons(false);
-  renderDashboard(status, data.snap || {}, data.tail || [], data.ledger || [], data.mcp || [], data.voice || {}, data.capabilities || {}, errors);
+  renderDashboard(status, data.snap || {}, data.tail || [], data.ledger || [], data.mcp || [], data.voice || {}, data.capabilities || {}, data.organism || {}, errors);
 }
 
 function setDashboardSkeletons(loading) {
@@ -514,6 +515,7 @@ function setDashboardSkeletons(loading) {
       </div>
     `).join('');
     const panels = [
+      { id: 'organism-chain', lines: 3 },
       { id: 'p2p-peers', lines: 2 },
       { id: 'mcp-status', lines: 2 },
       { id: 'capabilities-list', lines: 4 },
@@ -542,7 +544,7 @@ function errorState(title, detail) {
   return `<div class="error-state"><div class="error-title">${title}</div><div class="error-body">${short}</div><button class="secondary" onclick="loadDashboard()">Retry</button></div>`;
 }
 
-function renderDashboard(status, snap, tail, ledger, mcp, voice, capabilities, errors = {}) {
+function renderDashboard(status, snap, tail, ledger, mcp, voice, capabilities, organism, errors = {}) {
   const rt = status.runtime || {};
   const flags = [];
   if (rt.killed) flags.push('killed');
@@ -575,6 +577,36 @@ function renderDashboard(status, snap, tail, ledger, mcp, voice, capabilities, e
       <div class="sub">${r.sub}</div>
     </div>
   `).join('');
+
+  const orgEl = $('#organism-vitals');
+  const chainEl = $('#organism-chain');
+  if (errors.organism) {
+    orgEl.innerHTML = errorState('Could not read vitals', errors.organism);
+    chainEl.innerHTML = '';
+  } else if (organism && organism.attested_actions != null) {
+    const tip = organism.chain_tip ? `${String(organism.chain_tip).slice(0, 16)}…` : '—';
+    const sov = organism.sovereign || {};
+    const ify = organism.ify || {};
+    const vitals = [
+      { label: 'Attested actions', value: organism.attested_actions, cls: 'ok' },
+      { label: 'Organism age', value: organism.organism_age_days != null ? `${organism.organism_age_days} days` : '—' },
+      { label: 'Chain tip', value: tip },
+      { label: 'Sovereign seal', value: sov.entry_count ? `${sov.entry_count} sealed` : 'unsealed', cls: sov.entry_count ? 'ok' : 'warn' },
+      { label: 'IFY', value: ify.phase || '—', sub: ify.installed_days ? `${ify.installed_days}d watching` : '' },
+      { label: 'Identity', value: organism.identity?.secure_enclave ? 'Secure Enclave' : 'unknown', cls: organism.identity?.secure_enclave ? 'ok' : 'warn' },
+    ];
+    orgEl.innerHTML = vitals.map(v => `
+      <div class="card">
+        <h3>${v.label}</h3>
+        <div class="value${v.cls ? ' ' + v.cls : ''}">${v.value}</div>
+        ${v.sub ? `<div class="sub">${v.sub}</div>` : ''}
+      </div>
+    `).join('');
+    const entries = (ledger?.entries || []).slice(0, 8);
+    chainEl.innerHTML = entries.length
+      ? entries.map(e => `<div class="tool-call"><span class="name">⛓ ${String(e.hash || '').slice(0, 12)}…</span> <span class="muted">${escapeHtml(e.type || e.event_type || 'event')} · ${e.ts || ''}</span></div>`).join('')
+      : '<div class="sub">Chain quiet — no recent links.</div>';
+  }
 
   if (status.active_persona) {
     $('#top-persona').textContent = status.active_persona;

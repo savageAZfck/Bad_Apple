@@ -2,6 +2,33 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.3.0] — 2026-09-19
+
+### Added
+- **Council of Minds** (`BadAppleCouncil.swift`): a 14-seat deterministic
+  deliberation layer that votes on every gated action before it runs.
+  Seats: four financial minds (Buffett, Dalio, Musk, Jobs) and ten
+  strategists (Sun Tzu, Clausewitz, Musashi, Machiavelli, Napoleon,
+  Hannibal, Aurelius, Boyd, Genghis Khan, Patton). Each proposed action is
+  encoded into an 8-feature vector — destructiveness, irreversibility,
+  blast radius, sensitivity, privilege, scope, cost, novelty — every seat
+  votes with an in-voice rationale, and weighted consensus yields
+  approve/deny/abstain plus a dissent score.
+- **Autopilot gating**: under autopilot, a passed council vote executes
+  and a failed or contested vote escalates to a human approval proposal
+  instead of running. In manual mode the verdict rides on the approval
+  prompt as counsel. The council votes — the human stays the final
+  authority on anything contested.
+- **`council <question>`** command: semantic mode voices all fourteen
+  seats through the local model, then returns a tally verdict. `council`
+  alone prints the roster.
+- **Journaled deliberation**: every council vote lands on the audit
+  ledger as `council_deliberation` (tool, args, all fourteen votes with
+  rationales, consensus mean, dissent, mode) and failed votes under
+  autopilot also emit `council_escalated`. The record shows not only what
+  the AI did, but what fourteen minds concluded first — including what
+  they refused.
+
 ## [0.2.3] — 2026-09-17
 
 ### Security

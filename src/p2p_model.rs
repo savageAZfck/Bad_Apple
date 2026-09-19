@@ -46,15 +46,26 @@ pub enum TransferFrame {
     Request(RequestFrame),
     PushRequest(PushRequestFrame),
     PushAccept,
-    PushReject { reason: String },
+    PushReject {
+        reason: String,
+    },
     Offer(OfferFrame),
     Accept,
-    Reject { reason: String },
+    Reject {
+        reason: String,
+    },
     Chunk(ChunkFrame),
     Ack(AckFrame),
     Done,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Cancel,
+    /// Delegated inference: ask the peer's loaded engine to answer a prompt.
+    /// Serving is opt-in per peer (`BADAPPLE_P2P_INFER=1`) and inference-only —
+    /// the serving daemon bypasses meta/tool/approval routing entirely.
+    InferRequest(InferRequestFrame),
+    InferResponse(InferResponseFrame),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -89,6 +100,30 @@ pub struct ChunkFrame {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AckFrame {
     pub index: usize,
+}
+
+/// Largest prompt a peer may delegate to this machine (32 KiB).
+pub const MAX_DELEGATED_PROMPT_BYTES: usize = 32 * 1024;
+
+/// Hard cap on tokens generated for a delegated request.
+pub const MAX_DELEGATED_TOKENS: usize = 2048;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InferRequestFrame {
+    pub request_id: String,
+    pub prompt: String,
+    pub max_tokens: usize,
+    /// Requester's peer label, recorded in the serving machine's ledger.
+    pub from_peer: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InferResponseFrame {
+    pub request_id: String,
+    pub text: String,
+    /// Model tier that served the request, when reported.
+    pub tier: Option<String>,
+    pub elapsed_ms: u64,
 }
 
 /// Manifest for a model that a peer can advertise/gossip.
@@ -195,7 +230,7 @@ impl P2PModelTransfer {
         Ok((addr, handle))
     }
 
-    async fn handle_incoming(&self, mut stream: TcpStream, _peer: String) -> Result<()> {
+    async fn handle_incoming(&self, mut stream: TcpStream, peer: String) -> Result<()> {
         let cipher = self.cipher()?;
 
         let first = recv_frame(&mut stream, &cipher).await?;
@@ -204,8 +239,82 @@ impl P2PModelTransfer {
             TransferFrame::PushRequest(p) => {
                 self.handle_push_receive(&mut stream, &cipher, p).await
             }
-            other => bail!("expected Request or PushRequest frame, got {other:?}"),
+            TransferFrame::InferRequest(r) => {
+                self.handle_infer_request(&mut stream, &cipher, r, &peer)
+                    .await
+            }
+            other => bail!("expected Request, PushRequest, or InferRequest frame, got {other:?}"),
         }
+    }
+
+    /// Serve a delegated inference request through the local engine's
+    /// delegated-only path. Disabled unless `BADAPPLE_P2P_INFER=1` — peers may
+    /// transfer weights by default, but borrowing this machine's brain is an
+    /// explicit opt-in. The serving daemon ledger-records the query under the
+    /// requester's peer label and never routes it to tools or approvals.
+    async fn handle_infer_request<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: &mut S,
+        cipher: &P2PCipher,
+        request: InferRequestFrame,
+        peer: &str,
+    ) -> Result<()> {
+        if std::env::var("BADAPPLE_P2P_INFER").ok().as_deref() != Some("1") {
+            send_frame(
+                stream,
+                cipher,
+                TransferFrame::Error {
+                    message: "this peer does not serve delegated inference \
+                              (set BADAPPLE_P2P_INFER=1 to enable)"
+                        .to_string(),
+                },
+            )
+            .await?;
+            bail!("delegated inference refused — serving disabled on this peer");
+        }
+        if request.prompt.is_empty() || request.prompt.len() > MAX_DELEGATED_PROMPT_BYTES {
+            send_frame(
+                stream,
+                cipher,
+                TransferFrame::Error {
+                    message: format!("prompt empty or exceeds {MAX_DELEGATED_PROMPT_BYTES} bytes"),
+                },
+            )
+            .await?;
+            bail!("delegated prompt rejected: {} bytes", request.prompt.len());
+        }
+        let max_tokens = request.max_tokens.clamp(1, MAX_DELEGATED_TOKENS);
+        let started = std::time::Instant::now();
+        let peer_tag = format!("{peer} ({})", request.from_peer);
+
+        // The __BADAPPLE_DELEGATED__ envelope routes through the engine's
+        // inference-only path — no meta commands, no tools, no approvals.
+        let envelope = serde_json::json!({
+            "prompt": request.prompt,
+            "from_peer": request.from_peer,
+            "max_tokens": max_tokens,
+        });
+        let daemon_prompt = format!("__BADAPPLE_DELEGATED__ {envelope}");
+        let (text, metrics) = tokio::task::spawn_blocking(move || {
+            crate::bad_apple_ipc::query_with_metrics(&daemon_prompt, max_tokens, |_| {})
+        })
+        .await
+        .context("delegated inference task failed")??;
+        let tier = metrics.and_then(|m| m.tier);
+
+        send_frame(
+            stream,
+            cipher,
+            TransferFrame::InferResponse(InferResponseFrame {
+                request_id: request.request_id,
+                text,
+                tier,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            }),
+        )
+        .await?;
+        tracing::info!("served delegated inference for {peer_tag}");
+        Ok(())
     }
 
     async fn handle_pull_request<S: AsyncRead + AsyncWrite + Unpin>(
@@ -618,6 +727,45 @@ impl P2PModelTransfer {
         // 7. Done.
         send_frame(&mut stream, &cipher, TransferFrame::Done).await?;
         Ok(())
+    }
+
+    /// Ask a peer to run inference for us (delegated query). The serving peer
+    /// must have `BADAPPLE_P2P_INFER=1` and a running engine; the response is
+    /// the peer's answer text plus the tier that served it.
+    pub async fn infer(
+        &self,
+        peer_addr: &str,
+        prompt: &str,
+        max_tokens: usize,
+        from_peer: &str,
+    ) -> Result<InferResponseFrame> {
+        if prompt.is_empty() || prompt.len() > MAX_DELEGATED_PROMPT_BYTES {
+            bail!("prompt empty or exceeds {MAX_DELEGATED_PROMPT_BYTES} bytes");
+        }
+        let cipher = self.cipher()?;
+        let mut stream = TcpStream::connect(peer_addr)
+            .await
+            .with_context(|| format!("failed to reach peer at {peer_addr}"))?;
+        let request_id = format!("{:016x}", rand::random::<u64>());
+        send_frame(
+            &mut stream,
+            &cipher,
+            TransferFrame::InferRequest(InferRequestFrame {
+                request_id: request_id.clone(),
+                prompt: prompt.to_string(),
+                max_tokens: max_tokens.clamp(1, MAX_DELEGATED_TOKENS),
+                from_peer: from_peer.to_string(),
+            }),
+        )
+        .await?;
+        match recv_frame(&mut stream, &cipher).await? {
+            TransferFrame::InferResponse(r) if r.request_id == request_id => Ok(r),
+            TransferFrame::InferResponse(_) => {
+                bail!("infer response request_id mismatch")
+            }
+            TransferFrame::Error { message } => bail!("peer error: {message}"),
+            other => bail!("expected InferResponse, got {other:?}"),
+        }
     }
 
     fn find_model_file(&self, model_id: &str) -> Option<PathBuf> {

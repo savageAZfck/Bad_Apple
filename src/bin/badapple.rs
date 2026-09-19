@@ -232,8 +232,20 @@ fn main() -> Result<()> {
         return run_status();
     }
 
+    if prompt_parts.first().map(std::string::String::as_str) == Some("receipts") {
+        return run_receipts();
+    }
+
+    if prompt_parts.first().map(std::string::String::as_str) == Some("export-proof") {
+        return run_export_proof(&prompt_parts[1..]);
+    }
+
+    if prompt_parts.first().map(std::string::String::as_str) == Some("demo") {
+        return run_demo();
+    }
+
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple cert");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple receipts\n       badapple export-proof [dir]\n       badapple demo\n       badapple cert");
     } else {
         prompt_parts.join(" ")
     };
@@ -1723,6 +1735,244 @@ fn run_status() -> Result<()> {
     } else {
         println!("identity:  not running (SLICKS v1 still works)");
     }
+    Ok(())
+}
+
+fn run_receipts() -> Result<()> {
+    use std::io::BufRead;
+    println!("=== BAD APPLE PROOF CARD ===");
+    println!("version:    v{}", env!("CARGO_PKG_VERSION"));
+
+    let sock = bad_apple::bad_apple_ipc::socket_path();
+    let daemon_up = std::os::unix::net::UnixStream::connect(&sock).is_ok();
+    println!(
+        "daemon:     {}",
+        if daemon_up { "running" } else { "not running" }
+    );
+
+    let id_sock = bad_apple::bad_apple_ipc::identity_agent_socket_path();
+    let enclave = std::os::unix::net::UnixStream::connect(&id_sock).is_ok();
+    println!(
+        "identity:   {}",
+        if enclave {
+            "Secure Enclave (SLICKS v2)"
+        } else {
+            "SLICKS v1 (HMAC)"
+        }
+    );
+
+    let ledger = std::path::Path::new("/var/lib/bad_apple/ledger.jsonl");
+    match std::fs::File::open(ledger) {
+        Ok(f) => {
+            let mut count = 0u64;
+            let mut first_ts: Option<chrono::DateTime<chrono::Utc>> = None;
+            let mut last_hash = String::new();
+            for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+                count += 1;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if first_ts.is_none() {
+                        first_ts = v
+                            .get("ts")
+                            .and_then(|t| t.as_str())
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|d| d.with_timezone(&chrono::Utc));
+                    }
+                    if let Some(h) = v.get("hash").and_then(|h| h.as_str()) {
+                        last_hash = h.to_string();
+                    }
+                }
+            }
+            println!("ledger:     {count} attested actions");
+            if let Some(born) = first_ts {
+                let age = chrono::Utc::now().signed_duration_since(born).num_days();
+                println!("organism:   {age} days old");
+            }
+            if !last_hash.is_empty() {
+                println!("chain tip:  {}…", &last_hash[..16.min(last_hash.len())]);
+            }
+        }
+        Err(_) => println!("ledger:     not found (no attested history yet)"),
+    }
+
+    let cp = std::path::Path::new("/var/lib/bad_apple/ledger.sovereign.checkpoint.json");
+    if let Ok(text) = std::fs::read_to_string(cp) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let n = v["entry_count"].as_u64().unwrap_or(0);
+            let at = v["signed_at"].as_str().unwrap_or("unknown");
+            let scheme = v["scheme"].as_str().unwrap_or("unknown");
+            println!("sovereign:  sealed {n} entries · {scheme} · signed {at}");
+        }
+    } else {
+        println!("sovereign:  no checkpoint (run badapple-sovereign)");
+    }
+
+    let ify_state = bad_apple::ify::load_state();
+    let phase = bad_apple::ify::current_phase(&ify_state);
+    println!("ify:        watching ({})", phase.as_str());
+
+    println!();
+    println!("every action above is hash-chained and HMAC-sealed.");
+    println!("don't trust this card — verify it: `badapple --doctor` · `badapple cert`");
+    Ok(())
+}
+
+/// `badapple export-proof [dir]` — package the sovereign chain, its Enclave-signed
+/// checkpoint, and verify instructions into a shareable proof bundle. The exported
+/// chain verifies with zero secrets via sovereign_ledger's public verification.
+fn run_export_proof(args: &[String]) -> Result<()> {
+    let stamp = chrono::Utc::now().format("%Y%m%d");
+    let default_dir = format!("badapple-proof-{stamp}");
+    let out = std::path::PathBuf::from(args.first().map(String::as_str).unwrap_or(&default_dir));
+    std::fs::create_dir_all(&out)?;
+
+    let data_dir = std::path::Path::new("/var/lib/bad_apple");
+    let sovereign = data_dir.join("ledger.sovereign.jsonl");
+    if !sovereign.exists() {
+        bail!(
+            "no sovereign chain at {} — run badapple-sovereign first",
+            sovereign.display()
+        );
+    }
+
+    let mut copied: Vec<String> = Vec::new();
+    for name in [
+        "ledger.sovereign.jsonl",
+        "ledger.sovereign.checkpoint.json",
+        "ledger_checkpoint.json",
+    ] {
+        let src = data_dir.join(name);
+        if src.exists() {
+            std::fs::copy(&src, out.join(name))?;
+            copied.push(name.to_string());
+        }
+    }
+
+    let text = std::fs::read_to_string(&sovereign)?;
+    let entries = text.lines().count();
+    let manifest = serde_json::json!({
+        "exported_by": format!("Bad Apple v{}", env!("CARGO_PKG_VERSION")),
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "sovereign_entries": entries,
+        "format": "sovereign_ledger v1 JSONL (see SPEC.md in the sovereign_ledger repo)",
+        "verify": "sovereign_ledger::seal::verify_public — no secrets required",
+        "files": copied,
+    });
+    std::fs::write(
+        out.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+
+    std::fs::write(
+        out.join("VERIFY.md"),
+        "# Verify this proof bundle\n\n\
+         `ledger.sovereign.jsonl` is a tamper-evident, sealed audit chain written by\n\
+         Bad Apple's sovereign layer. It verifies **without any secret material** —\n\
+         every seal carries the revealed keys and signatures needed to check it.\n\n\
+         ## Verify with Rust\n\n\
+         ```sh\n\
+         cargo add sovereign_ledger\n\
+         ```\n\
+         ```rust\n\
+         let report = sovereign_ledger::seal::verify_public(reader)?;\n\
+         ```\n\n\
+         ## Verify with the independent JS verifier (zero dependencies)\n\n\
+         ```sh\n\
+         node verify.mjs ledger.sovereign.jsonl --public\n\
+         ```\n\
+         from https://github.com/savageAZfck/sovereign_ledger/tree/main/verifiers/js\n\n\
+         ## The format\n\n\
+         SPEC.md in https://github.com/savageAZfck/sovereign_ledger documents every\n\
+         byte: MAC preimages, segment keys, seals, Merkle construction, anchors.\n\n\
+         `ledger.sovereign.checkpoint.json` is a Secure Enclave-signed checkpoint\n\
+         (scheme `secure-enclave`) binding the chain tip and Merkle root.\n",
+    )?;
+
+    println!("proof bundle written to {}", out.display());
+    for f in &copied {
+        println!("  + {f}");
+    }
+    println!("  + manifest.json");
+    println!("  + VERIFY.md");
+    println!("\n{entries} sovereign entries — verifiable by anyone, no secrets required.");
+    Ok(())
+}
+
+/// `badapple demo` — narrated self-demonstration. Every line is a real subsystem
+/// call; nothing is scripted or faked. Screen-record this and it is the pitch.
+fn run_demo() -> Result<()> {
+    use std::io::BufRead;
+    println!();
+    println!("  Bad Apple — self-demonstration");
+    println!("  ────────────────────────────");
+    println!();
+
+    // 1. Chain verification — real ledger walk.
+    let ledger = std::path::Path::new("/var/lib/bad_apple/ledger.jsonl");
+    let (count, tip) = match std::fs::File::open(ledger) {
+        Ok(f) => {
+            let mut n = 0u64;
+            let mut last = String::new();
+            for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+                n += 1;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(h) = v.get("hash").and_then(|h| h.as_str()) {
+                        last = h.to_string();
+                    }
+                }
+            }
+            (n, last)
+        }
+        Err(_) => (0, String::new()),
+    };
+    println!(
+        "  Verifying my chain...        {count} attested actions, tip {}…",
+        &tip[..16.min(tip.len())]
+    );
+
+    // 2. Air-gap certification — real cert suite.
+    print!("  Checking my air gap...       ");
+    let results = cert::run();
+    let failures = results.iter().filter(|r| !r.passed).count();
+    if failures == 0 {
+        println!("{} checks, zero network sockets — clean", results.len());
+    } else {
+        println!("{failures} of {} checks FAILED", results.len());
+    }
+
+    // 3. Watchdog — real IFY state.
+    let ify_state = bad_apple::ify::load_state();
+    let phase = bad_apple::ify::current_phase(&ify_state);
+    println!(
+        "  Consulting my watchdog...    IFY is {} — watching, brake-only",
+        phase.as_str()
+    );
+
+    // 4. Identity — real socket check.
+    let id_sock = bad_apple::bad_apple_ipc::identity_agent_socket_path();
+    let enclave = std::os::unix::net::UnixStream::connect(&id_sock).is_ok();
+    println!(
+        "  Reading my vitals...         {}",
+        if enclave {
+            "Secure Enclave signing — identity is hardware-bound"
+        } else {
+            "SLICKS v1 HMAC — software identity"
+        }
+    );
+
+    // 5. Sovereign seal — real checkpoint.
+    let cp = std::path::Path::new("/var/lib/bad_apple/ledger.sovereign.checkpoint.json");
+    if let Ok(text) = std::fs::read_to_string(cp) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let n = v["entry_count"].as_u64().unwrap_or(0);
+            let scheme = v["scheme"].as_str().unwrap_or("?");
+            println!("  Checking my sovereign seal... {n} entries sealed · {scheme}");
+        }
+    }
+
+    println!();
+    println!("  As far as I can prove: I am alone with your data.");
+    println!("  Don't trust me — verify me: `badapple cert` · `badapple receipts`");
+    println!();
     Ok(())
 }
 

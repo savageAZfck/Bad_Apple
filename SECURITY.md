@@ -1,6 +1,6 @@
 # Security Policy
 
-Bad Apple is a local-first, sovereign AI runtime. It runs entirely on the user's machine and does not require cloud services after the first model download. This document outlines the security model, boundaries, and known limitations.
+Bad Apple is a local-first, sovereign AI runtime. It runs entirely on the user's machine and does not require cloud services after the first model download. This document outlines the security model, boundaries, and known limitations. The full adversary-by-adversary analysis lives in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Threat model
 
@@ -12,6 +12,7 @@ Bad Apple is a local-first, sovereign AI runtime. It runs entirely on the user's
 - **Resource exhaustion.** Unbounded memory, disk, or CPU usage from runaway generation, tool execution, or model loading.
 - **P2P packet forgery.** A peer on the local network could send unsigned or malicious mesh packets.
 - **Dylib / binary tampering.** A compromised `libBadAppleMLX.dylib`, `libbad_apple.dylib`, or app bundle could crash or mislead the runtime.
+- **Model supply chain.** Poisoned, typosquatted, or adversarially-trained model weights arriving through the download/update path.
 - **Prompt injection.** A document or webpage could inject instructions into the model context.
 
 ### Out of scope
@@ -30,6 +31,7 @@ Bad Apple is a local-first, sovereign AI runtime. It runs entirely on the user's
 | Resource exhaustion | The Swift `MemoryGovernor` polls macOS memory pressure and purges optional models. Rust UMA reservations and `policy.yaml` limits bound tool execution. The `wasm_cage` refuses oversized modules and halts on fuel exhaustion. |
 | P2P packet forgery | Every mesh packet is HMAC-SHA256 signed and AES-256-GCM encrypted. Peer keys are derived from a local pre-shared key or authenticated exchange. |
 | Dylib tampering | Release builds use `lto`, `codegen-units = 1`, and `panic = "abort"`. The Swift/Rust IPC validates frame lengths, signatures, and nonce freshness. Ad-hoc or Apple Developer ID signing is used depending on the build. |
+| Model supply chain | SHA-256 provenance manifests per model; `config.json` hash verified on each load; `BADAPPLE_MODEL_REVISION` pins upstream commits. Provenance verifies origin, not behavior — IFY and the ledger watch what the model *does* after install. |
 | Prompt injection | Workspace and document text is embedded and truncated. The output firewall scans generated text for secrets and redacts matches. The policy engine requires explicit user approval for destructive actions. |
 | Secret leakage | The audit ledger redacts secrets, emails, SSNs, phones, API keys, and long random tokens before writing. No API keys are required for core operation. |
 
@@ -60,7 +62,7 @@ No data leaves the machine unless the user explicitly enables a P2P peer or down
 
 ## Reporting
 
-Security issues should be reported directly to the author through a private channel. Do not open public issues for undisclosed vulnerabilities.
+Report vulnerabilities via GitHub private security advisory on the repository, or directly to the author through LinkedIn DM. Do not open public issues for undisclosed vulnerabilities. A response is targeted within 72 hours.
 
 ## Known limitations
 

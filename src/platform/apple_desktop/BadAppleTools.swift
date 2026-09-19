@@ -839,6 +839,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "system", "process", "memory", "disk usage",
         // Self-audit
         "self audit", "run diagnostics", "health check", "cert suite", "air gap check",
+        "are you alone", "are we alone", "anyone listening", "off the grid",
         // Output firewall
         "blocklist", "block pattern", "what is blocked", "what is output firewall", "inspect output firewall", "inspect firewall",
         "add pattern", "add output firewall", "add pattern to output firewall",
@@ -881,7 +882,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["blocklist", "block pattern", "what is blocked", "what is output firewall", "inspect output firewall", "inspect firewall"], ["inspect_output_firewall"]),
         (["add pattern", "add output firewall", "add pattern to output firewall", "remove pattern", "remove output firewall", "remove pattern from output firewall", "block this pattern", "update firewall"], ["update_output_firewall"]),
         (["undo", "delete last", "remove last"], ["undo_last"]),
-        (["self audit", "self_audit", "run self audit", "audit bad apple", "run diagnostics", "health check", "cert suite", "air gap check"], ["self_audit"]),
+        (["self audit", "self_audit", "run self audit", "audit bad apple", "run diagnostics", "health check", "cert suite", "air gap check", "are you alone", "are we alone", "anyone listening", "off the grid"], ["self_audit"]),
         (["curious", "self improve", "improve yourself", "improve bad apple", "curious check"], ["curious_self_improve"]),
         (["kill switch", "stop everything", "emergency stop", "panic stop"], ["kill_switch"]),
         (["resume", "resume bad apple", "start again", "leave safe mode", "exit safe mode"], ["resume"]),
@@ -1294,6 +1295,20 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         if hardcodedApprovalRequired.contains(toolName) { return true }
         let policy = toolPolicies[toolName] ?? defaultPolicy
         return policy.requireApproval
+    }
+
+    /// Human-readable basis for why a tool requires approval (for prompts).
+    func approvalBasis(toolName: String) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if hardcodedApprovalRequired.contains(toolName) {
+            return "restricted tool — always requires your approval"
+        }
+        let policy = toolPolicies[toolName] ?? defaultPolicy
+        return policy.requireApproval
+            ? "policy.yaml rule for '\(toolName)'"
+            : "default approval policy"
     }
 
     /// Check whether a tool is allowed at all by policy.
@@ -1951,7 +1966,15 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             case .denied(let reason):
                 return "Policy: \(reason)"
             case .needsApproval:
-                return "Approval required before I can run \(resolved). Reply with 'approve' to proceed. (Set autopilot to skip these prompts.)"
+                let basis = policy.approvalBasis(toolName: resolved)
+                var detail = ""
+                for key in ["command", "script", "path", "query", "text"] {
+                    if let v = args[key], !v.isEmpty {
+                        detail = v.count > 120 ? String(v.prefix(120)) + "…" : v
+                        break
+                    }
+                }
+                return "Approval required — I want to run \(resolved)\(detail.isEmpty ? "" : ": \(detail)"). Gated by: \(basis). Reply 'approve <id>' to allow once, or 'deny <id>' to refuse."
             case .approved:
                 break
             }
@@ -3482,7 +3505,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         {"patch":{"file":"/absolute/path/to/file","old":"exact text to replace","new":"exact replacement text","why":"one sentence reason"}}
 
         Example good patch:
-        {"patch":{"file":"/Users/savag3/bad_apple/src/Foo.swift","old":"let x = 1","new":"let x = 1\nlet y = 2","why":"Add missing secondary binding."}}
+        {"patch":{"file":"/path/to/project/src/Foo.swift","old":"let x = 1","new":"let x = 1\nlet y = 2","why":"Add missing secondary binding."}}
 
         If no safe patch, output exactly: {"no_patch":true}
         """

@@ -22,6 +22,7 @@ Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 
 - **Hot-reloadable persona**: edit `prompt.txt` without restarting the 7B/9B model.
 - **MCP + local marketplace**: exposes tools to MCP clients and can run local stdio MCP servers under the same policy gate.
 - **Curious self-improvement**: in `curious` persona with autopilot on, Bad Apple runs a bounded self-check (audit, firewall, git, source markers) and writes a proposal note so it can improve on its own, all local and policy-gated.
+- **Council of Minds**: a 14-seat deterministic council — four financial minds (Buffett, Dalio, Musk, Jobs) and ten strategists (Sun Tzu, Clausewitz, Musashi, Machiavelli, Napoleon, Hannibal, Aurelius, Boyd, Genghis Khan, Patton) — votes on every gated action. Under autopilot, passed votes execute and failed votes come back to the human for approval; every deliberation lands on the audit ledger with per-seat rationales. Ask the council anything directly with `council <question>`.
 
 ## Models loaded
 
@@ -143,7 +144,7 @@ When asked, it should say:
 
 ### 5. Security and control
 1. Human-in-the-loop approval gate
-2. Autopilot mode to skip approvals
+2. Autopilot mode — gated actions get a 14-seat council vote: passed votes run, failed votes escalate to the human
 3. Private mode to pause persistence
 4. Kill switch / emergency stop
 5. Air-gap hard switch to block network MCP and downloads

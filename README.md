@@ -1,214 +1,96 @@
 # Bad Apple
 
-> **A sovereign, local AI operating system layer for macOS.**
+> **A sovereign, local AI operating layer for macOS — one that can prove what it did.**
 >
-> On-device inference, hardware-rooted identity, fail-closed security, and a
-> native Swift menu bar — with zero cloud round-trips after the models are
-> downloaded once.
+> On-device MLX inference, Secure Enclave identity, a hash-chained audit
+> ledger, an independent verification layer, and a brake-only watchdog —
+> running entirely on Apple Silicon. After the models are cached, inference
+> needs no network. Under full air-gap, `badapple cert` asserts the daemon
+> holds **zero** network sockets.
 >
-> The menu bar is the primary daily interface; the terminal is only needed for
-> install and advanced maintenance.
+> Don't trust this README. Verify it.
 
 ---
 
-## Download the public beta
+## See it prove itself
 
-The latest public beta is **v0.2.0**:
-
-- **[Download the consumer zip](https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.2.0/Bad_Apple-0.2.0-unsigned.zip)** — unzip and run `sudo ./install.sh`
-- **[View the release page](https://github.com/savageAZfck/bad-apple-releases/releases/tag/v0.2.0)**
-- Or install via Homebrew:
-  ```bash
-  brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
-  brew install --cask bad-apple
-  ```
-
-## What Bad Apple Is
-
-Bad Apple is a **local-first AI operating-system layer for macOS**. It is not a
-chat app and it is not a cloud assistant. It is a set of `launchd` daemons,
-native Swift/Rust services, and a menu bar that turn an Apple Silicon Mac into a
-private, air-gapped assistant with real OS-level "hands":
-
-- Read and write files.
-- Run shell, AppleScript, and Shortcuts.
-- Watch your workspace and re-index it for RAG.
-- Talk to local MCP servers over stdio, Unix socket, or HTTP+SSE.
-- Sync models and messages over an encrypted P2P mesh.
-- Speak responses with native TTS.
-- Enforce a declarative security policy and keep a hash-chained audit ledger.
-
-All inference, tool execution, memory, and audit state stay on the machine.
-
-## Consumer Readiness
-
-**Current score: 9.85 / 10**
-
-Bad Apple is **#1 in the independent AI OS layer tier**. The only other product
-in this tier is OpenAGI, and it lacks Bad Apple's hardware-rooted identity,
-hash-chained audit ledger, air-gap certification, policy engine, VRAM governor,
-fast-tier routing, speculative-decoding telemetry, native document reading,
-MCP marketplace, or health supervisor.
-
-It is **below the platform-vendor AI tier** (Apple Intelligence, Copilot+,
-Gemini Nano) on distribution and OS integration, and it is **behind frontier
-cloud models** (Claude 4, GPT-4o, Gemini 2.5) on raw reasoning and difficult
-coding. Its value is the integrated, auditable, air-gapped system architecture —
-not the raw model alone.
-
-The remaining blockers to 10/10 are the deliberate lack of Apple notarization,
-a clean-machine VM install/smoke test run on a real fresh Mac, and one
-remaining `paste` transitive dependency after the recent `sled` → `redb` and
-`bincode` → `ciborium` work.
-
-Recent work closed the first-run preflight, memory-adaptive install,
-menubar-plist rendering, source-free public release
-(`savageAZfck/bad-apple-releases`), and public Homebrew Cask
-(`savageAZfck/homebrew-bad-apple`).
-
-The **v0.1.7 Event-Driven Curious and Runtime Self-Repair beta** ships a web
-Control Center with the Curious autopilot, event-driven self-improvement
-triggers, a bounded `repair_runtime_issue` tool that can `launchctl bootstrap`
-user agents and create missing data files, and a dashboard for reviewing,
-applying, rejecting, and rolling back source patches.
-
-**Hardware:** Apple Silicon Mac (M1 or newer). **8 GB unified memory** is the
-practical minimum and **16 GB** is recommended for comfortable use. The 7B model
-uses about **4 GB** at peak; the rest is for macOS and other apps. Keep at least
-**40 GB free** for the OS, model cache, and swap.
-
-See [Bad_Apple_Ranking.md](Bad_Apple_Ranking.md) for the full ranking,
-benchmarks, and competitive placement.
-
-## Models
-
-Bad Apple ships with a switchable, multi-tier model registry:
-
-| Model | Role | How to use |
-|---|---|---|
-| `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | **Default main model** | Loaded by default |
-| `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | **Switchable general model** | `badapple model use <id>` or `BADAPPLE_MAIN_MODEL` |
-| `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | **Optional fast tier** | `BADAPPLE_FAST_TIER=1` |
-| any cached draft model | **Optional speculative decoding** | `BADAPPLE_SPECULATIVE_DRAFT=<id>` |
-
-The 7B Coder is now the default because it scored **6/7 (~86%)** on Bad Apple's
-live seven-problem coding suite, while the 9B model scored **4/7 (~57%)** on the
-same suite. The 7B Qwen2.5 Coder is best-in-class for the 7B tier on public
-coding benchmarks.
-
-## Key Capabilities
-
-- **Native Swift MLX inference** on Apple Silicon, with streaming, KV cache,
-  VRAM admission, and optional fast-tier routing.
-- **Real speculative-decoding telemetry** (`draft_accept_pct` from MLX
-  `GenerateCompletionInfo`).
-- **SLICKS v1/v2 authenticated IPC** over Unix domain sockets: HMAC-SHA256 and
-  Secure Enclave ECDSA P-256.
-- **Hardware-rooted identity** with Secure Enclave key storage, signing, key
-  pinning, and model-provenance verification.
-- **Hash-chained audit ledger** — SHA-256 chained, HMAC'd, secret-redacted logs.
-- **Declarative policy engine** — 37 rules in `policy.yaml` with per-tool
-  argument enforcement, path allowlists, and human-in-the-loop approvals.
-- **Fail-closed automation cage** — `openat`-based file operations with
-  `O_NOFOLLOW`, allowlisted roots, and symlink/hardlink rejection.
-- **WASM sandbox** — fuel-metered, store-limited, output-capped execution.
-- **Streaming output firewall** — Aho-Corasick pattern matching with real-time
-  secret redaction.
-- **Native FSEvents workspace watcher** with automatic re-indexing.
-- **RAG + semantic cache** — `bge-small-en-v1.5` embeddings, cosine-similarity
-  lookup, scoped by persona.
-- **MCP marketplace** — local tool-server catalog with stdio, Unix socket, and
-  HTTP+SSE transports.
-- **Encrypted P2P mesh** — AES-256-GCM model and message sync, symmetric
-  push/pull model transfer, off by default for air-gap certification.
-- **Native TTS** via `AVSpeechSynthesizer` and `badapple-tts`.
-- **CLI agent protocol** — full JSON-RPC control of runtime, models, tools, P2P,
-  MCP, vault, and audits (power users and scripting).
-- **Persona system** — hot-reloadable `prompt.txt`, `personas.json`, and
-  voice-specific prompts.
-- **Bounded Curious self-improvement autopilot** — wired to the autopilot toggle.
-  When autopilot is on, the engine runs a local self-check (cert, doctor, output
-  firewall, git status, source TODO/FIXME scan) and writes a proposal note to
-  `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple
-  "curious check"`.
-- **Air-gap certification** — `badapple cert` runs 15 runtime checks; Rust
-  integration tests assert zero network sockets.
-
-## Architecture
+`badapple demo` is a narrated self-demonstration. Every line is a real call
+against live subsystem state — nothing is scripted:
 
 ```text
-badapple CLI / menu bar / voice host / dashboard
-              │
-              ▼
-   /var/run/badapple/substrate.sock  (SLICKS v1/v2)
-              │
-              ▼
-     gatekeeper (Rust, launchd)
-     ├─ CandleBrain semantic router
-     ├─ Fast action resolver
-     ├─ Replay cache (nonce dedup)
-     ├─ Automation cage (openat, O_NOFOLLOW)
-     └─ WASM sandbox
-              │
-              ▼
-   badapple-engine  (Swift MLX)
-   ├─ 7B Qwen2.5 Coder (default) + 9B switchable + 0.5B fast tier
-   ├─ Optional speculative decoding with live acceptance telemetry
-   ├─ Embeddings / semantic cache
-   ├─ Audit ledger (CryptoKit checkpoints)
-   ├─ Output firewall (Aho-Corasick)
-   ├─ Tool router + policy engine
-   ├─ FSEvents workspace watcher
-   ├─ Curious autopilot self-improvement loop (policy-gated)
-   ├─ MCP server (stdio / socket / SSE)
-   └─ P2P encrypted mesh
-              │
-              ▼
-    badapple-tts  (native AVSpeechSynthesizer)
+  Bad Apple — self-demonstration
+  ────────────────────────────
 
-    BadAppleAmbient / screen capture (opt-in)
+  Verifying my chain...        8726 attested actions, tip 378f8a4452869859…
+  Checking my air gap...       16 checks, zero network sockets — clean
+  Consulting my watchdog...    IFY is gestation — watching, brake-only
+  Reading my vitals...         Secure Enclave signing — identity is hardware-bound
+  Checking my sovereign seal... 8634 entries sealed · secure-enclave
+
+  As far as I can prove: I am alone with your data.
+  Don't trust me — verify me: `badapple cert` · `badapple receipts`
 ```
 
-## Build
+## The proof commands
 
-```bash
-cargo build --release
-BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+| Command | What it does |
+|---|---|
+| `badapple demo` | Narrated self-demo. Every line is a real subsystem read. |
+| `badapple receipts` | Prints a proof card: attested-action count, organism age, chain tip, sovereign seal, watchdog phase, identity. |
+| `badapple cert` | Runs the **16-check** air-gap/security certification suite; exits non-zero on any failure. |
+| `badapple export-proof` | Exports a self-contained verification bundle of the AI's own attested history — publicly verifiable, **no secrets required**. |
+| `badapple --doctor` | Diagnostics, binary checks, ledger hash-chain verification. |
+| `badapple ify status` | Shows the watchdog's phase, baseline, and findings. |
+
+`export-proof` bundles the sovereign ledger (`ledger.sovereign.jsonl`), its
+Secure Enclave-signed checkpoint, and verification instructions. The sealed
+segments verify **without any key material** — using the published
+[`sovereign_ledger`](https://crates.io/crates/sovereign_ledger) crate or the
+zero-dependency JS verifier:
+
+```sh
+node verify.mjs ledger.sovereign.jsonl --public
+# public verification passed: 8634 sealed entries in 1 segments, 1 unsealed
+# anchor: secure-enclave
 ```
 
-## Test
+You can post your AI's receipts and let strangers check them. That is the point.
 
-```bash
-# Rust unit tests and integration tests
-cargo test --release
+## What Bad Apple is
 
-# Format and lint
-cargo fmt --check
-cargo clippy --release -- -D warnings
+Not a chat app. Not a cloud wrapper. A set of `launchd` daemons, native
+Swift/Rust services, and a menu bar that turn an Apple Silicon Mac into a
+private, air-gap-certifiable assistant with real OS-level hands — files,
+shell, AppleScript, Shortcuts, workspace indexing, local MCP tools, native
+TTS — under a declarative security policy and a tamper-evident ledger.
 
-# Air-gap certification suite
-cargo test --release --test cert_suite
-badapple cert
-```
+The design thesis: **an assistant should be able to prove its own behavior.**
+Every query, tool call, approval, and refusal is appended to a hash-chained,
+secret-redacting ledger. A second, independent layer re-verifies that ledger
+into a sealed sovereign chain and signs daily checkpoints through the Secure
+Enclave. A watchdog (IFY) tails the ledger, learns baselines, and files
+approval-gated findings — it can brake, never steer. And a 14-seat
+**Council of Minds** deliberates before gated actions run: under
+autopilot, actions that pass the vote execute and contested ones come
+back to you; every vote is journaled on the ledger.
 
 ## Install
 
-### Consumer install (Homebrew Cask — one command)
-
-This is the smoothest path. Homebrew removes the Gatekeeper quarantine flag and
-runs the native platform installer for you:
+### Homebrew Cask (recommended)
 
 ```bash
 brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
 brew install --cask bad-apple
 ```
 
-The 7B model is downloaded on first use. If you prefer to seed the cache
-offline, set `MODEL_CACHE_SRC` before installing; see `tests/vm_smoke_test.sh`.
+### Direct download
 
-### Developer / manual install (unsigned)
+See [bad-apple-releases](https://github.com/savageAZfck/bad-apple-releases)
+for the signed-artifact beta zips. Unsigned builds trip Gatekeeper; the
+bundled `strip_quarantine.sh` handles this locally. **Notarization is on the
+roadmap** — see "Honest limits" below.
 
-No Apple Developer ID required:
+### From source (unsigned, no Apple Developer ID needed)
 
 ```bash
 cargo build --release
@@ -217,90 +99,142 @@ sudo src/platform/apple_desktop/strip_quarantine.sh
 osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridge/install_badapple_platform.sh --install --unsigned-install" with administrator privileges'
 ```
 
-For release packaging and signing see `package_minimal_release.sh`
-(consumer/Homebrew cask artifact), `package_full_release.sh`,
-`package_homebrew_cask.sh`, `package_signed_release.sh`, and
-`package_unsigned.sh` (app-only zip).
+**Hardware:** Apple Silicon (M1+). 8 GB unified memory minimum, 16 GB
+recommended. ~40 GB free disk for models and state.
 
-## Quick Use
+## Architecture
 
-```bash
-# Text query
-target/release/badapple "What is 2+2?"
+```text
+badapple CLI / menu bar / voice / dashboard
+              │
+              ▼
+   /var/run/badapple/substrate.sock  (SLICKS v1/v2)
+              │
+              ▼
+     gatekeeper (Rust, launchd)
+     ├─ SLICKS v1/v2 auth + replay cache
+     ├─ Candle semantic router
+     ├─ Automation cage (openat, O_NOFOLLOW)
+     └─ WASM sandbox (fuel-metered)
+              │
+              ▼
+   badapple-engine  (Swift MLX daemon)
+   ├─ Local models: 7B default · 9B switchable · 0.5B fast tier
+   ├─ RAG, semantic cache, native embeddings
+   ├─ Policy engine (60+ rules) + human-in-the-loop approvals
+   ├─ Council of Minds — 14 deterministic seats vote on every gated
+   │  action; passed votes run, failed votes escalate to the human
+   ├─ Streaming output firewall (Aho-Corasick secret redaction)
+   ├─ Hash-chained audit ledger
+   ├─ IFY watchdog (brake-only) · Curious autopilot (policy-gated)
+   ├─ Workspace watcher · MCP host · optional P2P mesh
+   │    (model transfer + delegated inference — borrow a peer's brain)
+   └─ Air-gap certification self-audit
+              │
+              ▼
+   badapple-tts  (native AVSpeechSynthesizer)
 
-# Voice (text output)
-BADAPPLE_VOICE=1 target/release/badapple "What do you think of Siri?"
-
-# Voice with TTS
-target/release/badapple --speak "What do you think of Siri?"
-
-# Benchmark
-target/release/badapple --benchmark
-
-# Diagnostics and air-gap cert
-target/release/badapple --doctor
-target/release/badapple cert
-
-# Curious self-improvement check (manual trigger)
-target/release/badapple "curious check"
-
-# Persona switch
-target/release/badapple "switch to wicket"
-target/release/badapple --roast "Tell me about cloud AI"
+Verification layers (independent of the engine):
+   badapple-sovereign → re-verifies ledger into sealed sovereign chain,
+                        Secure Enclave-signed daily checkpoints
+   badapple-respawn   → content-addressed snapshots of all state,
+                        drift detection, revert-to-any-point
 ```
 
-## Security & Privacy
+## The verification stack
 
-Bad Apple is designed around a fail-closed, local-first security model. The
-runtime is air-gap certifiable: with P2P and MCP disabled, the daemon process
-holds zero network sockets.
-
-| Property | Implementation | Tests |
+| Layer | What it proves | How to check it |
 |---|---|---|
-| IPC authentication | SLICKS v1 HMAC-SHA256, v2 Secure Enclave P-256 | `bad_apple_ipc.rs` + `tests/cert_suite.rs` |
-| Replay protection | Nonce-pair replay cache | `replay_cache_rejects_replayed_slicks_proofs` |
-| Filesystem isolation | `openat` + `O_NOFOLLOW` automation cage | `tool_cage_rejects_path_traversal`, `tool_cage_rejects_symlink_escape` |
-| Untrusted code | WASM sandbox with fuel, memory, and output caps | `wasm_cage::tests::*` |
-| Output safety | Streaming Aho-Corasick firewall | `output_firewall_patterns_present` |
-| Audit integrity | SHA-256 chained, secret-redacted ledger | `ledger_hash_chain_is_valid`, `ledger_redacts_secrets` |
-| Network posture | Air-gap cert suite proves zero external sockets | `no_external_network_sockets` |
-| Policy coverage | Declarative `policy.yaml` covering 37 tool rules | `policy_yaml_covers_dangerous_tools` |
+| Audit ledger | Every action is hash-chained and secret-redacted | `badapple --doctor` |
+| Sovereign ledger | Independent re-verified copy, sealed, publicly verifiable | `badapple export-proof` + `verify_public` |
+| Secure Enclave checkpoints | Daily signed chain-tip + Merkle root | `badapple receipts` |
+| IFY watchdog | Anomalies and drift surfaced as approval-gated findings | `badapple ify status` |
+| Council | Every gated action carries a journaled 14-seat vote with rationales | `badapple "council <q>"` · `council_deliberation` events |
+| Air-gap cert | 16 runtime checks, incl. zero external sockets | `badapple cert` |
+| Respawn | All platform state revertible to any snapshot | `badapple-respawn --status` |
 
-See [PRIVACY.md](PRIVACY.md) for the data posture.
+Companion open components: [`sovereign_ledger`](https://github.com/savageAZfck/sovereign_ledger),
+[`respawn`](https://github.com/savageAZfck/respawn),
+[`edge_gate`](https://github.com/savageAZfck/edge_gate).
 
-## Notarization Stance
+## Security model — and honest limits
 
-Bad Apple is intentionally **not notarized**. Notarization requires uploading
-binaries to Apple's servers, which conflicts with the product's "nothing leaves
-your machine" promise. The recommended install path is the **Homebrew Cask**
-(`brew install --cask bad-apple`), which strips quarantine locally without
-routing through Apple. Direct-download users can run the included
-`strip_quarantine.sh`.
+Read [THREAT_MODEL.md](THREAT_MODEL.md) and [SECURITY.md](SECURITY.md) first.
+The short version:
+
+- **Air-gap is a certified posture, not a magic property.** Downloads, P2P,
+  and MCP are optional doors; `badapple cert` proves them shut when they
+  should be. Model files you carry in are explicit trust-boundary inputs —
+  the chain verifies provenance, not benevolence.
+- **Unsigned binaries.** Until notarization lands, first install shows a
+  Gatekeeper warning. That is a real UX cost, stated plainly.
+- **Local model ceiling.** The default brain is a 7B-class local model. It is
+  not a frontier cloud model and will not pretend to be one.
+- **Prompt injection is a real residual.** The policy engine, cages, and
+  firewall bound it; they do not eliminate it. See THREAT_MODEL.md §5.
+- **Fail-closed by design.** Denied tools stay denied; approvals are
+  explicit, logged, and deniable (`deny <id>`).
+
+## Quick use
+
+```bash
+badapple "What is 2+2?"                  # text query
+badapple --speak "What do you think of Siri?"   # voice with native TTS
+badapple "are you alone"                 # on-demand self-audit, in persona
+badapple "approve <id>" / "deny <id>"    # human-in-the-loop approvals
+badapple --benchmark                     # performance suite
+badapple "switch to wicket"              # persona switch
+badapple-p2p ask <peer> "prompt"         # delegate a query to a peer's brain
+```
+
+## Build & test
+
+```bash
+cargo build --release
+cargo fmt --check
+cargo clippy --all-targets --all-features --release -- -D warnings
+cargo test --release          # 103 unit + 21 integration tests
+cargo test --release --test cert_suite
+badapple cert                 # live 16-check air-gap certification
+```
+
+Swift engine & app bundle:
+
+```bash
+BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
+```
 
 ## Documentation
 
-- [Bad_Apple_Ranking.md](Bad_Apple_Ranking.md) — Consumer readiness score,
-  live benchmarks, and competitive placement.
-- [BAD_APPLE.md](BAD_APPLE.md) — Technical deep dive.
-- [BAD_APPLE_BUYERS.md](BAD_APPLE_BUYERS.md) — Buyer-facing overview.
-- [AGENTS.md](AGENTS.md) — Build commands, project conventions, and architecture
-  notes.
-- [CHANGELOG.md](CHANGELOG.md) — Development history.
-- [PRIVACY.md](PRIVACY.md) — Privacy and data posture.
-
-## Stats
-
-| Metric | Value |
-|---|---|
-| Consumer-readiness score | 9.85 / 10 |
-| Rust tests | 103 passing |
-| Cert suite | 15 checks passing |
-| Mesh-sync tests | 4 passing |
-| Red-team tests | 6 passing |
-| Default model | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` |
-| Optional fast tier | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` |
-| Switchable general model | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` |
+- [THREAT_MODEL.md](THREAT_MODEL.md) — adversary classes, defenses, residuals
+- [SECURITY.md](SECURITY.md) — security posture and reporting
+- [docs/LEDGER_FORMAT.md](docs/LEDGER_FORMAT.md) — primary ledger format spec
+- [docs/SLICKS_PROTOCOL.md](docs/SLICKS_PROTOCOL.md) — IPC protocol spec
+- [BAD_APPLE.md](BAD_APPLE.md) — technical deep dive and live benchmarks
+- [AGENTS.md](AGENTS.md) — build commands and project conventions
+- [IFY.md](IFY.md) — watchdog design spec
+- [CHANGELOG.md](CHANGELOG.md) — development history
 
 ## License
 
-LicenseRef-Proprietary. See `LICENSE.txt`.
+**FSL-1.1-ALv2** — Functional Source License 1.1, Apache-2.0 future license.
+Copyright 2026 Adam Clark.
+
+This is a **source-available** license, not an OSI-approved open-source
+license — stated plainly. The source is fully auditable; for two years it may
+not be used to offer a competing product, after which it converts to
+Apache-2.0. The verification tooling
+([sovereign_ledger](https://github.com/savageAZfck/sovereign_ledger),
+[respawn](https://github.com/savageAZfck/respawn),
+[edge_gate](https://github.com/savageAZfck/edge_gate)) is released under the
+same terms: the tools that verify are open; the thing they verify is
+auditable too.
+
+## How this was built
+
+Bad Apple was architected, threat-modeled, and audited by a human; large
+portions of the implementation were produced with AI coding assistance and
+then reviewed, red-teamed, and tested before being kept. That is disclosed
+here because the project's own standard — *don't trust, verify* — applies to
+its provenance as much as to its runtime. Judge the artifact: run the cert,
+read the spec, verify the chain.

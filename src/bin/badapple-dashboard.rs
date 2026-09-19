@@ -203,6 +203,7 @@ async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
         .route("/audit", get(audit_handler))
         .route("/cert", get(cert_handler))
         .route("/doctor", get(doctor_handler))
+        .route("/organism", get(organism_handler))
         .route("/voice", get(voice_handler))
         .route("/capabilities", get(capabilities_handler))
         .route("/control", post(control_handler))
@@ -1274,6 +1275,72 @@ async fn doctor_handler() -> impl IntoResponse {
         Ok(v) => Json(v),
         Err(e) => Json(json!({"error": e.to_string()})),
     }
+}
+
+/// Organism vitals: ledger age/count/tip, sovereign seal, IFY phase, identity.
+/// Reads the same state as `badapple receipts` so the web view shows the
+/// proof card without running the daemon-facing self_audit suite.
+async fn organism_handler() -> impl IntoResponse {
+    let mut out = json!({});
+    let ledger = std::path::Path::new("/var/lib/bad_apple/ledger.jsonl");
+    let mut count = 0u64;
+    let mut tip = String::new();
+    let mut born: Option<chrono::DateTime<chrono::Utc>> = None;
+    if let Ok(text) = std::fs::read_to_string(ledger) {
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            count += 1;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(h) = v["hash"].as_str() {
+                    tip = h.to_string();
+                }
+                if born.is_none() {
+                    if let Some(ts) = v["ts"].as_str() {
+                        born = chrono::DateTime::parse_from_rfc3339(ts)
+                            .ok()
+                            .map(|t| t.with_timezone(&chrono::Utc));
+                    }
+                }
+            }
+        }
+    }
+    out["attested_actions"] = json!(count);
+    out["chain_tip"] = json!(tip);
+    if let Some(b) = born {
+        let age = Utc::now().signed_duration_since(b).num_days();
+        out["organism_age_days"] = json!(age);
+    }
+    let cp = std::path::Path::new("/var/lib/bad_apple/ledger.sovereign.checkpoint.json");
+    if let Ok(text) = std::fs::read_to_string(cp) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            out["sovereign"] = json!({
+                "entry_count": v["entry_count"],
+                "signed_at": v["signed_at"],
+                "scheme": v["scheme"],
+            });
+        }
+    }
+    let ify_state = bad_apple::ify::load_state();
+    out["ify"] = json!({
+        "phase": bad_apple::ify::current_phase(&ify_state).as_str(),
+        "events_seen": ify_state.events_seen,
+        "installed_days": if ify_state.installed_at > 0.0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            ((now - ify_state.installed_at) / 86400.0).floor() as i64
+        } else {
+            0
+        },
+    });
+    let id_sock = bad_apple::bad_apple_ipc::identity_agent_socket_path();
+    out["identity"] = json!({
+        "secure_enclave": std::path::Path::new(&id_sock).exists(),
+    });
+    Json(out)
 }
 
 /// Voice activity stub. The real voice log is not yet persisted.
