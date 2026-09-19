@@ -3382,6 +3382,64 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     ///
     /// When `approved` is true (i.e. Autopilot is on), the tool will also apply the
     /// generated patch after backing up the original and verifying the replacement.
+    /// Reads the ledger's council_deliberation/council_escalated events plus
+    /// IFY findings and summarizes whether high-dissent votes that passed
+    /// correlate with downstream anomalies. With sparse data it reports the
+    /// sample size honestly instead of inventing a signal.
+    private func councilCalibrationSummary() -> String {
+        let ledgerPath = "/var/lib/bad_apple/ledger.jsonl"
+        guard let text = try? String(contentsOfFile: ledgerPath, encoding: .utf8) else {
+            return "council calibration: no ledger readable"
+        }
+        var deliberations = 0
+        var escalations = 0
+        var highDissentPassed = 0
+        var dissentValues: [Double] = []
+        var passedTools: [String: Int] = [:]
+        for line in text.split(separator: "\n") {
+            guard let raw = line.data(using: .utf8),
+                  let e = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+                  let type = e["type"] as? String,
+                  let d = e["data"] as? [String: Any]
+            else { continue }
+            if type == "council_escalated" { escalations += 1; continue }
+            guard type == "council_deliberation",
+                  (d["mode"] as? String) == "gate"
+            else { continue }
+            deliberations += 1
+            let dissent = (d["dissent"] as? Double)
+                ?? Double(d["dissent"] as? String ?? "")
+                ?? 0
+            dissentValues.append(dissent)
+            if (d["decision"] as? String) == "approve" {
+                if dissent > 0.35 { highDissentPassed += 1 }
+                if let t = d["tool"] as? String {
+                    passedTools[t, default: 0] += 1
+                }
+            }
+        }
+        var ifyFindings = 0
+        let findingsPath = NSHomeDirectory() + "/.bad_apple/ify/findings.jsonl"
+        if let ftext = try? String(contentsOfFile: findingsPath, encoding: .utf8) {
+            ifyFindings = ftext.split(separator: "\n").filter { !$0.isEmpty }.count
+        }
+        let avg = dissentValues.isEmpty ? 0 : dissentValues.reduce(0, +) / Double(dissentValues.count)
+        let maxD = dissentValues.max() ?? 0
+        let toolList = passedTools.sorted { $0.value > $1.value }
+            .map { "\($0.key)x\($0.value)" }.joined(separator: ", ")
+        var lines = [
+            "gate deliberations: \(deliberations) · escalated: \(escalations) · ify findings on file: \(ifyFindings)",
+            "dissent: avg \(String(format: "%.3f", avg)) · max \(String(format: "%.3f", maxD)) · passed with dissent>0.35: \(highDissentPassed)",
+        ]
+        if !toolList.isEmpty { lines.append("approved tools: \(toolList)") }
+        if deliberations < 30 {
+            lines.append("sample too thin for dissent→outcome correlation (\(deliberations)/30) — keep collecting; revisit when deliberations accumulate")
+        } else {
+            lines.append("sample is large enough — correlate high-dissent approvals against ify findings timestamps and propose a threshold adjustment if they cluster")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     func curiousSelfImprove(include: String, approved: Bool = false) async -> String {
         isRunningCurious = true
         defer { isRunningCurious = false }
@@ -3408,6 +3466,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
 
         let audit = selfAudit(include: include)
+        let councilCalibration = councilCalibrationSummary()
 
         // Parse runtime repairs and attempt safe ones when the autopilot level allows.
         let level = loadAutopilotLevel()
@@ -3492,6 +3551,9 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         Self-audit:
         \(audit)
 
+        Council calibration:
+        \(councilCalibration)
+
         Output firewall:
         \(firewall)
 
@@ -3538,6 +3600,9 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         body += "**Workspace:** \(base)\n\n"
         body += "## Self-audit\n\n```json\n"
         body += audit.prefix(2_000)
+        body += "\n```\n\n"
+        body += "## Council calibration\n\n```\n"
+        body += councilCalibration
         body += "\n```\n\n"
         body += "## Runtime repairs\n\n"
         if repairs.isEmpty {
