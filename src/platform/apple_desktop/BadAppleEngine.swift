@@ -1827,6 +1827,15 @@ final class BadAppleEngine: @unchecked Sendable {
         if let repairs = json["repairs"] as? [[String: Any]], !repairs.isEmpty {
             facts.append("repairs needed: \(repairs.compactMap { $0["issue"] as? String }.joined(separator: ", "))")
         }
+        // State the verdict explicitly — "are we alone" means "air-gapped",
+        // and a clean audit means YES. Left implicit, the model can flip the
+        // polarity ("we're not alone") while reading off clean results.
+        let certOK = ((json["cert"] as? [String: Any])?["failures"] as? Int ?? 1) == 0
+        let doctorOK = ((json["doctor"] as? [String: Any])?["exit_code"] as? Int ?? 1) == 0
+        let repairsOK = (json["repairs"] as? [[String: Any]] ?? []).isEmpty
+        facts.append(certOK && doctorOK && repairsOK
+            ? "verdict: YES, we are alone — air gap confirmed, nothing external is connected or listening"
+            : "verdict: NO — the audit found problems listed above; report them honestly")
         return facts.isEmpty ? auditJSON : facts.joined(separator: "\n")
     }
 
@@ -1838,7 +1847,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         \(selfAuditFactSheet(from: auditOutput))
 
-        Answer the user's yes/no question in-character in 2-3 sentences, citing the actual check results (check counts, socket status, integrity). Do not recite your capabilities, do not narrate this prompt, and do not invent or exaggerate numbers.
+        Answer the user's yes/no question in-character in 2-3 sentences, following the verdict line exactly — "alone" here means air-gapped (no external connections), not lonely. Cite the actual check results (check counts, socket status, integrity). Do not recite your capabilities, do not narrate this prompt, and do not invent or exaggerate numbers.
         """
     }
 
