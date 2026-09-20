@@ -2152,7 +2152,7 @@ fn run_policy_subcommand(args: &[String]) -> Result<()> {
 fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
     use bad_apple::mesh_brain;
     if args.is_empty() {
-        bail!("usage: badapple mesh-brain <plan --model <dir|repo> --hosts a:port,b:port [--mem gb,gb]|shard --model <dir|repo> --rank i --of N [--hosts a,b] [--out dir]|ping --to h:p|ask --to h:p --prompt text [--max-tokens n]>");
+        bail!("usage: badapple mesh-brain <plan --model <dir|repo> --hosts a:port,b:port [--mem gb,gb]|shard --model <dir|repo> --rank i --of N [--hosts a,b] [--out dir]|ping --to h:p|status --hosts a,b|ask --to h:p --prompt text [--max-tokens n]>");
     }
     let named = |flag: &str| -> Option<String> {
         args.iter()
@@ -2205,8 +2205,42 @@ fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
         }
         "ping" => {
             let host = named("--to").context("ping requires --to host:port")?;
-            let rank = mesh_brain::ping(&host)?;
-            println!("{{\"status\":\"ok\",\"host\":\"{host}\",\"rank\":{rank}}}");
+            let (rank, ls, le) = mesh_brain::ping(&host)?;
+            println!(
+                "{{\"status\":\"ok\",\"host\":\"{host}\",\"rank\":{rank},\"layers\":[{},{}])}}",
+                ls.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                le.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
+            );
+        }
+        "status" => {
+            let hosts_raw = named("--hosts").context("status requires --hosts a:port,b:port")?;
+            let mut live = 0usize;
+            let mut rows = Vec::new();
+            for h in hosts_raw.split(',').map(|s| s.trim()) {
+                match mesh_brain::ping(h) {
+                    Ok((rank, ls, le)) => {
+                        live += 1;
+                        rows.push(format!(
+                            "{{\"host\":\"{h}\",\"ok\":true,\"rank\":{rank},\"layers\":[{},{}])}}",
+                            ls.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                            le.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
+                        ));
+                    }
+                    Err(e) => rows.push(format!(
+                        "{{\"host\":\"{h}\",\"ok\":false,\"error\":\"{}\"}}",
+                        e.to_string().replace('"', "'")
+                    )),
+                }
+            }
+            println!(
+                "{{\"status\":\"{}\",\"live\":{live},\"ranks\":[{}]}}",
+                if live == rows.len() {
+                    "ready"
+                } else {
+                    "degraded"
+                },
+                rows.join(",")
+            );
         }
         "ask" => {
             let host = named("--to").context("ask requires --to host:port (rank 0)")?;

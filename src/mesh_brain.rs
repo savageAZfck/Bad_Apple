@@ -18,14 +18,18 @@
 //! same path carries 671B-class models across multi-node Studios.
 
 use anyhow::{bail, Context, Result};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// One node's shard assignment.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -446,6 +450,107 @@ struct MeshBrainFrame {
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "layerStart")]
+    layer_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "layerEnd")]
+    layer_end: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------
+// mutual auth — per-connection HMAC-SHA256 nonce challenge over the shared
+// SLICKS secret. Server challenges; both sides prove. BADAPPLE_MESH_AUTH=0
+// disables for debugging (never default).
+// ---------------------------------------------------------------------------
+
+fn mesh_auth_enabled() -> bool {
+    std::env::var("BADAPPLE_MESH_AUTH").ok().as_deref() != Some("0")
+}
+
+/// Resolve the shared secret: BADAPPLE_MESH_KEY > BADAPPLE_P2P_SECRET >
+/// BADAPPLE_SLICKS_KEY_PATH > /var/lib/bad_apple/slicks.key.
+pub fn resolve_mesh_secret() -> Result<Vec<u8>> {
+    let raw = if let Ok(s) = std::env::var("BADAPPLE_MESH_KEY") {
+        if s.is_empty() {
+            bail!("BADAPPLE_MESH_KEY is empty");
+        }
+        s
+    } else if let Ok(s) = std::env::var("BADAPPLE_P2P_SECRET") {
+        if s.is_empty() {
+            bail!("BADAPPLE_P2P_SECRET is empty");
+        }
+        s
+    } else {
+        let path = std::env::var("BADAPPLE_SLICKS_KEY_PATH")
+            .unwrap_or_else(|_| "/var/lib/bad_apple/slicks.key".into());
+        fs::read_to_string(&path)
+            .with_context(|| format!("failed to read SLICKS key from {path}"))?
+            .trim()
+            .to_string()
+    };
+    if raw.len() < 32 {
+        bail!("mesh-brain secret must be at least 32 bytes");
+    }
+    Ok(raw.into_bytes())
+}
+
+fn hmac_hex(key: &[u8], msg: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts any key size");
+    mac.update(msg.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Client side of the handshake: answer the server's nonce, then verify the
+/// server's counter-proof. Returns early (no-op) when auth is disabled —
+/// detected by the server sending a normal result instead of a challenge.
+fn client_handshake(s: &mut TcpStream, key: &[u8]) -> Result<()> {
+    let challenge = read_frame(s)?;
+    if challenge.op != "auth" {
+        bail!("expected auth challenge, got {}", challenge.op);
+    }
+    let nonce = challenge.text.context("auth challenge missing nonce")?;
+    let proof = hmac_hex(key, &format!("mb-c:{nonce}"));
+    write_frame(
+        s,
+        &MeshBrainFrame {
+            op: "auth".into(),
+            prompt: None,
+            max_tokens: None,
+            token: None,
+            done: None,
+            text: Some(proof),
+            error: None,
+            layer_start: None,
+            layer_end: None,
+        },
+    )?;
+    let resp = read_frame(s)?;
+    match resp.op.as_str() {
+        "auth-ok" => {
+            let expect = hmac_hex(key, &format!("mb-s:{nonce}"));
+            if resp.text.as_deref() != Some(expect.as_str()) {
+                bail!("server counter-proof invalid — wrong mesh secret?");
+            }
+            Ok(())
+        }
+        "error" => bail!("auth rejected: {}", resp.error.unwrap_or_default()),
+        other => bail!("expected auth-ok, got {other}"),
+    }
+}
+
+/// Open an authenticated connection to a rank.
+fn connect(host: &str, timeout_secs: u64) -> Result<TcpStream> {
+    let mut s = TcpStream::connect(host).with_context(|| format!("connect {host}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
+    s.set_write_timeout(Some(Duration::from_secs(30)))?;
+    s.set_nodelay(true).ok();
+    if mesh_auth_enabled() {
+        client_handshake(&mut s, &resolve_mesh_secret()?)?;
+    }
+    Ok(s)
 }
 
 fn write_frame(s: &mut TcpStream, frame: &MeshBrainFrame) -> Result<()> {
@@ -467,10 +572,9 @@ fn read_frame(s: &mut TcpStream) -> Result<MeshBrainFrame> {
     Ok(serde_json::from_slice(&buf)?)
 }
 
-/// Ping a rank — returns its rank number as a liveness check.
-pub fn ping(host: &str) -> Result<i64> {
-    let mut s = TcpStream::connect(host).with_context(|| format!("connect {host}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(30)))?;
+/// Ping a rank — returns (rank, layer_start, layer_end) as a liveness check.
+pub fn ping(host: &str) -> Result<(i64, Option<usize>, Option<usize>)> {
+    let mut s = connect(host, 30)?;
     write_frame(
         &mut s,
         &MeshBrainFrame {
@@ -481,20 +585,25 @@ pub fn ping(host: &str) -> Result<i64> {
             done: None,
             text: None,
             error: None,
+            layer_start: None,
+            layer_end: None,
         },
     )?;
     let resp = read_frame(&mut s)?;
     if let Some(e) = resp.error {
         bail!("peer error: {e}");
     }
-    resp.token.context("ping response missing rank")
+    Ok((
+        resp.token.context("ping response missing rank")?,
+        resp.layer_start,
+        resp.layer_end,
+    ))
 }
 
 /// Ask the pipeline to generate: sends the prompt to the embed rank (rank 0)
 /// and returns decoded text produced by the last rank's head.
 pub fn ask(host: &str, prompt: &str, max_tokens: usize) -> Result<String> {
-    let mut s = TcpStream::connect(host).with_context(|| format!("connect {host}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(600)))?;
+    let mut s = connect(host, 600)?;
     write_frame(
         &mut s,
         &MeshBrainFrame {
@@ -505,6 +614,8 @@ pub fn ask(host: &str, prompt: &str, max_tokens: usize) -> Result<String> {
             done: None,
             text: None,
             error: None,
+            layer_start: None,
+            layer_end: None,
         },
     )?;
     let resp = read_frame(&mut s)?;

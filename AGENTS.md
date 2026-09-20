@@ -347,8 +347,15 @@ Internals:
   branches before normal engine load.
 - Non-layer weights (embed/norm/head) ship on EVERY rank — MLX module
   loading is strict about declared params; layers are the only real split.
-- Wire protocol is currently unauthenticated TCP — intended to ride the
-  SLICKS/P2P authenticated channel before release.
+- Wire auth: per-connection mutual HMAC-SHA256 nonce challenge over the
+  shared SLICKS secret (BADAPPLE_MESH_KEY > BADAPPLE_P2P_SECRET >
+  BADAPPLE_SLICKS_KEY_PATH > /var/lib/bad_apple/slicks.key).
+  BADAPPLE_MESH_AUTH=0 disables (debug only). Watchdog timers cancel dead
+  conns (BADAPPLE_MESH_TIMEOUT, default 120s); transport failure mid-token
+  resets the whole pipeline and retries once — KV caches can't be trusted
+  after a dropped step.
+- Verified live on one Mac: 2-rank 0.5B over loopback AND over the LAN
+  interface, wrong-key rejection, dead-peer fast error, restart recovery.
 
 ## Air-gap certification
 

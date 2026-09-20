@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MLX
 import MLXLLM
@@ -49,7 +50,7 @@ public struct MeshBrainRankSpec: Codable, Sendable {
 // shape/dtype so the receiver can rebuild an MLXArray without a copy.
 
 struct MeshBrainFrame: Codable {
-    var op: String                       // step | reset | ping | generate | result | error
+    var op: String                       // auth | auth-ok | step | reset | ping | generate | result | error
     var shape: [Int]? = nil
     var dtype: String? = nil
     var token: Int? = nil
@@ -58,6 +59,84 @@ struct MeshBrainFrame: Codable {
     var prompt: String? = nil
     var text: String? = nil
     var error: String? = nil
+    var layerStart: Int? = nil
+    var layerEnd: Int? = nil
+}
+
+// MARK: - Mutual auth
+//
+// Per-connection HMAC-SHA256 nonce challenge over the shared SLICKS secret.
+// The server challenges; both sides prove. Resolved from
+// BADAPPLE_MESH_KEY > BADAPPLE_P2P_SECRET > BADAPPLE_SLICKS_KEY_PATH >
+// /var/lib/bad_apple/slicks.key. BADAPPLE_MESH_AUTH=0 disables (debug only).
+
+enum MeshBrainAuth {
+    static var enabled: Bool {
+        ProcessInfo.processInfo.environment["BADAPPLE_MESH_AUTH"] != "0"
+    }
+
+    static var secret: Data? {
+        let env = ProcessInfo.processInfo.environment
+        if let s = env["BADAPPLE_MESH_KEY"], !s.isEmpty { return Data(s.utf8) }
+        if let s = env["BADAPPLE_P2P_SECRET"], !s.isEmpty { return Data(s.utf8) }
+        let path = env["BADAPPLE_SLICKS_KEY_PATH"] ?? "/var/lib/bad_apple/slicks.key"
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !raw.isEmpty else { return nil }
+        return Data(raw.utf8)
+    }
+
+    static func nonce() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func hmac(_ msg: String, key: Data) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(
+            for: Data(msg.utf8), using: SymmetricKey(data: key))
+        return mac.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Server side: challenge the peer, verify proof, return counter-proof.
+    static func serverHandshake(_ conn: NWConnection) async throws {
+        guard enabled else { return }
+        guard let key = secret else {
+            throw MeshBrainError.transport(
+                "mesh auth on but no secret — set BADAPPLE_MESH_KEY or slicks.key")
+        }
+        let n = nonce()
+        var challenge = MeshBrainFrame(op: "auth")
+        challenge.text = n
+        try await MeshBrainWire.writeFrame(to: conn, header: challenge, payload: nil)
+        let (resp, _) = try await MeshBrainWire.readFrame(from: conn)
+        guard resp.op == "auth",
+              resp.text == hmac("mb-c:" + n, key: key)
+        else { throw MeshBrainError.transport("peer auth failed") }
+        var ok = MeshBrainFrame(op: "auth-ok")
+        ok.text = hmac("mb-s:" + n, key: key)
+        try await MeshBrainWire.writeFrame(to: conn, header: ok, payload: nil)
+    }
+
+    /// Client side: answer the challenge, verify the counter-proof.
+    static func clientHandshake(_ conn: NWConnection) async throws {
+        guard enabled else { return }
+        guard let key = secret else {
+            throw MeshBrainError.transport(
+                "mesh auth on but no secret — set BADAPPLE_MESH_KEY or slicks.key")
+        }
+        let (challenge, _) = try await MeshBrainWire.readFrame(from: conn)
+        guard challenge.op == "auth", let n = challenge.text else {
+            throw MeshBrainError.badFrame("expected auth challenge")
+        }
+        var resp = MeshBrainFrame(op: "auth")
+        resp.text = hmac("mb-c:" + n, key: key)
+        try await MeshBrainWire.writeFrame(to: conn, header: resp, payload: nil)
+        let (ok, _) = try await MeshBrainWire.readFrame(from: conn)
+        guard ok.op == "auth-ok",
+              ok.text == hmac("mb-s:" + n, key: key)
+        else { throw MeshBrainError.transport("server counter-proof failed") }
+    }
 }
 
 enum MeshBrainWire {
@@ -184,6 +263,17 @@ actor AsyncSemaphore {
 
 // MARK: - Downstream link (rank i -> rank i+1)
 
+private var meshTimeout: TimeInterval {
+    TimeInterval(
+        ProcessInfo.processInfo.environment["BADAPPLE_MESH_TIMEOUT"] ?? "120")
+        ?? 120
+}
+
+/// Timeout flag — checked by a watchdog task that cancels the connection to
+/// wake pending sends/receives. NWConnection ops aren't Task-cancellable, so
+/// the only way to interrupt a dead peer's read is killing the socket.
+final class TimeoutFlag: @unchecked Sendable { var done = false }
+
 final class MeshBrainLink: @unchecked Sendable {
     private let conn: NWConnection
     private let queue = DispatchQueue(label: "badapple.meshbrain.link")
@@ -196,6 +286,13 @@ final class MeshBrainLink: @unchecked Sendable {
             host: NWEndpoint.Host(String(h)), port: port, using: .tcp)
         final class Once: @unchecked Sendable { var resumed = false }
         let once = Once()
+        // Watchdog: unreachable hosts stall .waiting for 75s+ — cancel at 15s.
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.conn.cancel()
+        }
+        defer { watchdog.cancel() }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             conn.stateUpdateHandler = { state in
                 switch state {
@@ -203,19 +300,36 @@ final class MeshBrainLink: @unchecked Sendable {
                     if !once.resumed { once.resumed = true; cont.resume() }
                 case .failed(let e), .waiting(let e):
                     if !once.resumed { once.resumed = true; cont.resume(throwing: e) }
+                case .cancelled:
+                    if !once.resumed {
+                        once.resumed = true
+                        cont.resume(throwing: MeshBrainError.transport("connect timeout"))
+                    }
                 default: break
                 }
             }
             conn.start(queue: queue)
         }
         conn.stateUpdateHandler = nil
+        try await MeshBrainAuth.clientHandshake(conn)
     }
 
     func request(_ header: MeshBrainFrame, payload: Data?) async throws
         -> (MeshBrainFrame, Data)
     {
-        try await MeshBrainWire.writeFrame(to: conn, header: header, payload: payload)
-        return try await MeshBrainWire.readFrame(from: conn)
+        let flag = TimeoutFlag()
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(meshTimeout * 1_000_000_000))
+            guard !Task.isCancelled, !flag.done else { return }
+            self?.conn.cancel()  // wakes pending send/receive with an error
+        }
+        defer { flag.done = true; watchdog.cancel() }
+        do {
+            try await MeshBrainWire.writeFrame(to: conn, header: header, payload: payload)
+            return try await MeshBrainWire.readFrame(from: conn)
+        } catch {
+            throw MeshBrainError.transport("\(error)")
+        }
     }
 }
 
@@ -336,7 +450,13 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
             if link == nil { link = try await MeshBrainLink(host: next) }
             var (frame, payload) = try MeshBrainWire.packArray(box.output!)
             frame.op = "step"
-            let (resp, _) = try await link!.request(frame, payload: payload)
+            let resp: MeshBrainFrame
+            do {
+                (resp, _) = try await link!.request(frame, payload: payload)
+            } catch {
+                link = nil  // dead peer — next caller reconnects
+                throw MeshBrainError.transport("downstream \(next): \(error)")
+            }
             if let err = resp.error { throw MeshBrainError.transport(err) }
             guard let tok = resp.token else {
                 throw MeshBrainError.badFrame("step response missing token")
@@ -398,19 +518,51 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
                     if !once.resumed { once.resumed = true; cont.resume() }
                 case .failed(let e), .waiting(let e):
                     if !once.resumed { once.resumed = true; cont.resume(throwing: e) }
+                case .cancelled:
+                    if !once.resumed {
+                        once.resumed = true
+                        cont.resume(throwing: MeshBrainError.transport("conn cancelled"))
+                    }
                 default: break
                 }
             }
             conn.start(queue: queue)
         }
         conn.stateUpdateHandler = nil
+        // Auth watchdog — a peer that connects and never proves itself gets
+        // 15s, then the socket drops out from under the pending read.
+        let authDone = TimeoutFlag()
+        let authWatchdog = Task {
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled, !authDone.done else { return }
+            conn.cancel()
+        }
+        do {
+            try await MeshBrainAuth.serverHandshake(conn)
+        } catch {
+            var r = MeshBrainFrame(op: "error")
+            r.error = "authentication failed"
+            try? await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+            conn.cancel()
+            return
+        }
+        authDone.done = true
+        authWatchdog.cancel()
         while true {
+            let header: MeshBrainFrame
+            let payload: Data
             do {
-                let (header, payload) = try await MeshBrainWire.readFrame(from: conn)
+                (header, payload) = try await MeshBrainWire.readFrame(from: conn)
+            } catch {
+                return  // transport broke — nothing left to say
+            }
+            do {
                 switch header.op {
                 case "ping":
                     var r = MeshBrainFrame(op: "result")
                     r.token = spec.rank
+                    r.layerStart = spec.layerStart
+                    r.layerEnd = spec.layerEnd
                     try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
                 case "reset":
                     try await handleReset()
@@ -435,7 +587,10 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
                     try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
                 }
             } catch {
-                return  // peer went away or frame broke — drop connection
+                // Handler failure — tell the caller, keep the conn alive.
+                var r = MeshBrainFrame(op: "error")
+                r.error = "\(error)"
+                try? await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
             }
         }
     }
@@ -443,8 +598,21 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
     // MARK: orchestration (rank 0)
 
     /// Full generate for rank 0: tokenize -> embed -> per-token pipeline.
-    /// Only valid when spec.hasEmbed is true.
+    /// Only valid when spec.hasEmbed is true. A transport failure mid-token
+    /// desyncs every downstream KV cache, so the whole pipeline resets and
+    /// retries once before surfacing the error.
     public func generate(prompt: String, maxTokens: Int) async throws -> String {
+        do {
+            return try await generateOnce(prompt: prompt, maxTokens: maxTokens)
+        } catch let e as MeshBrainError {
+            if case .transport = e {} else if case .peerClosed = e {} else { throw e }
+            link = nil  // dead — force reconnect on retry
+            try? await resetPipeline()
+            return try await generateOnce(prompt: prompt, maxTokens: maxTokens)
+        }
+    }
+
+    private func generateOnce(prompt: String, maxTokens: Int) async throws -> String {
         guard spec.hasEmbed else {
             throw MeshBrainError.badFrame("generate must start on the embed rank")
         }
@@ -468,7 +636,13 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
                 if link == nil { link = try await MeshBrainLink(host: next) }
                 var (frame, payload) = try MeshBrainWire.packArray(box.output!)
                 frame.op = "step"
-                let (resp, _) = try await link!.request(frame, payload: payload)
+                let resp: MeshBrainFrame
+                do {
+                    (resp, _) = try await link!.request(frame, payload: payload)
+                } catch {
+                    link = nil
+                    throw MeshBrainError.transport("downstream \(next): \(error)")
+                }
                 if let err = resp.error { throw MeshBrainError.transport(err) }
                 guard let t = resp.token else {
                     throw MeshBrainError.badFrame("missing token")
