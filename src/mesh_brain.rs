@@ -436,24 +436,28 @@ pub fn resolve_model_dir(model: &str) -> Result<PathBuf> {
 
 /// Frame header shared with BadAppleShard.swift: [u32 BE jsonLen][json][payload].
 #[derive(Serialize, Deserialize)]
-struct MeshBrainFrame {
-    op: String,
+pub(crate) struct MeshBrainFrame {
+    pub(crate) op: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    prompt: Option<String>,
+    pub(crate) prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "maxTokens")]
-    max_tokens: Option<usize>,
+    pub(crate) max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    token: Option<i64>,
+    pub(crate) token: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    done: Option<bool>,
+    pub(crate) done: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
+    pub(crate) text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shape: Option<Vec<usize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dtype: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "layerStart")]
-    layer_start: Option<usize>,
+    pub(crate) layer_start: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "layerEnd")]
-    layer_end: Option<usize>,
+    pub(crate) layer_end: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +497,7 @@ pub fn resolve_mesh_secret() -> Result<Vec<u8>> {
     Ok(raw.into_bytes())
 }
 
-fn hmac_hex(key: &[u8], msg: &str) -> String {
+pub(crate) fn hmac_hex(key: &[u8], msg: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts any key size");
     mac.update(msg.as_bytes());
     mac.finalize()
@@ -503,10 +507,100 @@ fn hmac_hex(key: &[u8], msg: &str) -> String {
         .collect()
 }
 
+/// AES-256-GCM session cipher derived from the shared secret — same
+/// derivation as the P2P engram crypto (SHA-256 of the secret). Encryption
+/// rides on top of the auth handshake; BADAPPLE_MESH_ENC=0 disables.
+fn mesh_enc_enabled() -> bool {
+    std::env::var("BADAPPLE_MESH_ENC").ok().as_deref() != Some("0")
+}
+
+pub(crate) fn session_cipher(secret: &[u8]) -> Result<crate::p2p_crypto::P2PCipher> {
+    crate::p2p_crypto::P2PCipher::new(&crate::p2p_crypto::derive_key_from_bytes(secret))
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Wire packet = plaintext [u32 jsonLen][json][payload] when `cipher` is
+/// None, else [u32 ctLen][nonce||AES-GCM(jsonLen||json||payload)+tag].
+pub(crate) fn write_packet(
+    s: &mut TcpStream,
+    frame: &MeshBrainFrame,
+    payload: &[u8],
+    cipher: Option<&crate::p2p_crypto::P2PCipher>,
+) -> Result<()> {
+    let json = serde_json::to_vec(frame)?;
+    match cipher {
+        Some(c) => {
+            let mut inner = Vec::with_capacity(4 + json.len() + payload.len());
+            inner.extend_from_slice(&(json.len() as u32).to_be_bytes());
+            inner.extend_from_slice(&json);
+            inner.extend_from_slice(payload);
+            let ct = c.encrypt(&inner).map_err(|e| anyhow::anyhow!(e))?;
+            s.write_all(&(ct.len() as u32).to_be_bytes())?;
+            s.write_all(&ct)?;
+        }
+        None => {
+            s.write_all(&(json.len() as u32).to_be_bytes())?;
+            s.write_all(&json)?;
+            s.write_all(payload)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn read_packet(
+    s: &mut TcpStream,
+    cipher: Option<&crate::p2p_crypto::P2PCipher>,
+) -> Result<(MeshBrainFrame, Vec<u8>)> {
+    match cipher {
+        Some(c) => {
+            let mut len_buf = [0u8; 4];
+            s.read_exact(&mut len_buf)?;
+            let len = u32::from_be_bytes(len_buf) as usize;
+            if len > 512 * 1024 * 1024 {
+                bail!("encrypted frame too large: {len}");
+            }
+            let mut ct = vec![0u8; len];
+            s.read_exact(&mut ct)?;
+            let inner = c.decrypt(&ct).map_err(|e| anyhow::anyhow!(e))?;
+            if inner.len() < 4 {
+                bail!("decrypted frame too short");
+            }
+            let json_len = u32::from_be_bytes(inner[..4].try_into().unwrap()) as usize;
+            if inner.len() < 4 + json_len {
+                bail!("decrypted frame truncated");
+            }
+            let frame: MeshBrainFrame = serde_json::from_slice(&inner[4..4 + json_len])?;
+            Ok((frame, inner[4 + json_len..].to_vec()))
+        }
+        None => {
+            let frame = read_frame(s)?;
+            let payload = if let Some(shape) = &frame.shape {
+                let elems: usize = shape.iter().product();
+                let size = elems * dtype_size(frame.dtype.as_deref().unwrap_or("float16"));
+                let mut p = vec![0u8; size];
+                s.read_exact(&mut p)?;
+                p
+            } else {
+                Vec::new()
+            };
+            Ok((frame, payload))
+        }
+    }
+}
+
+fn dtype_size(name: &str) -> usize {
+    match name {
+        "float64" | "int64" | "uint64" => 8,
+        "float32" | "int32" | "uint32" => 4,
+        "bool" | "uint8" | "int8" => 1,
+        _ => 2, // f16/bf16/u16/i16 + anything else small
+    }
+}
+
 /// Client side of the handshake: answer the server's nonce, then verify the
 /// server's counter-proof. Returns early (no-op) when auth is disabled —
 /// detected by the server sending a normal result instead of a challenge.
-fn client_handshake(s: &mut TcpStream, key: &[u8]) -> Result<()> {
+pub(crate) fn client_handshake(s: &mut TcpStream, key: &[u8]) -> Result<()> {
     let challenge = read_frame(s)?;
     if challenge.op != "auth" {
         bail!("expected auth challenge, got {}", challenge.op);
@@ -523,6 +617,8 @@ fn client_handshake(s: &mut TcpStream, key: &[u8]) -> Result<()> {
             done: None,
             text: Some(proof),
             error: None,
+            shape: None,
+            dtype: None,
             layer_start: None,
             layer_end: None,
         },
@@ -541,26 +637,34 @@ fn client_handshake(s: &mut TcpStream, key: &[u8]) -> Result<()> {
     }
 }
 
-/// Open an authenticated connection to a rank.
-fn connect(host: &str, timeout_secs: u64) -> Result<TcpStream> {
+/// Open an authenticated connection to a rank. Returns the stream and the
+/// session cipher — Some when auth+encryption are both enabled.
+fn connect(
+    host: &str,
+    timeout_secs: u64,
+) -> Result<(TcpStream, Option<crate::p2p_crypto::P2PCipher>)> {
     let mut s = TcpStream::connect(host).with_context(|| format!("connect {host}"))?;
     s.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
     s.set_write_timeout(Some(Duration::from_secs(30)))?;
     s.set_nodelay(true).ok();
     if mesh_auth_enabled() {
-        client_handshake(&mut s, &resolve_mesh_secret()?)?;
+        let secret = resolve_mesh_secret()?;
+        client_handshake(&mut s, &secret)?;
+        if mesh_enc_enabled() {
+            return Ok((s, Some(session_cipher(&secret)?)));
+        }
     }
-    Ok(s)
+    Ok((s, None))
 }
 
-fn write_frame(s: &mut TcpStream, frame: &MeshBrainFrame) -> Result<()> {
+pub(crate) fn write_frame(s: &mut TcpStream, frame: &MeshBrainFrame) -> Result<()> {
     let json = serde_json::to_vec(frame)?;
     s.write_all(&(json.len() as u32).to_be_bytes())?;
     s.write_all(&json)?;
     Ok(())
 }
 
-fn read_frame(s: &mut TcpStream) -> Result<MeshBrainFrame> {
+pub(crate) fn read_frame(s: &mut TcpStream) -> Result<MeshBrainFrame> {
     let mut len_buf = [0u8; 4];
     s.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -574,8 +678,8 @@ fn read_frame(s: &mut TcpStream) -> Result<MeshBrainFrame> {
 
 /// Ping a rank — returns (rank, layer_start, layer_end) as a liveness check.
 pub fn ping(host: &str) -> Result<(i64, Option<usize>, Option<usize>)> {
-    let mut s = connect(host, 30)?;
-    write_frame(
+    let (mut s, cipher) = connect(host, 30)?;
+    write_packet(
         &mut s,
         &MeshBrainFrame {
             op: "ping".into(),
@@ -585,11 +689,15 @@ pub fn ping(host: &str) -> Result<(i64, Option<usize>, Option<usize>)> {
             done: None,
             text: None,
             error: None,
+            shape: None,
+            dtype: None,
             layer_start: None,
             layer_end: None,
         },
+        &[],
+        cipher.as_ref(),
     )?;
-    let resp = read_frame(&mut s)?;
+    let (resp, _) = read_packet(&mut s, cipher.as_ref())?;
     if let Some(e) = resp.error {
         bail!("peer error: {e}");
     }
@@ -603,8 +711,8 @@ pub fn ping(host: &str) -> Result<(i64, Option<usize>, Option<usize>)> {
 /// Ask the pipeline to generate: sends the prompt to the embed rank (rank 0)
 /// and returns decoded text produced by the last rank's head.
 pub fn ask(host: &str, prompt: &str, max_tokens: usize) -> Result<String> {
-    let mut s = connect(host, 600)?;
-    write_frame(
+    let (mut s, cipher) = connect(host, 600)?;
+    write_packet(
         &mut s,
         &MeshBrainFrame {
             op: "generate".into(),
@@ -614,11 +722,15 @@ pub fn ask(host: &str, prompt: &str, max_tokens: usize) -> Result<String> {
             done: None,
             text: None,
             error: None,
+            shape: None,
+            dtype: None,
             layer_start: None,
             layer_end: None,
         },
+        &[],
+        cipher.as_ref(),
     )?;
-    let resp = read_frame(&mut s)?;
+    let (resp, _) = read_packet(&mut s, cipher.as_ref())?;
     if let Some(e) = resp.error {
         bail!("mesh-brain error: {e}");
     }
@@ -662,11 +774,14 @@ mod tests {
     fn remap_renumbers_layers() {
         let spec = ShardSpec {
             rank: 1,
+            world: 2,
             host: "b:8741".into(),
+            next_host: None,
             layer_start: 14,
             layer_end: 28,
             has_embed: false,
             has_head: true,
+            tie_embeddings: false,
         };
         assert_eq!(
             remap_key("model.layers.14.mlp.down_proj.weight", &spec).as_deref(),
@@ -680,6 +795,12 @@ mod tests {
             remap_key("model.norm.weight", &spec).as_deref(),
             Some("model.norm.weight")
         );
-        assert_eq!(remap_key("model.embed_tokens.weight", &spec), None);
+        // Non-layer weights replicate to every rank — MLX validates all
+        // declared module weights at load time, and tied models need
+        // embed_tokens on the last rank as the output head.
+        assert_eq!(
+            remap_key("model.embed_tokens.weight", &spec).as_deref(),
+            Some("model.embed_tokens.weight")
+        );
     }
 }

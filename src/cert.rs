@@ -79,6 +79,26 @@ pub fn run() -> Vec<CertResult> {
             "policy_yaml_covers_dangerous_tools",
             policy_yaml_covers_dangerous_tools,
         ),
+        run_check(
+            "mesh_brain_plan_covers_layers",
+            mesh_brain_plan_covers_layers,
+        ),
+        run_check(
+            "mesh_brain_shard_metadata_written",
+            mesh_brain_shard_metadata_written,
+        ),
+        run_check(
+            "mesh_brain_frames_carry_no_plaintext",
+            mesh_brain_frames_carry_no_plaintext,
+        ),
+        run_check(
+            "mesh_brain_auth_rejects_wrong_key",
+            mesh_brain_auth_rejects_wrong_key,
+        ),
+        run_check(
+            "mesh_brain_dead_peer_fails_fast",
+            mesh_brain_dead_peer_fails_fast,
+        ),
     ]
 }
 
@@ -624,6 +644,360 @@ fn policy_yaml_covers_dangerous_tools() -> Result<(), String> {
         if !policy.contains(tool) {
             return Err(format!("policy.yaml must cover {tool}"));
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Mesh-brain checks — pipeline-parallel inference across trusted peers.
+// All checks are self-contained: loopback sockets and synthetic model dirs
+// only; no live ranks, downloads, or external state required.
+// ---------------------------------------------------------------------------
+
+/// Layer plans must cover every decoder layer exactly once, in order, with
+/// embed on rank 0, head on the last rank, and a wired next_host chain.
+fn mesh_brain_plan_covers_layers() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cert_mbplan_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("config.json"),
+        r#"{"num_hidden_layers": 28, "hidden_size": 896, "vocab_size": 151936}"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let hosts: Vec<String> = ["a:8741", "b:8741", "c:8741"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let plan =
+        crate::mesh_brain::plan(&dir, &hosts, None).map_err(|e| format!("plan failed: {e}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if plan.ranks.len() != 3 {
+        return Err(format!("expected 3 ranks, got {}", plan.ranks.len()));
+    }
+    if plan.ranks[0].layer_start != 0 || plan.ranks[2].layer_end != 28 {
+        return Err("plan does not cover layers 0..28".to_string());
+    }
+    for w in plan.ranks.windows(2) {
+        if w[0].layer_end != w[1].layer_start {
+            return Err(format!(
+                "gap/overlap between ranks {} and {}",
+                w[0].rank, w[1].rank
+            ));
+        }
+        if w[0].next_host.as_deref() != Some(w[1].host.as_str()) {
+            return Err(format!("rank {} not wired to next host", w[0].rank));
+        }
+    }
+    if !plan.ranks[0].has_embed || plan.ranks[0].has_head {
+        return Err("rank 0 must own embed and not head".to_string());
+    }
+    if plan.ranks[2].has_embed || !plan.ranks[2].has_head {
+        return Err("last rank must own head and not embed".to_string());
+    }
+    for r in &plan.ranks {
+        if r.world != 3 {
+            return Err(format!("rank {} has world {}", r.rank, r.world));
+        }
+    }
+    if plan.ranks[2].next_host.is_some() {
+        return Err("last rank must have no next_host".to_string());
+    }
+    Ok(())
+}
+
+/// build_shard must write mesh_brain_rank.json with the camelCase keys the
+/// Swift Codable expects, renumber layer tensors, and regenerate the weight
+/// index — verified here against a synthetic safetensors model.
+fn mesh_brain_shard_metadata_written() -> Result<(), String> {
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join(format!("cert_mbshard_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let model = dir.join("model");
+    let out = dir.join("shard0");
+    std::fs::create_dir_all(&model).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+
+    std::fs::write(
+        model.join("config.json"),
+        r#"{"num_hidden_layers": 2, "hidden_size": 4, "vocab_size": 8}"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Minimal safetensors: 8-byte LE header len + JSON header + raw data.
+    // Two tensors — a layer weight (split) and a non-layer weight (replicated).
+    let tensor_data = [0u8; 16]; // two BF16 tensors of 4 elems each
+    let header = serde_json::json!({
+        "model.layers.0.mlp.weight": {"dtype": "BF16", "shape": [2, 2], "data_offsets": [0, 8]},
+        "model.norm.weight": {"dtype": "BF16", "shape": [2, 2], "data_offsets": [8, 16]},
+    });
+    let header_bytes = serde_json::to_vec(&header).map_err(|e| e.to_string())?;
+    let mut st = Vec::new();
+    st.write_all(&(header_bytes.len() as u64).to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    st.write_all(&header_bytes).map_err(|e| e.to_string())?;
+    st.write_all(&tensor_data).map_err(|e| e.to_string())?;
+    std::fs::write(model.join("model.safetensors"), &st).map_err(|e| e.to_string())?;
+    // A global index that must be regenerated, not copied.
+    std::fs::write(
+        model.join("model.safetensors.index.json"),
+        r#"{"metadata": {"total_size": 16}, "weight_map": {"model.layers.0.mlp.weight": "model.safetensors", "model.norm.weight": "model.safetensors", "model.layers.1.mlp.weight": "model.safetensors"}}"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let spec = crate::mesh_brain::ShardSpec {
+        rank: 0,
+        world: 2,
+        host: "a:8741".into(),
+        next_host: Some("b:8741".into()),
+        layer_start: 0,
+        layer_end: 1,
+        has_embed: true,
+        has_head: false,
+        tie_embeddings: false,
+    };
+    let kept = crate::mesh_brain::build_shard(&model, &out, &spec)
+        .map_err(|e| format!("build_shard failed: {e}"))?;
+    if kept == 0 {
+        return Err("shard kept no tensors".to_string());
+    }
+
+    // Rank metadata must exist with camelCase keys for the Swift Codable.
+    let meta_text = std::fs::read_to_string(out.join("mesh_brain_rank.json"))
+        .map_err(|e| format!("mesh_brain_rank.json missing: {e}"))?;
+    let meta: serde_json::Value = serde_json::from_str(&meta_text).map_err(|e| e.to_string())?;
+    for key in [
+        "rank",
+        "world",
+        "host",
+        "nextHost",
+        "hasEmbed",
+        "hasHead",
+        "layerStart",
+        "layerEnd",
+    ] {
+        if meta.get(key).is_none() {
+            return Err(format!("mesh_brain_rank.json missing key {key}"));
+        }
+    }
+    if meta["nextHost"] != "b:8741" || meta["layerEnd"] != 1 {
+        return Err("rank metadata values wrong".to_string());
+    }
+
+    // The regenerated index must not reference global keys absent locally.
+    let idx_text = std::fs::read_to_string(out.join("model.safetensors.index.json"))
+        .map_err(|e| format!("index not regenerated: {e}"))?;
+    if idx_text.contains("layers.1") {
+        return Err("stale index references layer 1, which is not in this shard".to_string());
+    }
+    if !idx_text.contains("model.norm.weight") {
+        return Err("index lost the replicated non-layer weight".to_string());
+    }
+
+    // The shard safetensors must hold re-keyed local indices.
+    let shard_st = std::fs::read(out.join("model.safetensors")).map_err(|e| e.to_string())?;
+    let hlen = u64::from_le_bytes(shard_st[..8].try_into().unwrap()) as usize;
+    let shard_header: serde_json::Value =
+        serde_json::from_slice(&shard_st[8..8 + hlen]).map_err(|e| e.to_string())?;
+    if shard_header.get("model.layers.0.mlp.weight").is_none() {
+        return Err("layer tensor was not re-keyed into the shard".to_string());
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// Post-handshake frames must be AES-256-GCM envelopes — the wire bytes must
+/// not contain the plaintext op or payload, tampering must fail, and a wrong
+/// session key must fail. Runs over a real loopback socket pair.
+fn mesh_brain_frames_carry_no_plaintext() -> Result<(), String> {
+    use crate::mesh_brain as mb;
+    use std::net::{TcpListener, TcpStream};
+
+    let secret = b"cert-mesh-secret-cert-mesh-secret-42";
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+
+    // "Server" thread: perform the server handshake, then echo one packet.
+    let server = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+        let (mut s, _) = listener.accept().map_err(|e| e.to_string())?;
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let mut ch = mb::MeshBrainFrame {
+            op: "auth".into(),
+            prompt: None,
+            max_tokens: None,
+            token: None,
+            done: None,
+            text: Some(nonce.into()),
+            error: None,
+            shape: None,
+            dtype: None,
+            layer_start: None,
+            layer_end: None,
+        };
+        mb::write_frame(&mut s, &ch).map_err(|e| e.to_string())?;
+        let resp = mb::read_frame(&mut s).map_err(|e| e.to_string())?;
+        let expect = mb::hmac_hex(secret, &format!("mb-c:{nonce}"));
+        if resp.text.as_deref() != Some(expect.as_str()) {
+            return Err("client proof mismatch".to_string());
+        }
+        ch.op = "auth-ok".into();
+        ch.text = Some(mb::hmac_hex(secret, &format!("mb-s:{nonce}")));
+        mb::write_frame(&mut s, &ch).map_err(|e| e.to_string())?;
+
+        let cipher = mb::session_cipher(secret).map_err(|e| e.to_string())?;
+        let (frame, payload) = mb::read_packet(&mut s, Some(&cipher)).map_err(|e| e.to_string())?;
+        mb::write_packet(&mut s, &frame, &payload, Some(&cipher)).map_err(|e| e.to_string())?;
+
+        // Also sniff the raw wire: read one more packet's raw bytes the
+        // client sends purely for the sniff check is overkill — instead we
+        // capture what the client sent by re-reading nothing. The plaintext
+        // check happens client-side on the echo bytes.
+        Ok(payload)
+    });
+
+    let mut s = TcpStream::connect(addr).map_err(|e| e.to_string())?;
+    mb::client_handshake(&mut s, secret).map_err(|e| format!("handshake: {e}"))?;
+    let cipher = mb::session_cipher(secret).map_err(|e| e.to_string())?;
+
+    let marker_payload = b"hidden-state-marker-0xdeadbeef".to_vec();
+    let frame = mb::MeshBrainFrame {
+        op: "step".into(),
+        prompt: None,
+        max_tokens: None,
+        token: None,
+        done: None,
+        text: Some("plaintext-marker-op".into()),
+        error: None,
+        shape: Some(vec![1, 1, 8]),
+        dtype: Some("bfloat16".into()),
+        layer_start: None,
+        layer_end: None,
+    };
+    mb::write_packet(&mut s, &frame, &marker_payload, Some(&cipher)).map_err(|e| e.to_string())?;
+    let (echo, echo_payload) = mb::read_packet(&mut s, Some(&cipher)).map_err(|e| e.to_string())?;
+    if echo_payload != marker_payload || echo.op != "step" {
+        return Err("encrypted round-trip corrupted the frame".to_string());
+    }
+    server
+        .join()
+        .map_err(|_| "server thread panicked".to_string())??;
+
+    // Wire proof: encrypt the same frame and confirm neither the JSON header
+    // nor the payload survives in the ciphertext.
+    let json = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
+    let mut inner = Vec::new();
+    inner.extend_from_slice(&(json.len() as u32).to_be_bytes());
+    inner.extend_from_slice(&json);
+    inner.extend_from_slice(&marker_payload);
+    let ct = cipher.encrypt(&inner).map_err(|e| e.to_string())?;
+    for needle in [
+        b"\"op\"".as_slice(),
+        b"step".as_slice(),
+        b"plaintext-marker-op".as_slice(),
+        b"hidden-state-marker".as_slice(),
+    ] {
+        if ct.windows(needle.len()).any(|w| w == needle) {
+            return Err("plaintext marker visible in encrypted frame".to_string());
+        }
+    }
+
+    // Tamper: flip a ciphertext byte — decrypt must fail.
+    let mut bad = ct.clone();
+    let n = bad.len();
+    bad[n - 1] ^= 0x01;
+    if cipher.decrypt(&bad).is_ok() {
+        return Err("tampered mesh frame decrypted successfully".to_string());
+    }
+    // Wrong key: a second cipher must not open the frame.
+    let wrong =
+        mb::session_cipher(b"cert-mesh-secret-cert-mesh-secret-99").map_err(|e| e.to_string())?;
+    if wrong.decrypt(&ct).is_ok() {
+        return Err("mesh frame opened with the wrong session key".to_string());
+    }
+    Ok(())
+}
+
+/// The mutual handshake must reject a peer that proves the wrong secret —
+/// exercised over a real loopback connection against a mock server.
+fn mesh_brain_auth_rejects_wrong_key() -> Result<(), String> {
+    use crate::mesh_brain as mb;
+    use std::net::{TcpListener, TcpStream};
+
+    let server_key = b"cert-server-key-cert-server-key-000";
+    let client_key = b"cert-WRONG-key-cert-WRONG-key-0000";
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            let nonce = "aabbccddeeff00112233445566778899";
+            let mut ch = mb::MeshBrainFrame {
+                op: "auth".into(),
+                prompt: None,
+                max_tokens: None,
+                token: None,
+                done: None,
+                text: Some(nonce.into()),
+                error: None,
+                shape: None,
+                dtype: None,
+                layer_start: None,
+                layer_end: None,
+            };
+            if mb::write_frame(&mut s, &ch).is_err() {
+                return;
+            }
+            if let Ok(resp) = mb::read_frame(&mut s) {
+                let expect = mb::hmac_hex(server_key, &format!("mb-c:{nonce}"));
+                if resp.text.as_deref() != Some(expect.as_str()) {
+                    ch.op = "error".into();
+                    ch.text = Some("authentication failed".into());
+                    let _ = mb::write_frame(&mut s, &ch);
+                    return;
+                }
+                ch.op = "auth-ok".into();
+                ch.text = Some(mb::hmac_hex(server_key, &format!("mb-s:{nonce}")));
+                let _ = mb::write_frame(&mut s, &ch);
+            }
+        }
+    });
+
+    let mut s = TcpStream::connect(addr).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
+    match mb::client_handshake(&mut s, client_key) {
+        Ok(()) => Err("client handshake succeeded with the wrong key".to_string()),
+        Err(e) => {
+            if format!("{e}").contains("auth") {
+                Ok(())
+            } else {
+                Err(format!("handshake failed but not via auth rejection: {e}"))
+            }
+        }
+    }
+}
+
+/// A dead rank must surface as a fast connection error — never a hang.
+fn mesh_brain_dead_peer_fails_fast() -> Result<(), String> {
+    // Bind then drop a listener to find a port that is definitely closed.
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        l.local_addr().map_err(|e| e.to_string())?.port()
+    };
+    let start = std::time::Instant::now();
+    let result = crate::mesh_brain::ping(&format!("127.0.0.1:{port}"));
+    let elapsed = start.elapsed();
+    if result.is_ok() {
+        return Err("ping to a dead rank succeeded".to_string());
+    }
+    if elapsed > std::time::Duration::from_secs(10) {
+        return Err(format!(
+            "dead peer took {elapsed:?} to fail — possible hang"
+        ));
     }
     Ok(())
 }

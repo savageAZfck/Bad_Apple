@@ -75,6 +75,18 @@ enum MeshBrainAuth {
         ProcessInfo.processInfo.environment["BADAPPLE_MESH_AUTH"] != "0"
     }
 
+    /// AES-256-GCM frames ride on top of the handshake — same SHA-256
+    /// derivation as the P2P engram crypto. BADAPPLE_MESH_ENC=0 disables.
+    static var encryptionEnabled: Bool {
+        enabled
+            && ProcessInfo.processInfo.environment["BADAPPLE_MESH_ENC"] != "0"
+    }
+
+    static func sessionKey() -> SymmetricKey? {
+        guard encryptionEnabled, let s = secret else { return nil }
+        return SymmetricKey(data: SHA256.hash(data: s))
+    }
+
     static var secret: Data? {
         let env = ProcessInfo.processInfo.environment
         if let s = env["BADAPPLE_MESH_KEY"], !s.isEmpty { return Data(s.utf8) }
@@ -229,6 +241,62 @@ enum MeshBrainWire {
         }
         return (header, payload)
     }
+
+    // MARK: encrypted packets
+    //
+    // Post-handshake the whole frame — header and tensor payload — travels
+    // inside one AES-256-GCM envelope: [u32 ctLen][nonce||ct||tag].
+    // `combined` layout matches Rust's P2PCipher.encrypt byte-for-byte.
+
+    static func writePacket(
+        to conn: NWConnection, header: MeshBrainFrame, payload: Data?,
+        key: SymmetricKey?
+    ) async throws {
+        guard let key else {
+            return try await writeFrame(to: conn, header: header, payload: payload)
+        }
+        let json = try JSONEncoder().encode(header)
+        var inner = Data()
+        var l = UInt32(json.count).bigEndian
+        inner.append(Data(bytes: &l, count: 4))
+        inner.append(json)
+        if let payload { inner.append(payload) }
+        let box = try AES.GCM.seal(inner, using: key)
+        guard let combined = box.combined else {
+            throw MeshBrainError.transport("gcm seal produced no combined box")
+        }
+        var out = Data()
+        var cl = UInt32(combined.count).bigEndian
+        out.append(Data(bytes: &cl, count: 4))
+        out.append(combined)
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            conn.send(content: out, completion: .contentProcessed { error in
+                if let error { cont.resume(throwing: error) } else { cont.resume() }
+            })
+        }
+    }
+
+    static func readPacket(
+        from conn: NWConnection, key: SymmetricKey?
+    ) async throws -> (MeshBrainFrame, Data) {
+        guard let key else { return try await readFrame(from: conn) }
+        let lenData = try await readExact(conn, count: 4)
+        let len = lenData.withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
+        guard len < 512 * 1024 * 1024 else {
+            throw MeshBrainError.badFrame("encrypted frame too large")
+        }
+        let combined = try await readExact(conn, count: Int(len))
+        let sealed = try AES.GCM.SealedBox(combined: combined)
+        let inner = try AES.GCM.open(sealed, using: key)
+        guard inner.count >= 4 else { throw MeshBrainError.badFrame("frame too short") }
+        let jsonLen = Int(inner.withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian)
+        guard inner.count >= 4 + jsonLen else {
+            throw MeshBrainError.badFrame("frame truncated")
+        }
+        let header = try JSONDecoder().decode(
+            MeshBrainFrame.self, from: inner[4 ..< 4 + jsonLen])
+        return (header, inner[(4 + jsonLen)...])
+    }
 }
 
 public enum MeshBrainError: Error, CustomStringConvertible {
@@ -276,6 +344,7 @@ final class TimeoutFlag: @unchecked Sendable { var done = false }
 
 final class MeshBrainLink: @unchecked Sendable {
     private let conn: NWConnection
+    private var sessionKey: SymmetricKey?
     private let queue = DispatchQueue(label: "badapple.meshbrain.link")
 
     init(host: String) async throws {
@@ -312,6 +381,7 @@ final class MeshBrainLink: @unchecked Sendable {
         }
         conn.stateUpdateHandler = nil
         try await MeshBrainAuth.clientHandshake(conn)
+        sessionKey = MeshBrainAuth.sessionKey()
     }
 
     func request(_ header: MeshBrainFrame, payload: Data?) async throws
@@ -325,8 +395,9 @@ final class MeshBrainLink: @unchecked Sendable {
         }
         defer { flag.done = true; watchdog.cancel() }
         do {
-            try await MeshBrainWire.writeFrame(to: conn, header: header, payload: payload)
-            return try await MeshBrainWire.readFrame(from: conn)
+            try await MeshBrainWire.writePacket(
+                to: conn, header: header, payload: payload, key: sessionKey)
+            return try await MeshBrainWire.readPacket(from: conn, key: sessionKey)
         } catch {
             throw MeshBrainError.transport("\(error)")
         }
@@ -548,11 +619,13 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
         }
         authDone.done = true
         authWatchdog.cancel()
+        let connKey = MeshBrainAuth.sessionKey()
         while true {
             let header: MeshBrainFrame
             let payload: Data
             do {
-                (header, payload) = try await MeshBrainWire.readFrame(from: conn)
+                (header, payload) = try await MeshBrainWire.readPacket(
+                    from: conn, key: connKey)
             } catch {
                 return  // transport broke — nothing left to say
             }
@@ -563,34 +636,40 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
                     r.token = spec.rank
                     r.layerStart = spec.layerStart
                     r.layerEnd = spec.layerEnd
-                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                    try await MeshBrainWire.writePacket(
+                        to: conn, header: r, payload: nil, key: connKey)
                 case "reset":
                     try await handleReset()
-                    try await MeshBrainWire.writeFrame(
-                        to: conn, header: MeshBrainFrame(op: "result"), payload: nil)
+                    try await MeshBrainWire.writePacket(
+                        to: conn, header: MeshBrainFrame(op: "result"),
+                        payload: nil, key: connKey)
                 case "step":
                     let h = try MeshBrainWire.unpackArray(header, payload: payload)
                     let (tok, done) = try await handleStep(hidden: h)
                     var r = MeshBrainFrame(op: "result")
                     r.token = tok; r.done = done
-                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                    try await MeshBrainWire.writePacket(
+                        to: conn, header: r, payload: nil, key: connKey)
                 case "generate":
                     let text = try await generate(
                         prompt: header.prompt ?? "",
                         maxTokens: header.maxTokens ?? 64)
                     var r = MeshBrainFrame(op: "result")
                     r.text = text
-                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                    try await MeshBrainWire.writePacket(
+                        to: conn, header: r, payload: nil, key: connKey)
                 default:
                     var r = MeshBrainFrame(op: "error")
                     r.error = "unknown op \(header.op)"
-                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                    try await MeshBrainWire.writePacket(
+                        to: conn, header: r, payload: nil, key: connKey)
                 }
             } catch {
                 // Handler failure — tell the caller, keep the conn alive.
                 var r = MeshBrainFrame(op: "error")
                 r.error = "\(error)"
-                try? await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                try? await MeshBrainWire.writePacket(
+                    to: conn, header: r, payload: nil, key: connKey)
             }
         }
     }

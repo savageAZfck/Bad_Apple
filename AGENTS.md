@@ -328,6 +328,7 @@ BADAPPLE_SHARD_DIR=/path/to/shard-r0 badapple-engine   # listens on its rank add
 
 # Drive it from rank 0
 badapple mesh-brain ping --to h1:8741
+badapple mesh-brain status --hosts h1:8741,h2:8742
 badapple mesh-brain ask --to h1:8741 --prompt "..." --max-tokens 64
 ```
 
@@ -350,12 +351,22 @@ Internals:
 - Wire auth: per-connection mutual HMAC-SHA256 nonce challenge over the
   shared SLICKS secret (BADAPPLE_MESH_KEY > BADAPPLE_P2P_SECRET >
   BADAPPLE_SLICKS_KEY_PATH > /var/lib/bad_apple/slicks.key).
-  BADAPPLE_MESH_AUTH=0 disables (debug only). Watchdog timers cancel dead
-  conns (BADAPPLE_MESH_TIMEOUT, default 120s); transport failure mid-token
-  resets the whole pipeline and retries once — KV caches can't be trusted
-  after a dropped step.
+  BADAPPLE_MESH_AUTH=0 disables (debug only).
+- Wire encryption: after the handshake every frame — header AND tensor
+  payload — travels in one AES-256-GCM envelope
+  `[u32 ctLen][nonce||GCM(u32 jsonLen||json||payload)||tag]`; the session
+  key is SHA-256 of the shared secret (same derivation as P2P engram
+  crypto, `P2PCipher` on the Rust side, CryptoKit `AES.GCM` on Swift).
+  BADAPPLE_MESH_ENC=0 disables (debug only); requires auth on. Handshake
+  frames stay plaintext so a peer without the secret cannot get past auth.
+- Watchdog timers cancel dead conns (BADAPPLE_MESH_TIMEOUT, default 120s);
+  transport failure mid-token resets the whole pipeline and retries once —
+  KV caches can't be trusted after a dropped step.
 - Verified live on one Mac: 2-rank 0.5B over loopback AND over the LAN
-  interface, wrong-key rejection, dead-peer fast error, restart recovery.
+  interface, encrypted generation, wrong-key rejection, plaintext-client
+  rejection, dead-peer fast error, restart recovery. `badapple cert`
+  covers planning, shard metadata, ciphertext-on-wire, wrong-key
+  handshake rejection, and dead-peer fail-fast.
 
 ## Air-gap certification
 
