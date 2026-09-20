@@ -116,9 +116,60 @@ final class BadAppleModelManager {
         ),
         ModelProfile(
             id: "main_70b",
-            name: "Deep 70B MoE",
-            repoId: "mlx-community/DeepSeek-V3-Chat-4bit",
-            sizeGB: 41.0,
+            name: "Deep 70B",
+            repoId: "mlx-community/Llama-3.3-70B-Instruct-4bit",
+            sizeGB: 40.0,
+            kind: "text",
+            loadedIn: "mlx_server"
+        ),
+        ModelProfile(
+            id: "moe_80b",
+            name: "Hybrid 80B MoE",
+            repoId: "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
+            sizeGB: 45.0,
+            kind: "text",
+            loadedIn: "mlx_server"
+        ),
+        ModelProfile(
+            id: "oss_120b",
+            name: "GPT-OSS 120B MoE",
+            repoId: "mlx-community/gpt-oss-120b-MXFP4-Q4",
+            sizeGB: 65.0,
+            kind: "text",
+            loadedIn: "mlx_server"
+        ),
+        ModelProfile(
+            id: "moe_235b",
+            name: "Deep 235B MoE",
+            repoId: "mlx-community/Qwen3-235B-A22B-Instruct-2507-4bit",
+            sizeGB: 132.0,
+            kind: "text",
+            loadedIn: "mlx_server"
+        ),
+        // GLM4MOE arch is supported by the bundled mlx-swift-lm build;
+        // Llama-4 (llama4 arch) is not, so this fills the ~200 GB slot.
+        ModelProfile(
+            id: "glm_355b",
+            name: "GLM-4.5 355B MoE",
+            repoId: "mlx-community/GLM-4.5-4bit",
+            sizeGB: 200.0,
+            kind: "text",
+            loadedIn: "mlx_server"
+        ),
+        ModelProfile(
+            id: "coder_480b",
+            name: "Coder 480B MoE",
+            repoId: "mlx-community/Qwen3-Coder-480B-A35B-Instruct-4bit",
+            sizeGB: 273.0,
+            kind: "text",
+            loadedIn: "mlx_server"
+        ),
+        // Peak single-node brain: needs a maxed-out Studio (~512GB unified).
+        ModelProfile(
+            id: "r1_671b",
+            name: "DeepSeek R1 671B",
+            repoId: "mlx-community/DeepSeek-R1-0528-4bit",
+            sizeGB: 380.0,
             kind: "text",
             loadedIn: "mlx_server"
         ),
@@ -183,6 +234,32 @@ final class BadAppleModelManager {
 
     private var verifyHashes: Bool {
         ProcessInfo.processInfo.environment["BADAPPLE_VERIFY_MODEL_HASHES"] != "0"
+    }
+
+    /// Memory headroom multiplier for load-time fit checks. Dense models
+    /// keep ~40% overhead for KV cache and runtime; giant MoE models have
+    /// far less cache relative to parameter count, so a flat 1.4x would
+    /// make a 380 GB model unreachable on a 512 GB machine.
+    private func headroomFactor(_ sizeGB: Double) -> Double {
+        sizeGB >= 100.0 ? 1.15 : 1.4
+    }
+
+    /// Provenance hashing budget scaled to the model's declared size.
+    /// A flat 10 GB cap silently skips shards on 100 GB+ models.
+    private func hashCapFor(_ profile: ModelProfile) -> Int64 {
+        Int64(max(10.0, profile.sizeGB * 1.3) * 1_073_741_824.0)
+    }
+
+    /// Hashing a 380 GB model exceeds the default 5-minute budget even on
+    /// fast NVMe; scale the deadline by model size (~2 s/GB floor).
+    private func provenanceTimeoutFor(_ profile: ModelProfile) -> TimeInterval {
+        max(provenanceTimeout, profile.sizeGB * 2.0)
+    }
+
+    /// Download deadline scaled to model size (~1 min/GB floor) so a
+    /// multi-hundred-GB pull isn't killed at the 30-minute default.
+    private func downloadTimeoutFor(_ profile: ModelProfile) -> TimeInterval {
+        max(downloadTimeout, profile.sizeGB * 60.0)
     }
 
     private var hfCacheRoot: URL {
@@ -328,7 +405,7 @@ final class BadAppleModelManager {
         saveState()
 
         // Use the native Rust helper. Falls back to environment overrides.
-        let timeout = downloadTimeout
+        let timeout = downloadTimeoutFor(profile)
         let repoId = profile.repoId
         guard let helperURL = fetchHelperURL() else {
             state.status = .error
@@ -658,10 +735,13 @@ final class BadAppleModelManager {
         return profiles[modelId]?.name ?? modelId
     }
 
-    /// Estimated memory required to load a model, with a 1.4x multiplier for KV/cache overhead.
+    /// Estimated memory required to load a model: size times a headroom
+    /// factor for KV cache and runtime overhead (lower for giant MoE
+    /// models whose cache is small relative to parameter count).
     func memoryRequiredGB(modelId: String) -> Double {
         lock.lock(); defer { lock.unlock() }
-        return (profiles[modelId]?.sizeGB ?? 0.0) * 1.4
+        let size = profiles[modelId]?.sizeGB ?? 0.0
+        return size * headroomFactor(size)
     }
 
     // MARK: - Provenance
@@ -705,6 +785,11 @@ final class BadAppleModelManager {
         guard let root = safeLocalPath(localPath, mustExist: true) else {
             return ["status": "invalid_path", "error": "path is outside HF cache or does not exist"]
         }
+        guard let profile = lock.withLock({ profiles[modelId] }) else {
+            return ["status": "error", "error": "unknown model \(modelId)"]
+        }
+        let hashCap = hashCapFor(profile)
+        let deadline = Date().addingTimeInterval(provenanceTimeoutFor(profile))
 
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(atPath: root.path) else {
@@ -713,7 +798,6 @@ final class BadAppleModelManager {
 
         var files: [String: ModelFileEntry] = [:]
         var totalHashed: Int64 = 0
-        let deadline = Date().addingTimeInterval(provenanceTimeout)
 
         for case let file as String in enumerator {
             if file.hasPrefix(".") { continue }
@@ -725,7 +809,7 @@ final class BadAppleModelManager {
             fm.fileExists(atPath: full.path, isDirectory: &isDir)
             if isDir.boolValue { continue }
 
-            if totalHashed > defaultHashCap { break }
+            if totalHashed > hashCap { break }
 
             var attributes: [FileAttributeKey: Any]?
             do {
@@ -733,7 +817,7 @@ final class BadAppleModelManager {
             } catch { continue }
             let size = (attributes?[.size] as? Int64) ?? 0
             let mtime = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-            if size > defaultHashCap { continue }
+            if size > hashCap { continue }
 
             do {
                 let sha256 = try sha256File(full, deadline: deadline)
@@ -744,9 +828,6 @@ final class BadAppleModelManager {
             }
         }
 
-        guard let profile = profiles[modelId] else {
-            return ["status": "error", "error": "unknown model \(modelId)"]
-        }
         var manifest = ModelManifest(
             repoId: profile.repoId,
             localPath: root.path,
@@ -810,7 +891,9 @@ final class BadAppleModelManager {
 
         var mismatches: [String] = []
         var checked = 0
-        let deadline = Date().addingTimeInterval(provenanceTimeout)
+        let deadline = Date().addingTimeInterval(
+            lock.withLock { profiles[modelId] }.map { provenanceTimeoutFor($0) } ?? provenanceTimeout
+        )
 
         for (rel, entry) in manifest.files {
             let file = root.appendingPathComponent(rel)
@@ -1096,11 +1179,16 @@ final class BadAppleModelManager {
         return 8.0
     }
 
+    /// Pick the largest text model that fits in the available memory,
+    /// walking the whole catalog — from 0.5B up to whatever the hardware
+    /// can carry. Self-scaling: new catalog entries join the ladder
+    /// automatically instead of needing a new hardcoded rung.
     private func recommendModelForMemory(availableGB: Double) -> String {
-        if availableGB < 3.0 { return "fast_0.5b" }
-        if availableGB < 7.0 { return "main_9b" }
-        if availableGB < 24.0 { return "main_32b" }
-        return "main_70b"
+        lock.lock(); defer { lock.unlock() }
+        let fitting = profiles.values.filter {
+            $0.kind == "text" && $0.sizeGB * headroomFactor($0.sizeGB) <= availableGB
+        }
+        return fitting.max(by: { $0.sizeGB < $1.sizeGB })?.id ?? "fast_0.5b"
     }
 
     private func recommendModelForQuery(_ query: String, availableGB: Double) -> String {
@@ -1112,9 +1200,10 @@ final class BadAppleModelManager {
     }
 
     private func recommendationReason(availableGB: Double, pick: String) -> String {
-        if pick.hasPrefix("fast_") { return "Only \(String(format: "%.1f", availableGB)) GB of memory is free, so a tiny model is the safest choice." }
-        if pick == "main_70b" { return "You have plenty of free memory (\(String(format: "%.1f", availableGB)) GB), so the largest available model is recommended." }
-        if pick == "main_32b" { return "You have a lot of free memory (\(String(format: "%.1f", availableGB)) GB), so a large model is recommended." }
-        return "You have \(String(format: "%.1f", availableGB)) GB of free memory, so the default 9B model is a good fit."
+        let avail = String(format: "%.1f", availableGB)
+        if pick == "fast_0.5b" {
+            return "Only \(avail) GB of memory is free, so a tiny model is the safest choice."
+        }
+        return "You have \(avail) GB of free memory, so \(profileName(pick)) is the largest model that fits."
     }
 }
