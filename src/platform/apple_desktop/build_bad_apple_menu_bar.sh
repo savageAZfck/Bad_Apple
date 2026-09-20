@@ -67,6 +67,10 @@ MLX_METAL_SHA256="198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a5
 MLX_METAL_CACHE="${HOME}/.cache/badapple/mlx-metal-${MLX_METAL_VERSION}/mlx.metallib"
 
 echo "Building BadAppleMLX inference module..."
+# Resolve dependencies first so the mlx-swift-lm checkout exists, then apply
+# the mesh-brain shard accessors (idempotent — skips patched files).
+(cd "${MLX_INFERENCE_DIR}" && swift package resolve)
+"${REPO_ROOT}/src/platform/apple_desktop/apply_mesh_brain_patch.sh"
 (cd "${MLX_INFERENCE_DIR}" && swift build -c release)
 
 if [[ -f "${MLX_METAL_CACHE}" ]] && [[ "$(shasum -a 256 "${MLX_METAL_CACHE}" | awk '{print $1}')" != "${MLX_METAL_SHA256}" ]]; then

@@ -1,0 +1,496 @@
+import Foundation
+import MLX
+import MLXLLM
+import MLXLMCommon
+import MLXRandom
+import Network
+
+// MARK: - Shardable model protocol
+//
+// The model files in MLXLLM carry `badapple-mesh-brain` extensions (see
+// apply_mesh_brain_patch.sh) that expose embed/layers/norm/head slices of the
+// forward pass. This protocol is the uniform handle the shard runtime drives;
+// conformances are declared here while the witnesses live in the vendored
+// model files (same-file extensions, so fileprivate members stay reachable).
+
+public protocol BadAppleShardable {
+    func badappleShardEmbed(_ ids: MLXArray) -> MLXArray
+    func badappleShardLayers(_ h: MLXArray, cache: [KVCache]?) -> MLXArray
+    func badappleShardNorm(_ h: MLXArray) -> MLXArray
+    func badappleShardHead(_ h: MLXArray) -> MLXArray
+}
+
+extension Qwen2Model: BadAppleShardable {}
+extension Qwen3Model: BadAppleShardable {}
+extension LlamaModel: BadAppleShardable {}
+extension Qwen3MoEModel: BadAppleShardable {}
+extension GLM4MoEModel: BadAppleShardable {}
+extension GLM4MoELiteModel: BadAppleShardable {}
+extension DeepseekV3Model: BadAppleShardable {}
+extension GPTOSSModel: BadAppleShardable {}
+
+// MARK: - Rank spec (written by `badapple mesh-brain shard`)
+
+public struct MeshBrainRankSpec: Codable, Sendable {
+    public var rank: Int
+    public var world: Int
+    public var host: String        // this rank's listen address "host:port"
+    public var nextHost: String?   // next rank's address, nil on the last rank
+    public var hasEmbed: Bool
+    public var hasHead: Bool
+    public var layerStart: Int
+    public var layerEnd: Int
+}
+
+// MARK: - Wire framing
+//
+// Frame = [u32 big-endian header length][header JSON][raw payload bytes].
+// The payload is a contiguous activation tensor; the header carries
+// shape/dtype so the receiver can rebuild an MLXArray without a copy.
+
+struct MeshBrainFrame: Codable {
+    var op: String                       // step | reset | ping | generate | result | error
+    var shape: [Int]? = nil
+    var dtype: String? = nil
+    var token: Int? = nil
+    var done: Bool? = nil
+    var maxTokens: Int? = nil
+    var prompt: String? = nil
+    var text: String? = nil
+    var error: String? = nil
+}
+
+enum MeshBrainWire {
+    static func dtypeName(_ d: DType) -> String {
+        switch d {
+        case .bfloat16: return "bfloat16"
+        case .float16: return "float16"
+        case .float32: return "float32"
+        case .float64: return "float64"
+        case .int32: return "int32"
+        case .int64: return "int64"
+        case .uint32: return "uint32"
+        default: return "\(d)"
+        }
+    }
+
+    static func dtype(named name: String) -> DType? {
+        switch name {
+        case "bfloat16": return .bfloat16
+        case "float16": return .float16
+        case "float32": return .float32
+        case "float64": return .float64
+        case "int32": return .int32
+        case "int64": return .int64
+        case "uint32": return .uint32
+        default: return nil
+        }
+    }
+
+    static func packArray(_ array: MLXArray) throws -> (MeshBrainFrame, Data) {
+        let d = array.contiguous().asData()
+        var frame = MeshBrainFrame(op: "")
+        frame.shape = d.shape
+        frame.dtype = dtypeName(d.dType)
+        return (frame, d.data)
+    }
+
+    static func unpackArray(_ frame: MeshBrainFrame, payload: Data) throws -> MLXArray {
+        guard let shape = frame.shape, let name = frame.dtype,
+              let dtype = dtype(named: name)
+        else { throw MeshBrainError.badFrame("missing shape/dtype") }
+        return MLXArray(payload, shape, dtype: dtype)
+    }
+
+    static func writeFrame(
+        to conn: NWConnection, header: MeshBrainFrame, payload: Data?
+    ) async throws {
+        var headerData = try JSONEncoder().encode(header)
+        var len = UInt32(headerData.count).bigEndian
+        var out = Data(bytes: &len, count: 4)
+        out.append(headerData)
+        if let payload { out.append(payload) }
+        headerData.removeAll()
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            conn.send(content: out, completion: .contentProcessed { error in
+                if let error { cont.resume(throwing: error) } else { cont.resume() }
+            })
+        }
+    }
+
+    static func readExact(_ conn: NWConnection, count: Int) async throws -> Data {
+        var buf = Data()
+        while buf.count < count {
+            let chunk: Data = try await withCheckedThrowingContinuation { cont in
+                conn.receive(minimumIncompleteLength: 1,
+                             maximumLength: count - buf.count) { data, _, _, error in
+                    if let error { cont.resume(throwing: error); return }
+                    cont.resume(returning: data ?? Data())
+                }
+            }
+            if chunk.isEmpty { throw MeshBrainError.peerClosed }
+            buf.append(chunk)
+        }
+        return buf
+    }
+
+    static func readFrame(
+        from conn: NWConnection
+    ) async throws -> (MeshBrainFrame, Data) {
+        let lenData = try await readExact(conn, count: 4)
+        let len = lenData.withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
+        guard len < 64 * 1024 else { throw MeshBrainError.badFrame("header too large") }
+        let headerData = try await readExact(conn, count: Int(len))
+        let header = try JSONDecoder().decode(MeshBrainFrame.self, from: headerData)
+        var payload = Data()
+        if let shape = header.shape {
+            let elems = shape.reduce(1, *)
+            let size = elems * (dtype(named: header.dtype ?? "")?.size ?? 2)
+            if size > 0 { payload = try await readExact(conn, count: size) }
+        }
+        return (header, payload)
+    }
+}
+
+public enum MeshBrainError: Error, CustomStringConvertible {
+    case badFrame(String)
+    case peerClosed
+    case unsupportedModel(String)
+    case transport(String)
+    public var description: String {
+        switch self {
+        case .badFrame(let s): return "bad frame: \(s)"
+        case .peerClosed: return "peer closed connection"
+        case .unsupportedModel(let s): return "unsupported shard model: \(s)"
+        case .transport(let s): return "transport: \(s)"
+        }
+    }
+}
+
+/// Minimal async semaphore — serializes pipeline steps since KV caches are
+/// stateful and must not interleave between requests.
+actor AsyncSemaphore {
+    private var permits: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    init(_ n: Int) { permits = n }
+    func wait() async {
+        if permits > 0 { permits -= 1; return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func signal() {
+        if !waiters.isEmpty { waiters.removeFirst().resume() } else { permits += 1 }
+    }
+}
+
+// MARK: - Downstream link (rank i -> rank i+1)
+
+final class MeshBrainLink: @unchecked Sendable {
+    private let conn: NWConnection
+    private let queue = DispatchQueue(label: "badapple.meshbrain.link")
+
+    init(host: String) async throws {
+        let parts = host.split(separator: ":")
+        guard let h = parts.first, let p = parts.last, let port = NWEndpoint.Port(String(p))
+        else { throw MeshBrainError.transport("bad host \(host)") }
+        conn = NWConnection(
+            host: NWEndpoint.Host(String(h)), port: port, using: .tcp)
+        final class Once: @unchecked Sendable { var resumed = false }
+        let once = Once()
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            conn.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if !once.resumed { once.resumed = true; cont.resume() }
+                case .failed(let e), .waiting(let e):
+                    if !once.resumed { once.resumed = true; cont.resume(throwing: e) }
+                default: break
+                }
+            }
+            conn.start(queue: queue)
+        }
+        conn.stateUpdateHandler = nil
+    }
+
+    func request(_ header: MeshBrainFrame, payload: Data?) async throws
+        -> (MeshBrainFrame, Data)
+    {
+        try await MeshBrainWire.writeFrame(to: conn, header: header, payload: payload)
+        return try await MeshBrainWire.readFrame(from: conn)
+    }
+}
+
+// MARK: - Shard runtime
+
+/// One pipeline rank: loads a shard directory produced by
+/// `badapple mesh-brain shard` and serves hidden-state forwards over TCP.
+/// Rank 0 additionally owns the embed and the tokenizer; the last rank owns
+/// the final norm + lm_head and returns the next token.
+public final class BadAppleShardRuntime: @unchecked Sendable {
+
+    // Boxes keep non-Sendable MLX handles across @Sendable perform closures.
+    final class Boxes: @unchecked Sendable {
+        var shard: (any BadAppleShardable)?
+        var model: (any LanguageModel)?
+        var caches: [KVCache]?
+        var eosTokenId: Int?
+        // MLXArray isn't Sendable — tensors never leave perform() closures;
+        // they travel between ops through these slots instead.
+        var input: MLXArray?
+        var output: MLXArray?
+        var logits: MLXArray?
+        var tokenIds: [Int] = []
+        var sampledToken: Int = -1
+        var outputText: String = ""
+    }
+
+    public let spec: MeshBrainRankSpec
+    let container: ModelContainer
+    let box = Boxes()
+    private var link: MeshBrainLink?
+    private var listener: NWListener?
+    private let stepGate = AsyncSemaphore(1)
+    public private(set) var isReady = false
+
+    public init(shardDir: URL) async throws {
+        let specURL = shardDir.appendingPathComponent("mesh_brain_rank.json")
+        spec = try JSONDecoder().decode(
+            MeshBrainRankSpec.self, from: Data(contentsOf: specURL))
+        container = try await LLMModelFactory.shared.loadContainer(
+            from: shardDir, using: TokenizersLoader())
+        let b = box
+        try await container.perform { ctx in
+            guard let shard = ctx.model as? any BadAppleShardable else {
+                throw MeshBrainError.unsupportedModel(
+                    String(describing: type(of: ctx.model)))
+            }
+            b.shard = shard
+            b.model = ctx.model
+            b.caches = ctx.model.newCache(parameters: nil)
+            b.eosTokenId = ctx.tokenizer.eosTokenId
+        }
+        isReady = true
+    }
+
+    // MARK: local forward ops
+
+    /// ids -> embeddings, result in box.output (rank 0 only).
+    private func embed(_ ids: [Int]) async throws {
+        let b = box
+        b.tokenIds = ids
+        try await container.perform { _ in
+            let arr = MLXArray(b.tokenIds.map { Int32($0) }, [1, b.tokenIds.count])
+            let out = b.shard!.badappleShardEmbed(arr)
+            out.eval()
+            b.output = out
+        }
+    }
+
+    /// box.input -> hidden states after local layer slice, into box.output.
+    private func runLayers() async throws {
+        let b = box
+        try await container.perform { _ in
+            let out = b.shard!.badappleShardLayers(b.input!, cache: b.caches)
+            out.eval()
+            b.output = out
+        }
+    }
+
+    /// box.input -> norm + lm_head logits, into box.logits (last rank only).
+    private func logits() async throws {
+        let b = box
+        try await container.perform { _ in
+            let n = b.shard!.badappleShardNorm(b.input!)
+            let out = b.shard!.badappleShardHead(n)
+            out.eval()
+            b.logits = out
+        }
+    }
+
+    private func sampleNextToken(temperature: Float) async throws -> Int {
+        let b = box
+        await container.perform { _ in
+            let lg = b.logits!
+            let last = lg[0, lg.dim(1) - 1]
+            let token: MLXArray
+            if temperature <= 0 {
+                token = last.argMax()
+            } else {
+                token = MLXRandom.categorical(last / temperature)
+            }
+            token.eval()
+            b.sampledToken = token.item(Int.self)
+        }
+        return box.sampledToken
+    }
+
+    // MARK: pipeline
+
+    /// Handle one `step` frame: run local layers, then either hand the hidden
+    /// state downstream or produce the next token locally on the last rank.
+    func handleStep(hidden: MLXArray) async throws -> (token: Int, done: Bool) {
+        await stepGate.wait()
+        defer { Task { await stepGate.signal() } }
+        box.input = hidden
+        try await runLayers()
+        if let next = spec.nextHost {
+            if link == nil { link = try await MeshBrainLink(host: next) }
+            var (frame, payload) = try MeshBrainWire.packArray(box.output!)
+            frame.op = "step"
+            let (resp, _) = try await link!.request(frame, payload: payload)
+            if let err = resp.error { throw MeshBrainError.transport(err) }
+            guard let tok = resp.token else {
+                throw MeshBrainError.badFrame("step response missing token")
+            }
+            return (tok, resp.done ?? false)
+        }
+        box.input = box.output
+        try await logits()
+        let tok = try await sampleNextToken(temperature: 0)
+        return (tok, tok == box.eosTokenId)
+    }
+
+    func handleReset() async throws {
+        await stepGate.wait()
+        defer { Task { await stepGate.signal() } }
+        try await resetPipeline()
+    }
+
+    /// Fresh KV caches locally and downstream. Caller must hold stepLock.
+    private func resetPipeline() async throws {
+        if let next = spec.nextHost {
+            if link == nil { link = try await MeshBrainLink(host: next) }
+            let f = MeshBrainFrame(op: "reset")
+            _ = try await link!.request(f, payload: nil)
+        }
+        let b = box
+        await container.perform { _ in
+            b.caches = b.model!.newCache(parameters: nil)
+        }
+    }
+
+    // MARK: server
+
+    /// Listen on spec.host and serve step/reset/ping frames forever.
+    public func serve() async throws {
+        let parts = spec.host.split(separator: ":")
+        guard let p = parts.last, let port = NWEndpoint.Port(String(p))
+        else { throw MeshBrainError.transport("bad listen addr \(spec.host)") }
+        let listener = try NWListener(using: .tcp, on: port)
+        self.listener = listener
+        let q = DispatchQueue(label: "badapple.meshbrain.serve")
+        listener.newConnectionHandler = { [weak self] conn in
+            Task { try? await self?.serveConnection(conn, queue: q) }
+        }
+        listener.start(queue: q)
+        FileHandle.standardError.write(
+            "mesh-brain rank \(spec.rank)/\(spec.world) serving \(spec.host)\n"
+                .data(using: .utf8)!)
+        try await Task.sleep(nanoseconds: .max)  // serve forever
+    }
+
+    private func serveConnection(_ conn: NWConnection, queue: DispatchQueue) async throws {
+        final class Once: @unchecked Sendable { var resumed = false }
+        let once = Once()
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            conn.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if !once.resumed { once.resumed = true; cont.resume() }
+                case .failed(let e), .waiting(let e):
+                    if !once.resumed { once.resumed = true; cont.resume(throwing: e) }
+                default: break
+                }
+            }
+            conn.start(queue: queue)
+        }
+        conn.stateUpdateHandler = nil
+        while true {
+            do {
+                let (header, payload) = try await MeshBrainWire.readFrame(from: conn)
+                switch header.op {
+                case "ping":
+                    var r = MeshBrainFrame(op: "result")
+                    r.token = spec.rank
+                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                case "reset":
+                    try await handleReset()
+                    try await MeshBrainWire.writeFrame(
+                        to: conn, header: MeshBrainFrame(op: "result"), payload: nil)
+                case "step":
+                    let h = try MeshBrainWire.unpackArray(header, payload: payload)
+                    let (tok, done) = try await handleStep(hidden: h)
+                    var r = MeshBrainFrame(op: "result")
+                    r.token = tok; r.done = done
+                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                case "generate":
+                    let text = try await generate(
+                        prompt: header.prompt ?? "",
+                        maxTokens: header.maxTokens ?? 64)
+                    var r = MeshBrainFrame(op: "result")
+                    r.text = text
+                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                default:
+                    var r = MeshBrainFrame(op: "error")
+                    r.error = "unknown op \(header.op)"
+                    try await MeshBrainWire.writeFrame(to: conn, header: r, payload: nil)
+                }
+            } catch {
+                return  // peer went away or frame broke — drop connection
+            }
+        }
+    }
+
+    // MARK: orchestration (rank 0)
+
+    /// Full generate for rank 0: tokenize -> embed -> per-token pipeline.
+    /// Only valid when spec.hasEmbed is true.
+    public func generate(prompt: String, maxTokens: Int) async throws -> String {
+        guard spec.hasEmbed else {
+            throw MeshBrainError.badFrame("generate must start on the embed rank")
+        }
+        await stepGate.wait()
+        defer { Task { await stepGate.signal() } }
+        try await resetPipeline()
+        let b = box
+        b.tokenIds = []
+        try await container.perform { ctx in
+            b.tokenIds = ctx.tokenizer.encode(text: prompt)
+        }
+        // Prefill: embed the whole prompt, run local layers over it.
+        try await embed(b.tokenIds)
+        box.input = box.output
+        try await runLayers()
+        var outTokens: [Int] = []
+        var steps = 0
+        while steps < maxTokens {
+            let tok: Int
+            if let next = spec.nextHost {
+                if link == nil { link = try await MeshBrainLink(host: next) }
+                var (frame, payload) = try MeshBrainWire.packArray(box.output!)
+                frame.op = "step"
+                let (resp, _) = try await link!.request(frame, payload: payload)
+                if let err = resp.error { throw MeshBrainError.transport(err) }
+                guard let t = resp.token else {
+                    throw MeshBrainError.badFrame("missing token")
+                }
+                tok = t
+            } else {
+                box.input = box.output
+                try await logits()
+                tok = try await sampleNextToken(temperature: 0)
+            }
+            if tok == box.eosTokenId { break }
+            outTokens.append(tok)
+            steps += 1
+            // feed the sampled token back through embed -> local layers
+            try await embed([tok])
+            box.input = box.output
+            try await runLayers()
+        }
+        b.tokenIds = outTokens
+        await container.perform { ctx in
+            b.outputText = ctx.tokenizer.decode(tokenIds: b.tokenIds)
+        }
+        return b.outputText
+    }
+}

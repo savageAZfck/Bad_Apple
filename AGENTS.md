@@ -307,6 +307,49 @@ target/release/badapple "enable private mode"   # pause persistence
 target/release/badapple "disable private mode"
 ```
 
+## Mesh-brain (pipeline-parallel distributed inference)
+
+One model split across trusted peers — layers partitioned by rank, hidden
+states flow over TCP frames per token. The feature that takes the model
+catalog beyond single-machine memory (e.g. DeepSeek-R1-0528-4bit ~380 GB
+across two 512 GB Studios).
+
+```bash
+# Plan a layer split across N hosts
+badapple mesh-brain plan --model <repo-id|dir> --hosts h1:8741,h2:8742 [--mem gb,gb]
+
+# Build a rank's shard dir (rekeys layer indices, rewrites config.json
+# num_hidden_layers, regenerates weight index, writes mesh_brain_rank.json)
+badapple mesh-brain shard --model <repo-id|dir> --rank 0 --of 2 \
+    --hosts h1:8741,h2:8742 --out /path/to/shard-r0
+
+# Serve a rank (one engine process per rank, on each host)
+BADAPPLE_SHARD_DIR=/path/to/shard-r0 badapple-engine   # listens on its rank addr
+
+# Drive it from rank 0
+badapple mesh-brain ping --to h1:8741
+badapple mesh-brain ask --to h1:8741 --prompt "..." --max-tokens 64
+```
+
+Internals:
+
+- `src/mesh_brain.rs` — planner, safetensors re-keying shard writer, TCP client.
+- `src/platform/apple_desktop/apply_mesh_brain_patch.sh` — appends
+  `badappleShard{Embed,Layers,Norm,Head}` extensions to vendored mlx-swift-lm
+  model files (same-file extensions reach `fileprivate` members). Idempotent;
+  wired into `build_bad_apple_menu_bar.sh` after `swift package resolve`.
+  Covers Qwen2/3, Llama, Qwen3MoE, GLM4MOE(+Lite), DeepseekV3, GPTOSS.
+- `MLXInference/Sources/BadAppleMLX/BadAppleShard.swift` — `BadAppleShardable`
+  protocol + conformances, `BadAppleShardRuntime` (embed/layers/head ops,
+  KV caches, TCP server+downstream link), wire framing
+  `[u32 len][json header][raw tensor bytes]`.
+- Daemon shard mode: `BADAPPLE_SHARD_DIR` env in `BadAppleEngineDaemon.swift`
+  branches before normal engine load.
+- Non-layer weights (embed/norm/head) ship on EVERY rank — MLX module
+  loading is strict about declared params; layers are the only real split.
+- Wire protocol is currently unauthenticated TCP — intended to ride the
+  SLICKS/P2P authenticated channel before release.
+
 ## Air-gap certification
 
 ```bash

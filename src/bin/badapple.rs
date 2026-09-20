@@ -4,6 +4,7 @@ use bad_apple::cert;
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -129,11 +130,16 @@ fn sanitize_for_tts(text: &str) -> String {
 }
 
 fn main() -> Result<()> {
-    // `policy` takes its own --flags; dispatch before the query parser
-    // rejects them as unknown options.
-    if std::env::args().nth(1).as_deref() == Some("policy") {
-        let rest: Vec<String> = std::env::args().skip(2).collect();
-        return run_policy_subcommand(&rest);
+    // Subcommands that take their own --flags; dispatch before the query
+    // parser rejects them as unknown options.
+    match std::env::args().nth(1).as_deref() {
+        Some("policy") => {
+            return run_policy_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
+        Some("mesh-brain") => {
+            return run_mesh_brain_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
+        _ => {}
     }
     let mut args = std::env::args().skip(1);
     let mut prompt_parts = Vec::new();
@@ -232,6 +238,10 @@ fn main() -> Result<()> {
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("policy") {
         return run_policy_subcommand(&prompt_parts[1..]);
+    }
+
+    if prompt_parts.first().map(std::string::String::as_str) == Some("mesh-brain") {
+        return run_mesh_brain_subcommand(&prompt_parts[1..]);
     }
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("cert") {
@@ -2135,6 +2145,84 @@ fn run_policy_subcommand(args: &[String]) -> Result<()> {
         sub => bail!(
             "unknown policy subcommand: {sub}\nusage: badapple policy <keygen|sign|verify|status>"
         ),
+    }
+    Ok(())
+}
+
+fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
+    use bad_apple::mesh_brain;
+    if args.is_empty() {
+        bail!("usage: badapple mesh-brain <plan --model <dir|repo> --hosts a:port,b:port [--mem gb,gb]|shard --model <dir|repo> --rank i --of N [--hosts a,b] [--out dir]|ping --to h:p|ask --to h:p --prompt text [--max-tokens n]>");
+    }
+    let named = |flag: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    match args[0].as_str() {
+        "plan" => {
+            let model = named("--model").context("--model required")?;
+            let hosts_raw =
+                named("--hosts").context("--hosts required (comma-separated host:port)")?;
+            let hosts: Vec<String> = hosts_raw.split(',').map(|s| s.trim().to_string()).collect();
+            let mem: Option<Vec<f64>> = named("--mem")
+                .map(|m| m.split(',').filter_map(|s| s.trim().parse().ok()).collect());
+            let dir = mesh_brain::resolve_model_dir(&model)?;
+            let plan = mesh_brain::plan(&dir, &hosts, mem.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        "shard" => {
+            let model = named("--model").context("--model required")?;
+            let dir = mesh_brain::resolve_model_dir(&model)?;
+            let (world, rank) = match (named("--of"), named("--rank")) {
+                (Some(w), Some(r)) => (w.parse::<usize>()?, r.parse::<usize>()?),
+                _ => bail!("shard requires --rank <i> --of <N>"),
+            };
+            let hosts: Vec<String> = match named("--hosts") {
+                Some(h) => h.split(',').map(|s| s.trim().to_string()).collect(),
+                None => (0..world)
+                    .map(|i| format!("127.0.0.1:{}", 8741 + i))
+                    .collect(),
+            };
+            if hosts.len() != world {
+                bail!(
+                    "--hosts count {} does not match --of {}",
+                    hosts.len(),
+                    world
+                );
+            }
+            let p = mesh_brain::plan(&dir, &hosts, None)?;
+            let spec = p.ranks.get(rank).cloned().context("rank out of range")?;
+            let out = named("--out")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dir.join(format!("shard-r{rank}")));
+            let n = mesh_brain::build_shard(&dir, &out, &spec)?;
+            println!(
+                "{{\"status\":\"ok\",\"rank\":{rank},\"world\":{world},\"layers\":[{},{}),\"tensors\":{n},\"out\":\"{}\"}}",
+                spec.layer_start, spec.layer_end, out.display()
+            );
+        }
+        "ping" => {
+            let host = named("--to").context("ping requires --to host:port")?;
+            let rank = mesh_brain::ping(&host)?;
+            println!("{{\"status\":\"ok\",\"host\":\"{host}\",\"rank\":{rank}}}");
+        }
+        "ask" => {
+            let host = named("--to").context("ask requires --to host:port (rank 0)")?;
+            let prompt = named("--prompt")
+                .or_else(|| args.get(1).cloned())
+                .context("ask requires a prompt")?;
+            let max_tokens = named("--max-tokens")
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(64);
+            let text = mesh_brain::ask(&host, &prompt, max_tokens)?;
+            println!("{text}");
+        }
+        "serve" => {
+            bail!("run the engine in shard mode instead: BADAPPLE_SHARD_DIR=<shard dir> badapple-engine")
+        }
+        sub => bail!("unknown mesh-brain subcommand: {sub}"),
     }
     Ok(())
 }

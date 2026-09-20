@@ -26,6 +26,7 @@ pub mod config;
 pub mod ify;
 pub mod mcp;
 pub mod mcp_marketplace;
+pub mod mesh_brain;
 pub mod mesh_sync;
 pub mod metal_uma;
 pub mod metrics;

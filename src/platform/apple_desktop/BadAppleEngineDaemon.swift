@@ -1242,6 +1242,27 @@ func runDaemonMain() {
         return
     }
 
+    // Mesh-brain shard mode: this process is one pipeline rank — it loads a
+    // shard dir produced by `badapple mesh-brain shard` and serves
+    // hidden-state forwards on its rank address. The normal engine never
+    // loads in this mode.
+    if let shardDir = ProcessInfo.processInfo.environment["BADAPPLE_SHARD_DIR"],
+       !shardDir.isEmpty {
+        log("Mesh-brain shard mode: \(shardDir)")
+        Task {
+            do {
+                let runtime = try await BadAppleShardRuntime(
+                    shardDir: URL(fileURLWithPath: shardDir))
+                log("Shard rank \(runtime.spec.rank)/\(runtime.spec.world) ready — layers \(runtime.spec.layerStart)..\(runtime.spec.layerEnd)")
+                try await runtime.serve()
+            } catch {
+                log("mesh-brain shard fatal: \(error)")
+                exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
     // Set workspace if provided; this is used by the RAG module.
     if let workspace = ProcessInfo.processInfo.environment["BADAPPLE_WORKSPACE_DIR"],
        !workspace.isEmpty {
