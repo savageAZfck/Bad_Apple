@@ -25,6 +25,12 @@ pub enum MeshDocKind {
     Prompt,
     Settings,
     ModelManifests,
+    /// Secure Enclave-signed sovereign checkpoint. Peers replicate it so
+    /// each member's integrity proofs survive local tampering — a wiped
+    /// state dir can't erase what the mesh already holds.
+    SovereignCheckpoint,
+    /// Primary ledger checkpoint (source chain tip + Merkle root).
+    LedgerCheckpoint,
 }
 
 impl std::fmt::Display for MeshDocKind {
@@ -34,6 +40,8 @@ impl std::fmt::Display for MeshDocKind {
             MeshDocKind::Prompt => write!(f, "prompt"),
             MeshDocKind::Settings => write!(f, "settings"),
             MeshDocKind::ModelManifests => write!(f, "model_manifests"),
+            MeshDocKind::SovereignCheckpoint => write!(f, "sovereign_checkpoint"),
+            MeshDocKind::LedgerCheckpoint => write!(f, "ledger_checkpoint"),
         }
     }
 }
@@ -46,6 +54,10 @@ impl std::str::FromStr for MeshDocKind {
             "prompt" | "prompts" => Ok(MeshDocKind::Prompt),
             "settings" => Ok(MeshDocKind::Settings),
             "model_manifests" | "models" => Ok(MeshDocKind::ModelManifests),
+            "sovereign_checkpoint" | "checkpoint" | "checkpoints" => {
+                Ok(MeshDocKind::SovereignCheckpoint)
+            }
+            "ledger_checkpoint" => Ok(MeshDocKind::LedgerCheckpoint),
             _ => Err(anyhow::anyhow!("unknown mesh document kind: {s}")),
         }
     }
@@ -59,6 +71,8 @@ impl MeshDocKind {
             MeshDocKind::Prompt => "prompt.txt",
             MeshDocKind::Settings => "settings.json",
             MeshDocKind::ModelManifests => "model_manifests.json",
+            MeshDocKind::SovereignCheckpoint => "sovereign_checkpoint.json",
+            MeshDocKind::LedgerCheckpoint => "ledger_checkpoint.json",
         }
     }
 
@@ -72,6 +86,13 @@ impl MeshDocKind {
             MeshDocKind::Prompt => base.join("prompt.txt"),
             MeshDocKind::Settings => base.join("settings.json"),
             MeshDocKind::ModelManifests => base.join("model_manifests.json"),
+            // Checkpoints live at the state root, not the data-dir subtree.
+            MeshDocKind::SovereignCheckpoint => {
+                PathBuf::from("/var/lib/bad_apple/ledger.sovereign.checkpoint.json")
+            }
+            MeshDocKind::LedgerCheckpoint => {
+                PathBuf::from("/var/lib/bad_apple/ledger_checkpoint.json")
+            }
         }
     }
 }

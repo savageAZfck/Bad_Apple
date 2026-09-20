@@ -8,6 +8,7 @@
 import Foundation
 import Dispatch
 import CommonCrypto
+import CryptoKit
 import Darwin
 
 // MARK: - Custom Workshop Tools
@@ -1260,6 +1261,21 @@ final class BadApplePolicyEngine: @unchecked Sendable {
 
     /// Policy file path.
     private let policyPath = "/var/lib/bad_apple/policy.yaml"
+    /// Org trust root (hex Ed25519 pubkey). Its presence switches policy
+    /// loading into org-verified mode: policy.yaml must carry a valid
+    /// detached signature or the engine fails closed.
+    private let orgPubPath = "/var/lib/bad_apple/org_policy.pub"
+    /// Detached hex Ed25519 signature over the policy file bytes.
+    private let policySigPath = "/var/lib/bad_apple/policy.yaml.sig"
+    /// Set when an org trust root is installed but the policy signature
+    /// is missing or invalid. Denial reasons surface this so the failure
+    /// is explicit rather than silent.
+    private var _orgPolicyViolation = false
+    var orgPolicyViolation: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _orgPolicyViolation
+    }
 
     // MARK: - Init
 
@@ -1505,8 +1521,58 @@ final class BadApplePolicyEngine: @unchecked Sendable {
     // MARK: - Policy Loading
 
     /// Load policy from the YAML file. Supports scalars, flow lists, and block lists.
+    /// Hex → Data for the org key/signature files (lowercase hex, no 0x).
+    private func hexData(_ hex: String) -> Data? {
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(hex.count / 2)
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+            guard next != idx, let b = UInt8(hex[idx..<next], radix: 16) else { return nil }
+            bytes.append(b)
+            idx = next
+        }
+        return Data(bytes)
+    }
+
+    /// Verify policy bytes against the org trust root when one is pinned.
+    /// No trust root -> personal sovereignty, policy loads unsigned.
+    /// Trust root present -> missing or invalid signature fails closed.
+    private func verifyOrgPolicySignature(_ data: Data) -> Bool {
+        guard let pubHex = try? String(contentsOfFile: orgPubPath, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !pubHex.isEmpty else {
+            return true
+        }
+        guard let pubData = hexData(pubHex),
+              let pubKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubData),
+              let sigHex = try? String(contentsOfFile: policySigPath, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let sigData = hexData(sigHex), sigData.count == 64 else {
+            return false
+        }
+        return pubKey.isValidSignature(sigData, for: data)
+    }
+
     private func loadPolicy() {
-        guard let content = try? String(contentsOfFile: policyPath, encoding: .utf8) else { return }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)),
+              let content = String(data: data, encoding: .utf8) else { return }
+
+        if !verifyOrgPolicySignature(data) {
+            lock.lock()
+            var locked = ToolPolicy()
+            locked.allowed = false
+            locked.requireApproval = true
+            defaultPolicy = locked
+            toolPolicies = [:]
+            policyLoaded = false
+            _orgPolicyViolation = true
+            lock.unlock()
+            FileHandle.standardError.write(
+                "badapple-policy: org trust root present but policy signature missing/invalid — all tools denied\n"
+                    .data(using: .utf8)!)
+            return
+        }
 
         var defaults = ToolPolicy()
         var tools: [String: ToolPolicy] = [:]

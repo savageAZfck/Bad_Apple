@@ -129,6 +129,12 @@ fn sanitize_for_tts(text: &str) -> String {
 }
 
 fn main() -> Result<()> {
+    // `policy` takes its own --flags; dispatch before the query parser
+    // rejects them as unknown options.
+    if std::env::args().nth(1).as_deref() == Some("policy") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        return run_policy_subcommand(&rest);
+    }
     let mut args = std::env::args().skip(1);
     let mut prompt_parts = Vec::new();
     let mut max_new_tokens = 500;
@@ -222,6 +228,10 @@ fn main() -> Result<()> {
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("ify") {
         return run_ify_subcommand(&prompt_parts[1..]);
+    }
+
+    if prompt_parts.first().map(std::string::String::as_str) == Some("policy") {
+        return run_policy_subcommand(&prompt_parts[1..]);
     }
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("cert") {
@@ -1199,13 +1209,14 @@ fn p2p_sync_kind_alias(sub: &str) -> Option<&'static str> {
         "sync-prompt" | "sync-prompts" => Some("prompt"),
         "sync-settings" => Some("settings"),
         "sync-models" | "sync-model-manifests" => Some("models"),
+        "sync-checkpoint" | "sync-checkpoints" => Some("checkpoint"),
         _ => None,
     }
 }
 
 fn run_p2p_subcommand(args: &[String]) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
+        bail!("usage: badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|sync-checkpoint|attest|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>");
     }
     let sub = args[0].as_str();
     let mut params = serde_json::Map::new();
@@ -1221,7 +1232,7 @@ fn run_p2p_subcommand(args: &[String]) -> Result<()> {
         }
         "sync-doc" => {
             if args.len() < 2 {
-                bail!("usage: badapple p2p sync-doc <personas|prompt|settings|models>");
+                bail!("usage: badapple p2p sync-doc <personas|prompt|settings|models|checkpoint|ledger_checkpoint>");
             }
             run_p2p_helper(&["sync-doc".to_string(), args[1].clone()])?;
         }
@@ -1231,9 +1242,35 @@ fn run_p2p_subcommand(args: &[String]) -> Result<()> {
         | "sync-prompts"
         | "sync-settings"
         | "sync-models"
-        | "sync-model-manifests" => {
+        | "sync-model-manifests"
+        | "sync-checkpoint"
+        | "sync-checkpoints" => {
             let kind = p2p_sync_kind_alias(sub).unwrap_or(sub);
             run_p2p_helper(&["sync-doc".to_string(), kind.to_string()])?;
+        }
+        "attest" => {
+            // Show the checkpoint docs this node holds for each mesh peer —
+            // the mutual-attestation surface: what each member last proved.
+            let store = bad_apple::mesh_sync::MeshStore::new(
+                bad_apple::mesh_sync::MeshStore::default_root(),
+            )?;
+            let mut rows: Vec<serde_json::Value> = Vec::new();
+            for doc in store.list() {
+                if doc.kind != bad_apple::mesh_sync::MeshDocKind::SovereignCheckpoint
+                    && doc.kind != bad_apple::mesh_sync::MeshDocKind::LedgerCheckpoint
+                {
+                    continue;
+                }
+                rows.push(serde_json::json!({
+                    "kind": doc.kind.to_string(),
+                    "origin": doc.origin,
+                    "timestamp": doc.timestamp,
+                    "version": doc.version,
+                    "checkpoint": serde_json::from_str::<serde_json::Value>(&doc.body)
+                        .unwrap_or(serde_json::Value::Null),
+                }));
+            }
+            println!("{}", serde_json::to_string_pretty(&rows)?);
         }
         "receive-mesh" => {
             let mut argv = vec!["receive-mesh".to_string()];
@@ -2037,6 +2074,67 @@ fn run_ify_subcommand(args: &[String]) -> Result<()> {
             }
         }
         _ => bail!("unknown ify subcommand: {sub}\nusage: badapple ify <status|once|findings [n]|proposals>"),
+    }
+    Ok(())
+}
+
+fn run_policy_subcommand(args: &[String]) -> Result<()> {
+    use bad_apple::org_policy;
+    if args.is_empty() {
+        bail!("usage: badapple policy <keygen [--out <dir>]|sign [--key <path>] [--policy <path>] [--sig <path>]|verify [--policy <path>] [--sig <path>] [--pub <path>]|status>");
+    }
+    let named = |flag: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let policy = named("--policy").unwrap_or_else(|| org_policy::DEFAULT_POLICY_PATH.into());
+    let sig = named("--sig").unwrap_or_else(|| org_policy::DEFAULT_SIG_PATH.into());
+    let pubk = named("--pub").unwrap_or_else(|| org_policy::DEFAULT_PUB_PATH.into());
+    match args[0].as_str() {
+        "keygen" => {
+            let dir = named("--out").unwrap_or_else(|| ".".into());
+            let (key, pub_key) = org_policy::keygen(&dir)?;
+            println!("org keypair generated");
+            println!("  secret (keep offline): {}", key.display());
+            println!(
+                "  trust root (pin on managed machines): {}",
+                pub_key.display()
+            );
+        }
+        "sign" => {
+            let key = named("--key").unwrap_or_else(|| org_policy::DEFAULT_KEY_PATH.into());
+            org_policy::sign_file(&policy, &key, &sig)?;
+            println!("signed {} -> {}", policy, sig);
+        }
+        "verify" => match org_policy::verify_file(&policy, &sig, &pubk) {
+            Ok(true) => println!("{{\"policy_signature\": \"valid\", \"policy\": \"{policy}\"}}"),
+            Ok(false) => bail!("policy signature invalid or missing: {policy}"),
+            Err(e) => return Err(e),
+        },
+        "status" => {
+            let org = org_policy::org_mode_active();
+            let valid = if org {
+                org_policy::verify_file(&policy, &sig, &pubk).unwrap_or(false)
+            } else {
+                false
+            };
+            println!(
+                "{{\"mode\": \"{}\", \"policy_signature\": \"{}\"}}",
+                if org { "org-signed" } else { "personal" },
+                if !org {
+                    "not required"
+                } else if valid {
+                    "valid"
+                } else {
+                    "invalid or missing"
+                }
+            );
+        }
+        sub => bail!(
+            "unknown policy subcommand: {sub}\nusage: badapple policy <keygen|sign|verify|status>"
+        ),
     }
     Ok(())
 }

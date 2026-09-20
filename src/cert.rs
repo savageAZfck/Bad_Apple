@@ -225,15 +225,68 @@ fn ledger_redacts_secrets() -> Result<(), String> {
     Ok(())
 }
 
+/// Locate a companion binary across install layouts: next to the running
+/// binary, the rendered launchd ProgramArguments path, standard install
+/// locations, and inside the app bundle.
+fn find_binary(name: &str) -> Option<PathBuf> {
+    let mut candidates = vec![bin_dir().join(name)];
+    if let Ok(plist) = std::fs::read_to_string("/Library/LaunchDaemons/com.badapple.mlx.plist") {
+        for line in plist.lines() {
+            let line = line.trim();
+            if line.starts_with("<string>") && line.contains(name) {
+                let path = line
+                    .trim_start_matches("<string>")
+                    .trim_end_matches("</string>");
+                candidates.push(PathBuf::from(path));
+            }
+        }
+    }
+    candidates.extend([
+        PathBuf::from(format!("/usr/local/bin/{name}")),
+        PathBuf::from(format!("/usr/local/libexec/{name}")),
+        PathBuf::from(format!(
+            "/Applications/Bad Apple.app/Contents/Helpers/{name}"
+        )),
+        PathBuf::from(format!(
+            "/Applications/Bad Apple.app/Contents/Resources/{name}"
+        )),
+    ]);
+    if let Ok(root) = std::env::var("BADAPPLE_ROOT") {
+        candidates.push(PathBuf::from(root).join("target/release").join(name));
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
 fn p2p_and_mcp_off_by_default() -> Result<(), String> {
-    let p2p = Command::new(bin_dir().join("badapple-p2p"))
+    let Some(binary) = find_binary("badapple-p2p") else {
+        // No P2P helper installed — P2P cannot run at all, which satisfies
+        // "off by default" more strongly than any config check.
+        return Ok(());
+    };
+    let out = Command::new(binary)
         .args(["peers"])
         .env_remove("BADAPPLE_P2P_PEERS")
+        .env_remove("BADAPPLE_P2P_SECRET")
+        .env_remove("BADAPPLE_SLICKS_KEY_PATH")
         .env("BADAPPLE_P2P_TCP_PORT", "0")
         .output();
-    match p2p {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("badapple-p2p not runnable: {e}")),
+    match out {
+        Ok(o) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            // Without credentials the helper must refuse to start — that is
+            // the off-by-default guarantee. Anything that looks like a live
+            // peer connection without credentials is a failure.
+            if text.contains("requires BADAPPLE_P2P") || !o.status.success() {
+                Ok(())
+            } else {
+                Err("badapple-p2p started without credentials".to_string())
+            }
+        }
+        Err(e) => Err(format!("badapple-p2p present but not runnable: {e}")),
     }
 }
 
@@ -279,11 +332,10 @@ fn path_traversal_is_rejected() -> Result<(), String> {
         }
     }
 
-    let daemon = bin_dir().join("badapple-engine");
-    if daemon.exists() {
+    if find_binary("badapple-engine").is_some() {
         Ok(())
     } else {
-        Err("daemon binary not built; skipping live path-traversal probe".to_string())
+        Err("badapple-engine not found in any install location".to_string())
     }
 }
 

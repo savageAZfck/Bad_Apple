@@ -29,6 +29,7 @@ pub mod mcp_marketplace;
 pub mod mesh_sync;
 pub mod metal_uma;
 pub mod metrics;
+pub mod org_policy;
 pub mod p2p_crypto;
 pub mod p2p_model;
 pub mod production_blueprint;

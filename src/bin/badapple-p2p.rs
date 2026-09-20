@@ -40,7 +40,7 @@ fn main() {
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        anyhow::bail!("usage: badapple-p2p <peers|sync|sync-doc <kind>|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]|ask <peer_id> <prompt...>>");
+        anyhow::bail!("usage: badapple-p2p <peers|sync|sync-doc <kind>|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]|ask <peer_id> <prompt...>>\n  doc kinds: personas, prompt, settings, models, checkpoint, ledger_checkpoint");
     }
 
     match args[0].as_str() {
@@ -48,7 +48,7 @@ fn run() -> Result<()> {
         "sync" => do_sync(),
         "sync-doc" => {
             if args.len() < 2 {
-                anyhow::bail!("usage: badapple-p2p sync-doc <personas|prompt|settings|models>");
+                anyhow::bail!("usage: badapple-p2p sync-doc <personas|prompt|settings|models|checkpoint|ledger_checkpoint>");
             }
             sync_doc(&args[1])
         }

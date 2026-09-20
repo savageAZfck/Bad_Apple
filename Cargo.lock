@@ -246,6 +246,7 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "dirs",
+ "ed25519-dalek",
  "futures-util",
  "half",
  "hex",
