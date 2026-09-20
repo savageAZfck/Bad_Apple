@@ -1777,10 +1777,20 @@ final class BadAppleEngine: @unchecked Sendable {
         let lower = prompt.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "?!.,"))
-        return [
+        if [
             "are you alone", "are we alone", "anyone listening", "off the grid",
             "prove you're alone", "prove you are alone",
-        ].contains(lower)
+        ].contains(lower) {
+            return true
+        }
+        // Explicit audit/cert requests match by substring — they can arrive
+        // wrapped in a longer sentence ("run the cert suite", "audit yourself").
+        return [
+            "cert suite", "certification suite", "certification test",
+            "run cert", "run the cert", "self audit", "self-audit",
+            "run the audit", "run an audit", "audit yourself", "audit your",
+            "security audit", "air gap audit", "airgap audit",
+        ].contains { lower.contains($0) }
     }
 
     /// Distill the raw self_audit JSON into a compact fact sheet — the full
@@ -2309,9 +2319,29 @@ final class BadAppleEngine: @unchecked Sendable {
 
             The short version: I think, talk, and listen — say "Hey Bad Apple" and I'm right there. I can see your screen, read and write your files, run terminal commands and your Shortcuts, and I write real software — I'll fix, build, test, and debug code, including my own when something's off. Give me a multi-step job and I'll plan it out, work through it, and check with you before I do anything risky. And I actually remember — conversations, facts, stuff about your projects, all of it survives restarts.
 
-            Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" and I'll run a live audit and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
+            Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" or run `badapple cert` and I'll run a live audit — sockets, chains, firewall — and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
 
             \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
+            """
+        }
+
+        // Spoken commands reference — teach the user the phrases that are
+        // wired in as real commands, in plain language they can remember.
+        if lower.contains("commands") || lower.contains("what can i say") ||
+            lower.contains("what do i say") || lower.contains("how do i control you") ||
+            lower.contains("voice commands") || lower.contains("list commands") ||
+            lower.contains("what phrases") || lower.contains("how do i use you") {
+            let personas = personaManager.personaNames.joined(separator: ", ")
+            return """
+            I'm Bad Apple — you can talk to me like a person, but here's what's wired in as real commands.
+
+            To control me: say "kill switch" or "stop everything" and I freeze mid-thought; "resume bad apple" brings me back. "Leave safe mode" gets me out of a lockdown. "Enable private mode" and I stop remembering anything until you say "disable private mode."
+
+            To check me: "are you alone" or "run the cert suite" — I'll audit myself live and show you the numbers. Say "council" plus any question and all fourteen strategist seats weigh in. "What model are you running" tells you which brain I'm wearing today.
+
+            To change me: "switch to" plus a persona — I've got \(personas). Say "teach" plus a line and I'll learn to say it. And when I ask your permission for something, "approve" or "deny" plus the ID settles it.
+
+            And for everything else, just say it — "list my files," "take a screenshot," "open Safari," "run shell ls." If a tool can do it, I'll fire it. Say "what can you do" anytime for the full tour.
             """
         }
 

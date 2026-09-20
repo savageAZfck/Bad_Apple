@@ -3317,11 +3317,15 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
         if includeCert {
             let r = runProcess(launchPath: binary, arguments: ["cert"], timeout: 60)
-            if r.exitCode != 0 {
-                result["cert"] = ["ok": false, "error": r.stderr + r.stdout]
-            } else if let data = r.stdout.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: data) {
+            // `badapple cert` exits non-zero when any check fails but still
+            // prints the full JSON report on stdout — parse it either way so
+            // a failed check reports real numbers, not "unknown / 0 checks".
+            if let data = r.stdout.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               json["results"] != nil || json["status"] != nil {
                 result["cert"] = json
+            } else if r.exitCode != 0 {
+                result["cert"] = ["ok": false, "error": r.stderr + r.stdout]
             } else {
                 result["cert"] = ["ok": true, "text": r.stdout]
             }
