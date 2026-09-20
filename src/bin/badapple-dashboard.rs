@@ -1352,16 +1352,21 @@ async fn voice_handler() -> impl IntoResponse {
 async fn capabilities_handler() -> impl IntoResponse {
     Json(json!({
         "capabilities": [
-            "Local chat with Qwen 2.5 Coder 7B",
-            "Voice input and TTS output",
-            "Ocular screen capture and VLM description",
-            "Workspace indexing and RAG",
-            "Long-term memory facts",
-            "Self-audit (cert suite + doctor)",
-            "P2P model and document sync",
-            "MCP tool marketplace",
-            "Curious autopilot and bounded self-improvement",
-            "Output firewall and audit ledger",
+            "Thinks entirely on your Mac — nothing leaves the device",
+            "Talks and listens — say \"Hey Bad Apple\"",
+            "Sees your screen and describes images",
+            "Reads, writes, and organizes your files",
+            "Runs terminal commands, AppleScripts, and Shortcuts",
+            "Writes, builds, tests, and debugs code — including her own",
+            "Plans multi-step jobs and checks in before anything risky",
+            "Remembers across restarts",
+            "Autopilot sets her leash — from \"ask me first\" to \"handle it\"",
+            "Fourteen-seat council votes on every risky action",
+            "Watchdog can brake but never steer — plus a kill switch",
+            "Every action lands on a tamper-proof ledger you can verify",
+            "Audits herself and proposes patches to her own code",
+            "Picks the best model your Mac can carry — brain is swappable",
+            "Optional encrypted mesh links trusted Bad Apples",
         ]
     }))
 }

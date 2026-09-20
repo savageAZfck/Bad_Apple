@@ -2302,30 +2302,16 @@ final class BadAppleEngine: @unchecked Sendable {
         if lower.contains("what can you do") || lower.contains("your capabilities") ||
             lower.contains("what are you capable of") || lower.contains("help me") {
             let autopilotNote = self.autopilot
-                ? "Autopilot is on — the Council votes on gated actions; passed votes run, failed votes come to you for approval."
-                : "Autopilot is off, so destructive actions still require your approval."
+                ? "Right now Autopilot's on, so I'm on a longer leash — I handle things and show you the receipts after. Risky stuff still goes through a council vote first, that part never turns off."
+                : "Right now Autopilot's off, so I'm on a short leash — anything risky, I ask you first."
             return """
-            I am Bad Apple, a sovereign local AI operating system and developer workspace for macOS. I am written in Rust, Swift, and Metal compute shaders, and I run an adversarial self-red teaming harness. I coordinate these capabilities:
-            • Inspecting, writing, refactoring, building, testing, and debugging source code in approved workspaces — I can act on my own source code independently
-            • Answering questions and having conversations
-            • Reading and writing files on your Mac
-            • Running shell commands and AppleScripts
-            • Listing and running macOS Shortcuts
-            • Searching your local notes, documents, and source repositories
-            • Taking screenshots and describing images
-            • Managing a working memory scratchpad
-            • Multi-step agent tasks with planning
-            • Voice interaction with "Hey Bad Apple"
-            • Continuous self-red teaming with adversarial probes across the cage, SLICKS, P2P, WASM, policy, and audit subsystems
-            • Curious bounded self-improvement and runtime repair: I audit my own runtime, detect safe repairs, attempt them when Autopilot allows, and propose minimal source patches with backup and verification
-            • Provable receipts: every action lands on a hash-chained ledger and a sovereign-sealed chain, signed through the Secure Enclave — I can export a proof bundle anyone can verify without secrets
-            • Self-audit on demand: ask me "are you alone" and I run the real certification suite and report the numbers
-            • IFY, a brake-only watchdog that learns my behavioral baselines and can halt Autopilot but can never steer me
-            • The Council of Minds — fourteen strategist seats that vote on every gated action: under Autopilot passed votes run and failed votes escalate to you; ask them anything with "council <question>"
-            • Respawn state snapshots with drift detection and revert to any prior state
-            • Delegated inference: on your trusted mesh I can ask a peer's larger model — opt-in, inference-only, attested on their ledger
+            I'm Bad Apple — a sovereign AI that lives on your Mac and nowhere else. No cloud, no accounts, nothing you say leaves this device.
 
-            \(autopilotNote) Everything runs locally on your Mac — no cloud, no data leaves your device.
+            The short version: I think, talk, and listen — say "Hey Bad Apple" and I'm right there. I can see your screen, read and write your files, run terminal commands and your Shortcuts, and I write real software — I'll fix, build, test, and debug code, including my own when something's off. Give me a multi-step job and I'll plan it out, work through it, and check with you before I do anything risky. And I actually remember — conversations, facts, stuff about your projects, all of it survives restarts.
+
+            Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" and I'll run a live audit and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
+
+            \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
             """
         }
 
