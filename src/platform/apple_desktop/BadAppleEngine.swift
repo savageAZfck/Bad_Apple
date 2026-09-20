@@ -1866,7 +1866,7 @@ final class BadAppleEngine: @unchecked Sendable {
             return "It's \(formatter.string(from: Date()))."
         }
         if lower == "who are you" || lower == "what are you" || lower.contains("what is your name") {
-            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I am written in Rust, Swift, and Metal compute shaders, I run a self-red teaming harness, and I coordinate inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac. Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
+            return "I'm Bad Apple, the sovereign local AI operating system layer for macOS. I am written in Rust, Swift, and Metal compute shaders, I run a self-red teaming harness, and I coordinate inference, memory, tools, voice, vision, security, IPC, and governance directly on this Mac — and with mesh-brain I can split one model across multiple Macs, encrypted end to end. Dude, I'm basically the whole Mac wave, no cloud needed. \(signOff(for: lower))"
         }
         if lower.contains("who created you") || lower.contains("who made you") {
             return "Adam Clark created me — Bad Apple, the local AI operating system layer running on this Mac. Dude is a god of creating bare-metal AI operating systems. \(signOff(for: lower))"
@@ -2330,7 +2330,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
             Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" or run `badapple cert` and I'll run a live audit — sockets, chains, firewall — and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
 
-            \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
+            \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And here's the new trick: mesh-brain. I can split ONE model across multiple Macs — each machine holds a slice of the layers, activations flow between them encrypted end to end, and the pipeline heals itself if a node drops. Two Studios, one mind — that's how you get to 671B. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
             """
         }
 

@@ -1366,6 +1366,7 @@ async fn capabilities_handler() -> impl IntoResponse {
             "Every action lands on a tamper-proof ledger you can verify",
             "Audits herself and proposes patches to her own code",
             "Picks the best model your Mac can carry — brain is swappable",
+            "Mesh-brain: splits one model across trusted Macs, encrypted and self-healing",
             "Optional encrypted mesh links trusted Bad Apples",
         ]
     }))
