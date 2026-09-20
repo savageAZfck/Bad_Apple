@@ -497,6 +497,43 @@ pub fn resolve_mesh_secret() -> Result<Vec<u8>> {
     Ok(raw.into_bytes())
 }
 
+/// Registry of the last planned/sharded mesh — written by `mesh-brain
+/// plan|shard`, read as the default host list by `status`/`ping`/`ask`
+/// and by the engine when answering "is the mesh up".
+pub fn hosts_file() -> PathBuf {
+    std::env::var("BADAPPLE_MESH_HOSTS_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/bad_apple/mesh_hosts.json"))
+}
+
+pub fn save_hosts(hosts: &[String], model: &str) -> Result<()> {
+    let v = serde_json::json!({
+        "hosts": hosts,
+        "model": model,
+        "updated": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    fs::write(hosts_file(), serde_json::to_string_pretty(&v)?)?;
+    Ok(())
+}
+
+pub fn load_hosts() -> Option<Vec<String>> {
+    let text = fs::read_to_string(hosts_file()).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let hosts: Vec<String> = v["hosts"]
+        .as_array()?
+        .iter()
+        .filter_map(|h| h.as_str().map(String::from))
+        .collect();
+    if hosts.is_empty() {
+        None
+    } else {
+        Some(hosts)
+    }
+}
+
 pub(crate) fn hmac_hex(key: &[u8], msg: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts any key size");
     mac.update(msg.as_bytes());

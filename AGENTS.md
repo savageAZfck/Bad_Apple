@@ -310,9 +310,10 @@ target/release/badapple "disable private mode"
 ## Mesh-brain (pipeline-parallel distributed inference)
 
 One model split across trusted peers — layers partitioned by rank, hidden
-states flow over TCP frames per token. The feature that takes the model
-catalog beyond single-machine memory (e.g. DeepSeek-R1-0528-4bit ~380 GB
-across two 512 GB Studios).
+states flow over TCP frames per token. Lets several smaller Macs pool memory
+into a model class none could hold alone (a maxed 512 GB Studio already
+carries ~671B-class 4-bit models solo; mesh-brain is for pooling machines
+and surviving rank loss).
 
 ```bash
 # Plan a layer split across N hosts
@@ -330,6 +331,13 @@ BADAPPLE_SHARD_DIR=/path/to/shard-r0 badapple-engine   # listens on its rank add
 badapple mesh-brain ping --to h1:8741
 badapple mesh-brain status --hosts h1:8741,h2:8742
 badapple mesh-brain ask --to h1:8741 --prompt "..." --max-tokens 64
+
+# plan/shard write /var/lib/bad_apple/mesh_hosts.json — afterwards these
+# work bare, the engine answers "is the mesh up" from it, and `forget`
+# clears it
+badapple mesh-brain status
+badapple mesh-brain ask --prompt "..." 
+badapple mesh-brain forget
 ```
 
 Internals:
@@ -367,6 +375,11 @@ Internals:
   rejection, dead-peer fast error, restart recovery. `badapple cert`
   covers planning, shard metadata, ciphertext-on-wire, wrong-key
   handshake rejection, and dead-peer fail-fast.
+- `badapple demo` prints the compact proof card; `badapple demo full`
+  execs `demo_walkthrough.sh` (found at the runtime root — shipped in the
+  package and app Resources; `BADAPPLE_DEMO_SCRIPT` overrides,
+  `BADAPPLE_BIN`/`BADAPPLE_ENGINE_BIN` point it at non-default binaries).
+  User-facing mesh doc: `MESH_BRAIN.md`.
 
 ## Air-gap certification
 

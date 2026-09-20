@@ -261,11 +261,14 @@ fn main() -> Result<()> {
     }
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("demo") {
+        if prompt_parts.get(1).map(std::string::String::as_str) == Some("full") {
+            return run_demo_full();
+        }
         return run_demo();
     }
 
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple receipts\n       badapple export-proof [dir]\n       badapple demo\n       badapple cert");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple receipts\n       badapple export-proof [dir]\n       badapple demo [full]\n       badapple cert");
     } else {
         prompt_parts.join(" ")
     };
@@ -2023,6 +2026,40 @@ fn run_demo() -> Result<()> {
     Ok(())
 }
 
+/// `badapple demo full` — exec the narrated walkthrough (mesh-brain kill/heal
+/// included). The script lives at the runtime root — two dirs above
+/// target/release/<exe> in both the dev repo and the installed layout.
+fn run_demo_full() -> Result<()> {
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("cannot resolve the badapple binary path")?;
+    let exe_dir = exe.parent().context("no binary dir")?.to_path_buf();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(s) = std::env::var("BADAPPLE_DEMO_SCRIPT") {
+        candidates.push(PathBuf::from(s));
+    }
+    candidates.push(exe_dir.join("../../demo_walkthrough.sh"));
+    candidates.push(PathBuf::from(
+        "/Applications/Bad Apple.app/Contents/Resources/demo_walkthrough.sh",
+    ));
+    candidates.push(PathBuf::from("demo_walkthrough.sh"));
+    let script = candidates
+        .iter()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+        .find(|p| p.is_file())
+        .context("demo_walkthrough.sh not found — set BADAPPLE_DEMO_SCRIPT to point at it")?;
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .env("BADAPPLE_BIN", &exe)
+        .env("BADAPPLE_ENGINE_BIN", exe_dir.join("badapple-engine"))
+        .status()
+        .context("failed to launch the walkthrough demo")?;
+    if !status.success() {
+        bail!("walkthrough exited with {status}");
+    }
+    Ok(())
+}
+
 fn run_ify_subcommand(args: &[String]) -> Result<()> {
     let sub = args.first().map(String::as_str).unwrap_or("status");
     match sub {
@@ -2152,7 +2189,7 @@ fn run_policy_subcommand(args: &[String]) -> Result<()> {
 fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
     use bad_apple::mesh_brain;
     if args.is_empty() {
-        bail!("usage: badapple mesh-brain <plan --model <dir|repo> --hosts a:port,b:port [--mem gb,gb]|shard --model <dir|repo> --rank i --of N [--hosts a,b] [--out dir]|ping --to h:p|status --hosts a,b|ask --to h:p --prompt text [--max-tokens n]>");
+        bail!("usage: badapple mesh-brain <plan --model <dir|repo> --hosts a:port,b:port [--mem gb,gb]|shard --model <dir|repo> --rank i --of N [--hosts a,b] [--out dir]|ping [--to h:p]|status [--hosts a,b]|ask [--to h:p] --prompt text [--max-tokens n]|forget>\n       plan/shard remember the mesh in /var/lib/bad_apple/mesh_hosts.json — later status/ping/ask default to it.");
     }
     let named = |flag: &str| -> Option<String> {
         args.iter()
@@ -2170,6 +2207,7 @@ fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
                 .map(|m| m.split(',').filter_map(|s| s.trim().parse().ok()).collect());
             let dir = mesh_brain::resolve_model_dir(&model)?;
             let plan = mesh_brain::plan(&dir, &hosts, mem.as_deref())?;
+            let _ = mesh_brain::save_hosts(&hosts, &model);
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         "shard" => {
@@ -2198,13 +2236,18 @@ fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| dir.join(format!("shard-r{rank}")));
             let n = mesh_brain::build_shard(&dir, &out, &spec)?;
+            let _ = mesh_brain::save_hosts(&hosts, &model);
             println!(
                 "{{\"status\":\"ok\",\"rank\":{rank},\"world\":{world},\"layers\":[{},{}),\"tensors\":{n},\"out\":\"{}\"}}",
                 spec.layer_start, spec.layer_end, out.display()
             );
         }
         "ping" => {
-            let host = named("--to").context("ping requires --to host:port")?;
+            let host = named("--to")
+                .or_else(|| mesh_brain::load_hosts().and_then(|h| h.first().cloned()))
+                .context(
+                    "ping requires --to host:port (no saved mesh — run `mesh-brain plan` first)",
+                )?;
             let (rank, ls, le) = mesh_brain::ping(&host)?;
             println!(
                 "{{\"status\":\"ok\",\"host\":\"{host}\",\"rank\":{rank},\"layers\":[{},{}])}}",
@@ -2213,7 +2256,9 @@ fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
             );
         }
         "status" => {
-            let hosts_raw = named("--hosts").context("status requires --hosts a:port,b:port")?;
+            let hosts_raw = named("--hosts")
+                .or_else(|| mesh_brain::load_hosts().map(|h| h.join(",")))
+                .context("status requires --hosts a:port,b:port (no saved mesh — run `mesh-brain plan` first)")?;
             let mut live = 0usize;
             let mut rows = Vec::new();
             for h in hosts_raw.split(',').map(|s| s.trim()) {
@@ -2243,7 +2288,9 @@ fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
             );
         }
         "ask" => {
-            let host = named("--to").context("ask requires --to host:port (rank 0)")?;
+            let host = named("--to")
+                .or_else(|| mesh_brain::load_hosts().and_then(|h| h.first().cloned()))
+                .context("ask requires --to host:port (rank 0) (no saved mesh — run `mesh-brain plan` first)")?;
             let prompt = named("--prompt")
                 .or_else(|| args.get(1).cloned())
                 .context("ask requires a prompt")?;
@@ -2256,6 +2303,13 @@ fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
         "serve" => {
             bail!("run the engine in shard mode instead: BADAPPLE_SHARD_DIR=<shard dir> badapple-engine")
         }
+        "forget" => match std::fs::remove_file(mesh_brain::hosts_file()) {
+            Ok(()) => println!("{{\"status\":\"forgotten\"}}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("{{\"status\":\"no saved mesh\"}}")
+            }
+            Err(e) => return Err(e.into()),
+        },
         sub => bail!("unknown mesh-brain subcommand: {sub}"),
     }
     Ok(())

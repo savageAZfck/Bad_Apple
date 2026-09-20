@@ -297,6 +297,8 @@ install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/update_bad_apple.sh" "${
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/strip_quarantine.sh" "${CONTENTS_DIR}/Resources/strip_quarantine.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_desktop/install_badapple.sh" "${CONTENTS_DIR}/Resources/install_badapple.sh"
 install -m 755 "${REPO_ROOT}/src/platform/apple_bridge/install_badapple_platform.sh" "${CONTENTS_DIR}/Resources/install_badapple_platform.sh"
+install -m 755 "${REPO_ROOT}/demo_walkthrough.sh" "${CONTENTS_DIR}/Resources/demo_walkthrough.sh" 2>/dev/null || true
+install -m 644 "${REPO_ROOT}/MESH_BRAIN.md" "${CONTENTS_DIR}/Resources/MESH_BRAIN.md" 2>/dev/null || true
 
 if [[ -f "${BUILD_DIR}/libbad_apple.dylib" ]]; then
     install -m 755 "${BUILD_DIR}/libbad_apple.dylib" "${FRAMEWORKS_DIR}/libbad_apple.dylib"

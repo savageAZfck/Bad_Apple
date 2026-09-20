@@ -96,7 +96,7 @@ done
 for rel in "${LIBS[@]}" mlx.metallib; do
     [[ -s "${BUILD_DIR}/${rel}" ]] || fail "required runtime library missing: ${rel}"
 done
-for rel in "${BRIDGE_FILES[@]}" "${DESKTOP_FILES[@]}" "${CONFIG_FILES[@]}" src/platform/apple_desktop/first_run_preflight.sh; do
+for rel in "${BRIDGE_FILES[@]}" "${DESKTOP_FILES[@]}" "${CONFIG_FILES[@]}" src/platform/apple_desktop/first_run_preflight.sh demo_walkthrough.sh MESH_BRAIN.md; do
     [[ -s "${REPO_ROOT}/${rel}" ]] || fail "required package file missing: ${rel}"
 done
 APP_SOURCE="${BUILD_DIR}/Bad Apple.app"
@@ -146,6 +146,11 @@ done
 for rel in "${CONFIG_FILES[@]}"; do
     copy_file "${REPO_ROOT}/${rel}" "${PKG_DIR}/bad_apple/${rel}"
 done
+
+# Walkthrough demo + mesh doc — sit at the runtime root so `badapple demo
+# full` finds the script two dirs above target/release/.
+install -m 755 "${REPO_ROOT}/demo_walkthrough.sh" "${PKG_DIR}/bad_apple/demo_walkthrough.sh"
+install -m 644 "${REPO_ROOT}/MESH_BRAIN.md" "${PKG_DIR}/bad_apple/MESH_BRAIN.md"
 
 # Bundle the web dashboard assets so the packaged runtime can serve /control.
 if [[ -d "${REPO_ROOT}/web" ]]; then

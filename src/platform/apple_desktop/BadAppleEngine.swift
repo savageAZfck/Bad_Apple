@@ -1877,6 +1877,9 @@ final class BadAppleEngine: @unchecked Sendable {
         if ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"].contains(lower) {
             return "Hey homie! What's the wave? I'm vibing on bare-metal local power, so hit me with whatever you need. \(signOff(for: lower))"
         }
+        if lower == "mesh" || lower.contains("mesh status") || lower.contains("is the mesh") || lower.contains("is my mesh") || lower.contains("mesh up") || lower.contains("mesh down") || lower.contains("mesh alive") || lower.contains("how's the mesh") || lower.contains("how is the mesh") || lower.contains("mesh health") {
+            return meshStatusAnswer()
+        }
 
         let pattern = #"^\s*(?:what is|calculate)?\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*\??\s*$"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
@@ -1897,6 +1900,63 @@ final class BadAppleEngine: @unchecked Sendable {
         default: return nil
         }
         return result.rounded() == result ? String(Int(result)) : String(result)
+    }
+
+    /// Answer "is the mesh up" from the saved mesh registry with a live TCP
+    /// probe per rank — deterministic, no model involved. The CLI writes the
+    /// registry at /var/lib/bad_apple/mesh_hosts.json on plan/shard.
+    private func meshStatusAnswer() -> String {
+        let path = "/var/lib/bad_apple/mesh_hosts.json"
+        guard let data = FileManager.default.contents(atPath: path),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hosts = obj["hosts"] as? [String], !hosts.isEmpty else {
+            return "No mesh is set up yet — but mesh-brain is built in. I can split one model across trusted Macs: each machine holds a slice of the layers, the mid-stream activations cross on authenticated AES-256-GCM encrypted frames, and the pipeline heals itself if a rank drops and rejoins. Run `badapple mesh-brain plan` to lay one out."
+        }
+        var live = 0
+        var downs: [String] = []
+        for h in hosts {
+            if probeMeshHost(h) { live += 1 } else { downs.append(h) }
+        }
+        if live == hosts.count {
+            return "The mesh is up — all \(live) rank\(live == 1 ? "" : "s") answering. One model spread across \(live) machine\(live == 1 ? "" : "s"), every activation frame authenticated and AES-256-GCM encrypted."
+        } else if live == 0 {
+            return "The mesh is configured for \(hosts.count) rank\(hosts.count == 1 ? "" : "s") but nothing is answering right now. Bring a rank back online and it rejoins on its own."
+        }
+        return "The mesh is degraded — \(live) of \(hosts.count) ranks answering; \(downs.joined(separator: ", ")) not responding. A dead rank fails fast instead of hanging, and the pipeline heals when it rejoins."
+    }
+
+    /// Fast TCP reachability probe — non-blocking connect + poll (~400ms).
+    private func probeMeshHost(_ hostport: String, timeoutMs: Int32 = 400) -> Bool {
+        guard let colon = hostport.lastIndex(of: ":"),
+              let port = UInt16(hostport[hostport.index(after: colon)...]) else { return false }
+        let host = String(hostport[..<colon])
+        var hints = addrinfo()
+        hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &res) == 0, let first = res else { return false }
+        defer { freeaddrinfo(first) }
+        var cur: UnsafeMutablePointer<addrinfo>? = first
+        while let ai = cur?.pointee {
+            let fd = socket(ai.ai_family, ai.ai_socktype, ai.ai_protocol)
+            if fd >= 0 {
+                let flags = fcntl(fd, F_GETFL)
+                _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+                var ok = connect(fd, ai.ai_addr, ai.ai_addrlen) == 0
+                if !ok && errno == EINPROGRESS {
+                    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    if poll(&pfd, 1, timeoutMs) > 0 {
+                        var err: Int32 = 0
+                        var len = socklen_t(MemoryLayout<Int32>.size)
+                        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)
+                        ok = (err == 0)
+                    }
+                }
+                close(fd)
+                if ok { return true }
+            }
+            cur = ai.ai_next
+        }
+        return false
     }
 
     /// Simple queries (greetings, math, time, identity) get fewer tokens.
@@ -2330,7 +2390,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
             Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" or run `badapple cert` and I'll run a live audit — sockets, chains, firewall — and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
 
-            \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And here's the new trick: mesh-brain. I can split ONE model across multiple Macs — each machine holds a slice of the layers, activations flow between them encrypted end to end, and the pipeline heals itself if a node drops. Two Studios, one mind — that's how you get to 671B. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
+            \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And here's the new trick: mesh-brain. I can split ONE model across multiple Macs — each machine holds a slice of the layers, activations flow between them encrypted end to end, and the pipeline heals itself if a node drops. A maxed-out Studio already carries 671B alone — mesh-brain is how a crew of smaller Macs pools memory into the same league. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
             """
         }
 
