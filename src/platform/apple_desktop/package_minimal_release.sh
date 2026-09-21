@@ -96,7 +96,7 @@ done
 for rel in "${LIBS[@]}" mlx.metallib; do
     [[ -s "${BUILD_DIR}/${rel}" ]] || fail "required runtime library missing: ${rel}"
 done
-for rel in "${BRIDGE_FILES[@]}" "${DESKTOP_FILES[@]}" "${CONFIG_FILES[@]}" src/platform/apple_desktop/first_run_preflight.sh demo_walkthrough.sh MESH_BRAIN.md; do
+for rel in "${BRIDGE_FILES[@]}" "${DESKTOP_FILES[@]}" "${CONFIG_FILES[@]}" src/platform/apple_desktop/first_run_preflight.sh demo_walkthrough.sh MESH_BRAIN.md tokenizer.json; do
     [[ -s "${REPO_ROOT}/${rel}" ]] || fail "required package file missing: ${rel}"
 done
 APP_SOURCE="${BUILD_DIR}/Bad Apple.app"
@@ -151,6 +151,9 @@ done
 # full` finds the script two dirs above target/release/.
 install -m 755 "${REPO_ROOT}/demo_walkthrough.sh" "${PKG_DIR}/bad_apple/demo_walkthrough.sh"
 install -m 644 "${REPO_ROOT}/MESH_BRAIN.md" "${PKG_DIR}/bad_apple/MESH_BRAIN.md"
+# Grounded code index tokenizer — two dirs above target/release/ so
+# `badapple index` / `badapple recall` share the gatekeeper's vector space.
+install -m 644 "${REPO_ROOT}/tokenizer.json" "${PKG_DIR}/bad_apple/tokenizer.json"
 
 # Bundle the web dashboard assets so the packaged runtime can serve /control.
 if [[ -d "${REPO_ROOT}/web" ]]; then

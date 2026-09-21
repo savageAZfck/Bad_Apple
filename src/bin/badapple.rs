@@ -139,6 +139,12 @@ fn main() -> Result<()> {
         Some("mesh-brain") => {
             return run_mesh_brain_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("index") => {
+            return run_index_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
+        Some("recall") => {
+            return run_recall_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         _ => {}
     }
     let mut args = std::env::args().skip(1);
@@ -2056,6 +2062,132 @@ fn run_demo_full() -> Result<()> {
         .context("failed to launch the walkthrough demo")?;
     if !status.success() {
         bail!("walkthrough exited with {status}");
+    }
+    Ok(())
+}
+
+/// Pin a tokenizer for the grounded-embedding index so `index` and `recall`
+/// agree on the same vector space regardless of the caller's cwd. Prefers an
+/// explicit `BADAPPLE_BRAIN_TOKENIZER`, then the repo's trained
+/// `tokenizer.json` (two dirs above target/release/<exe>), then the
+/// installed copy at /var/lib/bad_apple/.
+fn resolve_brain_tokenizer() -> Option<PathBuf> {
+    if let Some(set) = std::env::var_os("BADAPPLE_BRAIN_TOKENIZER") {
+        let path = PathBuf::from(set);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize()) {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("../../tokenizer.json"));
+            candidates.push(dir.join("tokenizer.json"));
+            // App bundle: Contents/Helpers/badapple -> Contents/Resources.
+            candidates.push(dir.join("../Resources/tokenizer.json"));
+        }
+    }
+    candidates.push(PathBuf::from("/var/lib/bad_apple/tokenizer.json"));
+    candidates.push(PathBuf::from("tokenizer.json"));
+    for path in &candidates {
+        if path.is_file() {
+            std::env::set_var("BADAPPLE_BRAIN_TOKENIZER", path);
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+/// `badapple index [dir ...]` — build/refresh the grounded code index.
+/// No dirs given: index the workspace + source repos under $HOME.
+fn run_index_subcommand(args: &[String]) -> Result<()> {
+    if resolve_brain_tokenizer().is_none() {
+        bail!("no tokenizer.json found — set BADAPPLE_BRAIN_TOKENIZER to a valid tokenizer");
+    }
+    let mut dirs: Vec<PathBuf> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(PathBuf::from)
+        .collect();
+    if dirs.is_empty() {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        if let Ok(workspace) = std::env::var("BADAPPLE_WORKSPACE_DIR") {
+            dirs.push(PathBuf::from(workspace));
+        }
+        dirs.push(home.join("bad_apple"));
+        // Also index adjacent source repositories under $HOME.
+        if let Ok(entries) = std::fs::read_dir(&home) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() || dirs.contains(&path) {
+                    continue;
+                }
+                let markers = [
+                    "Cargo.toml",
+                    "Package.swift",
+                    "pyproject.toml",
+                    "package.json",
+                    "go.mod",
+                    ".git",
+                ];
+                if markers.iter().any(|m| path.join(m).exists()) {
+                    dirs.push(path);
+                }
+            }
+        }
+    }
+    let db_path = std::env::var_os("BADAPPLE_GROUNDED_INDEX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(bad_apple::scavenger::GROUNDED_INDEX_PATH));
+    let start = std::time::Instant::now();
+    let (files, chunks) = bad_apple::scavenger::index_directories_at(&dirs, &db_path)?;
+    let total = bad_apple::scavenger::grounded_chunk_count_at(&db_path);
+    println!(
+        "Indexed {files} files ({chunks} chunks written, {total} total in index) in {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// `badapple recall <query>` — semantic search over the grounded code index.
+fn run_recall_subcommand(args: &[String]) -> Result<()> {
+    if resolve_brain_tokenizer().is_none() {
+        bail!("no tokenizer.json found — set BADAPPLE_BRAIN_TOKENIZER to a valid tokenizer");
+    }
+    let mut k = 4usize;
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-k" | "--top" => {
+                if let Some(v) = args.get(i + 1) {
+                    k = v.parse().unwrap_or(4);
+                    i += 1;
+                }
+            }
+            other => words.push(other.to_string()),
+        }
+        i += 1;
+    }
+    let query = words.join(" ");
+    if query.is_empty() {
+        bail!("usage: badapple recall [-k N] <query>");
+    }
+    let db_path = std::env::var_os("BADAPPLE_GROUNDED_INDEX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(bad_apple::scavenger::GROUNDED_INDEX_PATH));
+    let hits = bad_apple::scavenger::recall_at(&query, k, &db_path)?;
+    if hits.is_empty() {
+        return Ok(());
+    }
+    for hit in &hits {
+        let snippet: String = hit.text.chars().take(600).collect();
+        println!(
+            "File: {} (chunk {}, relevance {:.3})\n{}\n",
+            hit.path, hit.chunk_index, hit.score, snippet
+        );
     }
     Ok(())
 }

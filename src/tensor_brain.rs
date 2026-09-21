@@ -893,6 +893,16 @@ impl CandleBrain {
 /// sequence fed into the Transformer is semantically stable across runs.
 static BPE_TOKENIZER: OnceLock<BpeTokenizer> = OnceLock::new();
 
+/// Resolve the tokenizer path. `BADAPPLE_BRAIN_TOKENIZER` wins when set so
+/// CLI subcommands invoked from arbitrary directories can pin a stable
+/// tokenizer; otherwise fall back to the historical `tokenizer.json` in the
+/// process working directory.
+fn brain_tokenizer_path() -> std::path::PathBuf {
+    std::env::var_os("BADAPPLE_BRAIN_TOKENIZER")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("tokenizer.json"))
+}
+
 struct BpeTokenizer {
     tokenizer: Tokenizer,
     /// vocab_size x 64 deterministic token embeddings.
@@ -1041,15 +1051,46 @@ pub fn text_to_grounded_embedding(text: &str, spatial_axes: &[f64; 4]) -> Vec<f6
 /// `Vec` allocation when a pre-allocated or arena-backed buffer is reused.
 pub fn text_to_grounded_embedding_into(text: &str, spatial_axes: &[f64; 4], out: &mut [f64]) {
     assert_eq!(out.len(), 2048, "grounded embedding must be 2048-D");
-    let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train("tokenizer.json"));
+    let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train(brain_tokenizer_path()));
     bpe.encode_to_2048_into(text, spatial_axes, out);
 }
 
 /// Tokenize a string into BPE token IDs, returning the raw token sequence.
 /// Used by higher-level modules (e.g., HDC script profiling).
 pub fn tokenize_text(text: &str) -> Vec<u32> {
-    let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train("tokenizer.json"));
+    let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train(brain_tokenizer_path()));
     bpe.tokenize_to_ids(text)
+}
+
+/// Mean-pooled 64-D semantic embedding: the order-invariant average of the
+/// deterministic per-token vectors, L2-normalized for cosine-similarity
+/// recall.  Unlike `text_to_grounded_embedding` (which is positional), token
+/// order does not matter here, so documents sharing vocabulary land near
+/// each other — the property the grounded code index needs.
+pub fn semantic_embedding(text: &str) -> Vec<f64> {
+    let bpe = BPE_TOKENIZER.get_or_init(|| BpeTokenizer::load_or_train(brain_tokenizer_path()));
+    let ids = bpe.tokenize_to_ids(text);
+    let mut out = vec![0.0f64; 64];
+    let mut n = 0usize;
+    for &id in &ids {
+        let idx = (id as usize).min(bpe.embeddings.len().saturating_sub(1));
+        for (i, &v) in bpe.embeddings[idx].iter().enumerate() {
+            out[i] += v;
+        }
+        n += 1;
+    }
+    if n > 0 {
+        for v in out.iter_mut() {
+            *v /= n as f64;
+        }
+    }
+    let magnitude: f64 = out.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if magnitude > 0.0 {
+        for v in out.iter_mut() {
+            *v /= magnitude;
+        }
+    }
+    out
 }
 
 // =========================================================================

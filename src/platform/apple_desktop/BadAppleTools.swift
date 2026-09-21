@@ -2601,6 +2601,16 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return "Error: \(jailed) does not exist"
         }
 
+        // Build the persistent grounded code index — real semantic recall,
+        // not just enumeration. Falls back to the enumeration summary when
+        // the CLI is unavailable.
+        if let binary = badappleBinaryPath() {
+            let result = runProcess(launchPath: binary, arguments: ["index", jailed], timeout: 180)
+            if result.exitCode == 0, !result.stdout.isEmpty {
+                return "Indexed \(jailed) into the semantic code index.\n" + result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
         let files = secureTextFiles(at: jailed, maximum: 2_000)
         if files.isEmpty { return "No supported text files found under \(jailed)" }
         var totalBytes = 0
@@ -4132,6 +4142,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             (ProcessInfo.processInfo.arguments.first.map {
                 (URL(fileURLWithPath: $0).deletingLastPathComponent().appendingPathComponent("badapple")).path
             } ?? ""),
+            "/Applications/Bad Apple.app/Contents/Helpers/badapple",
             "/usr/local/bin/badapple",
             fm.currentDirectoryPath + "/target/release/badapple",
         ]

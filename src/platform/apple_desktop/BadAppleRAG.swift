@@ -499,6 +499,12 @@ final class BadAppleRAG: @unchecked Sendable {
             }
         }
 
+        // 3. Grounded code index recall — the persistent semantic index built
+        // by `badapple index`. Returns nil when no index exists.
+        if let recalled = codeIndexRecall(prompt: prompt), !recalled.isEmpty {
+            blocks.append("Relevant indexed code:\n\(recalled)")
+        }
+
         guard !blocks.isEmpty else { return nil }
         return "Use this context if relevant:\n\n" + blocks.joined(separator: "\n\n")
     }
@@ -545,6 +551,11 @@ final class BadAppleRAG: @unchecked Sendable {
                     blocks.append("Relevant local documents:\n\(docs)")
                 }
             }
+        }
+
+        // 3. Grounded code index recall.
+        if let recalled = codeIndexRecall(prompt: prompt), !recalled.isEmpty {
+            blocks.append("Relevant indexed code:\n\(recalled)")
         }
 
         guard !blocks.isEmpty else { return nil }
@@ -799,6 +810,67 @@ final class BadAppleRAG: @unchecked Sendable {
         guard !scored.isEmpty else { return nil }
         scored.sort { $0.0 > $1.0 }
         return scored.prefix(3).map { "- \($0.1)" }.joined(separator: "\n")
+    }
+
+    /// Query the grounded code index via `badapple recall`. Returns formatted
+    /// hits, or nil when the CLI is missing, the index is empty, or the call
+    /// fails. Bounded by a short timeout so retrieval can never stall a query.
+    private func codeIndexRecall(prompt: String) -> String? {
+        guard let binary = badappleCLIPath() else { return nil }
+        let out = runProcess(binary, arguments: ["recall", "-k", "3", prompt], timeout: 8)
+        if let out {
+            let hits = out.components(separatedBy: "###").count - 1
+            NSLog("[BadAppleRAG] code index recall injected %d chunk(s)", hits)
+        }
+        return out
+    }
+
+    /// Resolve the `badapple` CLI beside the app bundle, beside the running
+    /// executable, or on the standard install paths.
+    private func badappleCLIPath() -> String? {
+        if let override = ProcessInfo.processInfo.environment["BADAPPLE_CLI"],
+           fileManager.isExecutableFile(atPath: override) {
+            return override
+        }
+        let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/badapple").path,
+            "/Applications/Bad Apple.app/Contents/Helpers/badapple",
+            "/usr/local/bin/badapple",
+            "/opt/homebrew/bin/badapple",
+            "/var/lib/bad_apple/bin/badapple",
+        ]
+        for path in candidates where fileManager.isExecutableFile(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
+    /// Minimal process runner with timeout — stdout only, nil on failure.
+    private func runProcess(_ launchPath: String, arguments: [String], timeout: TimeInterval) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            if Date() > deadline {
+                process.terminate()
+                return nil
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let out = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (out?.isEmpty ?? true) ? nil : out
     }
 
     /// Best-effort git invocation. Returns trimmed stdout on success, nil on

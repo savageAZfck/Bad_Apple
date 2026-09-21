@@ -262,6 +262,33 @@ target/release/badapple-respawn --status --full    # forged-mtime-safe rehash
 target/release/badapple-respawn --revert head      # restore state root
 ```
 
+## Grounded code index (scavenger)
+
+The repo scavenger maintains a persistent semantic index of tracked source and
+document files at `/var/lib/bad_apple/grounded_index` (redb; override with
+`BADAPPLE_GROUNDED_INDEX`). Chunks are embedded with the gatekeeper's
+`text_to_grounded_embedding` space (mean-pooled, cosine), so the index needs
+only `tokenizer.json` — resolved from `BADAPPLE_BRAIN_TOKENIZER`, the repo
+root, the app bundle's `Contents/Resources`, or `/var/lib/bad_apple`.
+
+```bash
+target/release/badapple index <dir> [dir...]   # incremental reindex
+target/release/badapple index                  # workspace + repos under $HOME
+target/release/badapple recall [-k N] <query>  # hybrid semantic+lexical search
+```
+
+Recall ranks chunks by cosine similarity plus a lexical bonus for literal
+identifier matches in the chunk text and file path — code queries hinge on
+exact names, which the coarse 64-D space alone misses.
+
+The engine injects the top 3 chunks into the system prompt on every query
+(`[BadAppleRAG] code index recall injected N chunk(s)` in the log) via a
+bounded subprocess call to the installed `badapple` binary; missing binary,
+index, or tokenizer degrades silently to no context. The `index_documents`
+tool calls `badapple index` inside the path jail and falls back to file
+enumeration when the CLI is unavailable. `tokenizer.json` ships in the app
+bundle's `Contents/Resources` and at the release package's runtime root.
+
 ## Semantic cache
 
 The first response to a question is embedded with `BAAI/bge-small-en-v1.5` and
