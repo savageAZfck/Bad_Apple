@@ -505,6 +505,12 @@ final class BadAppleRAG: @unchecked Sendable {
             blocks.append("Relevant indexed code:\n\(recalled)")
         }
 
+        // 4. Strategy memory — a learned procedure whose problem matches this
+        // prompt, surfaced when its observed reliability is worth suggesting.
+        if let strategy = strategyMatch(prompt: prompt) {
+            blocks.append(strategy)
+        }
+
         guard !blocks.isEmpty else { return nil }
         return "Use this context if relevant:\n\n" + blocks.joined(separator: "\n\n")
     }
@@ -556,6 +562,11 @@ final class BadAppleRAG: @unchecked Sendable {
         // 3. Grounded code index recall.
         if let recalled = codeIndexRecall(prompt: prompt), !recalled.isEmpty {
             blocks.append("Relevant indexed code:\n\(recalled)")
+        }
+
+        // 4. Strategy memory.
+        if let strategy = strategyMatch(prompt: prompt) {
+            blocks.append(strategy)
         }
 
         guard !blocks.isEmpty else { return nil }
@@ -823,6 +834,23 @@ final class BadAppleRAG: @unchecked Sendable {
             NSLog("[BadAppleRAG] code index recall injected %d chunk(s)", hits)
         }
         return out
+    }
+
+    /// Strategy-memory probe: `badapple strategy match` returns a JSON blob
+    /// when a learned strategy's problem text overlaps this prompt. Returns a
+    /// one-line summary when the match is reliable enough to be worth
+    /// suggesting — unreliable strategies stay silent.
+    private func strategyMatch(prompt: String) -> String? {
+        guard let binary = badappleCLIPath() else { return nil }
+        guard let out = runProcess(binary, arguments: ["strategy", "match", prompt], timeout: 8),
+              let data = out.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let key = json["key"] as? String,
+              let reliability = json["reliability"] as? Double,
+              let problem = json["problem"] as? String,
+              reliability >= 0.4
+        else { return nil }
+        return String(format: "Known strategy '%@' (reliability %.2f, for: %@)", key, reliability, problem)
     }
 
     /// Resolve the `badapple` CLI beside the app bundle, beside the running

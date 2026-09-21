@@ -324,6 +324,43 @@ stored.  Repeated semantically similar queries return the cached answer
 instantly, scoped by active persona.  Set `BADAPPLE_CACHE_THRESHOLD` (default
 0.92).  Cache file: `/var/lib/bad_apple/semantic_cache.json`.
 
+## Causal explanations
+
+`badapple explain <failure text>` walks the causal knowledge graph
+(`CausalGraph::bad_apple_default`) backwards from the matched primitive and
+prints the chain — upstream causes and downstream blast radius. Node names
+are matched as substrings of the failure text in `PRIMITIVE_PRIORITY` order
+(specific before generic). IFY enriches every finding's `detail` with the
+chain at `dispatch`, and `repair_runtime_issue` appends it to failures so
+the model sees why a repair failed.
+
+## Thermodynamic governor
+
+`badapple thermal` samples sudo-free telemetry (loadavg/cores,
+`memory_pressure` free %, `pmset -g batt`, `pmset -g therm` speed limit)
+through the `ThermodynamicGovernor` and writes `/var/lib/bad_apple/thermal.json`.
+The supervisor refreshes it every check cycle. When `throttle` is true the
+engine caps generation at 128 tokens and injects a `Thermal:` ambient line.
+A stale file (>10 min) means the governor is not running and generation is
+unaffected. Override path: `BADAPPLE_THERMAL_FILE`.
+
+## Strategy memory
+
+`~/.bad_apple/strategies.redb` (`BADAPPLE_STRATEGIES` override) stores learned
+strategies with EMA reliability:
+
+```bash
+badapple strategy learn <key> --problem "..." [--lang shell] [--code "..."]
+badapple strategy record <key> <ok|fail> [--problem ... --lang ... --code ...]
+badapple strategy match <problem text>    # JSON blob or nothing
+badapple strategy list [--weak <t>]
+badapple strategy prune <threshold>       # default 0.3
+```
+
+Workshop tool executions record outcomes automatically (`tool:<id>` keys) —
+observation only; tools are already approval-gated when created. RAG prompt
+assembly injects a `Known strategy` line when a match has reliability ≥ 0.4.
+
 ## Human-in-the-loop approvals
 
 Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_documents`)

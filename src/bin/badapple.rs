@@ -148,6 +148,12 @@ fn main() -> Result<()> {
         Some("explain") => {
             return run_explain_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("thermal") => {
+            return run_thermal_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
+        Some("strategy") => {
+            return run_strategy_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         _ => {}
     }
     let mut args = std::env::args().skip(1);
@@ -2219,6 +2225,141 @@ fn run_explain_subcommand(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_thermal_subcommand(_args: &[String]) -> Result<()> {
+    let report = bad_apple::production_blueprint::probe_thermal();
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Path of the strategy library — user-writable like the rest of
+/// ~/.bad_apple state; BADAPPLE_STRATEGIES overrides for tests.
+fn strategies_path() -> PathBuf {
+    std::env::var("BADAPPLE_STRATEGIES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home)
+                .join(".bad_apple")
+                .join("strategies.redb")
+        })
+}
+
+fn run_strategy_subcommand(args: &[String]) -> Result<()> {
+    use bad_apple::strategy_library::{Strategy, StrategyLibrary};
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let lib = StrategyLibrary::open(strategies_path())?;
+    let rt = tokio::runtime::Runtime::new()?;
+
+    let flag = |name: &str| -> Option<String> {
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == name {
+                return args.get(i + 1).cloned();
+            }
+            i += 1;
+        }
+        None
+    };
+    // Positional args: everything after the subcommand that isn't a flag or
+    // a flag's value.
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            i += 2;
+        } else {
+            positional.push(args[i].clone());
+            i += 1;
+        }
+    }
+
+    rt.block_on(async move {
+        match sub {
+            "learn" => {
+                let key = positional.first().cloned();
+                let problem = flag("--problem");
+                let lang = flag("--lang").unwrap_or_else(|| "shell".into());
+                let code = flag("--code").unwrap_or_default();
+                let (Some(key), Some(problem)) = (key, problem) else {
+                    bail!("usage: badapple strategy learn <key> --problem <p> [--lang <l>] [--code <c>]");
+                };
+                lib.put(&Strategy::new(key.clone(), problem, lang, code))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("learned strategy '{key}'");
+            }
+            "record" => {
+                let (Some(key), Some(outcome)) =
+                    (positional.first().cloned(), positional.get(1).cloned())
+                else {
+                    bail!("usage: badapple strategy record <key> <ok|fail> [--problem p] [--lang l] [--code c]");
+                };
+                let success = match outcome.as_str() {
+                    "ok" | "success" => true,
+                    "fail" | "failure" => false,
+                    other => bail!("outcome must be ok|fail, got '{other}'"),
+                };
+                let mut s = lib.get(&key).await.unwrap_or_else(|| {
+                    Strategy::new(
+                        key.clone(),
+                        flag("--problem").unwrap_or_else(|| key.clone()),
+                        flag("--lang").unwrap_or_else(|| "shell".into()),
+                        flag("--code").unwrap_or_default(),
+                    )
+                });
+                s.record(success);
+                lib.put(&s).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!(
+                    "{}: reliability {:.2} over {} use(s)",
+                    s.key, s.reliability, s.uses
+                );
+            }
+            "match" => {
+                let problem = positional.join(" ");
+                if problem.is_empty() {
+                    bail!("usage: badapple strategy match <problem text>");
+                }
+                if let Some(s) = lib.best_match(&problem).await {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "key": s.key,
+                            "reliability": s.reliability,
+                            "problem": s.problem,
+                            "language": s.language,
+                            "uses": s.uses,
+                        })
+                    );
+                }
+            }
+            "list" => {
+                let weak = flag("--weak").and_then(|v| v.parse::<f64>().ok());
+                let items = if let Some(t) = weak {
+                    lib.weak_strategies(t).await
+                } else {
+                    lib.weak_strategies(2.0).await
+                };
+                for s in items {
+                    println!(
+                        "{}\t{:.2}\t{} use(s)\t{}",
+                        s.key, s.reliability, s.uses, s.problem
+                    );
+                }
+            }
+            "prune" => {
+                let threshold = positional
+                    .first()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.3);
+                let n = lib.prune_below(threshold).await;
+                println!("pruned {n} strateg(y|ies) below {threshold}");
+            }
+            other => bail!("unknown strategy subcommand '{other}' — learn|record|match|list|prune"),
+        }
+        Ok(())
+    })
 }
 
 fn run_ify_subcommand(args: &[String]) -> Result<()> {

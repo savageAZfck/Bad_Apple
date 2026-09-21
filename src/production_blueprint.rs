@@ -245,6 +245,133 @@ impl HomeostaticController {
     }
 }
 
+/// Path of the thermal report consumed by the engine.
+/// `/var/lib/bad_apple/thermal.json` by default — written by the supervisor
+/// or `badapple thermal`, read by the engine like any other percept file.
+pub fn thermal_path() -> std::path::PathBuf {
+    std::env::var("BADAPPLE_THERMAL_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/bad_apple/thermal.json"))
+}
+
+fn command_stdout(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(cmd).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+/// 1-minute load average normalised by core count.
+fn sample_cpu_usage() -> f32 {
+    let load = command_stdout("sysctl", &["-n", "vm.loadavg"])
+        .and_then(|s| {
+            s.split_whitespace()
+                .find(|t| t.parse::<f32>().is_ok())
+                .and_then(|t| t.parse::<f32>().ok())
+        })
+        .unwrap_or(0.0);
+    let cores = command_stdout("sysctl", &["-n", "hw.ncpu"])
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(1.0)
+        .max(1.0);
+    (load / cores).clamp(0.0, 1.0)
+}
+
+/// `memory_pressure` prints "System-wide memory free percentage: NN%".
+fn sample_memory_pressure() -> f32 {
+    command_stdout("memory_pressure", &[])
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.contains("free percentage"))
+                .and_then(|l| {
+                    l.split_whitespace()
+                        .find_map(|t| t.trim_end_matches('%').parse::<f32>().ok())
+                })
+        })
+        .map(|free_pct| (1.0 - free_pct / 100.0).clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
+/// On AC or no battery → 1.0 (healthy). Discharging → charge fraction.
+fn sample_battery_health() -> f32 {
+    let Some(out) = command_stdout("pmset", &["-g", "batt"]) else {
+        return 1.0;
+    };
+    if !out.contains("Battery Power") && !out.contains("discharging") {
+        return 1.0;
+    }
+    out.split_whitespace()
+        .find_map(|t| {
+            t.trim_end_matches("%;")
+                .trim_end_matches('%')
+                .parse::<f32>()
+                .ok()
+        })
+        .map(|pct| (pct / 100.0).clamp(0.0, 1.0))
+        .unwrap_or(1.0)
+}
+
+/// `pmset -g therm` reports `CPU_Speed_Limit = NN` (100 = unthrottled).
+/// Thermal pressure reads as 1 - limit/100. (`-g thermlog` follows the log
+/// stream and never exits — `-g therm` is the one-shot snapshot.)
+fn sample_cpu_thermal() -> f32 {
+    command_stdout("pmset", &["-g", "therm"])
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.contains("CPU_Speed_Limit"))
+                .and_then(|l| {
+                    l.split('=')
+                        .nth(1)
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                })
+        })
+        .map(|limit| (1.0 - limit / 100.0).clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
+/// Sample live macOS telemetry into a `ThermalState`. Every source is
+/// sudo-free; unavailable signals default to nominal (0 / healthy).
+pub fn sample_thermal_state() -> ThermalState {
+    ThermalState {
+        cpu_usage: sample_cpu_usage(),
+        memory_pressure: sample_memory_pressure(),
+        battery_health: sample_battery_health(),
+        cpu_temp: sample_cpu_thermal(),
+    }
+}
+
+/// Sample hardware telemetry, run it through the governor, and persist the
+/// verdict to `thermal_path()`. Returns the report that was written.
+pub fn probe_thermal() -> serde_json::Value {
+    let state = sample_thermal_state();
+    let mut governor = ThermodynamicGovernor::new();
+    governor.update(&state);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let report = serde_json::json!({
+        "stress": governor.stress,
+        "throttle": governor.throttle,
+        "target_sparsity": governor.target_sparsity,
+        "cpu_usage": state.cpu_usage,
+        "memory_pressure": state.memory_pressure,
+        "battery_health": state.battery_health,
+        "cpu_temp": state.cpu_temp,
+        "ts": ts,
+    });
+    let path = thermal_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+    report
+}
+
 /// Logical relation between two nodes in the causal knowledge graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CausalRelation {
@@ -599,5 +726,57 @@ mod causal_tests {
     fn unknown_failures_report_isolation() {
         let g = CausalGraph::bad_apple_default();
         assert!(g.find_broken_primitive("quantum flux inverter").is_none());
+    }
+}
+
+#[cfg(test)]
+mod thermal_tests {
+    use super::{probe_thermal, sample_thermal_state, ThermalState, ThermodynamicGovernor};
+
+    #[test]
+    fn governor_throttles_under_stress() {
+        let mut g = ThermodynamicGovernor::new();
+        g.update(&ThermalState {
+            cpu_usage: 0.95,
+            memory_pressure: 0.95,
+            battery_health: 0.05,
+            cpu_temp: 0.9,
+        });
+        assert!(g.throttle);
+        assert!(g.target_sparsity > 0.5);
+        assert!(g.throttle_learning_rate(0.001) < 0.0005);
+    }
+
+    #[test]
+    fn governor_is_calm_when_idle() {
+        let mut g = ThermodynamicGovernor::new();
+        g.update(&ThermalState {
+            battery_health: 1.0,
+            ..ThermalState::default()
+        });
+        assert!(!g.throttle);
+        assert_eq!(g.target_sparsity, 0.0);
+    }
+
+    #[test]
+    fn probe_writes_fresh_report() {
+        let path = std::env::temp_dir().join(format!("ba-thermal-{}.json", std::process::id()));
+        std::env::set_var("BADAPPLE_THERMAL_FILE", &path);
+        let report = probe_thermal();
+        assert!(path.exists());
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(report["throttle"], on_disk["throttle"]);
+        assert!(on_disk["ts"].as_f64().unwrap() > 0.0);
+        std::env::remove_var("BADAPPLE_THERMAL_FILE");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sampler_returns_bounded_values() {
+        let s = sample_thermal_state();
+        for v in [s.cpu_usage, s.memory_pressure, s.battery_health, s.cpu_temp] {
+            assert!((0.0..=1.0).contains(&v));
+        }
     }
 }

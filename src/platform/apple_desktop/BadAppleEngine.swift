@@ -300,6 +300,11 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private var lastAuralUpdate: Date?
 
+    /// Thermodynamic governor verdict — set from the thermal percept file
+    /// written by the supervisor (`/var/lib/bad_apple/thermal.json`).
+    private var thermalThrottle = false
+    private var thermalStress = 0.0
+
     /// Whether ambient updates are allowed. Off by default for air-gap / privacy.
     var ambientEnabled: Bool {
         let env = ProcessInfo.processInfo.environment["BADAPPLE_AMBIENT"] ?? "0"
@@ -438,7 +443,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Reuse any existing ocular description or ambient transcript without losing it.
         if let existing = ambientContext {
             for line in existing.components(separatedBy: .newlines) {
-                if line.starts(with: "Screen:") || line.starts(with: "Heard:") {
+                if line.starts(with: "Screen:") || line.starts(with: "Heard:") || line.starts(with: "Thermal:") {
                     parts.append(line)
                 }
             }
@@ -454,6 +459,7 @@ final class BadAppleEngine: @unchecked Sendable {
         updateAmbientContext()
         await updateOcularContext()
         updateAuralContext()
+        updateThermalContext()
     }
 
     /// Read the latest ambient-hearing percept written by the menu bar app —
@@ -485,6 +491,35 @@ final class BadAppleEngine: @unchecked Sendable {
             parts.append("Heard: \(heard)")
             ambientContext = parts.joined(separator: "\n")
         } else if ambientContext != nil {
+            ambientContext = parts.isEmpty ? nil : parts.joined(separator: "\n")
+        }
+    }
+
+    /// Read the thermodynamic governor verdict written by the supervisor.
+    /// A fresh report (<10 min) with `throttle: true` caps generation length
+    /// and tells the model to be terse; a missing or stale file means the
+    /// governor is not running and the brain is unaffected.
+    func updateThermalContext() {
+        let path = ProcessInfo.processInfo.environment["BADAPPLE_THERMAL_FILE"]
+            ?? "/var/lib/bad_apple/thermal.json"
+        var throttle = false
+        var stress = 0.0
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let ts = json["ts"] as? TimeInterval,
+           Date().timeIntervalSince1970 - ts < 600 {
+            throttle = json["throttle"] as? Bool ?? false
+            stress = json["stress"] as? Double ?? 0.0
+        }
+        thermalThrottle = throttle
+        thermalStress = stress
+
+        var parts = ambientContext?.components(separatedBy: .newlines) ?? []
+        parts.removeAll { $0.starts(with: "Thermal:") }
+        if throttle {
+            parts.append(String(format: "Thermal: system under stress (%.0f%%) — answer tersely", stress * 100))
+        }
+        if throttle || ambientContext != nil {
             ambientContext = parts.isEmpty ? nil : parts.joined(separator: "\n")
         }
     }
@@ -1240,7 +1275,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 sysPrompt += "\n\nContext:\n\(ragContext)"
             }
 
-            let effectiveMaxTokens = maxTokens
+            let effectiveMaxTokens = thermalThrottle ? min(maxTokens, 128) : maxTokens
             if let toolsText = toolRouter.toolsForPrompt(text: prompt) {
                 let example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>"
                 sysPrompt += "\n\nThe user is asking for a local action. You MUST use one of the available tools below. Do not answer from memory or in prose. Output ONLY one block like this: \(example). Do not wrap arguments inside a \"properties\" object. Put the actual arguments directly inside \"arguments\". Never invent a tool result.\n\n\(toolsText)"

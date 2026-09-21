@@ -549,3 +549,52 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod library_tests {
+    use super::{Strategy, StrategyLibrary};
+
+    fn temp_lib(name: &str) -> (StrategyLibrary, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("ba-strategies-{name}-{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        (StrategyLibrary::open(&path).unwrap(), path)
+    }
+
+    #[tokio::test]
+    async fn record_then_match_roundtrip() {
+        let (lib, path) = temp_lib("roundtrip");
+        lib.put(&Strategy::new(
+            "tool:list_files".into(),
+            "list files in a directory".into(),
+            "shell".into(),
+            "ls -la".into(),
+        ))
+        .await
+        .unwrap();
+        let mut s = lib.get("tool:list_files").await.unwrap();
+        s.record(true);
+        s.record(true);
+        lib.put(&s).await.unwrap();
+        let best = lib.best_match("list files in a directory").await.unwrap();
+        assert_eq!(best.key, "tool:list_files");
+        assert!(best.reliability > 0.5);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn failures_decay_reliability() {
+        let (lib, path) = temp_lib("decay");
+        let mut s = Strategy::new("k".into(), "p".into(), "shell".into(), "c".into());
+        for _ in 0..5 {
+            s.record(false);
+        }
+        lib.put(&s).await.unwrap();
+        let weak = lib.weak_strategies(0.3).await;
+        assert_eq!(weak.len(), 1);
+        let pruned = lib.prune_below(0.3).await;
+        assert_eq!(pruned, 1);
+        assert!(lib.get("k").await.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+}

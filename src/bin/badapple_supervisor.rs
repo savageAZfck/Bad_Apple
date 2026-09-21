@@ -222,6 +222,7 @@ fn check_once(repair: bool) -> serde_json::Value {
         "services": {},
         "safe_mode": false,
     });
+    report["thermal"] = bad_apple::production_blueprint::probe_thermal();
     let grace = startup_grace();
 
     for svc in services() {

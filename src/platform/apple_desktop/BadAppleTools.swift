@@ -2155,16 +2155,39 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         let argList = tool.args.compactMap { args[$0] }
         let interpolated = CustomToolExecutor.interpolate(template: tool.command, args: argList)
 
+        let result: String
         switch tool.kind.lowercased() {
         case "shell":
-            return CustomToolExecutor.runShellCommand(interpolated)
+            result = CustomToolExecutor.runShellCommand(interpolated)
         case "applescript":
-            return CustomToolExecutor.runAppleScript(interpolated)
+            result = CustomToolExecutor.runAppleScript(interpolated)
         case "shortcut":
-            return runShortcut(name: tool.command, input: argList.first)
+            result = runShortcut(name: tool.command, input: argList.first)
         default:
             return "Error: unknown custom tool kind '\(tool.kind)'"
         }
+        recordStrategyOutcome(tool: tool, result: result)
+        return result
+    }
+
+    /// Feed a workshop tool's outcome into strategy memory: reliability is an
+    /// EMA over observed successes, so tools that work strengthen and tools
+    /// that rot decay toward pruning. Observation only — the tool itself was
+    /// already approval-gated when created.
+    private func recordStrategyOutcome(tool: WorkshopCustomTool, result: String) {
+        guard let binary = badappleBinaryPath() else { return }
+        let outcome = result.hasPrefix("Error") ? "fail" : "ok"
+        let problem = tool.description.isEmpty ? tool.name : tool.description
+        _ = runProcess(
+            launchPath: binary,
+            arguments: [
+                "strategy", "record", "tool:\(tool.id)", outcome,
+                "--problem", problem,
+                "--lang", tool.kind,
+                "--code", tool.command,
+            ],
+            timeout: 10
+        )
     }
 
     // MARK: - Path Jail
