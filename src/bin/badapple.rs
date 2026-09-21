@@ -145,6 +145,9 @@ fn main() -> Result<()> {
         Some("recall") => {
             return run_recall_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("explain") => {
+            return run_explain_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         _ => {}
     }
     let mut args = std::env::args().skip(1);
@@ -2188,6 +2191,32 @@ fn run_recall_subcommand(args: &[String]) -> Result<()> {
             "File: {} (chunk {}, relevance {:.3})\n{}\n",
             hit.path, hit.chunk_index, hit.score, snippet
         );
+    }
+    Ok(())
+}
+
+fn run_explain_subcommand(args: &[String]) -> Result<()> {
+    let graph = bad_apple::production_blueprint::CausalGraph::bad_apple_default();
+    let text = args.join(" ");
+    if text.trim().is_empty() || text.trim() == "--list" {
+        println!("Causal primitives:");
+        for name in graph.node_names() {
+            println!("  {name}");
+        }
+        return Ok(());
+    }
+    match graph.find_broken_primitive(&text) {
+        Some(primitive) => {
+            if let Some(chain) = graph.explain_failure(primitive) {
+                println!("{chain}");
+            }
+        }
+        None => {
+            println!("No causal primitive matched '{text}'. Known primitives:");
+            for name in graph.node_names() {
+                println!("  {name}");
+            }
+        }
     }
     Ok(())
 }

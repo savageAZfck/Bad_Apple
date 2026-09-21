@@ -206,6 +206,31 @@ fn kill_switch_event_surfaces() {
 }
 
 #[test]
+fn dispatch_enriches_detail_with_causal_chain() {
+    let _g = lock();
+    let fx = fixture("causal");
+    let state = ify::IfyState::default();
+    let f = ify::Finding {
+        id: "ify-test-causal".into(),
+        ts: ify::now_secs(),
+        rule: "daemon_error".into(),
+        severity: ify::Severity::Info,
+        observed: "bind failed: address already in use on socket".into(),
+        baseline: "clean bind".into(),
+        detail: "engine could not bind".into(),
+    };
+    ify::dispatch(&state, &f);
+    let text = fs::read_to_string(ify::findings_path()).unwrap();
+    let logged: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    let detail = logged["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("Causal chain for failure at [socket]"),
+        "enriched detail: {detail}"
+    );
+    assert!(detail.contains("stale_engine_process"));
+}
+
+#[test]
 fn proposals_use_curious_format() {
     let _g = lock();
     let fx = fixture("proposals");

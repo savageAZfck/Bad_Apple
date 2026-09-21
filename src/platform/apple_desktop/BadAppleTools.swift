@@ -3342,7 +3342,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
                 )
                 return "Created \(dataDir)."
             } catch {
-                return "Error: could not create \(dataDir): \(error.localizedDescription)"
+                return "Error: could not create \(dataDir): \(error.localizedDescription)" + causalExplanation("data_dir \(error.localizedDescription)")
             }
         case "blocklist_missing":
             let path = "/var/lib/bad_apple/blocklist.txt"
@@ -3351,28 +3351,38 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             if FileManager.default.createFile(atPath: path, contents: Data(), attributes: nil) {
                 return "Created \(path)."
             }
-            return "Error: could not create \(path)."
+            return "Error: could not create \(path)." + causalExplanation("blocklist")
         case "identity_agent_not_loaded":
             let plist = home + "/Library/LaunchAgents/com.badapple.identity_agent.plist"
             let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
-            return r.exitCode == 0 ? "Loaded identity agent." : "Error: \(r.stdout + r.stderr)"
+            return r.exitCode == 0 ? "Loaded identity agent." : "Error: \(r.stdout + r.stderr)" + causalExplanation("identity \(r.stderr)")
         case "dashboard_agent_not_loaded":
             let plist = home + "/Library/LaunchAgents/com.badapple.dashboard.plist"
             let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
-            return r.exitCode == 0 ? "Loaded dashboard agent." : "Error: \(r.stdout + r.stderr)"
+            return r.exitCode == 0 ? "Loaded dashboard agent." : "Error: \(r.stdout + r.stderr)" + causalExplanation("dashboard \(r.stderr)")
         case "tts_agent_not_loaded":
             let plist = home + "/Library/LaunchAgents/com.badapple.tts.plist"
             let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
-            return r.exitCode == 0 ? "Loaded TTS agent." : "Error: \(r.stdout + r.stderr)"
+            return r.exitCode == 0 ? "Loaded TTS agent." : "Error: \(r.stdout + r.stderr)" + causalExplanation("tts \(r.stderr)")
         case "menubar_agent_not_loaded":
             let plist = home + "/Library/LaunchAgents/com.badapple.menubar.plist"
             let r = runProcess(launchPath: "/bin/launchctl", arguments: ["bootstrap", "gui/\(uid)", plist], timeout: 15)
-            return r.exitCode == 0 ? "Loaded menu bar agent." : "Error: \(r.stdout + r.stderr)"
+            return r.exitCode == 0 ? "Loaded menu bar agent." : "Error: \(r.stdout + r.stderr)" + causalExplanation("menubar \(r.stderr)")
         case "app_not_installed":
             return "Cannot auto-repair: install /Applications/Bad Apple.app manually (requires administrator privileges)."
         default:
-            return "Error: unknown or unsupported runtime issue '\(issue)'."
+            return "Error: unknown or unsupported runtime issue '\(issue)'." + causalExplanation(issue)
         }
+    }
+
+    /// Ask the causal graph why a repair failed, so the model sees the chain,
+    /// not just the symptom. Silent when no primitive matches.
+    private func causalExplanation(_ text: String) -> String {
+        guard let binary = badappleBinaryPath() else { return "" }
+        let r = runProcess(launchPath: binary, arguments: ["explain", text], timeout: 10)
+        let out = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard r.exitCode == 0, !out.isEmpty, !out.hasPrefix("No causal primitive") else { return "" }
+        return "\n\n" + out
     }
 
     /// Run the local cert suite and/or doctor diagnostic and return a JSON summary.

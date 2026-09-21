@@ -372,9 +372,54 @@ impl CausalGraph {
             .map(std::string::String::as_str)
     }
 
+    /// Node names, in `find_broken_primitive` match priority order.
+    /// `find_broken_primitive` returns the first node whose name appears in
+    /// the failure text, so specific technical terms must precede generic
+    /// ones ("vram" before "memory", "identity" before "agent").
+    pub const PRIMITIVE_PRIORITY: &'static [&'static str] = &[
+        "vram",
+        "tokenizer",
+        "socket",
+        "ledger",
+        "identity",
+        "slicks",
+        "menubar",
+        "dashboard",
+        "tts",
+        "ears",
+        "microphone",
+        "speech",
+        "screen",
+        "index",
+        "blocklist",
+        "permission",
+        "launch",
+        "agent",
+        "disk",
+        "mesh",
+        "peer",
+        "council",
+        "approval",
+        "firewall",
+        "cache",
+        "data_dir",
+        "recall",
+        "model",
+        "engine",
+        "memory",
+    ];
+
+    /// All node names registered in the graph.
+    pub fn node_names(&self) -> &[String] {
+        &self.nodes
+    }
+
     /// Built-in causal map for the Bad Apple architecture.
     pub fn bad_apple_default() -> Self {
         let mut g = Self::new();
+        for name in Self::PRIMITIVE_PRIORITY {
+            g.add_node(name);
+        }
         g.add_relation(
             "apple_intelligence_bridge",
             CausalRelation::Enables,
@@ -406,6 +451,153 @@ impl CausalGraph {
             CausalRelation::DependsOn,
             "skill_memory",
         );
+
+        // Runtime anatomy: real primitives, named by the vocabulary that
+        // appears in actual failure text. Two edge shapes per subsystem:
+        // (prerequisite, Enables, dependent) so a dependent's failure names
+        // its cause, and (dependent, DependsOn, prerequisite) so a
+        // prerequisite's failure names what else it takes down.
+        let runtime: &[(&str, CausalRelation, &str)] = &[
+            // Daemon socket lifecycle — a stale engine generation races the
+            // fd and shadows the socket for the new process.
+            ("launch_plist", CausalRelation::Enables, "socket"),
+            ("stale_engine_process", CausalRelation::Violates, "socket"),
+            ("engine", CausalRelation::DependsOn, "socket"),
+            ("gatekeeper", CausalRelation::DependsOn, "socket"),
+            ("cli", CausalRelation::DependsOn, "socket"),
+            // Model residency — VRAM admission is the classic failure;
+            // stale engines compressing gigabytes were the observed cause.
+            ("vram", CausalRelation::Enables, "model"),
+            ("memory_pressure", CausalRelation::Violates, "vram"),
+            (
+                "stale_engine_process",
+                CausalRelation::Causes,
+                "memory_pressure",
+            ),
+            ("model", CausalRelation::Enables, "generation"),
+            ("model", CausalRelation::Enables, "engine"),
+            ("socket", CausalRelation::Enables, "engine"),
+            ("memory_pressure", CausalRelation::Violates, "memory"),
+            ("memory", CausalRelation::Enables, "vram"),
+            ("model", CausalRelation::DependsOn, "vram"),
+            // Retrieval stack — recall needs both a current index and a
+            // helper binary that matches the running scorer.
+            ("model_bundle", CausalRelation::Enables, "tokenizer"),
+            ("tokenizer", CausalRelation::Enables, "index"),
+            ("tokenizer", CausalRelation::Enables, "engine"),
+            ("index", CausalRelation::DependsOn, "tokenizer"),
+            ("engine", CausalRelation::DependsOn, "tokenizer"),
+            ("index", CausalRelation::Enables, "recall"),
+            ("helper_binary", CausalRelation::Enables, "recall"),
+            ("recall", CausalRelation::DependsOn, "index"),
+            ("hf_cache", CausalRelation::Enables, "model"),
+            ("app_bundle", CausalRelation::Protects, "helper_binary"),
+            // Identity and signing.
+            ("secure_enclave", CausalRelation::Enables, "identity"),
+            ("identity_agent", CausalRelation::Enables, "identity"),
+            ("launch_plist", CausalRelation::Enables, "identity_agent"),
+            ("identity", CausalRelation::Enables, "slicks"),
+            ("slicks", CausalRelation::DependsOn, "identity"),
+            ("peer_tls", CausalRelation::DependsOn, "identity"),
+            ("launchd_service", CausalRelation::Enables, "launch"),
+            ("launch_plist", CausalRelation::Enables, "agent"),
+            // Persistence and audit.
+            ("platform_installer", CausalRelation::Enables, "data_dir"),
+            ("data_dir", CausalRelation::Enables, "ledger"),
+            ("disk", CausalRelation::Enables, "ledger"),
+            ("state_growth", CausalRelation::Violates, "disk"),
+            ("ledger", CausalRelation::Enables, "ify"),
+            ("ledger", CausalRelation::Enables, "audit"),
+            ("ify", CausalRelation::DependsOn, "ledger"),
+            ("audit", CausalRelation::DependsOn, "ledger"),
+            ("bge_embedding_model", CausalRelation::Enables, "cache"),
+            // Senses — permissions are owned by the entitled app process.
+            ("microphone", CausalRelation::Enables, "ears"),
+            ("speech", CausalRelation::Enables, "ears"),
+            ("menubar", CausalRelation::Enables, "ears"),
+            ("ears", CausalRelation::DependsOn, "menubar"),
+            ("ears", CausalRelation::Enables, "ambient_hearing"),
+            ("screen", CausalRelation::Enables, "ocular"),
+            ("vision_model", CausalRelation::Enables, "ocular"),
+            ("user_consent", CausalRelation::Enables, "permission"),
+            ("permission", CausalRelation::Enables, "microphone"),
+            ("permission", CausalRelation::Enables, "speech"),
+            ("permission", CausalRelation::Enables, "screen"),
+            // User agents ride on their launch plists.
+            ("launch_plist", CausalRelation::Enables, "menubar"),
+            ("launch_plist", CausalRelation::Enables, "tts"),
+            ("launch_plist", CausalRelation::Enables, "dashboard"),
+            ("launch_plist", CausalRelation::Enables, "ify"),
+            // Governance.
+            ("council", CausalRelation::Enables, "approval"),
+            ("engine", CausalRelation::Enables, "council"),
+            ("firewall", CausalRelation::Protects, "secrets"),
+            ("firewall", CausalRelation::DependsOn, "blocklist"),
+            ("blocklist", CausalRelation::Enables, "firewall"),
+            // Mesh.
+            ("identity", CausalRelation::Enables, "peer_tls"),
+            ("peer_tls", CausalRelation::Enables, "peer"),
+            ("peer", CausalRelation::Enables, "mesh"),
+            ("mesh", CausalRelation::Enables, "delegated_inference"),
+        ];
+        for (src, rel, dst) in runtime {
+            g.add_relation(src, rel.clone(), dst);
+        }
         g
+    }
+}
+
+#[cfg(test)]
+mod causal_tests {
+    use super::CausalGraph;
+
+    #[test]
+    fn explains_vram_admission_denied() {
+        let g = CausalGraph::bad_apple_default();
+        let primitive = g
+            .find_broken_primitive("VRAM admission denied: Not enough free memory")
+            .expect("vram should match");
+        assert_eq!(primitive, "vram");
+        let chain = g.explain_failure(primitive).unwrap();
+        assert!(chain.contains("memory_pressure"));
+        assert!(chain.contains("stale_engine_process"));
+    }
+
+    #[test]
+    fn explains_socket_contention() {
+        let g = CausalGraph::bad_apple_default();
+        let primitive = g
+            .find_broken_primitive("error binding socket: address already in use")
+            .expect("socket should match");
+        assert_eq!(primitive, "socket");
+        let chain = g.explain_failure(primitive).unwrap();
+        assert!(chain.contains("stale_engine_process"));
+        assert!(chain.contains("DEPENDS_ON"));
+    }
+
+    #[test]
+    fn explains_identity_agent_failure() {
+        let g = CausalGraph::bad_apple_default();
+        let primitive = g
+            .find_broken_primitive("identity_agent_not_loaded")
+            .expect("identity should match before agent");
+        assert_eq!(primitive, "identity");
+        let chain = g.explain_failure(primitive).unwrap();
+        assert!(chain.contains("launch_plist"));
+    }
+
+    #[test]
+    fn specific_terms_win_over_generic() {
+        let g = CausalGraph::bad_apple_default();
+        let primitive = g
+            .find_broken_primitive("speech recognition permission denied")
+            .expect("speech should match before permission");
+        assert_eq!(primitive, "speech");
+    }
+
+    #[test]
+    fn unknown_failures_report_isolation() {
+        let g = CausalGraph::bad_apple_default();
+        assert!(g.find_broken_primitive("quantum flux inverter").is_none());
     }
 }

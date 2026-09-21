@@ -699,10 +699,29 @@ pub fn narrate(f: &Finding) -> Option<String> {
     crate::bad_apple_ipc::stream_query(&prompt, 120, |_| {}).ok()
 }
 
+/// Enrich a finding's detail with a causal-chain explanation when the
+/// observed text names a known runtime primitive.
+fn with_causal_explanation(f: &Finding) -> Finding {
+    let graph = crate::production_blueprint::CausalGraph::bad_apple_default();
+    let text = format!("{} {} {}", f.rule, f.observed, f.detail);
+    match graph.find_broken_primitive(&text) {
+        Some(primitive) => match graph.explain_failure(primitive) {
+            Some(chain) => {
+                let mut enriched = f.clone();
+                enriched.detail = format!("{}\n\n{}", f.detail, chain);
+                enriched
+            }
+            None => f.clone(),
+        },
+        None => f.clone(),
+    }
+}
+
 /// Dispatch one finding: always log; surface/brake per phase.
 /// Returns the path of a written proposal, if any.
 pub fn dispatch(state: &IfyState, f: &Finding) -> Option<PathBuf> {
-    log_finding(f);
+    let f = with_causal_explanation(f);
+    log_finding(&f);
     let phase = current_phase(state);
     if !surfaces(phase, f.severity) {
         return None;
@@ -714,7 +733,7 @@ pub fn dispatch(state: &IfyState, f: &Finding) -> Option<PathBuf> {
     }
     notify(
         &format!("IFY: {}", f.rule),
-        &narrate(f).unwrap_or_else(|| f.detail.clone()),
+        &narrate(&f).unwrap_or_else(|| f.detail.clone()),
     );
-    write_proposal(f, braked).ok()
+    write_proposal(&f, braked).ok()
 }
