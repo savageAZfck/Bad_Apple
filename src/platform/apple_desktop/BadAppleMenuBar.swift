@@ -4334,6 +4334,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var statusItem: NSStatusItem?
     private var menu: NSMenu?
     private var timer: Timer?
+    private var earsTimer: Timer?
+    private var earsCaptureInFlight = false
     private let voiceHost = BadAppleVoiceHost()
     // Dedicated serial queue for spawning the badapple CLI during voice
     // queries so the process spawn is not delayed by other global-queue work.
@@ -4515,6 +4517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         statusItem?.menu = menu
 
         voiceHUD.attach(statusButton: statusItem?.button)
+        startEarsLoop()
         voiceHost.onStateChange = { [weak self] state in
             self?.rebuildMenu()
             self?.updateStatusIcon()
@@ -5236,6 +5239,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private func syncAutopilotToDaemon() {
         Task {
             _ = try? await runBadAppleCLI(prompt: autopilotEnabled ? "autopilot on" : "autopilot off", socketPath: BadAppleBrain.deepSocket, maxTokens: 32)
+        }
+    }
+
+    // MARK: - Ambient hearing (ears)
+
+    /// Seconds between ambient hearing checks. The control file at
+    /// ~/.bad_apple/ears is the opt-in switch; capture only runs while it exists.
+    private var earsInterval: TimeInterval {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_EARS_INTERVAL"] ?? "45"
+        return max(TimeInterval(env) ?? 45, 10)
+    }
+
+    private var earsWindowSeconds: Int {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_EARS_SECONDS"] ?? "6"
+        return min(max(Int(env) ?? 6, 2), 15)
+    }
+
+    /// Poll the ears control file on a slow timer. When enabled, capture a
+    /// bounded window off the main thread and write the percept to
+    /// ~/.bad_apple/ambient_heard.json for the engine's ambient loop.
+    private func startEarsLoop() {
+        earsTimer?.invalidate()
+        earsTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.earsTick()
+        }
+    }
+
+    private var lastEarsCapture: Date?
+
+    private func earsTick() {
+        guard BadAppleEars.enabled, !earsCaptureInFlight else { return }
+        if let last = lastEarsCapture, Date().timeIntervalSince(last) < earsInterval { return }
+        lastEarsCapture = Date()
+        earsCaptureInFlight = true
+        let seconds = earsWindowSeconds
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let heard = BadAppleEars.captureOnce(seconds: seconds)
+            if !heard.isEmpty {
+                let payload: [String: Any] = [
+                    "heard": heard,
+                    "ts": Date().timeIntervalSince1970,
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payload) {
+                    try? data.write(to: BadAppleEars.heardFileURL, options: .atomic)
+                }
+            }
+            self?.earsCaptureInFlight = false
         }
     }
 

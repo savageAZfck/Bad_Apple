@@ -262,6 +262,34 @@ target/release/badapple-respawn --status --full    # forged-mtime-safe rehash
 target/release/badapple-respawn --revert head      # restore state root
 ```
 
+## Ambient hearing (ears)
+
+Opt-in ambient sense organ, off by default. The menu bar app owns the capture
+because it holds the microphone and speech-recognition TCC grants — a
+standalone helper carries no TCC identity and hard-aborts on the first
+capture API call.
+
+```bash
+target/release/badapple "enable ears"     # writes ~/.bad_apple/ears
+target/release/badapple "disable ears"    # removes it + the percept file
+```
+
+- `~/.bad_apple/ears` — the control file is the single switch; both the app's
+  capture loop and the engine's injection honor it live (no restart).
+- Menu bar polls it every 15 s and, while present, records a bounded window
+  (`BADAPPLE_EARS_SECONDS`, default 6, clamped 2–15) every
+  `BADAPPLE_EARS_INTERVAL` seconds (default 45, min 10).
+- Transcription is Apple's on-device `SFSpeechRecognizer`
+  (`requiresOnDeviceRecognition = true`) — no audio leaves the Mac.
+- Percepts land in `~/.bad_apple/ambient_heard.json` `{"heard","ts"}`; the
+  engine injects them as a `Heard:` ambient line, expiring percepts older
+  than ~3 refresh intervals.
+
+The cached `mlx-community/whisper-large-v3-turbo-asr-fp16` model is the
+planned ASR upgrade — nothing in the tree can load it today (no mlx_whisper,
+whisper.cpp, or CoreML build). When an MLX whisper Swift runtime lands,
+`BadAppleEars.captureOnce` is the single function to swap backends on.
+
 ## Grounded code index (scavenger)
 
 The repo scavenger maintains a persistent semantic index of tracked source and

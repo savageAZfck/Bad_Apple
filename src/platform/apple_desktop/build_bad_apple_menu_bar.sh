@@ -183,6 +183,7 @@ fi
     ${MLX_FLAGS} \
     -o "${SCRATCH_DIR}/native/BadAppleMenuBar" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleEars.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBarUIResponder.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleControlCenter.swift" \

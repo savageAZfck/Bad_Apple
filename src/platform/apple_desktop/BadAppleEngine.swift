@@ -292,6 +292,14 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private var lastOcularUpdate: Date?
 
+    /// Minimum seconds between ambient-hearing percept reads.
+    private let auralRefreshInterval: TimeInterval = {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_EARS_INTERVAL"] ?? "45"
+        return max(TimeInterval(env) ?? 45, 10)
+    }()
+
+    private var lastAuralUpdate: Date?
+
     /// Whether ambient updates are allowed. Off by default for air-gap / privacy.
     var ambientEnabled: Bool {
         let env = ProcessInfo.processInfo.environment["BADAPPLE_AMBIENT"] ?? "0"
@@ -301,6 +309,18 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Whether ocular screen capture is allowed. Off by default.
     var ocularEnabled: Bool {
         let env = ProcessInfo.processInfo.environment["BADAPPLE_OCULAR"] ?? "0"
+        return env == "1" || env.lowercased() == "true" || env.lowercased() == "on"
+    }
+
+    /// Whether ambient hearing is allowed. Off by default — audio is the most
+    /// privacy-dense sense, so it requires an explicit opt-in: the control
+    /// file at ~/.bad_apple/ears (the same switch the menu bar's capture loop
+    /// honors) or the BADAPPLE_EARS env var.
+    var auralEnabled: Bool {
+        if FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.bad_apple/ears") {
+            return true
+        }
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_EARS"] ?? "0"
         return env == "1" || env.lowercased() == "true" || env.lowercased() == "on"
     }
 
@@ -415,10 +435,10 @@ final class BadAppleEngine: @unchecked Sendable {
             }
         }
 
-        // Reuse any existing ocular description without losing it.
+        // Reuse any existing ocular description or ambient transcript without losing it.
         if let existing = ambientContext {
             for line in existing.components(separatedBy: .newlines) {
-                if line.starts(with: "Screen:") {
+                if line.starts(with: "Screen:") || line.starts(with: "Heard:") {
                     parts.append(line)
                 }
             }
@@ -433,6 +453,40 @@ final class BadAppleEngine: @unchecked Sendable {
     func refreshAmbientContext() async {
         updateAmbientContext()
         await updateOcularContext()
+        updateAuralContext()
+    }
+
+    /// Read the latest ambient-hearing percept written by the menu bar app —
+    /// the organ that holds the microphone TCC grant — and expose it to the
+    /// prompt as a `Heard:` line. The control file at ~/.bad_apple/ears is the
+    /// opt-in switch; a stale percept (older than a few refresh intervals) is
+    /// dropped because old speech is not ambient context.
+    func updateAuralContext() {
+        guard auralEnabled else { return }
+        if let last = lastAuralUpdate, Date().timeIntervalSince(last) < auralRefreshInterval { return }
+        lastAuralUpdate = Date()
+
+        let heardURL = URL(fileURLWithPath: NSHomeDirectory() + "/.bad_apple/ambient_heard.json")
+        var heard = ""
+        var heardAge = TimeInterval.greatestFiniteMagnitude
+        if let data = try? Data(contentsOf: heardURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            heard = (json["heard"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let ts = json["ts"] as? TimeInterval {
+                heardAge = Date().timeIntervalSince1970 - ts
+            }
+        }
+        // Stale percepts expire: ambient context describes now, not minutes ago.
+        if heardAge > auralRefreshInterval * 3 { heard = "" }
+
+        var parts = ambientContext?.components(separatedBy: .newlines) ?? []
+        parts.removeAll { $0.starts(with: "Heard:") }
+        if !heard.isEmpty {
+            parts.append("Heard: \(heard)")
+            ambientContext = parts.joined(separator: "\n")
+        } else if ambientContext != nil {
+            ambientContext = parts.isEmpty ? nil : parts.joined(separator: "\n")
+        }
     }
 
     /// Capture the screen and describe it with the vision model, appending the

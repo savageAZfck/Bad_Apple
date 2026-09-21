@@ -394,6 +394,14 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
     case "disable private mode", "private mode off":
         BadAppleEngine.shared.privateMode = false
         return "Private mode disabled. Local persistence is active again."
+    case "enable ears", "ears on", "enable ambient hearing", "start listening":
+        let path = NSHomeDirectory() + "/.bad_apple/ears"
+        FileManager.default.createFile(atPath: path, contents: Data("on\n".utf8))
+        return "Ambient hearing enabled. I'll transcribe short local mic windows in the background — all on-device, nothing leaves the Mac. Say 'disable ears' to stop."
+    case "disable ears", "ears off", "disable ambient hearing", "stop listening":
+        try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.bad_apple/ears")
+        try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.bad_apple/ambient_heard.json")
+        return "Ambient hearing disabled. The microphone stays off."
     case "new chat", "clear conversation":
         BadAppleEngine.shared.resetConversation()
         return "Okay, so... fresh start."

@@ -1252,8 +1252,10 @@ fn distinctive_terms(query: &str) -> Vec<String> {
 }
 
 /// Bonus for literal term presence: fraction of distinctive terms found in the
-/// chunk text (weight 0.2) plus a bonus when a term hits the file path itself
-/// (weight 0.15) — a named module should outrank a passing mention.
+/// chunk text (weight 0.4) plus a bonus when a term hits the file path itself
+/// (weight 0.8) — a named module should outrank a passing mention, and a path
+/// match is a far stronger signal than body text since filenames are chosen
+/// identifiers rather than prose.
 fn lexical_bonus(terms: &[String], text: &str, path: &str) -> f64 {
     if terms.is_empty() {
         return 0.0;
@@ -1270,7 +1272,7 @@ fn lexical_bonus(terms: &[String], text: &str, path: &str) -> f64 {
             path_hits += 1;
         }
     }
-    0.2 * (text_hits as f64 / terms.len() as f64) + 0.15 * (path_hits as f64 / terms.len() as f64)
+    0.4 * (text_hits as f64 / terms.len() as f64) + 0.8 * (path_hits as f64 / terms.len() as f64)
 }
 
 /// Number of grounded chunks currently in the index.
