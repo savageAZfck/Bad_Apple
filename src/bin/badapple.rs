@@ -2356,7 +2356,38 @@ fn run_strategy_subcommand(args: &[String]) -> Result<()> {
                 let n = lib.prune_below(threshold).await;
                 println!("pruned {n} strateg(y|ies) below {threshold}");
             }
-            other => bail!("unknown strategy subcommand '{other}' — learn|record|match|list|prune"),
+            "repair" => {
+                let Some(key) = positional.first().cloned() else {
+                    bail!("usage: badapple strategy repair <key> <error text>");
+                };
+                let error = positional.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+                if error.is_empty() {
+                    bail!("usage: badapple strategy repair <key> <error text>");
+                }
+                match lib.propose_repair(&key, &error, "tool execution").await {
+                    Some(path) => println!(
+                        "repair proposal written: {}\nadopt with: badapple strategy adopt {}",
+                        path.display(),
+                        path.display()
+                    ),
+                    None => println!(
+                        "no proposal — unknown strategy or contradiction too weak to carry new information"
+                    ),
+                }
+            }
+            "adopt" => {
+                let Some(path) = positional.first().cloned() else {
+                    bail!("usage: badapple strategy adopt <proposal-path>");
+                };
+                let key = lib
+                    .adopt_proposal(PathBuf::from(&path))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("adopted strategy '{key}'");
+            }
+            other => bail!(
+                "unknown strategy subcommand '{other}' — learn|record|match|list|prune|repair|adopt"
+            ),
         }
         Ok(())
     })

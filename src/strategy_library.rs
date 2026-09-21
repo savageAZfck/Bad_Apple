@@ -10,7 +10,7 @@ use crate::redb_kv;
 use anyhow::Result;
 use redb::Database;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task::spawn_blocking;
 
@@ -408,7 +408,130 @@ impl RustSynthesizer {
     }
 }
 
+/// Directory the dashboard scans for curious proposals
+/// (`~/.bad_apple/notes/proposed_patches`).
+pub fn strategy_proposals_dir() -> PathBuf {
+    std::env::var("BADAPPLE_STRATEGY_PROPOSALS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home)
+                .join(".bad_apple")
+                .join("notes")
+                .join("proposed_patches")
+        })
+}
+
+fn proposal_timestamp() -> String {
+    chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
 impl StrategyLibrary {
+    /// Dialectical synthesis on a failed strategy, kept *outside* the live
+    /// library: the repaired candidate is written as a curious-format
+    /// proposal for governed adoption (`strategy adopt <path>`), never
+    /// auto-installed. Returns the proposal path, or None when the
+    /// contradiction is too weak to carry new information (a strategy that
+    /// was already unreliable failing again is noise, not signal).
+    pub async fn propose_repair(
+        &self,
+        failed_key: &str,
+        error: &str,
+        predicted_outcome: &str,
+    ) -> Option<PathBuf> {
+        let original = self.get(failed_key).await?;
+        let engine = DialecticalEngine::new();
+        let thesis = engine.thesis(&original, predicted_outcome);
+        let antithesis = engine.antithesis(error);
+        let strength = engine.contradiction_strength(&thesis, &antithesis);
+        if strength < 0.2 {
+            return None;
+        }
+        let mut candidate = engine.synthesize(&original, error);
+        candidate.key = format!("{}_synth_{}", failed_key, engine.next_id());
+
+        let dir = strategy_proposals_dir();
+        std::fs::create_dir_all(&dir).ok()?;
+        let safe_key: String = failed_key
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        let path = dir.join(format!("strategy-{safe_key}-{}.md", proposal_timestamp()));
+        let error_excerpt: String = error.chars().take(500).collect();
+        let body = format!(
+            "# Strategy repair proposal: {failed_key}\n\n\
+             **When:** {when} UTC\n\
+             **Workspace:** system\n\n\
+             ## Finding\n\n\
+             - Failed strategy: `{failed_key}`\n\
+             - Prior reliability: {rel:.2} over {uses} use(s)\n\
+             - Contradiction strength: {strength:.2}\n\
+             - Observed error: {error_excerpt}\n\n\
+             ## Proposal\n\n\
+             ```json\n{json}\n```\n\n\
+             ## Adoption\n\n\
+             `badapple strategy adopt {path}`\n",
+            when = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
+            rel = original.reliability,
+            uses = original.uses,
+            strength = strength,
+            path = path.display(),
+            json = serde_json::to_string_pretty(&serde_json::json!({
+                "no_patch": true,
+                "strategy": {
+                    "key": candidate.key,
+                    "problem": candidate.problem,
+                    "language": candidate.language,
+                    "code": candidate.code,
+                }
+            }))
+            .unwrap_or_default(),
+        );
+        std::fs::write(&path, body).ok()?;
+        Some(path)
+    }
+
+    /// Adopt a repair proposal: parse the strategy block from its ```json
+    /// section and install it into the library. Marks the proposal applied.
+    pub async fn adopt_proposal<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)?;
+        let proposal_section = text
+            .split("## Proposal")
+            .nth(1)
+            .ok_or("no ## Proposal section")?;
+        let json_text = proposal_section
+            .split("```json")
+            .nth(1)
+            .and_then(|b| b.split("```").next())
+            .ok_or("no ```json block in proposal")?;
+        let v: serde_json::Value = serde_json::from_str(json_text.trim())?;
+        let s = v
+            .get("strategy")
+            .ok_or("proposal json has no strategy field")?;
+        let strategy = Strategy {
+            key: s["key"].as_str().ok_or("strategy.key missing")?.to_string(),
+            problem: s["problem"].as_str().unwrap_or_default().to_string(),
+            language: s["language"].as_str().unwrap_or("shell").to_string(),
+            code: s["code"].as_str().unwrap_or_default().to_string(),
+            reliability: 0.5,
+            uses: 0,
+            successes: 0,
+        };
+        let key = strategy.key.clone();
+        self.put(&strategy).await?;
+        let mut marked = text;
+        marked.push_str(&format!(
+            "\n## Applied\n\nAdopted {} UTC via `strategy adopt`.\n",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+        ));
+        let _ = std::fs::write(path, marked);
+        Ok(key)
+    }
+
     /// Run a dialectical synthesis on a failed strategy and store the repaired
     /// variant. Returns the key of the new synthesis.
     pub async fn dialectical_repair(
@@ -595,6 +718,67 @@ mod library_tests {
         let pruned = lib.prune_below(0.3).await;
         assert_eq!(pruned, 1);
         assert!(lib.get("k").await.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn repair_writes_proposal_not_library_entry() {
+        let prop_dir = std::env::temp_dir().join(format!("ba-strat-props-{}", std::process::id()));
+        std::env::set_var("BADAPPLE_STRATEGY_PROPOSALS", &prop_dir);
+        let (lib, path) = temp_lib("repair");
+        let mut s = Strategy::new(
+            "tool:flash".into(),
+            "flash the firmware".into(),
+            "shell".into(),
+            "flash.sh".into(),
+        );
+        // Raise reliability so the failure is a genuine contradiction.
+        for _ in 0..4 {
+            s.record(true);
+        }
+        lib.put(&s).await.unwrap();
+
+        let proposal = lib
+            .propose_repair("tool:flash", "missing module avrdude", "flash completes")
+            .await
+            .expect("proposal should be written");
+        let text = std::fs::read_to_string(&proposal).unwrap();
+        assert!(text.contains("## Proposal"));
+        assert!(text.contains("strategy"));
+        // The candidate must NOT be in the live library yet.
+        assert_eq!(lib.weak_strategies(2.0).await.len(), 1);
+
+        // Adoption is the explicit governed step.
+        let key = lib.adopt_proposal(&proposal).await.unwrap();
+        assert!(key.starts_with("tool:flash_synth_"));
+        assert!(lib.get(&key).await.is_some());
+        assert_eq!(lib.weak_strategies(2.0).await.len(), 2);
+        assert!(std::fs::read_to_string(&proposal)
+            .unwrap()
+            .contains("## Applied"));
+
+        std::env::remove_var("BADAPPLE_STRATEGY_PROPOSALS");
+        let _ = std::fs::remove_dir_all(prop_dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn weak_contradiction_writes_no_proposal() {
+        let prop_dir =
+            std::env::temp_dir().join(format!("ba-strat-props-weak-{}", std::process::id()));
+        std::env::set_var("BADAPPLE_STRATEGY_PROPOSALS", &prop_dir);
+        let (lib, path) = temp_lib("weakprop");
+        let mut s = Strategy::new("tool:x".into(), "p".into(), "shell".into(), "c".into());
+        for _ in 0..6 {
+            s.record(false); // reliability ~0.17 — failure is expected
+        }
+        lib.put(&s).await.unwrap();
+        assert!(lib
+            .propose_repair("tool:x", "it failed again", "works")
+            .await
+            .is_none());
+        std::env::remove_var("BADAPPLE_STRATEGY_PROPOSALS");
+        let _ = std::fs::remove_dir_all(prop_dir);
         let _ = std::fs::remove_file(path);
     }
 }

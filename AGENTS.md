@@ -355,11 +355,21 @@ badapple strategy record <key> <ok|fail> [--problem ... --lang ... --code ...]
 badapple strategy match <problem text>    # JSON blob or nothing
 badapple strategy list [--weak <t>]
 badapple strategy prune <threshold>       # default 0.3
+badapple strategy repair <key> <error>    # dialectical synthesis → proposal
+badapple strategy adopt <proposal-path>   # explicit governed install
 ```
 
 Workshop tool executions record outcomes automatically (`tool:<id>` keys) —
 observation only; tools are already approval-gated when created. RAG prompt
 assembly injects a `Known strategy` line when a match has reliability ≥ 0.4.
+
+A failing tool also fires `strategy repair`, which runs dialectical
+synthesis and writes a curious-format proposal to
+`~/.bad_apple/notes/proposed_patches/` — the dashboard renders it under
+Curious Proposals. The candidate is never auto-installed: adoption is the
+explicit `strategy adopt` step, and a proposal is only written when the
+contradiction strength (prior reliability × failure evidence) is ≥ 0.2 —
+a known-bad strategy failing again carries no new information.
 
 ## Human-in-the-loop approvals
 

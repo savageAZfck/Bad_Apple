@@ -2172,22 +2172,31 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     /// Feed a workshop tool's outcome into strategy memory: reliability is an
     /// EMA over observed successes, so tools that work strengthen and tools
-    /// that rot decay toward pruning. Observation only — the tool itself was
-    /// already approval-gated when created.
+    /// that rot decay toward pruning. On failure the dialectical engine also
+    /// writes a governed repair proposal — adoption is explicit, never
+    /// automatic. Observation only — the tool itself was already
+    /// approval-gated when created.
     private func recordStrategyOutcome(tool: WorkshopCustomTool, result: String) {
         guard let binary = badappleBinaryPath() else { return }
-        let outcome = result.hasPrefix("Error") ? "fail" : "ok"
+        let failed = result.hasPrefix("Error")
         let problem = tool.description.isEmpty ? tool.name : tool.description
         _ = runProcess(
             launchPath: binary,
             arguments: [
-                "strategy", "record", "tool:\(tool.id)", outcome,
+                "strategy", "record", "tool:\(tool.id)", failed ? "fail" : "ok",
                 "--problem", problem,
                 "--lang", tool.kind,
                 "--code", tool.command,
             ],
             timeout: 10
         )
+        if failed {
+            _ = runProcess(
+                launchPath: binary,
+                arguments: ["strategy", "repair", "tool:\(tool.id)", String(result.prefix(500))],
+                timeout: 10
+            )
+        }
     }
 
     // MARK: - Path Jail
