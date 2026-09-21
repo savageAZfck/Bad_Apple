@@ -1112,8 +1112,12 @@ private func acceptLoop(fd: Int32, secret: Data?) {
 }
 
 private var shouldStop = false
+private var gSignalSources: [DispatchSourceSignal] = []
 
 private func installSignalHandlers() {
+    signal(SIGINT, SIG_IGN)
+    signal(SIGTERM, SIG_IGN)
+
     let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 
@@ -1131,8 +1135,7 @@ private func installSignalHandlers() {
     sigint.resume()
     sigterm.resume()
 
-    signal(SIGINT, SIG_IGN)
-    signal(SIGTERM, SIG_IGN)
+    gSignalSources = [sigint, sigterm]
 }
 
 // MARK: - Main
