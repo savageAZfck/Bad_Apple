@@ -2301,6 +2301,23 @@ fn strategies_path() -> PathBuf {
         })
 }
 
+/// Version `~/.bad_apple` (strategy memory, IFY state, notes, proposals) via
+/// respawn so a destructive mutation is revertible with
+/// `badapple-respawn -d ~/.bad_apple --revert head`.
+fn snapshot_learned_state(message: &str) -> Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let dir = PathBuf::from(home).join(".bad_apple");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let store = match respawn::store::Store::open(&dir) {
+        Ok(s) => s,
+        Err(_) => respawn::store::Store::init(&dir)?,
+    };
+    respawn::snapshot::create(&store, &dir, message)?;
+    Ok(())
+}
+
 fn run_strategy_subcommand(args: &[String]) -> Result<()> {
     use bad_apple::strategy_library::{Strategy, StrategyLibrary};
     let sub = args.first().map(String::as_str).unwrap_or("list");
@@ -2433,6 +2450,12 @@ fn run_strategy_subcommand(args: &[String]) -> Result<()> {
                     if !answer.trim().eq_ignore_ascii_case("y") {
                         bail!("prune aborted");
                     }
+                }
+                // Version learned state before mutating it — the same undo
+                // layer the platform gets. Best-effort: a failed snapshot
+                // must not block a confirmed prune.
+                if let Err(e) = snapshot_learned_state("pre-prune state checkpoint") {
+                    eprintln!("warning: pre-prune snapshot failed: {e}");
                 }
                 let n = lib.prune_below(threshold).await;
                 println!("pruned {n} strateg(y|ies) below {threshold}");
