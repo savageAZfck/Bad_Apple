@@ -44,6 +44,102 @@ struct ServiceEntry {
 struct SupervisorState {
     services: HashMap<String, ServiceEntry>,
     last_report: Option<serde_json::Value>,
+    #[serde(default)]
+    last_index_check: f64,
+}
+
+/// Seconds between watched-index rescans (default 120 — the check loop runs
+/// every ~30s, so this is roughly every fourth tick).
+fn watch_interval() -> f64 {
+    env::var("BADAPPLE_WATCH_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120.0)
+}
+
+fn cli_path() -> Option<PathBuf> {
+    if let Ok(p) = env::var("BADAPPLE_CLI") {
+        return Some(PathBuf::from(p));
+    }
+    for candidate in [
+        "/Applications/Bad Apple.app/Contents/Helpers/badapple",
+        "/usr/local/bin/badapple",
+    ] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Re-index every registered watch path by shelling the CLI as the console
+/// user — the supervisor runs as root and a root-owned redb would break
+/// user-side `index`/`recall` writes. `launchctl asuser` makes the CLI do
+/// the work with the user's permissions and HOME.
+fn refresh_watched_indexes(state: &mut SupervisorState) -> serde_json::Value {
+    let now = now_secs();
+    if now - state.last_index_check < watch_interval() {
+        return json!({"skipped": "interval"});
+    }
+    state.last_index_check = now;
+    let dirs = bad_apple::scavenger::watched_dirs();
+    if dirs.is_empty() {
+        return json!({"watched": 0});
+    }
+    let Some(cli) = cli_path() else {
+        return json!({"watched": dirs.len(), "error": "no badapple cli found"});
+    };
+    let uid = console_uid();
+    if uid == 0 {
+        // No console user (or /dev/console owned by root): indexing as root
+        // would chown the redb away from the user, so skip rather than fail.
+        return json!({"watched": dirs.len(), "skipped": "no console user"});
+    }
+    let mut child = match Command::new("launchctl")
+        .args(["asuser", &uid.to_string()])
+        .arg(&cli)
+        .arg("index")
+        .arg("--watched")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return json!({"watched": dirs.len(), "error": e.to_string()}),
+    };
+    // Bounded wait: an incremental rescan is seconds, but a stalled CLI must
+    // never wedge the health loop.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let out = child.wait_with_output();
+                return match out {
+                    Ok(o) => json!({
+                        "watched": dirs.len(),
+                        "ok": o.status.success(),
+                        "output": String::from_utf8_lossy(&o.stdout).trim(),
+                    }),
+                    Err(e) => {
+                        json!({"watched": dirs.len(), "error": e.to_string()})
+                    }
+                };
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return json!({"watched": dirs.len(), "error": "index timed out"});
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return json!({"watched": dirs.len(), "error": e.to_string()});
+            }
+        }
+    }
 }
 
 fn now_secs() -> f64 {
@@ -223,6 +319,7 @@ fn check_once(repair: bool) -> serde_json::Value {
         "safe_mode": false,
     });
     report["thermal"] = bad_apple::production_blueprint::probe_thermal();
+    report["index"] = refresh_watched_indexes(&mut state);
     let grace = startup_grace();
 
     for svc in services() {
@@ -342,5 +439,45 @@ fn main() {
                 .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
         );
         std::thread::sleep(Duration::from_secs(interval));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_refresh_empty_registry_is_noop() {
+        let file = std::env::temp_dir().join(format!("ba-sup-watch-{}", std::process::id()));
+        std::fs::write(&file, "").unwrap();
+        std::env::set_var("BADAPPLE_WATCH_PATHS", &file);
+        let mut state = SupervisorState::default();
+        let report = refresh_watched_indexes(&mut state);
+        assert_eq!(report["watched"], 0);
+        std::env::remove_var("BADAPPLE_WATCH_PATHS");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn index_refresh_missing_cli_reports_error() {
+        let file = std::env::temp_dir().join(format!("ba-sup-watch2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ba-sup-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, format!("{}\n", dir.display())).unwrap();
+        std::env::set_var("BADAPPLE_WATCH_PATHS", &file);
+        std::env::set_var("BADAPPLE_CLI", "/nonexistent/badapple");
+        let mut state = SupervisorState::default();
+        let report = refresh_watched_indexes(&mut state);
+        // Spawn failure, launchctl-reported child failure, or uid-0 skip —
+        // any of these is a bounded, nonfatal report; the loop survives.
+        assert!(
+            report.get("error").is_some()
+                || report.get("skipped").is_some()
+                || report["ok"] == false
+        );
+        std::env::remove_var("BADAPPLE_WATCH_PATHS");
+        std::env::remove_var("BADAPPLE_CLI");
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

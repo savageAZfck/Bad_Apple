@@ -492,8 +492,9 @@ impl Scavenger {
 
             let self_ref = self.clone();
             spawn_blocking(move || {
-                for (path, mtime) in files {
-                    if let Err(error) = self_ref.index_file(&path, mtime) {
+                for (path, mtime_nanos, _size) in files {
+                    // Legacy chunk records store seconds-resolution mtimes.
+                    if let Err(error) = self_ref.index_file(&path, mtime_nanos / 1_000_000_000) {
                         tracing::warn!("scavenger failed to seed {}: {}", path.display(), error);
                     }
                 }
@@ -777,7 +778,7 @@ fn path_under_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| canonical.starts_with(root))
 }
 
-fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
+fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64, u64)>) {
     if depth == 0 {
         return;
     }
@@ -802,12 +803,14 @@ fn collect_files(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
                 collect_files(&path, depth - 1, out);
             } else if is_tracked_file(&path) {
                 if let Ok(meta) = fs::metadata(&path) {
+                    // Nanosecond mtime + size: seconds granularity misses two
+                    // writes inside one second, which periodic rescans must catch.
                     let mtime = meta
                         .modified()
                         .ok()
                         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                        .map_or(0, |d| d.as_secs());
-                    out.push((path, mtime));
+                        .map_or(0, |d| d.as_nanos() as u64);
+                    out.push((path, mtime, meta.len()));
                 }
             }
         }
@@ -882,6 +885,15 @@ struct GroundedFileMeta {
     path: String,
     content_hash: String,
     chunk_count: usize,
+    /// Modification time (nanos since epoch) and size at last index. Compared
+    /// before reading the file so periodic rescans skip unchanged files without
+    /// hashing. Nanos granularity + size keeps same-second rewrites visible.
+    /// Older metas lack both fields (serde default 0) — they get one content
+    /// hash pass and then migrate to the fast path.
+    #[serde(default)]
+    mtime: u64,
+    #[serde(default)]
+    size: u64,
 }
 
 /// A single recall hit.
@@ -1004,29 +1016,49 @@ fn grounded_read_file(path: &Path) -> Result<String> {
 
 /// Index one file into the grounded index. Returns the number of chunks
 /// written (0 when unchanged).
-fn index_grounded_file(db: &Database, path: &Path, mtime: u64) -> Result<usize> {
+fn index_grounded_file(db: &Database, path: &Path, mtime: u64, size: u64) -> Result<usize> {
     let pkey = path_key(path);
     let meta_key = grounded_meta_key(&pkey);
+
+    // Fast path: mtime+size unchanged since last index — skip without reading.
+    let prior = redb_kv::get(db, &meta_key)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_slice::<GroundedFileMeta>(&raw).ok());
+    if let Some(meta) = &prior {
+        if meta.mtime == mtime && meta.size == size && meta.mtime != 0 {
+            return Ok(0);
+        }
+    }
+
     let text = grounded_read_file(path)?;
     let current_hash = content_hash_bytes(text.as_bytes());
 
-    if let Ok(Some(raw)) = redb_kv::get(db, &meta_key) {
-        if let Ok(meta) = serde_json::from_slice::<GroundedFileMeta>(&raw) {
-            if meta.content_hash == current_hash {
-                return Ok(0);
+    if let Some(meta) = &prior {
+        if meta.content_hash == current_hash {
+            // Touched but unchanged: refresh the stored mtime/size so the next
+            // rescan takes the fast path.
+            let updated = GroundedFileMeta {
+                path: meta.path.clone(),
+                content_hash: meta.content_hash.clone(),
+                chunk_count: meta.chunk_count,
+                mtime,
+                size,
+            };
+            if let Ok(bytes) = serde_json::to_vec(&updated) {
+                let _ = redb_kv::insert(db, &meta_key, &bytes);
             }
+            return Ok(0);
         }
     }
 
     // Purge any previous version.
-    if let Ok(Some(raw)) = redb_kv::get(db, &meta_key) {
-        if let Ok(meta) = serde_json::from_slice::<GroundedFileMeta>(&raw) {
-            let keys: Vec<Vec<u8>> = (0..meta.chunk_count)
-                .map(|i| grounded_chunk_key(&pkey, i))
-                .collect();
-            let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-            let _ = redb_kv::remove_many(db, &refs);
-        }
+    if let Some(meta) = &prior {
+        let keys: Vec<Vec<u8>> = (0..meta.chunk_count)
+            .map(|i| grounded_chunk_key(&pkey, i))
+            .collect();
+        let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let _ = redb_kv::remove_many(db, &refs);
     }
 
     let chunks = grounded_chunk_text(&text);
@@ -1047,6 +1079,8 @@ fn index_grounded_file(db: &Database, path: &Path, mtime: u64) -> Result<usize> 
         path: path.to_string_lossy().into_owned(),
         content_hash: current_hash,
         chunk_count,
+        mtime,
+        size,
     };
     items.push((meta_key, serde_json::to_vec(&meta)?));
     let refs: Vec<(&[u8], &[u8])> = items
@@ -1064,11 +1098,79 @@ pub fn index_directories(dirs: &[PathBuf]) -> Result<(usize, usize)> {
     index_directories_at(dirs, Path::new(GROUNDED_INDEX_PATH))
 }
 
+/// Registry of directories the supervisor keeps indexed — one per line in
+/// `/var/lib/bad_apple/watch_paths` (BADAPPLE_WATCH_PATHS for tests).
+/// `badapple index --watch <dir>` registers; the supervisor re-scans them
+/// on its health cadence, and indexing is mtime/hash-incremental so an
+/// unchanged tree costs only a metadata walk.
+pub fn watch_paths_file() -> PathBuf {
+    std::env::var("BADAPPLE_WATCH_PATHS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/bad_apple/watch_paths"))
+}
+
+pub fn watched_dirs() -> Vec<PathBuf> {
+    fs::read_to_string(watch_paths_file())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Register a directory for persistent re-indexing. Returns true when newly
+/// added (false when already registered).
+pub fn register_watch(dir: &Path) -> Result<bool> {
+    let file = watch_paths_file();
+    let mut existing = watched_dirs();
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if existing.contains(&canonical) {
+        return Ok(false);
+    }
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    existing.push(canonical);
+    fs::write(
+        &file,
+        existing
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )?;
+    Ok(true)
+}
+
+/// Remove a directory from the watch registry. Returns true when it was
+/// registered (false when it was not present).
+pub fn unregister_watch(dir: &Path) -> Result<bool> {
+    let file = watch_paths_file();
+    let existing = watched_dirs();
+    let before = existing.len();
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let kept: Vec<PathBuf> = existing.into_iter().filter(|p| *p != canonical).collect();
+    if kept.len() == before {
+        return Ok(false);
+    }
+    fs::write(
+        &file,
+        kept.iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )?;
+    Ok(true)
+}
+
 /// Same as `index_directories` but against an explicit database path
 /// (used by tests and `BADAPPLE_GROUNDED_INDEX` overrides).
 pub fn index_directories_at(dirs: &[PathBuf], db_path: &Path) -> Result<(usize, usize)> {
     let db = redb_kv::open(db_path)?;
-    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    let mut files: Vec<(PathBuf, u64, u64)> = Vec::new();
     for dir in dirs {
         if dir.is_dir() {
             collect_files(dir, WATCH_DEPTH, &mut files);
@@ -1078,15 +1180,19 @@ pub fn index_directories_at(dirs: &[PathBuf], db_path: &Path) -> Result<(usize, 
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs());
-                files.push((dir.clone(), mtime));
+                    .map_or(0, |d| d.as_nanos() as u64);
+                files.push((dir.clone(), mtime, meta.len()));
             }
         }
     }
     let mut indexed = 0usize;
     let mut chunks = 0usize;
-    for (path, mtime) in files {
-        match index_grounded_file(&db, &path, mtime) {
+    for (path, mtime, size) in files {
+        // Canonicalize so a path spelled through a symlinked prefix (/tmp,
+        // /var) keys identically to its canonical form — otherwise rescans
+        // via differently-spelled watch paths duplicate the file's chunks.
+        let path = path.canonicalize().unwrap_or(path);
+        match index_grounded_file(&db, &path, mtime, size) {
             Ok(n) => {
                 if n > 0 {
                     indexed += 1;
@@ -1095,6 +1201,8 @@ pub fn index_directories_at(dirs: &[PathBuf], db_path: &Path) -> Result<(usize, 
             }
             Err(e) => {
                 tracing::warn!("grounded index failed for {}: {}", path.display(), e);
+                #[cfg(test)]
+                eprintln!("index err {}: {e:#}", path.display());
             }
         }
     }
@@ -1336,4 +1444,76 @@ fn disk_headroom_mb(path: &Path) -> Option<(u64, u64)> {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::{index_directories_at, register_watch, unregister_watch, watched_dirs};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ba-scan-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.redb");
+        (dir, db)
+    }
+
+    #[test]
+    fn rescan_skips_unchanged_and_reindexes_changed() {
+        let (dir, db) = fixture("incremental");
+        let file = dir.join("hello.rs");
+        fs::write(&file, "fn main() { println!(\"one\"); }").unwrap();
+
+        let (files1, chunks1) = index_directories_at(&[dir.clone()], &db).unwrap();
+        assert_eq!(files1, 1);
+        assert!(chunks1 > 0);
+
+        // Same mtime → fast-path skip, no read.
+        let (files2, _) = index_directories_at(&[dir.clone()], &db).unwrap();
+        assert_eq!(files2, 0);
+
+        // mtime bumped, content unchanged → hash check still skips embed.
+        fs::write(&file, "fn main() { println!(\"one\"); }").unwrap();
+        let (files3, _) = index_directories_at(&[dir.clone()], &db).unwrap();
+        assert_eq!(files3, 0);
+
+        // Content change inside the same second → nanos mtime still catches it.
+        fs::write(&file, "fn main() { println!(\"two\"); }").unwrap();
+        let (files4, _) = index_directories_at(&[dir.clone()], &db).unwrap();
+        assert_eq!(files4, 1);
+
+        // A differently-spelled alias (symlinked prefix like /var →
+        // /private/var) resolves to the same keys — no duplicate chunks.
+        let canon = dir.canonicalize().unwrap();
+        if canon != dir {
+            let (files5, _) = index_directories_at(&[canon], &db).unwrap();
+            assert_eq!(files5, 0);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn watch_registry_roundtrips() {
+        let file = std::env::temp_dir().join(format!("ba-watch-{}.txt", std::process::id()));
+        std::env::set_var("BADAPPLE_WATCH_PATHS", &file);
+        let dir = std::env::temp_dir().join(format!("ba-watchdir-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(register_watch(&dir).unwrap());
+        assert!(!register_watch(&dir).unwrap()); // dedup
+        assert_eq!(watched_dirs().len(), 1);
+        // Symlink-spelled alias unregisters the same canonical entry.
+        if let Ok(rel) = dir.strip_prefix("/private") {
+            assert!(unregister_watch(&PathBuf::from(rel)).unwrap());
+        } else {
+            assert!(unregister_watch(&dir).unwrap());
+        }
+        assert_eq!(watched_dirs().len(), 0);
+        assert!(!unregister_watch(&dir).unwrap()); // absent → false
+        std::env::remove_var("BADAPPLE_WATCH_PATHS");
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

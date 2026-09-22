@@ -302,8 +302,21 @@ root, the app bundle's `Contents/Resources`, or `/var/lib/bad_apple`.
 ```bash
 target/release/badapple index <dir> [dir...]   # incremental reindex
 target/release/badapple index                  # workspace + repos under $HOME
+target/release/badapple index --watch <dir>    # register + index for supervisor rescan
+target/release/badapple index --unwatch <dir>  # remove a watched path
+target/release/badapple index --watched        # re-index every registered path
 target/release/badapple recall [-k N] <query>  # hybrid semantic+lexical search
 ```
+
+Indexing is incremental on (nanos mtime, size) with a content-hash fallback —
+a same-second rewrite still re-indexes, and a touched-but-identical file costs
+one hash, never an embed. `--watch` writes the canonical path to
+`/var/lib/bad_apple/watch_paths` (`BADAPPLE_WATCH_PATHS` override); the
+supervisor re-scans registered paths on its poll cadence
+(`BADAPPLE_WATCH_INTERVAL`, default 120 s) by shelling `badapple index
+--watched` via `launchctl asuser <console-uid>` so the redb stays
+user-owned. The rescan is bounded (240 s kill) and skipped entirely when no
+console user is logged in.
 
 Recall ranks chunks by cosine similarity plus a lexical bonus for literal
 identifier matches in the chunk text and file path — code queries hinge on

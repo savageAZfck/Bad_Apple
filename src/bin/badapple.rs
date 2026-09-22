@@ -2109,16 +2109,71 @@ fn resolve_brain_tokenizer() -> Option<PathBuf> {
 
 /// `badapple index [dir ...]` — build/refresh the grounded code index.
 /// No dirs given: index the workspace + source repos under $HOME.
+/// `--watch <dir> [dir...]` registers paths for persistent supervisor rescan
+/// (and indexes them now); `--unwatch <dir>` removes one; `--watched`
+/// re-indexes every registered path.
 fn run_index_subcommand(args: &[String]) -> Result<()> {
     if resolve_brain_tokenizer().is_none() {
         bail!("no tokenizer.json found — set BADAPPLE_BRAIN_TOKENIZER to a valid tokenizer");
     }
-    let mut dirs: Vec<PathBuf> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(PathBuf::from)
-        .collect();
-    if dirs.is_empty() {
+    let mut watch_all = false;
+    let mut watch_flags: Vec<PathBuf> = Vec::new();
+    let mut unwatch_flags: Vec<PathBuf> = Vec::new();
+    let mut positional: Vec<PathBuf> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--watched" => watch_all = true,
+            flag @ ("--watch" | "--unwatch") => {
+                while i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    i += 1;
+                    if flag == "--watch" {
+                        watch_flags.push(PathBuf::from(&args[i]));
+                    } else {
+                        unwatch_flags.push(PathBuf::from(&args[i]));
+                    }
+                }
+            }
+            a if !a.starts_with('-') => positional.push(PathBuf::from(a)),
+            _ => {}
+        }
+        i += 1;
+    }
+    if watch_flags.is_empty()
+        && unwatch_flags.is_empty()
+        && !watch_all
+        && positional.is_empty()
+        && args.iter().any(|a| a.starts_with("--"))
+    {
+        bail!("usage: badapple index [dir ...] [--watch dir ...] [--unwatch dir ...] [--watched]");
+    }
+    for dir in &unwatch_flags {
+        if bad_apple::scavenger::unregister_watch(dir)? {
+            println!("unwatched {}", dir.display());
+        }
+    }
+    if !unwatch_flags.is_empty() && !watch_all && watch_flags.is_empty() && positional.is_empty() {
+        return Ok(());
+    }
+    let mut dirs: Vec<PathBuf> = if watch_all {
+        bad_apple::scavenger::watched_dirs()
+    } else {
+        Vec::new()
+    };
+    for dir in positional {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    for dir in &watch_flags {
+        if bad_apple::scavenger::register_watch(dir)? {
+            println!("watching {} for re-index", dir.display());
+        }
+        if !dirs.contains(dir) {
+            dirs.push(dir.clone());
+        }
+    }
+    if dirs.is_empty() && !watch_all {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"));
