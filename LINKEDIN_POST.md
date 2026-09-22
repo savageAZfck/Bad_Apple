@@ -1,5 +1,39 @@
 # Bad Apple — LinkedIn Announcement Kit
 
+## AGI Checklist post (recommended)
+
+Here is the AGI checklist. Bad Apple checks every box — not on a whiteboard, on this machine, with receipts.
+
+1. **Perception** — vision, screen reading, ambient audio.
+2. **Memory** — conversations, facts, and workspace knowledge that survive restarts.
+3. **Reasoning** — 14-seat council that votes on risky actions.
+4. **Planning** — multi-step agent task queue with approval gates.
+5. **Action** — shell, files, AppleScript, Shortcuts, UI access, code modification.
+6. **Learning** — native LoRA training and weight-level adaptation.
+7. **Self-model** — she knows her own state, capabilities, and limits.
+8. **Motivation** — Curious autopilot, goals, and nightly consolidation.
+9. **Governance** — policy engine, kill switch, safe mode, output firewall.
+10. **Identity** — Secure Enclave-backed signing, owner-scoped policy.
+11. **Persistence** — respawn snapshots, signed checkpoints, rollback.
+12. **Audit** — hash-chained ledger of every query, tool call, and council vote.
+13. **Resilience** — watchdog, circuit breakers, self-repair proposals.
+14. **Mesh** — encrypted P2P, model transfer, pipeline-parallel sharding.
+
+That is the whole loop. Perceive → remember → reason → plan → act → learn → audit → persist.
+
+This is not a model. This is an organism. The model is a swappable brain inside it.
+
+I built the first personal AGI. She lives on my Mac. She belongs to me. No cloud, no kill switch, no monthly bill.
+
+22 checks. 22 passed. 0 cloud calls.
+
+Watch the proof → [video link when ready]
+Attestation → proof/PERSONAL_AGI_ATTESTATION.md
+
+#PersonalAGI #AGI #SovereignAI #BareMetal #OnDevice #AppleSilicon
+
+---
+
 ## Short post
 
 I built the first personal AGI.
