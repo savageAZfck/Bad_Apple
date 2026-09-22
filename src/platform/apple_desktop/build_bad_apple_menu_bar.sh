@@ -226,6 +226,28 @@ install -m 755 "${MLX_DYLIB}" "${BUILD_DIR}/libBadAppleMLX.dylib"
 install -m 644 "${MLX_METAL_CACHE}" "${BUILD_DIR}/mlx.metallib"
 echo "Installed badapple-engine and MLX runtime into ${BUILD_DIR}."
 
+# badapple-lora: standalone LoRA trainer/generator (restores the lora_* tools).
+# Runs as a subprocess of the engine so adapter training never shares memory
+# with the resident inference model.
+if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
+    echo "Building badapple-lora trainer..."
+    "${SWIFTC}" \
+        -parse-as-library -swift-version 5 -O \
+        -target "${TARGET}" -sdk "${SDK_PATH}" \
+        -I "${SCRATCH_DIR}/native" -L "${BUILD_DIR}" \
+        ${MLX_FLAGS} \
+        -o "${BUILD_DIR}/badapple-lora" \
+        "${REPO_ROOT}/src/platform/apple_desktop/BadAppleLoRA.swift" \
+        -L "${BUILD_DIR}" -lBadAppleMLX -lBadAppleBridge \
+        -F "${FRAMEWORK_SEARCH}" \
+        -framework Foundation -framework CryptoKit -framework Security -framework LocalAuthentication -framework IOKit \
+        -Xlinker -rpath -Xlinker @executable_path \
+        -Xlinker -rpath -Xlinker @executable_path/../Libraries
+    install -d "${CONTENTS_DIR}/Helpers"
+    install -m 755 "${BUILD_DIR}/badapple-lora" "${CONTENTS_DIR}/Helpers/badapple-lora" 2>/dev/null || true
+    echo "Installed badapple-lora into ${BUILD_DIR} and app bundle Helpers."
+fi
+
 install -d "${CONTENTS_DIR}/Helpers"
 install -m 755 "${BUILD_DIR}/badapple" "${CONTENTS_DIR}/Helpers/badapple" 2>/dev/null || true
 install -m 755 "${BUILD_DIR}/badapple-fetch" "${CONTENTS_DIR}/Helpers/badapple-fetch" 2>/dev/null || true

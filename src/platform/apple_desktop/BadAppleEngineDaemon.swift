@@ -690,6 +690,7 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
     case "invoke_tool":
         let toolName = params["name"] as? String ?? ""
         let toolArgs = (params["args"] as? [String: Any] ?? [:]).mapValues { "\($0)" }
+        BadAppleEngine.shared.auditInvokeToolCall(name: toolName, args: toolArgs)
         let result = await BadAppleEngine.shared.executeTool(name: toolName, args: toolArgs)
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["tool": toolName, "result": result], error: nil)
 

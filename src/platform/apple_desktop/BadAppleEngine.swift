@@ -961,6 +961,17 @@ final class BadAppleEngine: @unchecked Sendable {
         )
     }
 
+    /// Ledger a tool call that arrived over the `invoke_tool` IPC path.
+    /// Model-emitted calls are audited by the generation loop; this covers
+    /// the direct-invocation path so every execution is attested.
+    func auditInvokeToolCall(name: String, args: [String: String]) {
+        auditLedger.append(
+            eventType: "tool_call",
+            data: ["name": name, "arguments": args, "via": "invoke_tool"],
+            persona: activePersona
+        )
+    }
+
     private func approvalPromptText(id: String, name: String, args: [String: String]) -> String {
         var detail = ""
         for key in ["command", "script", "path", "shortcut", "query", "text", "dir", "file", "goal"] {

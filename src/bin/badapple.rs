@@ -264,6 +264,31 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Direct tool invocation through the governed daemon path:
+    //   badapple tool <name> [key=value ...]
+    // Policy evaluation, council and approvals apply exactly as they do for
+    // model-emitted tool calls — approval-gated tools return a proposal id.
+    if prompt_parts.first().map(std::string::String::as_str) == Some("tool") {
+        let tool_args = &prompt_parts[1..];
+        let name = match tool_args.first() {
+            Some(n) => n.clone(),
+            None => bail!("usage: badapple tool <name> [key=value ...]"),
+        };
+        let mut arg_map = serde_json::Map::new();
+        for kv in &tool_args[1..] {
+            match kv.split_once('=') {
+                Some((k, v)) => {
+                    arg_map.insert(k.to_string(), Value::String(v.to_string()));
+                }
+                None => bail!("bad arg '{kv}' — expected key=value"),
+            }
+        }
+        let params = serde_json::json!({ "name": name, "args": Value::Object(arg_map) });
+        let result = call_agent("invoke_tool", Some(params), 512)?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
     if prompt_parts.first().map(std::string::String::as_str) == Some("policy") {
         return run_policy_subcommand(&prompt_parts[1..]);
     }
@@ -296,7 +321,7 @@ fn main() -> Result<()> {
     }
 
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple receipts\n       badapple export-proof [dir]\n       badapple demo [full]\n       badapple cert");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple receipts\n       badapple tool <name> [key=value ...]\n       badapple export-proof [dir]\n       badapple demo [full]\n       badapple cert");
     } else {
         prompt_parts.join(" ")
     };

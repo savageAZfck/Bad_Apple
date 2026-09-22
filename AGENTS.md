@@ -465,6 +465,34 @@ Secure Enclave-signed check-in (version, arch, SHA-256 of IOPlatformUUID) to
 an `https://` endpoint or a `file://` drop folder (fleet_beacon.jsonl).
 Manual fire: `target/release/badapple beacon`. Unset = silent — air-gap clean.
 
+## LoRA fine-tuning
+
+The `lora_*` tools (originally Python `mlx-lm`, lost in the Python purge) are
+restored natively: `badapple-lora` (`BadAppleLoRA.swift`) is a standalone
+trainer/generator binary built by `build_bad_apple_menu_bar.sh` and installed
+beside `badapple-engine` + into the app bundle `Helpers/`. It runs training in
+a subprocess so adapter optimizer state never shares memory with the resident
+inference model. Uses `LoRAContainer` + `LoRATrain` + `AdamW` from the vendored
+mlx-swift-lm; writes `adapters.safetensors` + `adapter_config.json` in the
+mlx-lm format under `/var/lib/bad_apple/lora_adapters/<name>/` — the same shape
+the original tools produced, so existing adapters still load.
+
+Four governed tools (declared in policy.yaml; `lora_train` requires approval):
+
+```bash
+target/release/badapple tool lora_add_example dataset=<name> user="..." assistant="..."
+target/release/badapple tool lora_train dataset=<name> [iters=N]
+target/release/badapple tool lora_adapters
+target/release/badapple tool lora_generate adapter=<name> prompt="..." [max_tokens=N]
+```
+
+Datasets live at `/var/lib/bad_apple/lora_data/<name>/train.jsonl` in
+`{"text":"<|im_start|>user\n..."}` form; the trainer also normalises legacy
+`{"messages":[...]}` rows. `badapple tool <name> [k=v]` invokes any tool
+through `invoke_tool` — the same governed path as model-emitted calls
+(ledgered `tool_call` with `via: invoke_tool`). Keywords `lora`/`adapter`/
+`fine-tune` route prompts to these tools.
+
 ## Kill switch, safe mode, and private mode
 
 Voice/text commands:

@@ -773,6 +773,41 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: false
         ),
         BadAppleTool(
+            name: "lora_add_example",
+            description: "Append one supervised user/assistant example to a named LoRA dataset under lora_data/. Use lora_train to fine-tune an adapter on it.",
+            parameters: [
+                .init(name: "dataset", description: "Dataset name (letters, digits, - and _).", required: true),
+                .init(name: "user", description: "The user-side prompt text.", required: true),
+                .init(name: "assistant", description: "The assistant-side response text to teach.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "lora_train",
+            description: "Train a LoRA adapter on a named dataset in lora_data/ and save it to lora_adapters/. Runs the native trainer as a subprocess.",
+            parameters: [
+                .init(name: "dataset", description: "Dataset name previously created with lora_add_example.", required: true),
+                .init(name: "iters", description: "Training iterations (default 100).", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "lora_adapters",
+            description: "List trained LoRA adapters under lora_adapters/ with rank and iteration info.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "lora_generate",
+            description: "Generate text with a trained LoRA adapter applied to the base model.",
+            parameters: [
+                .init(name: "adapter", description: "Adapter name from lora_adapters.", required: true),
+                .init(name: "prompt", description: "Prompt text to generate from.", required: true),
+                .init(name: "max_tokens", description: "Maximum tokens to generate (default 256).", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
             name: "repair_runtime_issue",
             description: "Execute a bounded, allowlisted runtime repair such as loading a user LaunchAgent or creating a missing data file. Unknown issues are rejected.",
             parameters: [
@@ -917,6 +952,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["translate", "translation", "translate text"], ["translate_text"]),
         (["consolidate memory", "deduplicate memory", "summarize memory"], ["consolidate_memory"]),
         (["task", "todo", "assign", "delegated", "work on", "goal"], ["submit_agent_task"]),
+        (["lora", "adapter", "fine-tune", "fine tune", "finetune"], ["lora_add_example", "lora_train", "lora_adapters", "lora_generate"]),
         (["workspace status", "current workspace", "workspace path"], ["workspace_status"]),
         (["read document", "open document", "document content"], ["read_document"]),
         (["search files", "find files", "file search", "search local files"], ["search_local_files"]),
@@ -2252,6 +2288,27 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             } catch {
                 return "Error: agent task submission failed: \(error.localizedDescription)"
             }
+        case "lora_add_example":
+            return loraAddExample(
+                dataset: args["dataset"] ?? args["name"] ?? "",
+                user: args["user"] ?? args["prompt"] ?? "",
+                assistant: args["assistant"] ?? args["response"] ?? args["completion"] ?? ""
+            )
+        case "lora_train":
+            return loraTrain(
+                dataset: args["dataset"] ?? args["name"] ?? "",
+                iters: parseLimit(args["iters"] ?? args["iterations"], defaultValue: 100, maximum: 2000),
+                timeout: timeout
+            )
+        case "lora_adapters":
+            return loraAdapters()
+        case "lora_generate":
+            return loraGenerate(
+                adapter: args["adapter"] ?? args["name"] ?? "",
+                prompt: args["prompt"] ?? "",
+                maxTokens: parseLimit(args["max_tokens"], defaultValue: 256, maximum: 2048),
+                timeout: timeout
+            )
         case "repair_runtime_issue":
             return repairRuntimeIssue(issue: args["issue"] ?? "", target: args["target"])
         default:
@@ -4162,6 +4219,177 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     /// Locate the project root by searching for a `.git` directory above the
     /// running `badapple` binary. Falls back to `~/bad_apple` if it exists.
+    // MARK: - LoRA fine-tuning (badapple-lora subprocess)
+
+    /// Adapter/dataset roots match the paths the original Python tools used.
+    private func loraDataRoot() -> String { "/var/lib/bad_apple/lora_data" }
+    private func loraAdapterRoot() -> String { "/var/lib/bad_apple/lora_adapters" }
+
+    private func loraBinaryPath() -> String? {
+        let fm = FileManager.default
+        if let binary = badappleBinaryPath() {
+            let sibling = URL(fileURLWithPath: binary)
+                .deletingLastPathComponent().appendingPathComponent("badapple-lora").path
+            if fm.isExecutableFile(atPath: sibling) { return sibling }
+        }
+        for path in [
+            "/Applications/Bad Apple.app/Contents/Helpers/badapple-lora",
+            NSHomeDirectory() + "/bad_apple/target/release/badapple-lora",
+        ] where fm.isExecutableFile(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
+    /// Dataset/adapter names are single path components — strict charset
+    /// keeps the lora roots clean and traversal-free.
+    private func loraSanitizeName(_ name: String) -> String? {
+        guard !name.isEmpty, !name.hasPrefix("."),
+            name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
+        else { return nil }
+        return name
+    }
+
+    private func loraAddExample(dataset: String, user: String, assistant: String) -> String {
+        guard let name = loraSanitizeName(dataset) else {
+            return "Error: invalid dataset name (letters, digits, - and _ only)"
+        }
+        guard !user.isEmpty, !assistant.isEmpty else {
+            return "Error: lora_add_example needs user and assistant text"
+        }
+        let dir = "\(loraDataRoot())/\(name)"
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let text = "<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n\(assistant)<|im_end|>\n"
+            let line = try JSONSerialization.data(withJSONObject: ["text": text])
+            let url = URL(fileURLWithPath: "\(dir)/train.jsonl")
+            if FileManager.default.fileExists(atPath: url.path) {
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: line)
+                try handle.write(contentsOf: Data("\n".utf8))
+            } else {
+                try (String(data: line, encoding: .utf8)! + "\n")
+                    .write(to: url, atomically: true, encoding: .utf8)
+            }
+            let rows = (try? String(contentsOf: url, encoding: .utf8))?
+                .components(separatedBy: .newlines).filter { $0.first == "{" }.count ?? 0
+            return "Added example to lora_data/\(name) (\(rows) total rows)"
+        } catch {
+            return "Error writing example: \(error.localizedDescription)"
+        }
+    }
+
+    /// Bounded subprocess runner: kills the child when the policy timeout
+    /// elapses rather than blocking the tool call forever.
+    private func loraSubprocess(exe: String, arguments: [String], timeout: Int) -> (status: Int32, timedOut: Bool, output: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: exe)
+        task.arguments = arguments
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        do {
+            try task.run()
+        } catch {
+            return (-1, false, "launch failed: \(error.localizedDescription)")
+        }
+        let deadline = Date().addingTimeInterval(TimeInterval(max(timeout, 1)))
+        var timedOut = false
+        while task.isRunning {
+            if Date() > deadline {
+                task.terminate()
+                timedOut = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (task.terminationStatus, timedOut, output)
+    }
+
+    private func loraTail(_ output: String) -> String {
+        output.components(separatedBy: .newlines)
+            .filter { !$0.isEmpty }.suffix(12).joined(separator: "\n")
+    }
+
+    private func loraTrain(dataset: String, iters: Int, timeout: Int) -> String {
+        guard let name = loraSanitizeName(dataset) else {
+            return "Error: invalid dataset name (letters, digits, - and _ only)"
+        }
+        guard let exe = loraBinaryPath() else {
+            return "Error: badapple-lora binary not found — rebuild the app bundle"
+        }
+        let dataDir = "\(loraDataRoot())/\(name)"
+        guard FileManager.default.fileExists(atPath: "\(dataDir)/train.jsonl") else {
+            return "Error: no dataset at \(dataDir) — add examples with lora_add_example first"
+        }
+        let outDir = "\(loraAdapterRoot())/\(name)"
+        let model = BadAppleEngine.shared.modelId
+        let result = loraSubprocess(
+            exe: exe,
+            arguments: [
+                "train", "--model", model, "--data", dataDir, "--out", outDir,
+                "--iters", String(iters), "--batch", "1",
+            ],
+            timeout: timeout
+        )
+        let tail = loraTail(result.output)
+        if result.timedOut { return "LoRA training timed out after \(timeout)s.\n\(tail)" }
+        if result.status != 0 { return "LoRA training failed:\n\(tail)" }
+        return "LoRA adapter trained → \(outDir)\n\(tail)"
+    }
+
+    private func loraAdapters() -> String {
+        let root = loraAdapterRoot()
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
+        var lines: [String] = []
+        for entry in entries.sorted() where !entry.hasPrefix(".") {
+            let dir = "\(root)/\(entry)"
+            var detail = entry
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: "\(dir)/adapter_config.json")),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            {
+                let rank = (json["lora_parameters"] as? [String: Any])?["rank"] ?? "?"
+                let iters = json["iters"] ?? "?"
+                detail += " (rank \(rank), iters \(iters))"
+            }
+            let hasWeights = FileManager.default.fileExists(atPath: "\(dir)/adapters.safetensors")
+            lines.append("• \(detail) — \(hasWeights ? "weights present" : "no weights")")
+        }
+        return lines.isEmpty
+            ? "No adapters yet — add examples with lora_add_example, then lora_train"
+            : lines.joined(separator: "\n")
+    }
+
+    private func loraGenerate(adapter: String, prompt: String, maxTokens: Int, timeout: Int) -> String {
+        guard let name = loraSanitizeName(adapter) else {
+            return "Error: invalid adapter name (letters, digits, - and _ only)"
+        }
+        guard !prompt.isEmpty else { return "Error: no prompt provided" }
+        guard let exe = loraBinaryPath() else {
+            return "Error: badapple-lora binary not found — rebuild the app bundle"
+        }
+        let adapterDir = "\(loraAdapterRoot())/\(name)"
+        guard FileManager.default.fileExists(atPath: "\(adapterDir)/adapters.safetensors") else {
+            return "Error: no adapter at \(adapterDir) — lora_adapters lists what exists"
+        }
+        let model = BadAppleEngine.shared.modelId
+        let result = loraSubprocess(
+            exe: exe,
+            arguments: [
+                "generate", "--model", model, "--adapter", adapterDir,
+                "--prompt", prompt, "--max-tokens", String(maxTokens),
+            ],
+            timeout: timeout
+        )
+        let tail = loraTail(result.output)
+        if result.timedOut { return "LoRA generate timed out after \(timeout)s.\n\(tail)" }
+        if result.status != 0 { return "LoRA generate failed:\n\(tail)" }
+        return tail.isEmpty ? "(adapter produced no output)" : tail
+    }
+
     private func projectRootFromBinary() -> String? {
         let home = NSHomeDirectory()
         let manualRepo = home + "/bad_apple"
