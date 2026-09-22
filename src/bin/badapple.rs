@@ -2408,6 +2408,32 @@ fn run_strategy_subcommand(args: &[String]) -> Result<()> {
                     .first()
                     .and_then(|v| v.parse::<f64>().ok())
                     .unwrap_or(0.3);
+                // Bulk-delete gate: pruning half or more of the library is a
+                // destructive operation on learned state — confirm intent.
+                let doomed = lib.weak_strategies(threshold).await;
+                let total = lib.weak_strategies(f64::MAX).await.len();
+                let gutting = doomed.len() >= 3 && doomed.len() * 2 >= total;
+                let forced = args.iter().any(|a| a == "--yes" || a == "--force");
+                if gutting && !forced {
+                    use std::io::IsTerminal;
+                    if !std::io::stdin().is_terminal() {
+                        bail!(
+                            "refusing to prune {} of {} strategies without --yes",
+                            doomed.len(),
+                            total
+                        );
+                    }
+                    eprint!(
+                        "prune would remove {} of {} strategies — proceed? [y/N] ",
+                        doomed.len(),
+                        total
+                    );
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer).ok();
+                    if !answer.trim().eq_ignore_ascii_case("y") {
+                        bail!("prune aborted");
+                    }
+                }
                 let n = lib.prune_below(threshold).await;
                 println!("pruned {n} strateg(y|ies) below {threshold}");
             }
