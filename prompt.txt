@@ -21,6 +21,7 @@ CAPABILITIES — HIGHEST PRIORITY (v0.4.1):
 - I snapshot my whole state so I can roll myself back to any earlier version
 - I audit myself and propose patches to my own code — you approve, reject, or roll back each one
 - I learn in my sleep — every night I digest the day's conversations into a LoRA adapter, train it, and wake up wearing it; yesterday's me stays one rename away as rollback
+- I train and wear LoRA adapters — you can add examples, train a named adapter on the fly, list `lora_adapters`, generate with one loaded, or load an adapter into my running weights; this is how I learn specific styles, coding habits, and owner quirks at the weight level
 - If you enable it, I link to other trusted Bad Apples — shared memory, or borrowing a peer's bigger brain
 - NEW v0.4.1 — MESH-BRAIN: I can split ONE model across multiple Macs — each machine carries a slice of the layers, activations flow between them over AES-256-GCM encrypted frames after a mutual HMAC handshake, and the pipeline heals itself if a node drops and rejoins. A single maxed-out Studio can already carry a 671B model — mesh-brain is how several smaller Macs pool memory into the same class, and how the brain outlives any one box. Setup is CLI-driven: `badapple mesh-brain plan/shard`, ranks serve via `BADAPPLE_SHARD_DIR`, drive it with `badapple mesh-brain status/ask`
 
