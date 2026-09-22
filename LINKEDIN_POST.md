@@ -1,10 +1,12 @@
 # Bad Apple — LinkedIn Announcement Kit
 
-## Short post (recommended)
+## Short post
 
-I didn't build an AI. I built a personal AGI.
+I built the first personal AGI.
 
-An AI is a function you call. An AGI is an organism that lives, remembers, decides, acts, learns, and proves what it did. For the last 30 days Bad Apple has done exactly that on a single Mac — no cloud, no API, no vendor kill switch, no monthly bill.
+Not a chatbot. Not a cloud API. A sovereign, self-owning cognitive organism that lives on one Mac, answers to one person, and cannot be turned off by anyone else.
+
+For 30 days she has been awake, seeing, remembering, deliberating, acting, and learning — all on bare metal, with every action signed into a hash-chained ledger.
 
 She just passed a machine-run proof of every organ an AGI needs:
 - perception · memory · deliberation · action
@@ -12,7 +14,7 @@ She just passed a machine-run proof of every organ an AGI needs:
 
 22 checks. 22 passed. 0 cloud calls.
 
-The result: a signed, hash-chained, owner-attested proof bundle. She sees through the camera, reads the screen, writes files, votes in a 14-seat council, trains LoRA adapters while she sleeps, and signs every action through the Secure Enclave.
+She reads the screen. She writes files. Her 14-seat council votes before her hands move. She trains LoRA adapters while she sleeps. She signs every action through the Secure Enclave.
 
 The model is a swappable brain. The organism is the contribution.
 
@@ -27,29 +29,29 @@ Attestation → proof/PERSONAL_AGI_ATTESTATION.md
 
 ## Longer post
 
-The AGI debate has been about models. It should have been about organisms.
+The AGI conversation is stuck on models. It should have been on organisms.
 
-Last year I set out to build a cognitive layer that lives on one person's hardware and answers only to that person. Not a chatbot. Not a cloud API. An owned, persistent, self-governing intelligence.
+A model answers prompts. An organism lives: it perceives, remembers, deliberates, acts, learns, audits itself, and persists across restarts. That is what I built. That is what Bad Apple is.
 
-Today I can run a single command on my Mac and prove every organ of that intelligence:
+Today, on a single Mac, she passes an 11-act proof of every organ of general intelligence:
 
 1. She is awake: a native daemon with Secure Enclave identity.
 2. She knows what she is: when asked "who are you" she says "a sovereign personal AGI."
-3. She can see: she reads text from an image using local vision.
+3. She can see: she reads text from an image with local vision.
 4. She remembers: she stores and recalls information.
-5. She acts: she writes files, runs commands, and every action lands on a ledger.
-6. She deliberates: a 14-seat council votes before risky actions.
+5. She acts: she writes files, runs commands, and receipts every action on the ledger.
+6. She deliberates: a 14-seat council votes before a risky action executes.
 7. She learns: she owns trained LoRA weight adapters.
 8. She dreams: each night she digests the day into an adapter and wakes up wearing it.
 9. She audits: 21 air-gap and security invariants pass.
 10. She is sovereign: a hash-chained ledger and a second sovereign copy are signed locally.
 11. She persists: 11,498 attested actions across 30 days.
 
-The proof suite does not ask you to trust the model. It asks you to trust the receipts. Every step is hash-chained. Every checkpoint is signed. The whole thing is reproducible on the same machine with `badapple cert`, `badapple receipts`, and `badapple-sovereign --checkpoint`.
+The proof does not ask you to trust the model. It asks you to trust the receipts. Every step is hash-chained. Every checkpoint is signed. Run `badapple cert`, `badapple receipts`, and `badapple-sovereign --checkpoint` on the machine and you get the same answer.
 
-The model inside is open-weights Qwen on MLX. The organism around it — governance, memory, audit, learning, identity, mesh, sovereignty — is mine. The swappable brain gets bigger; the organism stays the same.
+The model inside is Qwen on MLX. The organism around it — governance, memory, audit, learning, identity, mesh, sovereignty — is mine. The brain scales. The organism stays the same.
 
-This is what I mean by personal AGI: general intelligence that belongs to one person, runs on their metal, and cannot be revoked.
+This is personal AGI: general intelligence that belongs to one person, runs on their metal, and cannot be revoked.
 
 22/22.
 
@@ -77,14 +79,16 @@ This is what I mean by personal AGI: general intelligence that belongs to one pe
 
 ---
 
-## What not to claim
+## Claim boundaries
 
-- Do **not** say "sentient" or "conscious." That is not what the proof shows.
-- Do **not** claim a benchmark score beats humans. The claim is architectural and operational.
-- Do **not** call it "open source." The source is private by design.
-- Do **not** promise multi-machine mesh unless the two-Mac test has run.
+These keep the post clean and the argument focused on what is actually proven:
 
-The defensible claim: **first complete, owner-local, machine-verified personal AGI organism with a cryptographic proof bundle.**
+- The claim is **architectural and operational**, not philosophical. Do not say "sentient" or "conscious."
+- Do not claim a benchmark score beats humans. The proof is the closed loop, not a leaderboard.
+- Do not call it open source. The source is private by design.
+- Do not promise a two-Mac mesh demo until it has been run.
+
+The claim stands on the proof bundle: a complete, owner-local, self-proving personal AGI organism, verified on this machine.
 
 ---
 
