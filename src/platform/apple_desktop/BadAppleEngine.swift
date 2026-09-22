@@ -83,7 +83,10 @@ final class BadAppleEngine: @unchecked Sendable {
     let modelManager = BadAppleModelManager.shared
     private let conversationSessionId = "default"
     private let approvalLock = NSLock()
-    private var pendingApprovals: [String: (name: String, args: [String: String])] = [:]
+    private var pendingApprovals: [String: (name: String, args: [String: String], created: Date)] = [:]
+    private var approvalsLoaded = false
+    private let approvalsPath = NSHomeDirectory() + "/.bad_apple/pending_approvals.json"
+    private let approvalTTL: TimeInterval = 24 * 3600
 
     // MARK: - Conversation Pruning
 
@@ -113,6 +116,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private var lastConfigHash: String?
     private var curiousAutopilotTask: Task<Void, Never>?
+    private var lastCuriousCheck = Date.distantPast
     private let curiousProposalsDir = NSHomeDirectory() + "/.bad_apple/notes/proposed_patches"
     private lazy var agent: BadAppleAgent? = try? BadAppleAgent(
         planner: { [weak self] goal, maximumSteps in
@@ -807,10 +811,43 @@ final class BadAppleEngine: @unchecked Sendable {
         return .finish(postprocessOutput(text))
     }
 
+    /// Pending approvals persist to disk so a daemon restart does not strand
+    /// an outstanding `approve <id>` — entries expire after approvalTTL.
+    private func ensureApprovalsLoaded() {
+        // Caller must hold approvalLock.
+        guard !approvalsLoaded else { return }
+        approvalsLoaded = true
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: approvalsPath)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]]
+        else { return }
+        let now = Date()
+        for (id, entry) in obj {
+            guard let name = entry["name"] as? String,
+                  let args = entry["args"] as? [String: String] else { continue }
+            let created = (entry["created"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? now
+            guard now.timeIntervalSince(created) < approvalTTL else { continue }
+            pendingApprovals[id] = (name, args, created)
+        }
+    }
+
+    private func persistApprovals() {
+        // Caller must hold approvalLock.
+        var obj: [String: [String: Any]] = [:]
+        let now = Date()
+        for (id, call) in pendingApprovals where now.timeIntervalSince(call.created) < approvalTTL {
+            obj[id] = ["name": call.name, "args": call.args, "created": call.created.timeIntervalSince1970]
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: obj) {
+            try? data.write(to: URL(fileURLWithPath: approvalsPath), options: .atomic)
+        }
+    }
+
     private func createApproval(name: String, args: [String: String]) -> String {
         let id = String(UUID().uuidString.lowercased().prefix(8))
         approvalLock.lock()
-        pendingApprovals[id] = (name, args)
+        ensureApprovalsLoaded()
+        pendingApprovals[id] = (name, args, Date())
+        persistApprovals()
         approvalLock.unlock()
         return id
     }
@@ -821,7 +858,9 @@ final class BadAppleEngine: @unchecked Sendable {
         let id = String(parts[1])
         approvalLock.lock()
         defer { approvalLock.unlock() }
+        ensureApprovalsLoaded()
         guard let call = pendingApprovals.removeValue(forKey: id) else { return nil }
+        persistApprovals()
         return (parts[0] == "approve", id, call.name, call.args)
     }
 
@@ -1997,6 +2036,14 @@ final class BadAppleEngine: @unchecked Sendable {
             return ("self_history", ["source": "all", "limit": "15"])
         }
         if [
+            "organ status", "organ registry", "sense status", "senses report",
+            "senses status", "live capabilities", "capabilities report",
+            "check your senses", "what are your senses", "which senses",
+            "your organs", "list your organs",
+        ].contains(where: { lower.contains($0) }) {
+            return ("capabilities", [:])
+        }
+        if [
             "system inventory", "machine inventory", "hardware info",
             "machine info", "system info", "your specs", "system specs",
             "what hardware", "your hardware", "battery status", "disk space",
@@ -2321,6 +2368,11 @@ final class BadAppleEngine: @unchecked Sendable {
                 _ = await self.waitForCuriousTriggerOrTimeout(interval: interval)
                 guard !Task.isCancelled else { break }
                 guard self.curiousAutopilotLevel() != "off", self.curiousAutopilotInterval() > 0 else { continue }
+                // Debounce: engine respawns and other triggers wake the loop far
+                // more often than the interval — only run if enough time passed.
+                let cooldown = min(self.curiousAutopilotInterval(), 600)
+                guard Date().timeIntervalSince(self.lastCuriousCheck) >= cooldown else { continue }
+                self.lastCuriousCheck = Date()
                 let result = await self.toolExecutor.executeTool(
                     name: "curious_self_improve",
                     args: ["include": "all"],
@@ -2511,6 +2563,7 @@ final class BadAppleEngine: @unchecked Sendable {
     func listPendingApprovals() -> [(id: String, name: String, args: [String: String])] {
         approvalLock.lock()
         defer { approvalLock.unlock() }
+        ensureApprovalsLoaded()
         return pendingApprovals.map { (id: $0.key, name: $0.value.name, args: $0.value.args) }
             .sorted { $0.id < $1.id }
     }

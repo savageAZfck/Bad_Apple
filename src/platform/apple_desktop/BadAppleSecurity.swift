@@ -379,8 +379,10 @@ final class BadAppleAuditLedger: @unchecked Sendable {
             rule(#"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#, redactedEmail),
             // SSNs (xxx-xx-xxxx) or bare 9-digit SSNs.
             rule(#"\b\d{3}-\d{2}-\d{4}\b|\b\d{9}\b"#, redactedSSN),
-            // North-American phone numbers.
-            rule(#"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"#, redactedPhone),
+            // North-American phone numbers. Requires separators, parens, or a
+            // country-code prefix — a bare 10-digit run is more likely an
+            // epoch timestamp or numeric ID than a phone number.
+            rule(#"\b(?:\(\d{3}\)\s?|\d{3}[-.\s]|\+?1[-.\s]\d{3}[-.\s])\d{3}[-.\s]\d{4}\b"#, redactedPhone),
             // Bearer tokens.
             rule(#"[Bb]earer\s+[A-Za-z0-9_\-\.=]+"#, redactedBearer),
             // Long random-looking tokens (40+ alphanumeric / _ - chars).

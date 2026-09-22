@@ -702,6 +702,10 @@ cargo clippy --release
 - Self-introspection tools: `self_history` (tails `ledger.jsonl`, `~/.bad_apple/ify/findings.jsonl`, and `badapple strategy list`; args `source`/`limit`/`filter`) and `system_inventory` (hardware/storage/power/processes/logs/thermal via bounded subprocesses; serials/UUIDs stripped) are read-only and approval-free in `policy.yaml`. Like `self_audit`, they also run deterministically on user phrases (`wantsIntrospection` in `BadAppleEngine.swift` — "what happened", "your history", "system inventory", "what's running"), then the model voices the records in first person; this bypasses flaky 7B `<tool_call>` emission for unfamiliar tool names.
 - Ambient context is injected as `Your senses (live ambient state ...)` so the model attributes screen/hearing/thermal lines to its own perception rather than anonymous data.
 - Approval-tier responses (`tier: "approval"`) are never stored in the semantic cache — otherwise an identical re-ask replays a stale one-time approval ID. The cache file is `/var/lib/bad_apple/semantic_cache.json`; stale entries can be pruned by filtering the JSON list.
+- `capabilities` tool (`BadAppleTools.swift`): self-model report enumerating senses (hearing/thermal/vision/speech freshness), memory stores, integrity layer, tool surface, and kill-switch state — all read from live files/sockets. Deterministic trigger: `wantsIntrospection` phrases like "organ status", "sense status", "capabilities report". Generic "what can you do" stays with `metaResponse`.
+- Pending approvals persist to `~/.bad_apple/pending_approvals.json` (24 h TTL) — `approve <id>` survives daemon restarts.
+- Curious autopilot is debounced (`min(interval, 600s)` cooldown on `lastCuriousCheck`) and proposals are deduped by SHA-256 signature in `~/.bad_apple/notes/proposed_patches/.last_proposal_sig` — identical findings are not re-filed.
+- The phone-number redaction rule in `BadAppleSecurity.swift` requires a separator/parens/country code — bare 10-digit runs (epoch timestamps) no longer redact as `[REDACTED_PHONE]`.
 
 ## New web UI (SPA) and native splash
 

@@ -635,6 +635,12 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: false
         ),
         BadAppleTool(
+            name: "capabilities",
+            description: "List your own organs: senses (hearing, vision, thermal, speech), memory stores, integrity layer, and tool surface — reported from live state, with freshness.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
             name: "describe_image",
             description: "Use the vision engine to describe an image file. Returns a text description.",
             parameters: [
@@ -821,7 +827,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
     }
 
     /// All tool definitions, native + workshop, with a fresh custom-tool reload.
-    private func allTools() -> [BadAppleTool] {
+    func allTools() -> [BadAppleTool] {
         reloadCustomToolsIfNeeded()
         return tools + customTools
     }
@@ -870,6 +876,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "your history", "what happened", "remember", "watchdog", "ify", "strategies",
         "what do you know", "your ledger", "hardware", "battery", "disk space",
         "system log", "what is running", "inventory", "specs",
+        "capabilities", "what can you do", "your senses", "your organs",
         // Code
         "code", "function", "compile", "build",
         // Kill switch / resume
@@ -894,6 +901,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["runtime status", "health status", "system status", "process", "memory"], ["runtime_status", "system_inventory"]),
         (["self history", "your history", "what happened", "past events", "earlier", "previously", "remember", "your findings", "watchdog", "ify", "strategies", "what do you know", "learned", "your ledger", "recall"], ["self_history"]),
         (["hardware", "system info", "machine info", "chip", "processor", "cpu", "battery", "disk space", "storage", "system log", "processes", "what is running", "inventory", "specs"], ["system_inventory", "runtime_status"]),
+        (["capabilities", "what can you do", "your senses", "your organs", "what are you capable", "your tools", "what tools"], ["capabilities"]),
         (["code", "coding", "program", "programming", "developer", "refactor", "debug", "build project", "run tests"], ["read_file", "search_content", "write_file", "run_shell", "index_documents", "workspace_status"]),
         (["describe image", "image description", "what's in this image", "analyze image"], ["describe_image"]),
         (["generate image", "make an image", "create image", "draw", "image of"], ["image_generation"]),
@@ -2126,6 +2134,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
                 section: args["section"] ?? "all",
                 maxChars: min(invMax, 16_000)
             )
+        case "capabilities":
+            return capabilitiesReport()
         case "describe_image":
             return await describeImage(
                 path: args["path"] ?? "",
@@ -2970,6 +2980,49 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             parts.append("== thermal ==\n" + body)
         }
         return String(parts.joined(separator: "\n\n").prefix(maxChars))
+    }
+
+    /// Self-model: enumerate senses, memory stores, integrity layer, and the
+    /// tool surface from live filesystem/socket state — so the model reports
+    /// what it actually has, not what it guesses.
+    func capabilitiesReport() -> String {
+        let home = NSHomeDirectory()
+        let fm = FileManager.default
+        func exists(_ p: String) -> Bool { fm.fileExists(atPath: p) }
+        func freshness(_ p: String, liveWithin: TimeInterval) -> String {
+            guard let attr = try? fm.attributesOfItem(atPath: p),
+                  let mtime = attr[.modificationDate] as? Date else { return "absent" }
+            let age = Date().timeIntervalSince(mtime)
+            if age < liveWithin { return "live (\(Int(age))s old)" }
+            return "stale (\(Int(age / 60))m old)"
+        }
+
+        var out: [String] = ["== senses =="]
+        out.append("hearing (ambient ears): \(freshness(home + "/.bad_apple/ambient_heard.json", liveWithin: 600))")
+        out.append("thermal sense: \(freshness("/var/lib/bad_apple/thermal.json", liveWithin: 300))")
+        out.append("vision: screen_capture tool" + (visionProvider != nil
+            ? " + image-description model" : " (no vision model loaded — describe_image unavailable)"))
+        out.append("speech (TTS): \(exists("/tmp/badapple_tts.sock") ? "live" : "offline")")
+
+        out.append("== memory ==")
+        out.append("conversation ledger: \(exists("/var/lib/bad_apple/ledger.jsonl") ? "present" : "absent")")
+        out.append("semantic index: \(exists("/var/lib/bad_apple/grounded_index") ? "present" : "absent")")
+        out.append("strategy memory: \(exists(home + "/.bad_apple/strategies.redb") ? "present" : "absent")")
+        out.append("working memory: \(exists(home + "/.bad_apple/working_memory.txt") ? "present" : "empty")")
+        out.append("watchdog findings: \(freshness(home + "/.bad_apple/ify/findings.jsonl", liveWithin: 86400))")
+
+        out.append("== integrity ==")
+        out.append("sovereign checkpoint: \(freshness("/var/lib/bad_apple/ledger.sovereign.checkpoint.json", liveWithin: 129_600))")
+        out.append("platform snapshots: \(exists("/var/lib/bad_apple/.respawn") ? "versioned" : "not initialized")")
+        out.append("learned-state snapshots: \(exists(home + "/.bad_apple/.respawn") ? "versioned" : "not initialized")")
+        out.append("identity (Secure Enclave): \(exists("/var/run/badapple/identity.sock") ? "live" : "offline")")
+
+        let toolNames = BadAppleToolRouter().allTools().map(\.name).sorted()
+        out.append("== tools (\(toolNames.count)) ==\n" + toolNames.joined(separator: ", "))
+
+        out.append("== state ==")
+        out.append("kill switch: \(BadAppleEngine.shared.killed ? "ENGAGED" : "off")")
+        return out.joined(separator: "\n")
     }
 
     /// Describe an image file using the vision provider closure, or return a
@@ -3921,6 +3974,19 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         dateFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
         let timestamp = dateFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "")
         let proposalPath = (proposalsDir as NSString).appendingPathComponent("\(timestamp)-curious-proposal.md")
+
+        // Dedupe: when the proposal is identical to the previous run's (same
+        // model output and same resolved patch target), do not re-file it —
+        // autopilot otherwise rewrites the same finding every cycle.
+        let sigInput = proposal + "|" + (parsed?.file ?? "")
+        let sig = SHA256.hash(data: Data(sigInput.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let sigPath = (proposalsDir as NSString).appendingPathComponent(".last_proposal_sig")
+        if let last = try? String(contentsOfFile: sigPath, encoding: .utf8),
+           last.trimmingCharacters(in: .whitespacesAndNewlines) == sig {
+            return "Curious self-improvement check complete — no new findings (identical to the previous proposal; not re-filed)."
+        }
+        try? sig.data(using: .utf8)?.write(to: URL(fileURLWithPath: sigPath), options: .atomic)
 
         var body = "# Curious self-improvement check\n\n"
         body += "**When:** \(dateFormatter.string(from: Date()))\n\n"

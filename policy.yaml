@@ -142,6 +142,11 @@ tools:
     require_approval: false
     max_timeout: 20
 
+  capabilities:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
   run_shortcut:
     allowed: true
     require_approval: true
