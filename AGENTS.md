@@ -493,6 +493,31 @@ through `invoke_tool` — the same governed path as model-emitted calls
 (ledgered `tool_call` with `via: invoke_tool`). Keywords `lora`/`adapter`/
 `fine-tune` route prompts to these tools.
 
+## Dream pass (nightly weight-level learning)
+
+The daily consolidation tick also runs the dream pass (`maybeRunDream` in
+`BadAppleEngine.swift`) when `~/.bad_apple/dream.state` is older than
+`BADAPPLE_DREAM_INTERVAL` (default 86400 s) and `dream_learning:` is true in
+policy.yaml (default true — set false to hard-disable):
+
+1. `dreamCurate` pairs `query`/`response` ledger entries, drops refusals,
+   deterministic/fast-tier answers, approvals, errors, and trivial exchanges,
+   dedupes, and writes up to `BADAPPLE_DREAM_MAX_ROWS` (default 128) rows to
+   `/var/lib/bad_apple/lora_data/dream-candidate/` (last ~10% → `valid.jsonl`).
+2. `lora_train` (subprocess, policy timeout) trains `BADAPPLE_DREAM_ITERS`
+   iterations (default 40) → `lora_adapters/dream-candidate`.
+3. `dreamAdoptCandidate` promotes it to `lora_adapters/dream`, moving the prior
+   weights to `dream-prev` (one rename from rollback; respawn covers the rest).
+4. On the next model load `applyDreamAdapterIfPresent` injects the adapter via
+   `BadAppleInference.applyAdapter` (`LoRAContainer.load(into:)`). A bad adapter
+   is ledgered `dream_rejected` and the base weights serve alone — inference
+   can never be bricked by a dream adapter.
+
+Ledger events: `dream_dataset`, `dream_skipped`, `dream_adopted`,
+`dream_rejected`, `dream_applied`. Fewer than 12 curated rows → `dream_skipped`.
+Deleting `~/.bad_apple/consolidation.state` forces the next autopilot tick to
+run the pass (also re-runs consolidation — idempotent).
+
 ## Kill switch, safe mode, and private mode
 
 Voice/text commands:

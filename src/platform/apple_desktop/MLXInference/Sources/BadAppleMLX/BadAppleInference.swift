@@ -947,6 +947,20 @@ public final class BadAppleInference: @unchecked Sendable {
         Memory.clearCache()
     }
 
+    /// Inject a saved LoRA adapter (`adapters.safetensors` + `adapter_config.json`)
+    /// into the loaded model. The container mutates the module in place, so the
+    /// adapter stays applied for subsequent generations until unload or replace.
+    /// Callers handle failure — a bad adapter must never brick inference.
+    public func applyAdapter(directory: URL) async throws {
+        guard let container = await state.getContainer() else {
+            throw InferenceError.modelNotLoaded
+        }
+        try await container.perform { context in
+            let adapter = try LoRAContainer.from(directory: directory)
+            try adapter.load(into: context.model)
+        }
+    }
+
     public func unload() async {
         await state.setContainer(nil)
         Memory.clearCache()

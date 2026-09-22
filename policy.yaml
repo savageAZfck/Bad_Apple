@@ -17,6 +17,14 @@ autopilot: false
 proactive_notify: true
 proactive_voice: true
 
+# Dream learning: during each daily consolidation pass Bad Apple curates the
+# day's query/response exchanges into lora_data/dream-candidate, trains a
+# bounded LoRA adapter (BADAPPLE_DREAM_ITERS, default 40), and adopts it into
+# lora_adapters/dream — applied at next model load. The previous weights are
+# kept as dream-prev for instant rollback. BADAPPLE_DREAM_INTERVAL detunes
+# the cadence. Every pass lands on the audit ledger.
+dream_learning: true
+
 # Fleet beacon (opt-in): during each daily consolidation pass Bad Apple emits
 # one Secure Enclave-signed check-in — version, arch, anonymised machine id —
 # to this destination. Accepts an https:// endpoint or a file:// drop folder

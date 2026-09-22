@@ -1330,6 +1330,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
     private var _autopilot: Bool = false
     private var _proactiveNotify: Bool = true
     private var _proactiveVoice: Bool = true
+    private var _dreamLearning: Bool = true
     private var _beaconURL: String?
     private var policyLoaded: Bool = false
     private var defaultPolicy = ToolPolicy()
@@ -1400,6 +1401,15 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _proactiveVoice
+    }
+
+    /// Whether the nightly dream pass may curate the day's exchanges and
+    /// train a LoRA adapter that is applied at next model load.
+    /// Top-level `dream_learning:` in policy.yaml; default true.
+    var dreamLearning: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _dreamLearning
     }
 
     /// Opt-in fleet beacon destination. Top-level `beacon_url:` in
@@ -1732,6 +1742,8 @@ final class BadApplePolicyEngine: @unchecked Sendable {
                             lock.lock(); _proactiveNotify = (value == "true"); lock.unlock()
                         } else if key == "proactive_voice" {
                             lock.lock(); _proactiveVoice = (value == "true"); lock.unlock()
+                        } else if key == "dream_learning" {
+                            lock.lock(); _dreamLearning = (value == "true"); lock.unlock()
                         } else if key == "beacon_url" {
                             let unquoted = value.trimmingCharacters(
                                 in: CharacterSet(charactersIn: "\"'"))

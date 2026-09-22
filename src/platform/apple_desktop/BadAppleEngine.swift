@@ -743,6 +743,7 @@ final class BadAppleEngine: @unchecked Sendable {
             }
             guard await inference.ready else { throw BadAppleInference.InferenceError.modelNotLoaded }
             stateLock.withLock { _isLoaded = true }
+            await applyDreamAdapterIfPresent()
             await runtime.markModelReady(mid)
             Task {
                 await runtime.markModelLoading(embeddingEngine.configuration.modelId)
@@ -2602,6 +2603,12 @@ final class BadAppleEngine: @unchecked Sendable {
                     // Fleet check-in rides the same daily cadence — one
                     // signed beacon per consolidation pass, opt-in only.
                     self.emitFleetBeacon()
+                    // Dream pass rides the same daily tick: digest the day's
+                    // exchanges into a LoRA dataset, train a candidate adapter,
+                    // and adopt it for the next model load — or reject and
+                    // keep the previous weights. Memory digests nightly;
+                    // weights learn nightly.
+                    await self.maybeRunDream()
                 }
             }
         }
@@ -2617,6 +2624,209 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private var consolidationStatePath: String {
         NSHomeDirectory() + "/.bad_apple/consolidation.state"
+    }
+
+    // MARK: - Dream pass (nightly LoRA learning)
+
+    /// Whether the dream pass may curate exchanges and train/adopt an adapter.
+    /// Governed by `dream_learning:` in policy.yaml (default true).
+    private func dreamLearningEnabled() -> Bool { policyEngine.dreamLearning }
+
+    private var dreamStatePath: String {
+        NSHomeDirectory() + "/.bad_apple/dream.state"
+    }
+
+    private func dreamInterval() -> TimeInterval {
+        let raw = ProcessInfo.processInfo.environment["BADAPPLE_DREAM_INTERVAL"]
+        if let raw, let seconds = TimeInterval(raw), seconds > 0 { return seconds }
+        return 86_400
+    }
+
+    private func dreamDue() -> Bool {
+        guard let text = try? String(contentsOfFile: dreamStatePath, encoding: .utf8),
+              let last = TimeInterval(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return true }
+        return Date().timeIntervalSince1970 - last >= dreamInterval()
+    }
+
+    private func markDreamed() {
+        let stamp = String(format: "%.0f", Date().timeIntervalSince1970)
+        try? stamp.write(toFile: dreamStatePath, atomically: true, encoding: .utf8)
+    }
+
+    private func dreamMaxRows() -> Int {
+        let raw = ProcessInfo.processInfo.environment["BADAPPLE_DREAM_MAX_ROWS"]
+        if let raw, let n = Int(raw), n > 0 { return n }
+        return 128
+    }
+
+    private func dreamIters() -> Int {
+        let raw = ProcessInfo.processInfo.environment["BADAPPLE_DREAM_ITERS"]
+        if let raw, let n = Int(raw), n > 0 { return n }
+        return 40
+    }
+
+    /// Nightly weight-level learning. Curate query/response pairs from the
+    /// ledger into `lora_data/dream-candidate`, train a bounded adapter, then
+    /// adopt it into `lora_adapters/dream` (backing up the previous weights to
+    /// `dream-prev`). Every step lands on the ledger; failure leaves the
+    /// current adapter untouched.
+    private func maybeRunDream() async {
+        guard dreamLearningEnabled() else { return }
+        guard dreamDue() else { return }
+        markDreamed()
+
+        let ledger = dreamCurate()
+        auditLedger.append(
+            eventType: "dream_dataset",
+            data: ["rows": ledger.rows, "skipped": ledger.skipped],
+            persona: activePersona
+        )
+        guard ledger.rows >= 12 else {
+            auditLedger.append(
+                eventType: "dream_skipped",
+                data: ["reason": "insufficient curated rows (\(ledger.rows))"],
+                persona: activePersona
+            )
+            return
+        }
+
+        let result = await toolExecutor.executeTool(
+            name: "lora_train",
+            args: ["dataset": "dream-candidate", "iters": String(dreamIters())],
+            approved: true
+        )
+        guard result.contains("trained"), dreamAdoptCandidate() else {
+            auditLedger.append(
+                eventType: "dream_rejected",
+                data: ["stage": "train", "reason": String(result.suffix(400))],
+                persona: activePersona
+            )
+            return
+        }
+        auditLedger.append(
+            eventType: "dream_adopted",
+            data: ["rows": ledger.rows, "iters": dreamIters(), "result": String(result.suffix(200))],
+            persona: activePersona
+        )
+    }
+
+    /// Read the hash-chained ledger, pair each `query` with the next
+    /// `response`, filter out refusals/deterministic/control traffic, dedupe,
+    /// and write `train.jsonl`/`valid.jsonl` under lora_data/dream-candidate
+    /// in the same `{"text": "<|im_start|>..."}` shape lora_add_example uses.
+    private func dreamCurate() -> (rows: Int, skipped: Int) {
+        let path = "/var/lib/bad_apple/ledger.jsonl"
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return (0, 0)
+        }
+        var pairs: [(String, String)] = []
+        var pending: String?
+        var seen = Set<String>()
+        var skipped = 0
+        for line in raw.components(separatedBy: .newlines) where line.hasPrefix("{") {
+            guard let data = line.data(using: .utf8),
+                  let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = entry["type"] as? String,
+                  let fields = entry["data"] as? [String: Any]
+            else { continue }
+            switch type {
+            case "query":
+                guard let prompt = fields["prompt"] as? String else { continue }
+                pending = prompt
+            case "response":
+                guard let question = pending, let text = fields["text"] as? String else {
+                    pending = nil
+                    continue
+                }
+                pending = nil
+                let tier = fields["tier"] as? String
+                if tier == "deterministic" || tier == "fast" { skipped += 1; continue }
+                if dreamSkippable(question) || dreamSkippable(text) { skipped += 1; continue }
+                if seen.insert(question).inserted { pairs.append((question, text)) }
+            default:
+                continue
+            }
+        }
+        let capped = Array(pairs.suffix(dreamMaxRows()))
+        let validCount = max(1, capped.count / 10)
+        let train = capped.dropLast(validCount)
+        let valid = capped.suffix(validCount)
+
+        let dir = "/var/lib/bad_apple/lora_data/dream-candidate"
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try dreamRows(train).write(
+                toFile: "\(dir)/train.jsonl", atomically: true, encoding: .utf8)
+            try dreamRows(valid).write(
+                toFile: "\(dir)/valid.jsonl", atomically: true, encoding: .utf8)
+        } catch {
+            return (0, skipped)
+        }
+        return (capped.count, skipped)
+    }
+
+    private func dreamRows(_ pairs: ArraySlice<(String, String)>) -> String {
+        pairs.map { q, a in
+            let text = "<|im_start|>user\n\(q)<|im_end|>\n<|im_start|>assistant\n\(a)<|im_end|>\n"
+            let data = (try? JSONSerialization.data(withJSONObject: ["text": text])) ?? Data()
+            return String(data: data, encoding: .utf8) ?? ""
+        }.filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
+    }
+
+    /// Refusals, firewall output, approvals, errors, and trivial exchanges are
+    /// noise — training on them teaches the adapter to refuse and apologize.
+    private func dreamSkippable(_ text: String) -> Bool {
+        if text.count < 20 { return true }
+        for prefix in [
+            "I'm sorry", "I am sorry", "[Output firewall", "Approval required",
+            "approve ", "deny ", "kill switch", "Unknown tool", "Error",
+        ] where text.hasPrefix(prefix) { return true }
+        return false
+    }
+
+    /// Promote `dream-candidate` to the live `dream` adapter, keeping the
+    /// previous weights one rename away as `dream-prev` for instant rollback.
+    private func dreamAdoptCandidate() -> Bool {
+        let root = "/var/lib/bad_apple/lora_adapters"
+        let candidate = "\(root)/dream-candidate"
+        let live = "\(root)/dream"
+        let prev = "\(root)/dream-prev"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: "\(candidate)/adapters.safetensors") else { return false }
+        if fm.fileExists(atPath: live) {
+            try? fm.removeItem(atPath: prev)
+            try? fm.moveItem(atPath: live, toPath: prev)
+        }
+        do {
+            try fm.moveItem(atPath: candidate, toPath: live)
+        } catch {
+            return false
+        }
+        return true
+    }
+
+    /// Inject the adopted dream adapter into the freshly loaded model. A bad
+    /// adapter never bricks inference — rejection is ledgered and the base
+    /// weights serve alone.
+    private func applyDreamAdapterIfPresent() async {
+        guard dreamLearningEnabled() else { return }
+        let dir = "/var/lib/bad_apple/lora_adapters/dream"
+        guard FileManager.default.fileExists(atPath: "\(dir)/adapters.safetensors") else { return }
+        do {
+            try await inference.applyAdapter(directory: URL(fileURLWithPath: dir))
+            auditLedger.append(
+                eventType: "dream_applied",
+                data: ["adapter": dir],
+                persona: activePersona
+            )
+        } catch {
+            auditLedger.append(
+                eventType: "dream_rejected",
+                data: ["stage": "apply", "error": error.localizedDescription],
+                persona: activePersona
+            )
+        }
     }
 
     /// True when no consolidation pass has run within the interval. The state
