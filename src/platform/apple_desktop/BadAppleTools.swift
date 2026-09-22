@@ -617,6 +617,24 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: false
         ),
         BadAppleTool(
+            name: "self_history",
+            description: "Read your own recent history: audit-ledger events, watchdog findings, or learned strategy memory. Use it to recall what happened, what failed, or what you already know.",
+            parameters: [
+                .init(name: "source", description: "ledger | ify | strategies | all (default all)", required: false),
+                .init(name: "limit", description: "Max entries per source. Default 15, max 50.", required: false),
+                .init(name: "filter", description: "Only include entries containing this text.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "system_inventory",
+            description: "Read-only machine inventory: hardware model/chip, storage, power/battery, top processes by CPU and memory, recent system log errors, and live thermal state.",
+            parameters: [
+                .init(name: "section", description: "hardware | storage | power | processes | logs | thermal | all (default all)", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
             name: "describe_image",
             description: "Use the vision engine to describe an image file. Returns a text description.",
             parameters: [
@@ -848,6 +866,10 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "block this pattern", "update firewall",
         // Curious self-improvement
         "curious", "self improve", "improve yourself", "improve bad apple", "curious check",
+        // Self-introspection and machine inventory
+        "your history", "what happened", "remember", "watchdog", "ify", "strategies",
+        "what do you know", "your ledger", "hardware", "battery", "disk space",
+        "system log", "what is running", "inventory", "specs",
         // Code
         "code", "function", "compile", "build",
         // Kill switch / resume
@@ -869,7 +891,9 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["index documents", "index my", "index files"], ["index_documents"]),
         (["search my notes", "search notes", "what did I write"], ["search_notes"]),
         (["working memory", "scratchpad"], ["read_working_memory", "write_working_memory", "clear_working_memory"]),
-        (["runtime status", "health status", "system status", "process", "memory"], ["runtime_status"]),
+        (["runtime status", "health status", "system status", "process", "memory"], ["runtime_status", "system_inventory"]),
+        (["self history", "your history", "what happened", "past events", "earlier", "previously", "remember", "your findings", "watchdog", "ify", "strategies", "what do you know", "learned", "your ledger", "recall"], ["self_history"]),
+        (["hardware", "system info", "machine info", "chip", "processor", "cpu", "battery", "disk space", "storage", "system log", "processes", "what is running", "inventory", "specs"], ["system_inventory", "runtime_status"]),
         (["code", "coding", "program", "programming", "developer", "refactor", "debug", "build project", "run tests"], ["read_file", "search_content", "write_file", "run_shell", "index_documents", "workspace_status"]),
         (["describe image", "image description", "what's in this image", "analyze image"], ["describe_image"]),
         (["generate image", "make an image", "create image", "draw", "image of"], ["image_generation"]),
@@ -1045,6 +1069,8 @@ final class BadAppleToolRouter: @unchecked Sendable {
             "undo_last": "\"kind\":\"image\"",
             "self_audit": "\"include\":\"all\"",
             "curious_self_improve": "\"include\":\"all\"",
+            "self_history": "\"source\":\"all\",\"limit\":\"15\"",
+            "system_inventory": "\"section\":\"all\"",
             "screen_capture": "",
             "kill_switch": "",
             "resume": "",
@@ -1699,6 +1725,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         defaultPolicy = defaults
         toolPolicies = tools
         policyLoaded = true
+        lock.unlock()
 
         // Autopilot is intentionally in-memory only; the persistent level is
         // kept in ~/.bad_apple/autopilot_level by BadAppleEngine.
@@ -2085,6 +2112,20 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return clearWorkingMemory()
         case "runtime_status":
             return runtimeStatus()
+        case "self_history":
+            let histMax = policyEngine?.maxSize(toolName: "self_history") ?? 6_000
+            return selfHistory(
+                source: args["source"] ?? "all",
+                limit: parseLimit(args["limit"], defaultValue: 15, maximum: 50),
+                filter: args["filter"],
+                maxChars: min(histMax, 12_000)
+            )
+        case "system_inventory":
+            let invMax = policyEngine?.maxSize(toolName: "system_inventory") ?? 8_000
+            return systemInventory(
+                section: args["section"] ?? "all",
+                maxChars: min(invMax, 16_000)
+            )
         case "describe_image":
             return await describeImage(
                 path: args["path"] ?? "",
@@ -2765,6 +2806,170 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             "low_power_mode: \(info.isLowPowerModeEnabled)",
             "workspace: \(workspaceValue)",
         ].joined(separator: "\n")
+    }
+
+    /// Read the organism's own recent history: audit-ledger events, IFY
+    /// watchdog findings, or learned strategy memory. The sources live
+    /// outside the path jail (/var/lib, ~/.bad_apple) so this read-only,
+    /// bounded view is the sanctioned way for the model to see its own past.
+    func selfHistory(source: String, limit: Int, filter: String?, maxChars: Int) -> String {
+        let include = source.lowercased()
+        let wantLedger = include == "all" || include == "ledger"
+        let wantIfy = include == "all" || include == "ify"
+        let wantStrategies = include == "all" || include == "strategies"
+        guard wantLedger || wantIfy || wantStrategies else {
+            return "Error: unknown source '\(source)' — use ledger, ify, strategies, or all"
+        }
+        var sections: [String] = []
+        if wantLedger {
+            sections.append(tailJsonlFile(
+                "/var/lib/bad_apple/ledger.jsonl",
+                limit: limit, filter: filter, label: "ledger"
+            ))
+        }
+        if wantIfy {
+            sections.append(tailJsonlFile(
+                NSHomeDirectory() + "/.bad_apple/ify/findings.jsonl",
+                limit: limit, filter: filter, label: "ify findings"
+            ))
+        }
+        if wantStrategies, let binary = badappleBinaryPath() {
+            let r = runProcess(launchPath: binary, arguments: ["strategy", "list"], timeout: 10)
+            var lines = r.stdout.split(separator: "\n").map(String.init)
+            if let filter, !filter.isEmpty {
+                lines = lines.filter { $0.localizedCaseInsensitiveContains(filter) }
+            }
+            let tail = lines.suffix(limit)
+            sections.append(
+                "== strategies ==\n" + (tail.isEmpty ? "(none)" : tail.joined(separator: "\n"))
+            )
+        }
+        let out = sections.joined(separator: "\n\n")
+        return out.isEmpty ? "no history available" : String(out.prefix(maxChars))
+    }
+
+    /// Last `limit` lines of a JSONL file, optionally substring-filtered, each
+    /// compacted to `HH:mm:ss type: detail` for prompt-sized consumption.
+    private func tailJsonlFile(_ path: String, limit: Int, filter: String?, label: String) -> String {
+        // Read only the tail of the file — the ledger grows unboundedly and a
+        // full read would scale with history instead of with `limit`.
+        let tailBytes = 512 * 1024
+        var text = ""
+        if let fh = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) {
+            defer { try? fh.close() }
+            let size = (try? fh.seekToEnd()) ?? 0
+            let offset = size > tailBytes ? size - UInt64(tailBytes) : 0
+            try? fh.seek(toOffset: offset)
+            let data = fh.readDataToEndOfFile()
+            text = String(data: data, encoding: .utf8) ?? ""
+            // Drop the first partial line when we sliced mid-record.
+            if offset > 0, let nl = text.firstIndex(of: "\n") {
+                text = String(text[text.index(after: nl)...])
+            }
+        }
+        guard !text.isEmpty else {
+            return "== \(label) ==\n(unavailable)"
+        }
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        if let filter, !filter.isEmpty {
+            lines = lines.filter { $0.localizedCaseInsensitiveContains(filter) }
+        }
+        let tail = lines.suffix(limit).map(compactJsonlLine)
+        return "== \(label) ==\n" + (tail.isEmpty ? "(none)" : tail.joined(separator: "\n"))
+    }
+
+    private func compactJsonlLine(_ line: String) -> String {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return String(line.prefix(160)) }
+        var stamp = ""
+        if let ts = obj["ts"] as? Double {
+            let d = Date(timeIntervalSince1970: ts)
+            let fmt = DateFormatter()
+            fmt.dateFormat = "MM-dd HH:mm:ss"
+            stamp = fmt.string(from: d) + " "
+        }
+        let type = (obj["type"] as? String) ?? (obj["rule"] as? String) ?? "?"
+        // Ledger events nest their payload under `data`; findings are flat.
+        let flat: [String: Any] = (obj["data"] as? [String: Any]) ?? obj
+        var detail = ""
+        for key in ["error", "detail", "summary", "observed", "prompt", "text",
+                    "tool", "action", "path", "id"] {
+            if let v = flat[key] as? String, !v.isEmpty {
+                detail = v
+                break
+            }
+        }
+        return String("\(stamp)\(type): \(detail)".prefix(200))
+    }
+
+    /// Read-only machine inventory via bounded subprocesses — hardware model,
+    /// storage, power, top processes, recent log errors, thermal percept.
+    /// Hardware identifiers (serial, UUIDs) are stripped before output.
+    func systemInventory(section: String, maxChars: Int) -> String {
+        let s = section.lowercased()
+        let known = ["hardware", "storage", "power", "processes", "logs", "thermal", "all"]
+        guard known.contains(s) else {
+            return "Error: unknown section '\(section)' — use \(known.joined(separator: ", "))"
+        }
+        var parts: [String] = []
+        if s == "all" || s == "hardware" {
+            var out = runProcess(
+                launchPath: "/usr/sbin/system_profiler",
+                arguments: ["SPHardwareDataType", "SPDisplaysDataType", "-detailLevel", "mini"],
+                timeout: 20
+            ).stdout
+            // Strip machine identifiers — the model needs model/chip, not serials.
+            out = out.components(separatedBy: "\n")
+                .filter { line in
+                    !["Serial Number", "Hardware UUID", "Provisioning UDID", "Activation Lock"]
+                        .contains(where: { line.contains($0) })
+                }
+                .joined(separator: "\n")
+            parts.append("== hardware ==\n" + String(out.prefix(2000)))
+        }
+        if s == "all" || s == "storage" {
+            let out = runProcess(
+                launchPath: "/bin/df",
+                arguments: ["-h", "/", "/System/Volumes/Data"],
+                timeout: 10
+            ).stdout
+            parts.append("== storage ==\n" + String(out.prefix(800)))
+        }
+        if s == "all" || s == "power" {
+            let batt = runProcess(launchPath: "/usr/bin/pmset", arguments: ["-g", "batt"], timeout: 10).stdout
+            let therm = runProcess(launchPath: "/usr/bin/pmset", arguments: ["-g", "therm"], timeout: 10).stdout
+            parts.append("== power ==\n" + String((batt + therm).prefix(1200)))
+        }
+        if s == "all" || s == "processes" {
+            let out = runProcess(
+                launchPath: "/bin/ps",
+                arguments: ["-Aceo", "pcpu,pmem,comm", "-r"],
+                timeout: 10
+            ).stdout
+            parts.append("== top processes (by cpu) ==\n" + String(out.prefix(1200)))
+        }
+        if s == "all" || s == "logs" {
+            let out = runProcess(
+                launchPath: "/usr/bin/log",
+                arguments: ["show", "--last", "5m", "--style", "compact"],
+                timeout: 20
+            ).stdout
+            let interesting = out.components(separatedBy: "\n")
+                .filter { line in
+                    ["error", "fault", "fail", "denied", "crash"]
+                        .contains(where: { line.lowercased().contains($0) })
+                }
+                .suffix(30)
+                .joined(separator: "\n")
+            parts.append("== recent log errors (5m) ==\n" + (interesting.isEmpty ? "(none)" : interesting))
+        }
+        if s == "all" || s == "thermal" {
+            let path = "/var/lib/bad_apple/thermal.json"
+            let body = (try? String(contentsOfFile: path, encoding: .utf8)) ?? "(unavailable)"
+            parts.append("== thermal ==\n" + body)
+        }
+        return String(parts.joined(separator: "\n\n").prefix(maxChars))
     }
 
     /// Describe an image file using the vision provider closure, or return a

@@ -1149,6 +1149,62 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
 
+        // User-initiated introspection: "what happened", "what's running" run
+        // the REAL read-only tools — the phrase is itself the approval
+        // (human-initiated, not model-initiated).
+        if let introspection = wantsIntrospection(prompt) {
+            Task {
+                auditLedger.append(
+                    eventType: "tool_call",
+                    data: ["name": introspection.name, "arguments": introspection.args, "via": "user_phrase"],
+                    persona: persona
+                )
+                let toolOutput = await toolExecutor.executeTool(
+                    name: introspection.name, args: introspection.args, approved: true
+                )
+                auditLedger.append(
+                    eventType: "tool_result",
+                    data: ["name": introspection.name, "result": toolOutput],
+                    persona: persona
+                )
+                let sysPrompt = systemPrompt(voiceMode: voiceMode)
+                    + "\n\nYou are reporting the results of your own just-run \(introspection.name) tool. Only state what the results show."
+                do {
+                    let result = try await inference.generate(
+                        prompt: introspectionSynthesis(
+                            prompt: prompt, toolName: introspection.name, output: toolOutput
+                        ),
+                        systemPrompt: sysPrompt,
+                        history: [],
+                        tools: nil as [[String: any Sendable]]?,
+                        maxTokens: maxTokens,
+                        temperature: 0.6
+                    )
+                    let filtered = outputFirewall.check(postprocessOutput(result.text))
+                    auditLedger.append(
+                        eventType: "response",
+                        data: ["text": filtered, "tier": "introspection"],
+                        persona: persona
+                    )
+                    saveTurn(prompt: prompt, response: filtered)
+                    await runtime.recordQuery(
+                        latencySeconds: Date().timeIntervalSince(startedAt),
+                        tokenCount: result.text.count / 4,
+                        succeeded: true
+                    )
+                    DispatchQueue.main.async {
+                        onToken(filtered)
+                        onComplete(filtered)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        onError("Introspection ran, but the model could not voice it: \(error.localizedDescription)")
+                    }
+                }
+            }
+            return
+        }
+
         // Fast tier: route simple queries to the 0.5B model when enabled and configured.
         if fastTierEnabled, let fastInf = fastInference, isSimpleQuery(prompt), toolRouter.toolSchemasForPrompt(text: prompt) == nil {
             Task {
@@ -1264,7 +1320,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
             var sysPrompt = systemPrompt(voiceMode: voiceMode)
             if let ambient = ambientContext {
-                sysPrompt += "\n\nAmbient:\n\(ambient)"
+                sysPrompt += "\n\nYour senses (live ambient state you perceive right now — screen, hearing, thermal):\n\(ambient)"
             }
             let ragContext = await rag.buildSemanticRetrievalContext(
                 prompt: prompt,
@@ -1290,7 +1346,9 @@ final class BadAppleEngine: @unchecked Sendable {
                     )
                     let filtered = outputFirewall.check(postprocessOutput(result.text))
                     saveTurn(prompt: prompt, response: filtered)
-                    await semanticCache.store(prompt: prompt, response: filtered, persona: persona)
+                    if result.tier != "approval" {
+                        await semanticCache.store(prompt: prompt, response: filtered, persona: persona)
+                    }
                     auditLedger.append(
                         eventType: "response",
                         data: ["text": filtered, "tps": result.tokensPerSecond],
@@ -1541,6 +1599,44 @@ final class BadAppleEngine: @unchecked Sendable {
             return filtered
         }
 
+        // User-initiated introspection: runs the REAL read-only tools —
+        // the phrase is itself the approval (human-initiated).
+        if let introspection = wantsIntrospection(prompt) {
+            auditLedger.append(
+                eventType: "tool_call",
+                data: ["name": introspection.name, "arguments": introspection.args, "via": "user_phrase"],
+                persona: persona
+            )
+            let toolOutput = await toolExecutor.executeTool(
+                name: introspection.name, args: introspection.args, approved: true
+            )
+            auditLedger.append(
+                eventType: "tool_result",
+                data: ["name": introspection.name, "result": toolOutput],
+                persona: persona
+            )
+            let sysPrompt = systemPrompt(voiceMode: voiceMode)
+                + "\n\nYou are reporting the results of your own just-run \(introspection.name) tool. Only state what the results show."
+            let result = try await inference.generate(
+                prompt: introspectionSynthesis(
+                    prompt: prompt, toolName: introspection.name, output: toolOutput
+                ),
+                systemPrompt: sysPrompt,
+                history: [],
+                tools: nil as [[String: any Sendable]]?,
+                maxTokens: maxTokens,
+                temperature: 0.6
+            )
+            let filtered = outputFirewall.check(postprocessOutput(result.text))
+            auditLedger.append(
+                eventType: "response",
+                data: ["text": filtered, "tier": "introspection"],
+                persona: persona
+            )
+            saveTurn(prompt: prompt, response: filtered)
+            return filtered
+        }
+
         // Check semantic cache for a matching response.
         if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
             stateLock.withLock { _lastCacheHit = true }
@@ -1556,7 +1652,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Build system prompt with ambient context and semantic RAG.
         var sysPrompt = systemPrompt(voiceMode: voiceMode)
         if let ambient = ambientContext {
-            sysPrompt += "\n\nAmbient:\n\(ambient)"
+            sysPrompt += "\n\nYour senses (live ambient state you perceive right now — screen, hearing, thermal):\n\(ambient)"
         }
         let ragContext = await rag.buildSemanticRetrievalContext(
             prompt: prompt,
@@ -1602,9 +1698,10 @@ final class BadAppleEngine: @unchecked Sendable {
         let polished = postprocessOutput(result.text)
         let filtered = outputFirewall.check(polished)
 
-        // Do not cache responses that were likely truncated by the token limit.
+        // Do not cache responses that were likely truncated by the token limit,
+        // and never cache approval prompts — they embed one-time approval IDs.
         let looksComplete = result.tokenCount == 0 || result.tokenCount < maxTokens - 5
-        if looksComplete {
+        if looksComplete, result.tier != "approval" {
             await semanticCache.store(
                 prompt: prompt,
                 response: filtered,
@@ -1880,6 +1977,45 @@ final class BadAppleEngine: @unchecked Sendable {
             "run the audit", "run an audit", "audit yourself", "audit your",
             "security audit", "air gap audit", "airgap audit",
         ].contains { lower.contains($0) }
+    }
+
+    /// Detect user phrases that ask Bad Apple to inspect its own state.
+    /// Returns the read-only tool to run and its arguments. These phrases are
+    /// self-referential on purpose — generic questions must not trigger them.
+    private func wantsIntrospection(_ prompt: String) -> (name: String, args: [String: String])? {
+        let lower = prompt.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "?!.,"))
+        if [
+            "your history", "self history", "self-history", "what happened",
+            "what happened recently", "your findings", "watchdog findings",
+            "ify findings", "your ledger", "audit ledger", "what failed",
+            "past failures", "recent failures", "what have you learned",
+            "what did you learn", "your strategies", "strategy memory",
+            "what do you remember", "recall your",
+        ].contains(where: { lower.contains($0) }) {
+            return ("self_history", ["source": "all", "limit": "15"])
+        }
+        if [
+            "system inventory", "machine inventory", "hardware info",
+            "machine info", "system info", "your specs", "system specs",
+            "what hardware", "your hardware", "battery status", "disk space",
+            "storage space", "top processes", "what is running",
+            "what's running", "running processes", "system log",
+        ].contains(where: { lower.contains($0) }) {
+            return ("system_inventory", ["section": "all"])
+        }
+        return nil
+    }
+
+    private func introspectionSynthesis(prompt: String, toolName: String, output: String) -> String {
+        """
+        The user asked "\(prompt)". I just ran my own \(toolName) tool — these are my actual internal records:
+
+        \(output)
+
+        Report what the records actually show in-character, in 2-4 sentences or a short list. This is your own real history and machine state — speak in first person about what you found. Do not invent entries, do not narrate this prompt, and if a section is empty say so plainly.
+        """
     }
 
     /// Distill the raw self_audit JSON into a compact fact sheet — the full
