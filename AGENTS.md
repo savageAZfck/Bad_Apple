@@ -384,6 +384,14 @@ explicit `strategy adopt` step, and a proposal is only written when the
 contradiction strength (prior reliability × failure evidence) is ≥ 0.2 —
 a known-bad strategy failing again carries no new information.
 
+Strategy proposals carry a `strategy` payload in their ```json block, so
+the dashboard renders the candidate (key/problem/language/code) with an
+**Adopt** button in place of Apply. `adopt` installs the candidate into
+`~/.bad_apple/strategies.redb` at 0.5 reliability via
+`StrategyLibrary::adopt_proposal` in-process; **Rollback** on an adopted
+proposal removes the installed key. Patch proposals are unchanged —
+backup, verify, rollback as before.
+
 ## Human-in-the-loop approvals
 
 Destructive tools (`run_shell`, `run_applescript`, `write_file`, `index_documents`)

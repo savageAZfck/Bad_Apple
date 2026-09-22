@@ -2183,6 +2183,20 @@ struct CuriousFeedbackEntry {
     error: String,
 }
 
+/// A strategy-repair payload inside a proposal's ```json block — written by
+/// `badapple strategy repair`, adopted via the `adopt` action which installs
+/// the candidate into the live strategy library at fresh 0.5 reliability.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StrategyProposalPayload {
+    key: String,
+    #[serde(default)]
+    problem: String,
+    #[serde(default)]
+    language: String,
+    #[serde(default)]
+    code: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CuriousProposal {
     id: String,
@@ -2192,6 +2206,8 @@ struct CuriousProposal {
     no_patch: bool,
     #[serde(default)]
     patch: Option<PatchProposal>,
+    #[serde(default)]
+    strategy: Option<StrategyProposalPayload>,
     #[serde(default)]
     applied: bool,
     #[serde(default)]
@@ -2262,6 +2278,7 @@ fn parse_proposal_file(path: &PathBuf) -> Option<CuriousProposal> {
         workspace,
         no_patch: false,
         patch: None,
+        strategy: None,
         applied,
         rejected,
         error,
@@ -2269,6 +2286,9 @@ fn parse_proposal_file(path: &PathBuf) -> Option<CuriousProposal> {
 
     match extract_proposal_from_markdown(&text) {
         Some(json) => {
+            if let Some(strategy) = json.get("strategy") {
+                proposal.strategy = serde_json::from_value(strategy.clone()).ok();
+            }
             if json
                 .get("no_patch")
                 .and_then(|v| v.as_bool())
@@ -2802,6 +2822,44 @@ async fn curious_proposal_action_handler(
                 }
             }
         }
+        "adopt" => {
+            let proposal = match parse_proposal_file(&path) {
+                Some(p) => p,
+                None => return Json(json!({"error": "could not parse proposal"})),
+            };
+            let Some(strategy) = &proposal.strategy else {
+                return Json(json!({"error": "proposal carries no strategy payload"}));
+            };
+            if proposal.applied {
+                return Json(json!({"error": "proposal already applied"}));
+            }
+            let lib = match bad_apple::strategy_library::StrategyLibrary::open(
+                bad_apple_data_dir().join("strategies.redb"),
+            ) {
+                Ok(l) => l,
+                Err(e) => return Json(json!({"error": e.to_string()})),
+            };
+            // adopt_proposal installs the candidate at 0.5 reliability and
+            // appends the `## Applied` marker itself.
+            match lib.adopt_proposal(&path).await {
+                Ok(key) => {
+                    let _ = record_proposal_feedback(CuriousFeedbackEntry {
+                        id: body.id.clone(),
+                        file: String::new(),
+                        why: strategy.problem.clone(),
+                        status: "adopted".to_string(),
+                        timestamp: Utc::now().to_rfc3339(),
+                        error: String::new(),
+                    })
+                    .await;
+                    Json(json!({
+                        "status": "ok",
+                        "result": format!("adopted strategy '{key}' at 0.5 reliability")
+                    }))
+                }
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
+        }
         "reject" | "dismiss" | "archive" => {
             let proposal = parse_proposal_file(&path);
             match archive_proposal_file(&body.id).await {
@@ -2822,10 +2880,32 @@ async fn curious_proposal_action_handler(
                 Err(e) => Json(json!({"error": e.to_string()})),
             }
         }
-        "rollback" => match rollback_proposal_file(&body.id).await {
-            Ok(result) => Json(json!({"status": "ok", "result": result})),
-            Err(e) => Json(json!({"error": e.to_string()})),
-        },
+        "rollback" => {
+            // Strategy proposals roll back by removing the adopted key; patch
+            // proposals restore the backed-up file.
+            let proposal = parse_proposal_file(&path);
+            if let Some(strategy) = proposal.as_ref().and_then(|p| p.strategy.as_ref()) {
+                let lib = match bad_apple::strategy_library::StrategyLibrary::open(
+                    bad_apple_data_dir().join("strategies.redb"),
+                ) {
+                    Ok(l) => l,
+                    Err(e) => return Json(json!({"error": e.to_string()})),
+                };
+                match lib.remove(&strategy.key).await {
+                    Ok(()) => {
+                        let result =
+                            format!("Rolled back: removed adopted strategy '{}'", strategy.key);
+                        let _ = mark_proposal_applied(&body.id, &result).await;
+                        return Json(json!({"status": "ok", "result": result}));
+                    }
+                    Err(e) => return Json(json!({"error": e.to_string()})),
+                }
+            }
+            match rollback_proposal_file(&body.id).await {
+                Ok(result) => Json(json!({"status": "ok", "result": result})),
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
+        }
         _ => Json(json!({"error": "unknown action"})),
     }
 }

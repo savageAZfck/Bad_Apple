@@ -875,7 +875,15 @@
         if (!data.proposals || !data.proposals.length) { list.innerHTML = '<p class="muted">No pending proposals.</p>'; return; }
         list.innerHTML = data.proposals.map(p => {
           let body = '';
-          if (p.no_patch) body = '<p class="muted">No patch proposed.</p>';
+          if (p.strategy) {
+            body = `
+            <div class="fact"><strong>Strategy:</strong> <code>${esc(p.strategy.key)}</code></div>
+            <div class="fact"><strong>Problem:</strong> ${esc(p.strategy.problem)}</div>
+            <div class="fact"><strong>Language:</strong> ${esc(p.strategy.language)}</div>
+            ${p.strategy.code ? `<details class="log"><summary>Candidate code</summary><pre class="log"><code>${esc(p.strategy.code)}</code></pre></details>` : ''}
+          `;
+          }
+          else if (p.no_patch) body = '<p class="muted">No patch proposed.</p>';
           else if (p.patch) {
             const diff = p.patch.old
               ? `<span class="tag">edit</span>\n<pre class="log"><code>--- ${esc(p.patch.file)}\n+++ ${esc(p.patch.file)}\n@@\n-${esc(p.patch.old)}\n+${esc(p.patch.new)}</code></pre>`
@@ -896,7 +904,10 @@
               <div style="display:flex; justify-content:space-between; align-items:start;">
                 <div><strong>${esc(p.id)}</strong> <span class="muted">${esc(p.timestamp)}</span> ${status}</div>
                 <div class="actions">
-                  ${canApply ? `<button onclick="curiousAction('${esc(p.id)}', 'apply')">Apply</button><button class="secondary" onclick="curiousAction('${esc(p.id)}', 'reject')">Reject</button>` : ''}
+                  ${canApply ? (p.strategy
+                    ? `<button onclick="curiousAction('${esc(p.id)}', 'adopt')">Adopt</button>`
+                    : `<button onclick="curiousAction('${esc(p.id)}', 'apply')">Apply</button>`)
+                    + `<button class="secondary" onclick="curiousAction('${esc(p.id)}', 'reject')">Reject</button>` : ''}
                   ${canRollback ? `<button class="secondary" onclick="curiousAction('${esc(p.id)}', 'rollback')">Rollback</button>` : ''}
                   <button class="secondary" onclick="curiousAction('${esc(p.id)}', 'archive')">Archive</button>
                 </div>
