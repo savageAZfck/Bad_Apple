@@ -1721,7 +1721,7 @@ async fn extract_facts_from_text(text: &str, source: &str) -> Result<Vec<MemoryF
         "Extract every factual claim from the text below as a JSON array of objects with the fields \"subject\", \"predicate\", and \"object\". \
 Each object must be a single subject-predicate-object triple. Only use explicit facts from the text. Do not invent or infer facts not present. \
 If no facts are present, return an empty array []. \
-\nExample output:\n[{{\"subject\": \"Bad Apple\", \"predicate\": \"is\", \"object\": \"a local AI operating system\"}}]\n\nText:\n{}\n\nReturn ONLY the JSON array:",
+\nExample output:\n[{{\"subject\": \"Bad Apple\", \"predicate\": \"is\", \"object\": \"a personal AGI operating system\"}}]\n\nText:\n{}\n\nReturn ONLY the JSON array:",
         text
     );
     let system_prompt = "You are a precise fact extraction tool. You output only valid JSON arrays of {subject, predicate, object} triples. No markdown, no prose, no explanation.";
@@ -2949,7 +2949,7 @@ async fn resolve_prompt_text(persona: &WorkshopPersona) -> String {
             }
         }
     }
-    String::from("You are Bad Apple, a local AI operating system layer for macOS.")
+    String::from("You are Bad Apple, a personal AGI operating system layer for macOS.")
 }
 
 #[derive(Deserialize)]

@@ -1,6 +1,6 @@
 # Bad Apple — Cognitive Bare-Metal AI OS Roadmap
 
-> **Goal:** make Bad Apple the reference implementation for a sovereign, on-device, bare-metal cognitive operating system — one that proves local AI can be more private, more capable, and more personally aligned than anything rented from the cloud.
+> **Goal:** make Bad Apple the reference implementation for a sovereign, on-device, bare-metal cognitive operating system — one that proves personal AGI can be more private, more capable, and more personally aligned than anything rented from the cloud.
 
 This is a living list. Items are grouped by theme and roughly ordered from near-term natural extensions to longer-term research bets.
 
@@ -97,7 +97,7 @@ This is a living list. Items are grouped by theme and roughly ordered from near-
 
 ## What makes this a "standard" rather than a product
 
-A standard is something others can build against. For Bad Apple to become the cognitive bare-metal AI OS standard, it should expose:
+A standard is something others can build against. For Bad Apple to become the cognitive bare-metal AGI OS standard, it should expose:
 
 1. **A well-defined local trust boundary** — the assistant, the user, and the hardware are one trust domain.
 2. **An open tool and memory interface** — any local app can extend her capabilities.
@@ -105,4 +105,4 @@ A standard is something others can build against. For Bad Apple to become the co
 4. **Reference implementations** — the menu bar, the CLI, the daemon, and the cage serve as proof that the standard works.
 5. **A public design rationale** — why local, why sovereign, why anti-cloud, and how to stay safe.
 
-The cloud AI giants are building the exact opposite: multi-tenant, rented, surveilled, centralized. A bare-metal AI OS standard is the counter-architecture.
+The cloud AI giants are building the exact opposite: multi-tenant, rented, surveilled, centralized. A bare-metal AGI OS standard is the counter-architecture.

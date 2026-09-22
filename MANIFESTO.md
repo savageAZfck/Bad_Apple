@@ -2,11 +2,11 @@
 
 ## Preamble
 
-We are building a new kind of operating system: a **cognitive layer that lives on the user's own hardware**, not in a rented data center. We call this a **bare-metal AI operating system**.
+We are building a new kind of operating system: a **cognitive layer that lives on the user's own hardware**, not in a rented data center. We call this a **bare-metal AGI operating system**.
 
 The cloud AI industry wants you to believe that intelligence must be centralized: their GPUs, their terms, your data. We reject that premise. Intelligence can be local, private, fast, and sovereign.
 
-This document is a declaration of the principles, promises, and interfaces that define a bare-metal AI OS. It is not a product roadmap. It is a standard that any system may adopt, implement, or extend.
+This document is a declaration of the principles, promises, and interfaces that define a bare-metal AGI OS. It is not a product roadmap. It is a standard that any system may adopt, implement, or extend.
 
 ---
 
@@ -18,7 +18,7 @@ The model, the memory, the tools, the policy, and the audit trail all run on the
 
 ### 2. Air-gap is the default
 
-A bare-metal AI OS does not phone home. It does not send prompts, telemetry, or embeddings to a vendor. Network access is an explicit, auditable exception — never a default. If a model can be downloaded once and then cut off, it should be.
+A bare-metal AGI OS does not phone home. It does not send prompts, telemetry, or embeddings to a vendor. Network access is an explicit, auditable exception — never a default. If a model can be downloaded once and then cut off, it should be.
 
 ### 3. Every action is explainable and revocable
 
@@ -26,15 +26,15 @@ The assistant must be able to explain what it did, why it did it, and on what au
 
 ### 4. The cage is stronger than the brain
 
-Capability without control is not intelligence — it is a liability. A bare-metal AI OS embeds a policy layer that constrains the model before the model acts. The policy is human-readable, user-editable, and enforced by the OS, not by the assistant's good behavior.
+Capability without control is not intelligence — it is a liability. A bare-metal AGI OS embeds a policy layer that constrains the model before the model acts. The policy is human-readable, user-editable, and enforced by the OS, not by the assistant's good behavior.
 
 ### 5. Interoperability without centralization
 
-A bare-metal AI OS exposes open, local protocols so other apps and agents on the same device can extend its capabilities. It does not require a vendor's cloud to coordinate. It can talk to other bare-metal AI OSes peer-to-peer, not platform-to-platform.
+A bare-metal AGI OS exposes open, local protocols so other apps and agents on the same device can extend its capabilities. It does not require a vendor's cloud to coordinate. It can talk to other bare-metal AGI OSes peer-to-peer, not platform-to-platform.
 
 ---
 
-## What a bare-metal AI OS must provide
+## What a bare-metal AGI OS must provide
 
 | Layer | Responsibility | Non-negotiable properties |
 |---|---|---|
@@ -49,7 +49,7 @@ A bare-metal AI OS exposes open, local protocols so other apps and agents on the
 
 ---
 
-## What a bare-metal AI OS must never do
+## What a bare-metal AGI OS must never do
 
 1. **Never require a cloud account to function.**
 2. **Never transmit user prompts, files, or embeddings to a third party.**
@@ -61,7 +61,7 @@ A bare-metal AI OS exposes open, local protocols so other apps and agents on the
 
 ## The promise to the user
 
-When you run a bare-metal AI OS:
+When you run a bare-metal AGI OS:
 
 - Your data stays on your hardware.
 - Your assistant is yours.
@@ -73,7 +73,7 @@ When you run a bare-metal AI OS:
 
 ## The promise to builders
 
-A bare-metal AI OS is not a walled garden. It is a reference architecture. If you implement the interfaces, follow the manifesto, and pass the certification suite, your system is a bare-metal AI OS. You can extend it, sell it, fork it, or integrate it — as long as you keep the user sovereign.
+A bare-metal AGI OS is not a walled garden. It is a reference architecture. If you implement the interfaces, follow the manifesto, and pass the certification suite, your system is a bare-metal AGI OS. You can extend it, sell it, fork it, or integrate it — as long as you keep the user sovereign.
 
 ---
 
@@ -86,7 +86,7 @@ The cloud AI model is:
 - **Fragile.** A subscription change, a terms-of-service update, or an API deprecation can break your workflow overnight.
 - **Centralized.** A single breach, a single law, or a single outage affects millions.
 
-A bare-metal AI OS is the opposite: **owned, private, durable, and distributed.**
+A bare-metal AGI OS is the opposite: **owned, private, durable, and distributed.**
 
 ---
 

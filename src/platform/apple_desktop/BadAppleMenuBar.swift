@@ -3103,7 +3103,7 @@ private final class BadAppleSplashWindow {
         title.textColor = NSColor.white
         title.frame = NSRect(x: 0, y: 95, width: size.width, height: 28)
 
-        let status = NSTextField(labelWithString: "Starting local AI...")
+        let status = NSTextField(labelWithString: "Starting Bad Apple...")
         status.font = NSFont.systemFont(ofSize: 13)
         status.alignment = .center
         status.textColor = NSColor(red: 0.6, green: 0.6, blue: 0.6, alpha: 1.0)
@@ -3396,7 +3396,7 @@ private final class BadAppleFirstRunOnboarding {
 
     private func showWelcome() {
         let body = """
-        Bad Apple is a local AI operating system layer for macOS. It manages on-device inference, memory, tools, voice, vision, security, and governance entirely on your Mac — it does not send your prompts to the cloud.
+        Bad Apple is a personal AGI operating system layer for macOS. It manages on-device inference, memory, tools, voice, vision, security, and governance entirely on your Mac — it does not send your prompts to the cloud.
 
         To finish setup, Bad Apple needs to install a small background helper. Your Mac will ask for your password.
 
@@ -7805,7 +7805,7 @@ final class BadAppleOnboardingWindow: NSObject, NSTextFieldDelegate {
         title.frame = NSRect(x: 0, y: size.height - 150, width: size.width, height: 34)
         v.addSubview(title)
 
-        let body = NSTextField(wrappingLabelWithString: "Bad Apple is a local AI operating system layer for macOS. It manages on-device inference, memory, tools, voice, vision, security, and governance entirely on your Mac — without sending your data to the cloud.\n\nThis quick setup will take about a minute.")
+        let body = NSTextField(wrappingLabelWithString: "Bad Apple is a personal AGI operating system layer for macOS. It manages on-device inference, memory, tools, voice, vision, security, and governance entirely on your Mac — without sending your data to the cloud.\n\nThis quick setup will take about a minute.")
         body.font = .systemFont(ofSize: 15)
         body.textColor = .secondaryLabelColor
         body.alignment = .center

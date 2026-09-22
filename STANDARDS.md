@@ -1,6 +1,6 @@
 # Bad Apple — Bare-Metal AI OS Standards
 
-This document defines the public interfaces and formats of the Bad Apple bare-metal AI operating system. Implementations that follow this standard can interoperate with Bad Apple and with each other.
+This document defines the public interfaces and formats of the Bad Apple bare-metal AGI operating system. Implementations that follow this standard can interoperate with Bad Apple and with each other.
 
 ---
 
@@ -224,7 +224,7 @@ When a banned pattern is detected, the stream is replaced with a redaction marke
 
 ## 7. Certification Suite
 
-A bare-metal AI OS build must pass the air-gap certification suite.
+A bare-metal AGI OS build must pass the air-gap certification suite.
 
 ### 7.1 Required checks
 

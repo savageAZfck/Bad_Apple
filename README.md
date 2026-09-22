@@ -1,6 +1,6 @@
 # Bad Apple
 
-> **A sovereign, local AI operating layer for macOS — one that can prove what it did.**
+> **A sovereign personal AGI operating layer for macOS — one that can prove what it did.**
 >
 > On-device MLX inference, Secure Enclave identity, a hash-chained audit
 > ledger, an independent verification layer, and a brake-only watchdog —

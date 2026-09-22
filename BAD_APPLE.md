@@ -1,6 +1,6 @@
 # Bad Apple — Bare-Metal AI Operating System for macOS
 
-Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 7B Qwen 2.5 Coder as the default model on Apple Silicon using MLX, with a 9B Qwen 3.5 model as a switchable option. It answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
+Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. It runs a 7B Qwen 2.5 Coder as the default model on Apple Silicon using MLX, with a 9B Qwen 3.5 model as a switchable option. It answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
 
 Internally it is built as a supervised **actor OS**: every major subsystem — resources, circuit breakers, workspace, persona, P2P, MCP, health, audit, cache, and model registry — runs as a dedicated actor. The Rust CLI, the menu bar, and any MCP client authenticate to the daemon through **SLICKS v2**, a hardware-bound challenge/response protocol signed by the Apple Secure Enclave.
 
@@ -95,7 +95,7 @@ Voice uses the 7B brain by default. When fast tier is on, short voice greetings 
 
 ## What Bad Apple can do
 
-Bad Apple is a private, on-device AI assistant for macOS. It runs a 7B Qwen 2.5 Coder brain and a 0.5B fast tier on Apple Silicon using MLX, with a 9B Qwen 3.5 brain as a switchable option. It answers questions, runs local tools, indexes files, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
+Bad Apple is a private, on-device personal AGI for macOS. It runs a 7B Qwen 2.5 Coder brain and a 0.5B fast tier on Apple Silicon using MLX, with a 9B Qwen 3.5 brain as a switchable option. It answers questions, runs local tools, indexes files, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
 
 When asked, it can say:
 

@@ -1,12 +1,12 @@
 # Bad Apple — Complete Feature & Capability Overview
 
-> **Bad Apple is an on-device, air-gapped AI operating system layer for macOS. It runs a 7B Qwen 2.5 Coder large language model as the default coding brain on Apple Silicon through MLX, with a 9B Qwen 3.5 general model available as a switchable option. It executes local tools, indexes your files, speaks responses, extends via an MCP marketplace, syncs models and messages over an encrypted P2P mesh, watches your workspace for context, and can read the screen and room ambient state — all without sending prompts or data to the cloud after the models are downloaded once.**
+> **Bad Apple is an on-device, air-gapped personal AGI operating system layer for macOS. It runs a 7B Qwen 2.5 Coder large language model as the default coding brain on Apple Silicon through MLX, with a 9B Qwen 3.5 general model available as a switchable option. It executes local tools, indexes your files, speaks responses, extends via an MCP marketplace, syncs models and messages over an encrypted P2P mesh, watches your workspace for context, and can read the screen and room ambient state — all without sending prompts or data to the cloud after the models are downloaded once.**
 
 ---
 
 ## What Bad Apple Is
 
-Bad Apple is a **local-first AI operating system layer** for macOS. It is built around a 7B Qwen 2.5 Coder 4-bit default model on Apple Silicon through MLX, with a 9B Qwen 3.5 4-bit model available as a switchable option. It also has an optional 0.5B fast tier model for simple queries, optional speculative decoding with a small draft model, a native AVSpeechSynthesizer TTS server, a Rust-backed SLICKS-secured Unix-socket command layer, an encrypted P2P mesh for model and message sync, a workspace watcher, ambient/ocular context helpers, and an MCP marketplace. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
+Bad Apple is a **local-first personal AGI operating system layer** for macOS. It is built around a 7B Qwen 2.5 Coder 4-bit default model on Apple Silicon through MLX, with a 9B Qwen 3.5 4-bit model available as a switchable option. It also has an optional 0.5B fast tier model for simple queries, optional speculative decoding with a small draft model, a native AVSpeechSynthesizer TTS server, a Rust-backed SLICKS-secured Unix-socket command layer, an encrypted P2P mesh for model and message sync, a workspace watcher, ambient/ocular context helpers, and an MCP marketplace. It is designed for users who want the conversational power of a frontier chatbot with the privacy and latency of on-device inference.
 
 Unlike cloud-based assistants (Siri, ChatGPT, Gemini, Copilot), Bad Apple:
 
@@ -451,7 +451,7 @@ For a coding-focused local Mac, the 7B Coder is now the default and is the bette
 
 ## Where the Raw Model Ranks in the Wild
 
-Bad Apple is an AI operating system layer, not a chatbot API. The model is one component inside it. The raw language model itself is best compared as follows. Numbers are public benchmark pass@1 scores where available, rounded for readability; the 4-bit MLX quant used by Bad Apple can be a few points below the full-weight published scores.
+Bad Apple is an AGI operating system layer, not a chatbot API. The model is one component inside it. The raw language model itself is best compared as follows. Numbers are public benchmark pass@1 scores where available, rounded for readability; the 4-bit MLX quant used by Bad Apple can be a few points below the full-weight published scores.
 
 | Tier | Examples | HumanEval pass@1 (approx) | Relative to Bad Apple's 7B Coder |
 |---|---|---:|:---|
@@ -466,7 +466,7 @@ Bad Apple is an AI operating system layer, not a chatbot API. The model is one c
 
 ## Competitive Ranking (October 2026)
 
-### Bad Apple is an AI OS layer, not an app
+### Bad Apple is an AGI OS layer, not an app
 
 Bad Apple runs as **three system-level launchd daemons** (gatekeeper, MLX server, supervisor) managed by launchd with `KeepAlive`, a **Rust gatekeeper proxy** (1072 lines) on a system Unix socket with SLICKS v1/v2 authentication, a **bounded health supervisor** that restarts failed services with a restart budget (2 per 10 minutes) and enters safe mode on exhaustion, a **Candle-based classifier brain** in the gatekeeper for fast action resolution, a **WebAssembly sandbox** for untrusted code execution, a **fail-closed filesystem automation cage**, an **APFS file scavenger** module, a **declarative security policy engine** (60 tool rules in `policy.yaml`), a **Secure Enclave identity** with hardware-rooted signing, a **hash-chained audit ledger**, a **streaming output firewall** with real-time secret redaction, a **VRAM admission governor** plus a **memory pressure governor**, an **optional fast tier** with 0.5B model routing, **optional speculative decoding**, a **native agent task system** with plan-execute-observe loops, **native document reading** (PDF/DOCX/RTF), **vision/image description**, a **P2P encrypted mesh** for model and message sync, an **MCP marketplace** for local tool servers, a **workspace watcher**, **ambient/ocular context helpers**, a **local vault**, a **CLI agent protocol** for full runtime control, and **air-gap certification integration tests** that assert zero network sockets.
 
@@ -509,7 +509,7 @@ The only other product in this tier is OpenAGI, which is a proactive daemon with
 - **APFS file scavenger** module with tokenized chunking
 - **118 Rust tests (103 unit + 15 integration)** including air-gap certification, path-traversal, P2P crypto, output firewall, ledger integrity, vault round-trip, and WASM cage tests
 
-OpenAGI has none of these. It's a proactive agent daemon; Bad Apple is an AI operating system layer.
+OpenAGI has none of these. It's a proactive agent daemon; Bad Apple is an AGI operating system layer.
 
 ### Why Bad Apple is not in the "Local AI apps" tier
 

@@ -1,6 +1,6 @@
 # Support
 
-Bad Apple is a sovereign, local AI OS. Because it runs entirely on your machine, most issues can be diagnosed from the logs and a few built-in commands.
+Bad Apple is a sovereign, local AGI OS. Because it runs entirely on your machine, most issues can be diagnosed from the logs and a few built-in commands.
 
 ## Quick health check
 

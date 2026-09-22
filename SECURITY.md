@@ -1,6 +1,6 @@
 # Security Policy
 
-Bad Apple is a local-first, sovereign AI runtime. It runs entirely on the user's machine and does not require cloud services after the first model download. This document outlines the security model, boundaries, and known limitations. The full adversary-by-adversary analysis lives in [THREAT_MODEL.md](THREAT_MODEL.md).
+Bad Apple is a local-first, sovereign AGI runtime. It runs entirely on the user's machine and does not require cloud services after the first model download. This document outlines the security model, boundaries, and known limitations. The full adversary-by-adversary analysis lives in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Threat model
 

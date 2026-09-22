@@ -2,7 +2,7 @@
 
 ## What it is
 
-Bad Apple is a self-hosted, air-gapped AI operating system for macOS. It runs a 7B Qwen 2.5 Coder brain as the default reasoning and coding model, with a 9B Qwen 3.5 general model as a switchable option and a 0.5B Qwen 2.5 fast tier for instant simple queries — all on Apple Silicon using MLX. It answers questions, runs local tools, indexes your files, speaks responses through a native TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
+Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. It runs a 7B Qwen 2.5 Coder brain as the default reasoning and coding model, with a 9B Qwen 3.5 general model as a switchable option and a 0.5B Qwen 2.5 fast tier for instant simple queries — all on Apple Silicon using MLX. It answers questions, runs local tools, indexes your files, speaks responses through a native TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
 
 ## How to install (consumer)
 
