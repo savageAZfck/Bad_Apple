@@ -4,10 +4,58 @@
 
 import Foundation
 import BadAppleMLX
+import CryptoKit
+import IOKit
 
 extension Notification.Name {
     /// Posted when an event should force an immediate Curious self-improvement check.
     static let curiousTrigger = Notification.Name("BadAppleCuriousTrigger")
+}
+
+/// Shared proactive-notification queue. Any subsystem appends one JSON line
+/// per event to `~/.bad_apple/notify_queue.jsonl`; the menu bar tails it and
+/// turns entries into macOS notifications (and spoken alerts when `voice` is
+/// set and policy allows). Debounced per kind so trigger storms cannot spam.
+enum BadAppleNotify {
+    private static let lock = NSLock()
+    private static var lastPush: [String: Date] = [:]
+
+    static var path: String {
+        NSHomeDirectory() + "/.bad_apple/notify_queue.jsonl"
+    }
+
+    /// True when proactive notifications are enabled by policy.
+    static var enabled: Bool {
+        BadAppleEngine.shared.proactiveNotificationsEnabled
+    }
+
+    static func push(kind: String, title: String, body: String,
+                     voice: Bool = false, debounceSeconds: TimeInterval = 300) {
+        guard enabled else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        if let last = lastPush[kind], now.timeIntervalSince(last) < debounceSeconds { return }
+        lastPush[kind] = now
+        let entry: [String: Any] = [
+            "ts": now.timeIntervalSince1970,
+            "kind": kind,
+            "title": title,
+            "body": body,
+            "voice": voice,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: entry),
+              var line = String(data: data, encoding: .utf8)
+        else { return }
+        line += "\n"
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
 }
 
 /// The main AI engine. Loads the model, manages personas, and generates
@@ -67,6 +115,11 @@ final class BadAppleEngine: @unchecked Sendable {
         exec.visionProvider = { [weak self] path, prompt in
             guard let self else { return "Vision engine unavailable." }
             return await self.describeImageInternal(at: path, prompt: prompt)
+        }
+        exec.agentSubmitter = { [weak self] goal, maxSteps in
+            guard let self else { return "Error: engine unavailable." }
+            let task = try await self.submitAgentTask(goal: goal, maxSteps: maxSteps)
+            return "Task \(task.id) \(task.status.rawValue) — \(task.goal) (max \(task.maxSteps) steps). Track with `badapple tasks`."
         }
         exec.outputFirewall = outputFirewall
         return exec
@@ -170,9 +223,27 @@ final class BadAppleEngine: @unchecked Sendable {
         return stateLock.withLock { _isLoaded }
     }
 
+    /// Policy switch for proactive notifications — read by BadAppleNotify.
+    var proactiveNotificationsEnabled: Bool { policyEngine.proactiveNotify }
+
     var killed: Bool {
         get { stateLock.withLock { _killed } }
-        set { stateLock.withLock { _killed = newValue } }
+        set {
+            let wasKilled = stateLock.withLock { () -> Bool in
+                let old = _killed
+                _killed = newValue
+                return old
+            }
+            if newValue, !wasKilled {
+                BadAppleNotify.push(
+                    kind: "kill_switch",
+                    title: "Bad Apple paused",
+                    body: "Kill switch engaged — generation and tools are stopped. Say 'resume bad apple' to restart.",
+                    voice: true,
+                    debounceSeconds: 60
+                )
+            }
+        }
     }
 
     var isLoading: Bool {
@@ -849,6 +920,13 @@ final class BadAppleEngine: @unchecked Sendable {
         pendingApprovals[id] = (name, args, Date())
         persistApprovals()
         approvalLock.unlock()
+        BadAppleNotify.push(
+            kind: "approval:\(name)",
+            title: "Bad Apple needs approval",
+            body: "`\(name)` is waiting — reply `approve \(id)` to allow once.",
+            voice: true,
+            debounceSeconds: 120
+        )
         return id
     }
 
@@ -885,7 +963,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private func approvalPromptText(id: String, name: String, args: [String: String]) -> String {
         var detail = ""
-        for key in ["command", "script", "path", "shortcut", "query", "text", "dir", "file"] {
+        for key in ["command", "script", "path", "shortcut", "query", "text", "dir", "file", "goal"] {
             if let v = args[key], !v.isEmpty {
                 detail = v
                 break
@@ -1239,6 +1317,30 @@ final class BadAppleEngine: @unchecked Sendable {
                     DispatchQueue.main.async {
                         onError("Introspection ran, but the model could not voice it: \(error.localizedDescription)")
                     }
+                }
+            }
+            return
+        }
+
+        // User-initiated task submission: "task: ..." files a real goal onto
+        // the native agent queue — governed by policy, council and approval.
+        if let goal = wantsTaskSubmission(prompt) {
+            Task {
+                let output = await governedAgentSubmit(goal: goal, persona: persona)
+                auditLedger.append(
+                    eventType: "tool_result",
+                    data: ["name": "submit_agent_task", "result": output],
+                    persona: persona
+                )
+                saveTurn(prompt: prompt, response: output)
+                await runtime.recordQuery(
+                    latencySeconds: Date().timeIntervalSince(startedAt),
+                    tokenCount: 0,
+                    succeeded: true
+                )
+                DispatchQueue.main.async {
+                    onToken(output)
+                    onComplete(output)
                 }
             }
             return
@@ -1676,6 +1778,19 @@ final class BadAppleEngine: @unchecked Sendable {
             return filtered
         }
 
+        // User-initiated task submission: "task: ..." files a real goal onto
+        // the native agent queue — governed by policy, council and approval.
+        if let goal = wantsTaskSubmission(prompt) {
+            let output = await governedAgentSubmit(goal: goal, persona: persona)
+            auditLedger.append(
+                eventType: "tool_result",
+                data: ["name": "submit_agent_task", "result": output],
+                persona: persona
+            )
+            saveTurn(prompt: prompt, response: output)
+            return output
+        }
+
         // Check semantic cache for a matching response.
         if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
             stateLock.withLock { _lastCacheHit = true }
@@ -2055,6 +2170,75 @@ final class BadAppleEngine: @unchecked Sendable {
         return nil
     }
 
+    /// Detect explicit user task assignments: "task: do X", "add task X".
+    /// Returns the goal text. Human-initiated commands — policy, council and
+    /// approval still gate the submission like any privileged tool.
+    private func wantsTaskSubmission(_ prompt: String) -> String? {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        for prefix in ["task:", "new task:", "add task:", "assign task:",
+                       "add task ", "new task ", "assign task ", "assign a task "] {
+            if lower.hasPrefix(prefix) {
+                let goal = String(trimmed.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return goal.isEmpty ? nil : goal
+            }
+        }
+        return nil
+    }
+
+    /// Submit an agent task through the full governance path — policy
+    /// evaluation, council deliberation, and approval prompts when required.
+    private func governedAgentSubmit(goal: String, persona: String) async -> String {
+        let args: [String: String] = ["goal": goal]
+        auditLedger.append(
+            eventType: "tool_call",
+            data: ["name": "submit_agent_task", "arguments": args, "via": "user_phrase"],
+            persona: persona
+        )
+        switch policyEngine.evaluate(toolName: "submit_agent_task", args: args) {
+        case .denied(let reason):
+            return "Policy: \(reason)"
+        case .needsApproval:
+            let verdict = BadAppleCouncil.deliberate(toolName: "submit_agent_task", args: args)
+            auditCouncil(verdict: verdict, name: "submit_agent_task", args: args,
+                         mode: "advisory", persona: persona)
+            let id = createApproval(name: "submit_agent_task", args: args)
+            auditLedger.append(
+                eventType: "approval_requested",
+                data: ["id": id, "name": "submit_agent_task", "arguments": args],
+                persona: persona
+            )
+            return approvalPromptText(id: id, name: "submit_agent_task", args: args)
+                + "\n\n" + verdict.summaryLine
+        case .approved:
+            if policyEngine.requiresApproval(toolName: "submit_agent_task") {
+                let verdict = BadAppleCouncil.deliberate(toolName: "submit_agent_task", args: args)
+                auditCouncil(verdict: verdict, name: "submit_agent_task", args: args,
+                             mode: policyEngine.autopilot ? "autopilot" : "pre-approval",
+                             persona: persona)
+                if policyEngine.autopilot && verdict.contested {
+                    let id = createApproval(name: "submit_agent_task", args: args)
+                    auditLedger.append(
+                        eventType: "council_escalated",
+                        data: ["id": id, "name": "submit_agent_task",
+                               "decision": verdict.decision.rawValue,
+                               "dissent": verdict.dissent],
+                        persona: persona
+                    )
+                    return "Council vote failed `submit_agent_task` — sending it to you.\n"
+                        + verdict.summaryLine + "\n\n"
+                        + approvalPromptText(id: id, name: "submit_agent_task", args: args)
+                }
+                let out = await toolExecutor.executeTool(
+                    name: "submit_agent_task", args: args, approved: true)
+                return out + "\n\n[council: " + verdict.summaryLine + "]"
+            }
+            return await toolExecutor.executeTool(
+                name: "submit_agent_task", args: args, approved: true)
+        }
+    }
+
     private func introspectionSynthesis(prompt: String, toolName: String, output: String) -> String {
         """
         The user asked "\(prompt)". I just ran my own \(toolName) tool — these are my actual internal records:
@@ -2383,8 +2567,250 @@ final class BadAppleEngine: @unchecked Sendable {
                     data: ["result": result],
                     persona: self.activePersona
                 )
+                // Digestion pass: on a slower cadence than Curious, fold
+                // working memory down, prune stale cache answers, and sweep
+                // expired approvals — memory accumulates daily, it digests nightly.
+                if self.consolidationDue() {
+                    self.markConsolidated()
+                    let memResult = await self.toolExecutor.executeTool(
+                        name: "consolidate_memory",
+                        args: [:],
+                        approved: true
+                    )
+                    let pruned = self.semanticCache.pruneStale(olderThanDays: 30)
+                    let swept = self.sweepExpiredApprovals()
+                    self.auditLedger.append(
+                        eventType: "memory_consolidated",
+                        data: [
+                            "memory": memResult,
+                            "cache_pruned": pruned,
+                            "approvals_swept": swept,
+                        ],
+                        persona: self.activePersona
+                    )
+                    // Fleet check-in rides the same daily cadence — one
+                    // signed beacon per consolidation pass, opt-in only.
+                    self.emitFleetBeacon()
+                }
             }
         }
+    }
+
+    /// Seconds between consolidation passes. `BADAPPLE_CONSOLIDATE_INTERVAL`
+    /// overrides; default is daily.
+    private func consolidationInterval() -> TimeInterval {
+        let raw = ProcessInfo.processInfo.environment["BADAPPLE_CONSOLIDATE_INTERVAL"]
+        if let raw, let seconds = TimeInterval(raw), seconds > 0 { return seconds }
+        return 86_400
+    }
+
+    private var consolidationStatePath: String {
+        NSHomeDirectory() + "/.bad_apple/consolidation.state"
+    }
+
+    /// True when no consolidation pass has run within the interval. The state
+    /// file survives engine respawns so the cadence is wall-clock honest.
+    private func consolidationDue() -> Bool {
+        guard let text = try? String(contentsOfFile: consolidationStatePath, encoding: .utf8),
+              let last = TimeInterval(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return true }
+        return Date().timeIntervalSince1970 - last >= consolidationInterval()
+    }
+
+    private func markConsolidated() {
+        let stamp = String(format: "%.0f", Date().timeIntervalSince1970)
+        try? stamp.write(toFile: consolidationStatePath, atomically: true, encoding: .utf8)
+    }
+
+    /// Drop pending approvals past their TTL and persist — the same filter
+    /// `persistApprovals` applies, run on schedule instead of on next write.
+    private func sweepExpiredApprovals() -> Int {
+        approvalLock.lock()
+        defer { approvalLock.unlock() }
+        ensureApprovalsLoaded()
+        let now = Date()
+        let before = pendingApprovals.count
+        pendingApprovals = pendingApprovals.filter {
+            now.timeIntervalSince($0.value.created) < approvalTTL
+        }
+        if pendingApprovals.count != before { persistApprovals() }
+        return before - pendingApprovals.count
+    }
+
+    // MARK: - Fleet beacon
+
+    /// Opt-in fleet check-in. When policy sets `beacon_url:`, the daily
+    /// consolidation pass emits one signed record — version, arch, anonymised
+    /// machine id — to an HTTPS endpoint or a `file://` drop folder. Nothing
+    /// is sent unless the operator configures a destination; the payload is
+    /// signed by the Secure Enclave identity so a collector can verify which
+    /// machines are real.
+    /// Manual beacon emission for `badapple beacon` — returns a status line
+    /// for the operator instead of staying silent like the scheduled pass.
+    func emitFleetBeaconNow() -> String {
+        guard let target = policyEngine.beaconURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !target.isEmpty else {
+            return "Beacon disabled — set `beacon_url:` in policy.yaml (https:// endpoint or file:// drop folder)."
+        }
+        emitFleetBeacon()
+        return "Beacon emitted to \(target.hasPrefix("file://") ? "file drop" : "endpoint") — see ledger event `fleet_beacon`."
+    }
+
+    private func emitFleetBeacon() {
+        guard let target = policyEngine.beaconURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !target.isEmpty else { return }
+        guard let pubkey = IdentityAgentClient.shared.publicKey() else {
+            auditLedger.append(
+                eventType: "fleet_beacon",
+                data: ["error": "identity agent unavailable"],
+                persona: activePersona
+            )
+            return
+        }
+        let payload: [String: Any] = [
+            "v": 1,
+            "version": beaconVersion(),
+            "arch": beaconArch(),
+            "machine": beaconMachineID(),
+            "ts": ISO8601DateFormatter().string(from: Date()),
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let signature = IdentityAgentClient.shared.sign(message: body)
+        else {
+            auditLedger.append(
+                eventType: "fleet_beacon",
+                data: ["error": "signing failed"],
+                persona: activePersona
+            )
+            return
+        }
+        let envelope: [String: Any] = [
+            "payload": body.base64EncodedString(),
+            "signature": signature,
+            "public_key": pubkey,
+        ]
+        guard let wire = try? JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+        else { return }
+
+        if target.hasPrefix("file://") {
+            let dir = String(target.dropFirst("file://".count))
+            let file = dir + "/fleet_beacon.jsonl"
+            let line = String(data: wire, encoding: .utf8)! + "\n"
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: dir, withIntermediateDirectories: true)
+                if let handle = FileHandle(forWritingAtPath: file) {
+                    handle.seekToEndOfFile()
+                    handle.write(Data(line.utf8))
+                    try? handle.close()
+                } else {
+                    try line.write(toFile: file, atomically: true, encoding: .utf8)
+                }
+                auditLedger.append(
+                    eventType: "fleet_beacon",
+                    data: ["target": "file", "ok": true],
+                    persona: activePersona
+                )
+            } catch {
+                auditLedger.append(
+                    eventType: "fleet_beacon",
+                    data: ["target": "file", "error": error.localizedDescription],
+                    persona: activePersona
+                )
+            }
+            return
+        }
+
+        guard target.hasPrefix("https://") || target.hasPrefix("http://") else {
+            auditLedger.append(
+                eventType: "fleet_beacon",
+                data: ["error": "unsupported beacon_url scheme"],
+                persona: activePersona
+            )
+            return
+        }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("badapple-beacon-\(UUID().uuidString).json")
+        do {
+            try wire.write(to: tmp)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+            proc.arguments = [
+                "-sS", "-f", "--max-time", "15",
+                "-H", "Content-Type: application/json",
+                "--data-binary", "@\(tmp.path)",
+                target,
+            ]
+            try proc.run()
+            proc.waitUntilExit()
+            auditLedger.append(
+                eventType: "fleet_beacon",
+                data: [
+                    "target": "https",
+                    "ok": proc.terminationStatus == 0,
+                    "status": proc.terminationStatus,
+                ],
+                persona: activePersona
+            )
+        } catch {
+            auditLedger.append(
+                eventType: "fleet_beacon",
+                data: ["target": "https", "error": error.localizedDescription],
+                persona: activePersona
+            )
+        }
+    }
+
+    /// Release version for the beacon payload — the installed app's bundle
+    /// version when present, else the workspace Cargo.toml, else "dev".
+    private func beaconVersion() -> String {
+        let plist = "/Applications/Bad Apple.app/Contents/Info.plist"
+        if let dict = NSDictionary(contentsOfFile: plist) as? [String: Any],
+           let version = dict["CFBundleShortVersionString"] as? String, !version.isEmpty {
+            return version
+        }
+        if let root = workspacePath {
+            let cargo = root + "/Cargo.toml"
+            if let text = try? String(contentsOfFile: cargo, encoding: .utf8) {
+                for line in text.components(separatedBy: "\n") {
+                    let s = line.trimmingCharacters(in: .whitespaces)
+                    if s.hasPrefix("version"), let eq = s.firstIndex(of: "=") {
+                        return s[s.index(after: eq)...]
+                            .trimmingCharacters(in: .whitespaces)
+                            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    }
+                }
+            }
+        }
+        return "dev"
+    }
+
+    private func beaconArch() -> String {
+        #if arch(arm64)
+        return "arm64"
+        #else
+        return "x86_64"
+        #endif
+    }
+
+    /// SHA-256 of the hardware UUID — stable per machine, not reversible to
+    /// the real IOPlatformUUID. Fleet dedupe without device fingerprinting.
+    private func beaconMachineID() -> String {
+        var uuid = ""
+        let service = IOServiceGetMatchingService(
+            kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+        if service != 0 {
+            defer { IOObjectRelease(service) }
+            if let prop = IORegistryEntryCreateCFProperty(
+                service, "IOPlatformUUID" as CFString, kCFAllocatorDefault, 0
+            )?.takeRetainedValue() as? String {
+                uuid = prop
+            }
+        }
+        guard !uuid.isEmpty else { return "unknown" }
+        let digest = SHA256.hash(data: Data(uuid.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Wait for either the base interval to elapse or a `BadAppleCuriousTrigger`

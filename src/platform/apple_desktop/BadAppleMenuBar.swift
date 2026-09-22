@@ -8,6 +8,105 @@ import Darwin
 import Foundation
 import ServiceManagement
 import Speech
+import UserNotifications
+
+/// Tails ~/.bad_apple/notify_queue.jsonl — the proactive channel the engine,
+/// agent runner, and kill switch write to — and turns each entry into a real
+/// macOS notification (UNUserNotificationCenter, osascript fallback) plus a
+/// spoken alert when the entry asks for voice and policy allows it.
+private final class BadAppleNotifyWatcher {
+    private var timer: Timer?
+    private var offset: UInt64 = 0
+    private let path = NSHomeDirectory() + "/.bad_apple/notify_queue.jsonl"
+    /// Spoken-alert hook — wired to the app's voice host by the delegate.
+    var onSpeak: ((String) -> Void)?
+    private var notificationsAuthorized = false
+    private var notificationAuthRequested = false
+
+    func start() {
+        // Start at EOF: backlog entries are history, not new alerts.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let size = (attrs[.size] as? NSNumber)?.uint64Value {
+            offset = size
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+    }
+
+    private func poll() {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? handle.close() }
+        let size = handle.seekToEndOfFile()
+        if size < offset { offset = 0 }
+        guard size > offset else { return }
+        handle.seek(toFileOffset: offset)
+        let data = handle.readDataToEndOfFile()
+        offset = size
+        guard let text = String(data: data, encoding: .utf8) else { return }
+        for line in text.components(separatedBy: "\n") where !line.isEmpty {
+            guard let raw = line.data(using: .utf8),
+                  let entry = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+            else { continue }
+            let title = entry["title"] as? String ?? "Bad Apple"
+            let body = entry["body"] as? String ?? ""
+            let wantsVoice = entry["voice"] as? Bool ?? false
+            postNotification(title: title, body: body)
+            if wantsVoice, Self.proactiveVoiceEnabled() {
+                let spoken = String(body.prefix(300))
+                DispatchQueue.main.async { [weak self] in self?.onSpeak?(spoken) }
+            }
+        }
+    }
+
+    /// Reads the top-level proactive toggles straight from the live policy
+    /// file — the menu bar must work even when the in-process engine is
+    /// routed through the daemon.
+    private static func proactiveVoiceEnabled() -> Bool {
+        guard let content = try? String(
+            contentsOfFile: "/var/lib/bad_apple/policy.yaml", encoding: .utf8
+        ) else { return true }
+        var notifyOn = true
+        var voiceOn = true
+        for raw in content.components(separatedBy: "\n") {
+            let s = raw.trimmingCharacters(in: .whitespaces)
+            if s.hasPrefix("proactive_notify:") { notifyOn = s.contains("true") }
+            if s.hasPrefix("proactive_voice:") { voiceOn = s.contains("true") }
+        }
+        return notifyOn && voiceOn
+    }
+
+    private func postNotification(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        if !notificationAuthRequested {
+            notificationAuthRequested = true
+            center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
+                self?.notificationsAuthorized = granted
+            }
+        }
+        if notificationsAuthorized {
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            let req = UNNotificationRequest(
+                identifier: UUID().uuidString, content: content, trigger: nil
+            )
+            center.add(req)
+            return
+        }
+        // Fallback: osascript banner — no entitlement or consent needed.
+        let esc = { (s: String) in
+            s.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        let script = "display notification \"\(esc(body))\" with title \"\(esc(title))\""
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        try? proc.run()
+    }
+}
 
 private let badAppleVoiceLogPath = "/tmp/badapple_voice_debug.log"
 
@@ -4337,6 +4436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var earsTimer: Timer?
     private var earsCaptureInFlight = false
     private let voiceHost = BadAppleVoiceHost()
+    private let notifyWatcher = BadAppleNotifyWatcher()
     // Dedicated serial queue for spawning the badapple CLI during voice
     // queries so the process spawn is not delayed by other global-queue work.
     private let voiceQueue = DispatchQueue(label: "com.badapple.voice", qos: .userInitiated)
@@ -4510,6 +4610,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         // removeLegacyLaunchAgent()
         // Prevent AppKit from treating this LSUIElement as idle and terminating it.
         ProcessInfo.processInfo.disableAutomaticTermination("Bad Apple menu bar host")
+        // Proactive channel: tail the notify queue and surface approvals,
+        // kill-switch hits, and task outcomes without waiting to be asked.
+        notifyWatcher.onSpeak = { [weak self] text in self?.voiceHost.speak(text) }
+        notifyWatcher.start()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.title = "🍎"
         menu = NSMenu(title: "Bad Apple")

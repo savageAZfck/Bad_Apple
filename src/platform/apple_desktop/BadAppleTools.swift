@@ -677,6 +677,15 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: true
         ),
         BadAppleTool(
+            name: "submit_agent_task",
+            description: "Submit an autonomous goal to the native agent task queue. The agent plans and executes multi-step work in the background; each step still flows through normal policy gates.",
+            parameters: [
+                .init(name: "goal", description: "The goal or instruction for the agent task.", required: true),
+                .init(name: "max_steps", description: "Maximum plan steps (default 10, bounded by the agent).", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
             name: "workspace_status",
             description: "Return the current workspace path and a brief summary.",
             parameters: [],
@@ -907,6 +916,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["generate image", "make an image", "create image", "draw", "image of"], ["image_generation"]),
         (["translate", "translation", "translate text"], ["translate_text"]),
         (["consolidate memory", "deduplicate memory", "summarize memory"], ["consolidate_memory"]),
+        (["task", "todo", "assign", "delegated", "work on", "goal"], ["submit_agent_task"]),
         (["workspace status", "current workspace", "workspace path"], ["workspace_status"]),
         (["read document", "open document", "document content"], ["read_document"]),
         (["search files", "find files", "file search", "search local files"], ["search_local_files"]),
@@ -1282,6 +1292,9 @@ final class BadApplePolicyEngine: @unchecked Sendable {
 
     private let lock = NSLock()
     private var _autopilot: Bool = false
+    private var _proactiveNotify: Bool = true
+    private var _proactiveVoice: Bool = true
+    private var _beaconURL: String?
     private var policyLoaded: Bool = false
     private var defaultPolicy = ToolPolicy()
     private var toolPolicies: [String: ToolPolicy] = [:]
@@ -1333,6 +1346,32 @@ final class BadApplePolicyEngine: @unchecked Sendable {
             _autopilot = newValue
             lock.unlock()
         }
+    }
+
+    // MARK: - Proactive notifications
+
+    /// Whether Bad Apple may queue proactive notifications (menu bar banners).
+    /// Top-level `proactive_notify:` in policy.yaml; default true.
+    var proactiveNotify: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _proactiveNotify
+    }
+
+    /// Whether proactive notifications may also be spoken aloud.
+    /// Top-level `proactive_voice:` in policy.yaml; default true.
+    var proactiveVoice: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _proactiveVoice
+    }
+
+    /// Opt-in fleet beacon destination. Top-level `beacon_url:` in
+    /// policy.yaml — `https://` endpoint or `file://` drop folder. nil = off.
+    var beaconURL: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _beaconURL
     }
 
     // MARK: - Policy Checks
@@ -1653,6 +1692,16 @@ final class BadApplePolicyEngine: @unchecked Sendable {
                         let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
                         if key == "autopilot" {
                             lock.lock(); _autopilot = (value == "true"); lock.unlock()
+                        } else if key == "proactive_notify" {
+                            lock.lock(); _proactiveNotify = (value == "true"); lock.unlock()
+                        } else if key == "proactive_voice" {
+                            lock.lock(); _proactiveVoice = (value == "true"); lock.unlock()
+                        } else if key == "beacon_url" {
+                            let unquoted = value.trimmingCharacters(
+                                in: CharacterSet(charactersIn: "\"'"))
+                            lock.lock()
+                            _beaconURL = unquoted.isEmpty ? nil : unquoted
+                            lock.unlock()
                         }
                     }
                 }
@@ -1985,6 +2034,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     /// and `update_output_firewall` can read and modify the active blocklist.
     var outputFirewall: BadAppleOutputFirewall?
 
+    /// Optional agent task submitter. When set, `submit_agent_task` delegates
+    /// to this closure with (goal, maxSteps) and returns the task summary.
+    var agentSubmitter: ((String, Int) async throws -> String)?
+
     /// Optional workspace root. When set, paths within the workspace are
     /// allowed in addition to the home and temp directories.
     var workspace: String? {
@@ -2021,7 +2074,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         "describe_image", "image_generation", "search_local_files", "index_documents", "read_document",
         "translate_text", "consolidate_memory", "set_session_seed", "get_session_seed", "git_status",
         "inspect_output_firewall", "update_output_firewall", "undo_last", "self_audit", "screen_capture",
-        "kill_switch", "resume"
+        "kill_switch", "resume", "submit_agent_task"
     ]
 
     private func resolveToolName(_ name: String) -> String {
@@ -2187,6 +2240,18 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return selfAudit(include: args["include"] ?? "all")
         case "curious_self_improve":
             return await curiousSelfImprove(include: args["include"] ?? "all", approved: approved)
+        case "submit_agent_task":
+            let goal = args["goal"] ?? ""
+            guard !goal.isEmpty else { return "Error: submit_agent_task requires a 'goal' argument." }
+            let maxSteps = parseLimit(args["max_steps"], defaultValue: 10, maximum: 25)
+            guard let submitter = agentSubmitter else {
+                return "Error: agent task manager is not available."
+            }
+            do {
+                return try await submitter(goal, maxSteps)
+            } catch {
+                return "Error: agent task submission failed: \(error.localizedDescription)"
+            }
         case "repair_runtime_issue":
             return repairRuntimeIssue(issue: args["issue"] ?? "", target: args["target"])
         default:

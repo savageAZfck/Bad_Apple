@@ -327,6 +327,27 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         return "Semantic cache cleared."
     }
 
+    /// Drop entries older than `olderThanDays` that have never been re-hit —
+    /// stale one-shot answers are the entries that matter least and grow the
+    /// file fastest. Returns the number of entries removed.
+    @discardableResult
+    func pruneStale(olderThanDays: Double) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let cutoff = Date().addingTimeInterval(-olderThanDays * 86_400)
+        let fmt = ISO8601DateFormatter()
+        let before = entries.count
+        entries.removeAll { entry in
+            guard entry.hits == 0,
+                  let stamp = fmt.date(from: entry.timestamp)
+            else { return false }
+            return stamp < cutoff
+        }
+        let removed = before - entries.count
+        if removed > 0 { saveLocked() }
+        return removed
+    }
+
     // MARK: - Persistence
 
     /// Number of cached entries currently in memory.

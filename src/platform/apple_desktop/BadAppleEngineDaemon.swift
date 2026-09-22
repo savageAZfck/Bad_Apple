@@ -722,6 +722,10 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
             agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "inference failed: \(error.localizedDescription)")
         }
 
+    case "emit_beacon":
+        let status = BadAppleEngine.shared.emitFleetBeaconNow()
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["status": status], error: nil)
+
     case "run_agent_task":
         let goal = params["goal"] as? String ?? ""
         let maxSteps = params["max_steps"] as? Int ?? 10

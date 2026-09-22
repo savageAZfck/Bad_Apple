@@ -191,7 +191,7 @@ fi
     ${LOGIC_SOURCES} \
     ${MLX_SOURCES} \
     -lBadAppleBridge -ldl \
-    -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement \
+    -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement -framework UserNotifications -framework IOKit \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "${EMBED_PLIST}"
 
 # Copy the MLX runtime and its matching Metal shaders beside one another.
@@ -217,7 +217,7 @@ echo "Building badapple-engine daemon..."
     ${MLX_SOURCES} \
     -L "${BUILD_DIR}" -lBadAppleBridge \
     -F "${FRAMEWORK_SEARCH}" \
-    -framework Foundation -framework CryptoKit -framework Security -framework LocalAuthentication \
+    -framework Foundation -framework CryptoKit -framework Security -framework LocalAuthentication -framework IOKit \
     -Xlinker -rpath -Xlinker @executable_path \
     -Xlinker -rpath -Xlinker @executable_path/../Libraries
 

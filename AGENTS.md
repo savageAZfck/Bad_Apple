@@ -426,6 +426,45 @@ target/release/badapple "council"                        # seat roster + usage
 target/release/badapple "council should I ship friday"   # semantic session — all seats speak, then a verdict
 ```
 
+## Agent tasks (autonomous goal queue)
+
+`BadAppleAgent.swift` owns a persistent multi-step task queue at
+`~/.bad_apple/agent_tasks/`. Curious files self-improvement runs there; users
+file goals through the CLI or the chat phrase — `submit_agent_task` is a
+governed tool (policy + council + approval):
+
+```bash
+target/release/badapple task "goal text"     # submit (shorthand)
+target/release/badapple task submit "goal"   # submit (explicit)
+target/release/badapple tasks                # list queue + status
+target/release/badapple task status <id>     # one task
+target/release/badapple task cancel <id>     # or pause | resume
+target/release/badapple "task: do X"         # chat phrase → governed submit
+```
+
+## Proactive notifications
+
+`BadAppleNotify.push(...)` (BadAppleEngine.swift) appends JSON lines to
+`~/.bad_apple/notify_queue.jsonl` on approval requests, kill-switch hits, and
+agent task completion/failure — debounced per kind. The menu bar tails the
+queue and posts UNUserNotificationCenter banners (osascript fallback) plus
+spoken alerts through the voice host. Policy toggles: top-level
+`proactive_notify:` / `proactive_voice:` in policy.yaml (both default true).
+
+## Consolidation cadence
+
+The Curious autopilot loop runs a daily digestion pass after each check when
+`~/.bad_apple/consolidation.state` is older than `BADAPPLE_CONSOLIDATE_INTERVAL`
+(default 86400 s): `consolidate_memory`, `semanticCache.pruneStale(30d)`, and
+expired-approval sweep, ledgered as `memory_consolidated`.
+
+## Fleet beacon (opt-in)
+
+Set `beacon_url:` in policy.yaml and the daily consolidation pass emits one
+Secure Enclave-signed check-in (version, arch, SHA-256 of IOPlatformUUID) to
+an `https://` endpoint or a `file://` drop folder (fleet_beacon.jsonl).
+Manual fire: `target/release/badapple beacon`. Unset = silent — air-gap clean.
+
 ## Kill switch, safe mode, and private mode
 
 Voice/text commands:

@@ -251,6 +251,19 @@ fn main() -> Result<()> {
         return run_ify_subcommand(&prompt_parts[1..]);
     }
 
+    if matches!(
+        prompt_parts.first().map(std::string::String::as_str),
+        Some("task") | Some("tasks")
+    ) {
+        return run_task_subcommand(&prompt_parts[1..]);
+    }
+
+    if prompt_parts.first().map(std::string::String::as_str) == Some("beacon") {
+        let result = call_agent("emit_beacon", None, 32)?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
     if prompt_parts.first().map(std::string::String::as_str) == Some("policy") {
         return run_policy_subcommand(&prompt_parts[1..]);
     }
@@ -2495,6 +2508,75 @@ fn run_strategy_subcommand(args: &[String]) -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// `badapple task <goal>` files an autonomous goal onto the engine's native
+/// task queue; `badapple tasks` lists queue state; pause/resume/cancel steer
+/// individual tasks. The engine executes each step through normal policy
+/// gates — submission is operator trust, execution stays governed.
+fn run_task_subcommand(args: &[String]) -> Result<()> {
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    match sub {
+        "list" => {
+            let result = call_agent("list_agent_tasks", None, 32)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "status" => {
+            let id = args.get(1).map(String::as_str).unwrap_or("");
+            if id.is_empty() {
+                bail!("usage: badapple task status <task-id>");
+            }
+            let result = call_agent("list_agent_tasks", None, 32)?;
+            let found = result
+                .get("tasks")
+                .and_then(|t| t.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id))
+                })
+                .cloned();
+            match found {
+                Some(task) => println!("{}", serde_json::to_string_pretty(&task)?),
+                None => bail!("no task with id {id}"),
+            }
+        }
+        "cancel" | "pause" | "resume" => {
+            let id = args.get(1).map(String::as_str).unwrap_or("");
+            if id.is_empty() {
+                bail!("usage: badapple task {sub} <task-id>");
+            }
+            let mut params = serde_json::Map::new();
+            params.insert("task_id".to_string(), Value::String(id.to_string()));
+            let result = call_agent(
+                &format!("{sub}_agent_task"),
+                Some(Value::Object(params)),
+                32,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        "submit" => {
+            let goal = args[1..].join(" ");
+            if goal.trim().is_empty() {
+                bail!("usage: badapple task submit <goal> [max_steps]");
+            }
+            let mut params = serde_json::Map::new();
+            params.insert("goal".to_string(), Value::String(goal));
+            let result = call_agent("run_agent_task", Some(Value::Object(params)), 64)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        _ => {
+            // Bare `badapple task <words>` is a submit shorthand.
+            let goal = args.join(" ");
+            if goal.trim().is_empty() {
+                bail!("usage: badapple task <goal> | badapple tasks | badapple task <status|cancel|pause|resume> <id>");
+            }
+            let mut params = serde_json::Map::new();
+            params.insert("goal".to_string(), Value::String(goal));
+            let result = call_agent("run_agent_task", Some(Value::Object(params)), 64)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+    }
+    Ok(())
 }
 
 fn run_ify_subcommand(args: &[String]) -> Result<()> {

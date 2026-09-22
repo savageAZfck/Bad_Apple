@@ -434,6 +434,12 @@ public actor BadAppleAgent {
         task.updatedAt = Date()
         tasks[taskID] = task
         try persist(task)
+        BadAppleNotify.push(
+            kind: "task_done",
+            title: "Task finished",
+            body: "\(task.goal.prefix(140)) — \(summary.prefix(140))",
+            voice: false
+        )
     }
 
     private func fail(taskID: String, message: String) throws {
@@ -443,6 +449,12 @@ public actor BadAppleAgent {
         task.updatedAt = Date()
         tasks[taskID] = task
         try persist(task)
+        BadAppleNotify.push(
+            kind: "task_failed",
+            title: "Task failed",
+            body: "\(task.goal.prefix(140)) — \(message.prefix(140))",
+            voice: true
+        )
     }
 
     private func finishRunner(taskID: String, token: UUID) {

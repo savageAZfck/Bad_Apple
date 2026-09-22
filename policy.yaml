@@ -10,6 +10,20 @@ policy_version: "1.0"
 # SECURITY: Default is false. Must be explicitly enabled by the user.
 autopilot: false
 
+# Proactive initiation: when true, Bad Apple queues macOS notifications for
+# approvals waiting, kill-switch hits, and agent task outcomes (the menu bar
+# tails ~/.bad_apple/notify_queue.jsonl). proactive_voice additionally lets
+# voice-flagged events be spoken aloud through the voice host.
+proactive_notify: true
+proactive_voice: true
+
+# Fleet beacon (opt-in): during each daily consolidation pass Bad Apple emits
+# one Secure Enclave-signed check-in — version, arch, anonymised machine id —
+# to this destination. Accepts an https:// endpoint or a file:// drop folder
+# (e.g. a synced directory for zero-server fleet telemetry). Unset = silent.
+# beacon_url: "file:///Users/you/Library/Mobile Documents/com~apple~CloudDocs/badapple-fleet"
+# beacon_url: "https://fleet.example.com/checkin"
+
 # Defaults for tools that are not explicitly listed below.
 defaults:
   allowed: true
@@ -146,6 +160,11 @@ tools:
     allowed: true
     require_approval: false
     max_timeout: 10
+
+  submit_agent_task:
+    allowed: true
+    require_approval: true
+    max_timeout: 15
 
   run_shortcut:
     allowed: true
