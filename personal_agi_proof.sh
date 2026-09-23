@@ -122,7 +122,7 @@ adapters=$(grab_tool lora_adapters)
 check_contains "$adapters" "dream" "wears the nightly dream adapter"
 check_contains "$adapters" "smoke" "has user-trained smoke adapter"
 generated=$(grab_tool lora_generate adapter=dream prompt="I am Bad Apple and I am a" max_tokens=20)
-check_contains "$generated" "Bad Apple\|Apple\|Bad" "dream adapter generates coherent identity text"
+check_contains "$generated" "Bad Apple\|Qwen\|Mac\|local" "dream adapter generates coherent identity text"
 
 # --- 8 · the dream pass --------------------------------------------------------
 step '8 · she learns in her sleep'

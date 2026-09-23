@@ -1,7 +1,7 @@
 # Personal AGI Organism — Attestation
 
 **Machine:** adam’s MacBook Air  
-**Time:** 2026-09-22T22:32:37Z (UTC)  
+**Time:** 2026-09-22T22:45:05Z (UTC)  
 **Bad Apple version:** v0.4.1  
 **Claim:** This machine has been exercised as a complete personal AGI organism — perception, memory, deliberation, action, governance, learning, audit, and sovereignty — and produced cryptographic receipts for every stage.
 
