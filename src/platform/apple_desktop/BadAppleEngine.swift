@@ -3315,6 +3315,8 @@ final class BadAppleEngine: @unchecked Sendable {
 
             Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" or run `badapple cert` and I'll run a live audit — sockets, chains, firewall — and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
 
+            And I don't just patch code — I learn in my sleep. Every night I digest the day's conversations into a LoRA adapter, at the weight level, not just in notes — a bad adapter gets ledgered and rejected automatically, so I can never be bricked by a bad dream. You can also train me on the fly: add examples, kick off a named adapter, list what I'm wearing, or load one straight into my running weights.
+
             \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And here's the new trick: mesh-brain. I can split ONE model across multiple Macs — each machine holds a slice of the layers, activations flow between them encrypted end to end, and the pipeline heals itself if a node drops. A maxed-out Studio already carries 671B alone — mesh-brain is how a crew of smaller Macs pools memory into the same league. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
             """
         }

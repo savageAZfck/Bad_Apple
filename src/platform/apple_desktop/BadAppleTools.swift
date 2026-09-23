@@ -3151,6 +3151,11 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         out.append("learned-state snapshots: \(exists(home + "/.bad_apple/.respawn") ? "versioned" : "not initialized")")
         out.append("identity (Secure Enclave): \(exists("/var/run/badapple/identity.sock") ? "live" : "offline")")
 
+        out.append("== learning ==")
+        out.append("dream adapter (nightly, weight-level): \(exists("/var/lib/bad_apple/lora_adapters/dream/adapters.safetensors") ? "trained + applied" : "not yet trained")")
+        out.append("dream rollback adapter: \(exists("/var/lib/bad_apple/lora_adapters/dream-prev/adapters.safetensors") ? "present" : "absent")")
+        out.append("user-trainable adapters: lora_add_example, lora_train, lora_adapters, lora_generate")
+
         let toolNames = BadAppleToolRouter().allTools().map(\.name).sorted()
         out.append("== tools (\(toolNames.count)) ==\n" + toolNames.joined(separator: ", "))
 
