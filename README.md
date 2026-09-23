@@ -217,13 +217,10 @@ BADAPPLE_NO_SIGN=1 src/platform/apple_desktop/build_bad_apple_menu_bar.sh
 
 ## License
 
-**FSL-1.1-ALv2** — Functional Source License 1.1, Apache-2.0 future license.
+proprietary license
 Copyright 2026 Adam Clark.
 
-This is a **source-available** license, not an OSI-approved open-source
-license — stated plainly. The source is fully auditable; for two years it may
-not be used to offer a competing product, after which it converts to
-Apache-2.0. The verification tooling
+
 ([sovereign_ledger](https://github.com/savageAZfck/sovereign_ledger),
 [respawn](https://github.com/savageAZfck/respawn),
 [edge_gate](https://github.com/savageAZfck/edge_gate)) is released under the
