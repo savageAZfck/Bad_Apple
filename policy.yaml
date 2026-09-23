@@ -398,3 +398,38 @@ tools:
     allowed: true
     require_approval: true
     max_timeout: 30
+
+  human_home:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  remember_preference:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  forget_preference:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  add_commitment:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  update_commitment:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  manage_life_thread:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  set_attention_mode:
+    allowed: true
+    require_approval: false
+    max_timeout: 10

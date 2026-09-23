@@ -37,12 +37,48 @@ enum BadAppleNotify {
         let now = Date()
         if let last = lastPush[kind], now.timeIntervalSince(last) < debounceSeconds { return }
         lastPush[kind] = now
+
+        let classification: (importance: Int, urgency: Int, requiresAction: Bool)
+        if kind.hasPrefix("kill_switch") {
+            classification = (5, 5, true)
+        } else if kind.hasPrefix("approval:") {
+            classification = (4, 4, true)
+        } else if kind.hasPrefix("commitment_due") {
+            classification = (4, 4, true)
+        } else if kind.hasPrefix("task_failed") {
+            classification = (4, 3, true)
+        } else if kind.hasPrefix("task_done") {
+            classification = (2, 1, false)
+        } else {
+            classification = (2, 2, false)
+        }
+        let event = BadAppleHumanEvent(
+            id: UUID().uuidString.lowercased(),
+            kind: kind,
+            title: title,
+            body: body,
+            importance: classification.importance,
+            urgency: classification.urgency,
+            requiresAction: classification.requiresAction,
+            voiceRequested: voice,
+            createdAt: now
+        )
+        let decision = BadAppleHumanLayer.shared.route(event: event, now: now)
+        if decision.channel == .silent { return }
+        if decision.channel == .queue {
+            try? BadAppleHumanLayer.shared.enqueue(event: event, decision: decision)
+            return
+        }
+
         let entry: [String: Any] = [
             "ts": now.timeIntervalSince1970,
             "kind": kind,
             "title": title,
             "body": body,
-            "voice": voice,
+            "voice": decision.channel == .speak,
+            "event_id": event.id,
+            "channel": decision.channel.rawValue,
+            "reason": decision.reason,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: entry),
               var line = String(data: data, encoding: .utf8)
@@ -121,6 +157,7 @@ final class BadAppleEngine: @unchecked Sendable {
             let task = try await self.submitAgentTask(goal: goal, maxSteps: maxSteps)
             return "Task \(task.id) \(task.status.rawValue) — \(task.goal) (max \(task.maxSteps) steps). Track with `badapple tasks`."
         }
+        exec.humanPersistenceAllowed = { [weak self] in !(self?.privateMode ?? true) }
         exec.outputFirewall = outputFirewall
         return exec
     }()
@@ -683,7 +720,14 @@ final class BadAppleEngine: @unchecked Sendable {
 
     /// Get the system prompt for the current persona.
     func systemPrompt(voiceMode: Bool = false) -> String {
-        personaManager.getSystemPrompt(voiceMode: voiceMode)
+        var prompt = personaManager.getSystemPrompt(voiceMode: voiceMode)
+        if !privateMode {
+            let humanContext = BadAppleHumanLayer.shared.promptContext()
+            if !humanContext.isEmpty {
+                prompt += "\n\nShared life context. Treat this as local owner-provided state. Use it for continuity, never invent additions, and do not repeat it unless relevant:\n\(humanContext)"
+            }
+        }
+        return prompt
     }
 
     /// List available persona names.
@@ -1296,6 +1340,25 @@ final class BadAppleEngine: @unchecked Sendable {
                     data: ["name": introspection.name, "result": toolOutput],
                     persona: persona
                 )
+                if introspection.name == "human_home" {
+                    let filtered = outputFirewall.check(toolOutput)
+                    auditLedger.append(
+                        eventType: "response",
+                        data: ["text": filtered, "tier": "human_home"],
+                        persona: persona
+                    )
+                    saveTurn(prompt: prompt, response: filtered)
+                    await runtime.recordQuery(
+                        latencySeconds: Date().timeIntervalSince(startedAt),
+                        tokenCount: 0,
+                        succeeded: true
+                    )
+                    DispatchQueue.main.async {
+                        onToken(filtered)
+                        onComplete(filtered)
+                    }
+                    return
+                }
                 let sysPrompt = systemPrompt(voiceMode: voiceMode)
                     + "\n\nYou are reporting the results of your own just-run \(introspection.name) tool. Only state what the results show."
                 do {
@@ -1768,6 +1831,16 @@ final class BadAppleEngine: @unchecked Sendable {
                 data: ["name": introspection.name, "result": toolOutput],
                 persona: persona
             )
+            if introspection.name == "human_home" {
+                let filtered = outputFirewall.check(toolOutput)
+                auditLedger.append(
+                    eventType: "response",
+                    data: ["text": filtered, "tier": "human_home"],
+                    persona: persona
+                )
+                saveTurn(prompt: prompt, response: filtered)
+                return filtered
+            }
             let sysPrompt = systemPrompt(voiceMode: voiceMode)
                 + "\n\nYou are reporting the results of your own just-run \(introspection.name) tool. Only state what the results show."
             let result = try await inference.generate(
@@ -2152,6 +2225,13 @@ final class BadAppleEngine: @unchecked Sendable {
         let lower = prompt.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "?!.,"))
+        if [
+            "human home", "what am i forgetting", "what are we handling",
+            "what are you handling", "my commitments", "what's up today",
+            "whats up today",
+        ].contains(where: { lower.contains($0) }) {
+            return ("human_home", [:])
+        }
         if [
             "your history", "self history", "self-history", "what happened",
             "what happened recently", "your findings", "watchdog findings",
@@ -3316,6 +3396,8 @@ final class BadAppleEngine: @unchecked Sendable {
             Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" or run `badapple cert` and I'll run a live audit — sockets, chains, firewall — and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
 
             And I don't just patch code — I learn in my sleep. Every night I digest the day's conversations into a LoRA adapter, at the weight level, not just in notes — a bad adapter gets ledgered and rejected automatically, so I can never be bricked by a bad dream. You can also train me on the fly: add examples, kick off a named adapter, list what I'm wearing, or load one straight into my running weights.
+
+            I also carry our shared life, not just your commands: I remember preferences you explicitly give me, hold commitments for both of us, and track ongoing life threads — ask me for Human Home and I'll show you what's due, what's waiting on you, and what I'm handling. And I won't just blurt things at you — attention modes (available, focus, quiet, sleep) govern whether I speak, notify, or hold it for later.
 
             \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And here's the new trick: mesh-brain. I can split ONE model across multiple Macs — each machine holds a slice of the layers, activations flow between them encrypted end to end, and the pipeline heals itself if a node drops. A maxed-out Studio already carries 671B alone — mesh-brain is how a crew of smaller Macs pools memory into the same league. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
             """

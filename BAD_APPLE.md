@@ -126,6 +126,7 @@ When asked, it can say:
 - **Human-in-the-loop approvals** for destructive tools
 - **Council of Minds**: 14 deterministic strategist/financial seats vote on every gated action — passed votes execute under autopilot, failed votes escalate to the human; semantic `council <question>` sessions voice all seats; deliberations journaled on the ledger
 - **Bounded Curious self-improvement autopilot** — when `curious` persona is active and autopilot is on, the engine runs a local self-check (cert suite, doctor, output firewall, git status, source TODO/FIXME scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple "curious check"`.
+- **Human layer** (`~/.bad_apple/human/state.json`, mode 0600): persistent relationship preferences, shared commitments with due dates, and ongoing life threads. Private mode blocks all writes. The active attention mode (`available`/`focus`/`quiet`/`sleep`) governs whether proactive events speak, notify, or are held in Human Home; due commitments surface as `commitment_due` notifications through the same governed channel.
 
 ### Tools (local, no cloud)
 
@@ -143,6 +144,11 @@ The server can run these directly, either through a fast deterministic parser or
 - `index_documents` — index a directory into the local RAG store
 - `git_status`, `git_diff`, `git_log`, `git_commit` — local git helpers
 - `read_working_memory`, `write_working_memory`, `clear_working_memory` — scratchpad at `/var/lib/bad_apple/working_memory.txt`
+- `human_home` — read the shared-life state (due commitments, waiting items, preferences, life threads, held notifications)
+- `remember_preference`, `forget_preference` — store/remove explicitly stated preferences
+- `add_commitment`, `update_commitment` — record and complete commitments (`owner` user or bad_apple, optional `due_at`)
+- `manage_life_thread` — create/update ongoing life threads
+- `set_attention_mode` — set `available`, `focus`, `quiet`, or `sleep` delivery
 
 ### Feature roadmap status
 
@@ -171,6 +177,7 @@ The current build covers the following roadmap phases:
 `Bad Apple.app` lives in the macOS status bar. The first time it runs, a plain-English onboarding panel walks you through installing the small background helper. After that, right-click the apple icon for:
 
 - **Status...** — plain-English snapshot of brain, memory, P2P, and MCP
+- **Human Home...** — read-only window showing the human layer: NOW (due commitments), WAITING ON YOU, I'M HANDLING, REMEMBERING, LIFE THREADS, and HELD FOR LATER
 - **New Chat** — clears conversation history
 - **Chat History** — opens the transcript window
 - **Voice Listening** — toggle always-on voice wake

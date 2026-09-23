@@ -1,5 +1,28 @@
 import Foundation
 
+final class BadAppleEngine {
+    static let shared = BadAppleEngine()
+    var killed = false
+    var modelId: String { "" }
+    func curiousAutopilotLevel() -> String { "off" }
+    func triggerCuriousAutopilot(reason: String) {}
+    func updateCuriousAutopilotLoop() {}
+    func generateForSelfImprovement(prompt: String, maxTokens: Int = 500) async -> String { "" }
+}
+
+extension NSAttributedString {
+    struct DocumentType: RawRepresentable, Equatable {
+        let rawValue: String
+        static let rtf = DocumentType(rawValue: "rtf")
+    }
+    enum DocumentReadingOptionKey: String {
+        case documentType
+    }
+    convenience init(data: Data, options: [DocumentReadingOptionKey: Any], documentAttributes: Any?) throws {
+        self.init(string: String(data: data, encoding: .utf8) ?? "")
+    }
+}
+
 @main
 enum BadAppleNativeLogicTests {
     static func main() async {
@@ -35,6 +58,9 @@ enum BadAppleNativeLogicTests {
             "get_current_time", "run_applescript", "list_shortcuts", "run_shortcut",
             "index_documents", "search_notes", "read_working_memory",
             "write_working_memory", "clear_working_memory", "runtime_status",
+            "human_home", "remember_preference", "forget_preference",
+            "add_commitment", "update_commitment", "manage_life_thread",
+            "set_attention_mode",
         ]
         let registeredTools = Set(router.registeredToolNames())
         guard expectedNativeTools.isSubset(of: registeredTools) else {
@@ -44,14 +70,21 @@ enum BadAppleNativeLogicTests {
               router.toolsForPrompt(text: "list shortcuts")?.contains("[list_shortcuts]") == true,
               router.toolsForPrompt(text: "search my notes")?.contains("[search_notes]") == true,
               router.toolsForPrompt(text: "refactor this code and run tests")?.contains("[write_file]") == true,
-              router.toolsForPrompt(text: "refactor this code and run tests")?.contains("[run_shell]") == true else {
+              router.toolsForPrompt(text: "refactor this code and run tests")?.contains("[run_shell]") == true,
+              router.toolsForPrompt(text: "show my human home")?.contains("[human_home]") == true,
+              router.toolsForPrompt(text: "what am i forgetting")?.contains("[human_home]") == true,
+              router.toolsForPrompt(text: "remember that i prefer tea")?.contains("[remember_preference]") == true,
+              router.toolsForPrompt(text: "remind me to call mom")?.contains("[add_commitment]") == true,
+              router.toolsForPrompt(text: "keep track of this situation")?.contains("[manage_life_thread]") == true,
+              router.toolsForPrompt(text: "switch to quiet mode")?.contains("[set_attention_mode]") == true else {
             fail("native tool keyword routing")
         }
 
         let policy = BadApplePolicyEngine()
+        let allowedWritePath = NSHomeDirectory() + "/.bad_apple/notes/test.txt"
         guard case .needsApproval = policy.evaluate(
             toolName: "write_file",
-            args: ["path": "/tmp/test"]
+            args: ["path": allowedWritePath]
         ) else {
             fail("write_file approval policy")
         }
@@ -60,16 +93,24 @@ enum BadAppleNativeLogicTests {
             "write_working_memory", "clear_working_memory", "index_documents",
             "screen_capture",
         ]
+        let sampleArgs: [String: [String: String]] = [
+            "run_shell": ["command": "ls /tmp"],
+            "run_applescript": ["script": "tell app \"Finder\" to activate"],
+            "run_shortcut": ["name": "Test"],
+            "write_file": ["path": allowedWritePath],
+        ]
         for toolName in destructiveTools {
             guard policy.requiresApproval(toolName: toolName),
-                  case .needsApproval = policy.evaluate(toolName: toolName, args: [:]) else {
+                  case .needsApproval = policy.evaluate(
+                      toolName: toolName, args: sampleArgs[toolName] ?? [:]
+                  ) else {
                 fail("\(toolName) destructive approval policy")
             }
         }
         policy.autopilot = true
         guard case .approved = policy.evaluate(
             toolName: "write_file",
-            args: ["path": "/tmp/test"]
+            args: ["path": allowedWritePath]
         ) else {
             fail("autopilot approval policy")
         }
@@ -89,6 +130,41 @@ enum BadAppleNativeLogicTests {
         guard let temporaryDirectory = executor.jailPath("/tmp"),
               temporaryDirectory == "/tmp" || temporaryDirectory == "/private/tmp" else {
             fail("path jail temporary directory")
+        }
+
+        let humanDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("badapple-native-human-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: humanDir) }
+        let humanLayer = BadAppleHumanLayer(directory: humanDir)
+        let humanExecutor = BadAppleToolExecutor(humanLayer: humanLayer)
+        let emptyHome = await humanExecutor.executeTool(
+            name: "human_home", args: [:], approved: false
+        )
+        guard emptyHome.contains("Human Home is clear") else {
+            fail("human_home empty read")
+        }
+        let remembered = await humanExecutor.executeTool(
+            name: "remember_preference",
+            args: ["key": "drink", "value": "tea"],
+            approved: false
+        )
+        guard remembered.contains("Remembered drink: tea") else {
+            fail("remember_preference write")
+        }
+        let homeAfter = await humanExecutor.executeTool(
+            name: "human_home", args: [:], approved: false
+        )
+        guard homeAfter.contains("drink: tea") else {
+            fail("human_home reads remembered preference")
+        }
+        humanExecutor.humanPersistenceAllowed = { false }
+        let blocked = await humanExecutor.executeTool(
+            name: "remember_preference",
+            args: ["key": "other", "value": "x"],
+            approved: false
+        )
+        guard blocked == "Private mode is on. I did not save that." else {
+            fail("private mode blocks human-layer writes")
         }
 
         let firewall = BadAppleOutputFirewall()

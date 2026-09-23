@@ -817,6 +817,70 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: true
         ),
         BadAppleTool(
+            name: "human_home",
+            description: "Show Human Home: the shared-life state you and the user carry together — due commitments, what is waiting on the user, what you are handling, remembered preferences, life threads, and held notifications. Read-only.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "remember_preference",
+            description: "Store a relationship/shared-life preference the user explicitly stated (for example 'I prefer tea'). Only store what the user stated or explicitly asked you to remember — never inferred or sensitive facts.",
+            parameters: [
+                .init(name: "key", description: "Short preference name, e.g. 'morning drink'.", required: true),
+                .init(name: "value", description: "The preference value the user stated.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "forget_preference",
+            description: "Remove a remembered shared-life preference by key when the user asks to forget it.",
+            parameters: [
+                .init(name: "key", description: "The preference key to remove.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "add_commitment",
+            description: "Record a shared-life commitment — a promise, reminder, or follow-up the user stated or asked for. Never invent commitments the user did not state.",
+            parameters: [
+                .init(name: "title", description: "What was committed to.", required: true),
+                .init(name: "owner", description: "user (default) or bad_apple — who owes it.", required: false),
+                .init(name: "due_at", description: "Optional due time: ISO8601, 'yyyy-MM-dd HH:mm', 'today', 'tomorrow 9am', 'in 2 hours'.", required: false),
+                .init(name: "thread_id", description: "Optional life-thread id this belongs to.", required: false),
+                .init(name: "detail", description: "Optional extra context.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "update_commitment",
+            description: "Update a commitment's status by id or unique id prefix: active, waiting, completed, dismissed.",
+            parameters: [
+                .init(name: "id", description: "Commitment id or unique prefix from Human Home.", required: true),
+                .init(name: "status", description: "active | waiting | completed | dismissed", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "manage_life_thread",
+            description: "Create or update a life thread — an ongoing situation you and the user are tracking together (a move, a health issue, a project). Only record what the user stated or asked you to track.",
+            parameters: [
+                .init(name: "id", description: "Thread id or unique prefix to update; omit to create.", required: false),
+                .init(name: "title", description: "The thread's name.", required: true),
+                .init(name: "summary", description: "Optional current-state summary.", required: false),
+                .init(name: "next_action", description: "Optional next step.", required: false),
+                .init(name: "status", description: "active (default) | waiting | completed | dismissed", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "set_attention_mode",
+            description: "Set how Bad Apple delivers interruptions: available, focus, quiet, or sleep. Only when the user asks.",
+            parameters: [
+                .init(name: "mode", description: "available | focus | quiet | sleep", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
             name: "kill_switch",
             description: "Engage the Bad Apple kill switch. Immediately pauses all generation, tools, and ambient actions until the user says 'resume bad apple'.",
             parameters: [],
@@ -925,6 +989,12 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "code", "function", "compile", "build",
         // Kill switch / resume
         "kill switch", "stop everything", "emergency stop", "resume", "resume bad apple", "start again", "leave safe mode", "exit safe mode",
+        "human home", "what am i forgetting", "what are we handling", "what are you handling",
+        "my commitments", "what's up today", "whats up today",
+        "remember that", "i prefer", "my preference", "forget that preference", "stop remembering",
+        "remind me", "don't let me forget", "dont let me forget", "commitment", "mark complete", "i promised",
+        "life thread", "keep track of this", "track this situation", "next action",
+        "attention mode", "focus mode", "quiet mode", "sleep mode", "available mode",
     ]
 
     /// Maps keyword groups to the tools they suggest.
@@ -965,6 +1035,13 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["curious", "self improve", "improve yourself", "improve bad apple", "curious check"], ["curious_self_improve"]),
         (["kill switch", "stop everything", "emergency stop", "panic stop"], ["kill_switch"]),
         (["resume", "resume bad apple", "start again", "leave safe mode", "exit safe mode"], ["resume"]),
+        (["human home", "what am i forgetting", "what are we handling", "what are you handling", "my commitments", "what's up today", "whats up today"], ["human_home"]),
+        (["remember that", "i prefer", "my preference"], ["remember_preference"]),
+        (["forget that preference", "stop remembering"], ["forget_preference"]),
+        (["remind me", "don't let me forget", "dont let me forget", "commitment", "i promised"], ["add_commitment"]),
+        (["mark complete"], ["update_commitment"]),
+        (["life thread", "keep track of this", "track this situation", "next action"], ["manage_life_thread"]),
+        (["attention mode", "focus mode", "quiet mode", "sleep mode", "available mode"], ["set_attention_mode"]),
     ]
 
     // MARK: - Prompt Routing
@@ -1248,7 +1325,12 @@ final class BadAppleToolRouter: @unchecked Sendable {
             calls.append((name: name, args: args))
         }
 
-        return calls
+        var seen = Set<String>()
+        return calls.filter { call in
+            let key = call.name + "\u{1F}"
+                + call.args.keys.sorted().map { "\($0)=\(call.args[$0] ?? "")" }.joined(separator: "\u{1F}")
+            return seen.insert(key).inserted
+        }
     }
 
     /// Find balanced top-level JSON objects in `text` by brace counting.
@@ -1632,8 +1714,8 @@ final class BadApplePolicyEngine: @unchecked Sendable {
 
     private func expandPath(_ path: String) -> String {
         if path == "~" { return NSHomeDirectory() }
-        if path.hasPrefix("~/") { return NSHomeDirectory() + String(path.dropFirst(2)) }
-        if path.hasPrefix("~") { return NSHomeDirectory() + String(path.dropFirst(1)) }
+        if path.hasPrefix("~/") { return NSHomeDirectory() + "/" + String(path.dropFirst(2)) }
+        if path.hasPrefix("~") { return NSHomeDirectory() + "/" + String(path.dropFirst(1)) }
         return path
     }
 
@@ -1876,7 +1958,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         case "max_size":
             if let i = Int(value) { policy.maxSize = i }
         case "notes_dir":
-            policy.notesDir = value
+            policy.notesDir = trimQuotes(value)
         default:
             break
         }
@@ -2070,6 +2152,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     private let lock = NSLock()
     private var _workspace: String?
     private let policyEngine: BadApplePolicyEngine?
+    private let humanLayer: BadAppleHumanLayer
     private let startedAt = Date()
     private var sessionSeed: String?
     private var isRunningCurious = false
@@ -2085,6 +2168,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
     /// Optional agent task submitter. When set, `submit_agent_task` delegates
     /// to this closure with (goal, maxSteps) and returns the task summary.
     var agentSubmitter: ((String, Int) async throws -> String)?
+
+    var humanPersistenceAllowed: () -> Bool = { true }
 
     /// Optional workspace root. When set, paths within the workspace are
     /// allowed in addition to the home and temp directories.
@@ -2103,8 +2188,9 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
     // MARK: - Init
 
-    init(policyEngine: BadApplePolicyEngine? = nil) {
+    init(policyEngine: BadApplePolicyEngine? = nil, humanLayer: BadAppleHumanLayer = .shared) {
         self.policyEngine = policyEngine
+        self.humanLayer = humanLayer
     }
 
     // MARK: - Tool Aliases
@@ -2122,7 +2208,9 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         "describe_image", "image_generation", "search_local_files", "index_documents", "read_document",
         "translate_text", "consolidate_memory", "set_session_seed", "get_session_seed", "git_status",
         "inspect_output_firewall", "update_output_firewall", "undo_last", "self_audit", "screen_capture",
-        "kill_switch", "resume", "submit_agent_task"
+        "kill_switch", "resume", "submit_agent_task",
+        "human_home", "remember_preference", "forget_preference", "add_commitment",
+        "update_commitment", "manage_life_thread", "set_attention_mode"
     ]
 
     private func resolveToolName(_ name: String) -> String {
@@ -2323,6 +2411,120 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             )
         case "repair_runtime_issue":
             return repairRuntimeIssue(issue: args["issue"] ?? "", target: args["target"])
+        case "human_home":
+            return humanLayer.homeText()
+        case "remember_preference":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            do {
+                let pref = try humanLayer.rememberPreference(
+                    key: args["key"] ?? "",
+                    value: args["value"] ?? ""
+                )
+                return "Remembered \(pref.key): \(pref.value) [\(BadAppleHumanLayer.shortID(pref.id))]"
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "forget_preference":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            do {
+                return try humanLayer.forgetPreference(key: args["key"] ?? "")
+                    ? "Forgot that preference."
+                    : "No preference saved under that key."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "add_commitment":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            let ownerRaw = (args["owner"] ?? "user")
+                .lowercased()
+                .replacingOccurrences(of: " ", with: "_")
+            guard let owner = BadAppleCommitmentOwner(rawValue: ownerRaw) else {
+                return "Error: owner must be one of: \(BadAppleCommitmentOwner.allCases.map(\.rawValue).joined(separator: ", "))"
+            }
+            var dueAt: Date? = nil
+            if let dueText = args["due_at"], !dueText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard let parsed = BadAppleHumanLayer.parseDueDate(dueText) else {
+                    return "Error: could not parse due_at '\(dueText)'. Use ISO8601, 'yyyy-MM-dd HH:mm', 'today', 'tomorrow 9am', or 'in 2 hours'."
+                }
+                dueAt = parsed
+            }
+            do {
+                let commitment = try humanLayer.addCommitment(
+                    title: args["title"] ?? "",
+                    owner: owner,
+                    dueAt: dueAt,
+                    threadID: args["thread_id"],
+                    detail: args["detail"] ?? ""
+                )
+                var reply = "Commitment saved [\(BadAppleHumanLayer.shortID(commitment.id))]: \(commitment.title) — \(commitment.owner.rawValue)"
+                if let due = commitment.dueAt {
+                    reply += ", due \(BadAppleHumanLayer.formatDate(due))"
+                }
+                return reply
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "update_commitment":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            let statusRaw = (args["status"] ?? "").lowercased()
+            guard let status = BadAppleHumanStatus(rawValue: statusRaw) else {
+                return "Error: status must be one of: \(BadAppleHumanStatus.allCases.map(\.rawValue).joined(separator: ", "))"
+            }
+            do {
+                guard let commitment = try humanLayer.updateCommitment(
+                    id: args["id"] ?? "", status: status
+                ) else {
+                    return "No commitment found with id '\(args["id"] ?? "")'."
+                }
+                return "Commitment [\(BadAppleHumanLayer.shortID(commitment.id))] now \(commitment.status.rawValue): \(commitment.title)"
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "manage_life_thread":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            var threadStatus = BadAppleHumanStatus.active
+            if let raw = args["status"], !raw.isEmpty {
+                guard let parsed = BadAppleHumanStatus(rawValue: raw.lowercased()) else {
+                    return "Error: status must be one of: \(BadAppleHumanStatus.allCases.map(\.rawValue).joined(separator: ", "))"
+                }
+                threadStatus = parsed
+            }
+            do {
+                let thread = try humanLayer.upsertThread(
+                    id: args["id"],
+                    title: args["title"] ?? "",
+                    summary: args["summary"] ?? "",
+                    nextAction: args["next_action"] ?? "",
+                    status: threadStatus
+                )
+                return "Life thread [\(BadAppleHumanLayer.shortID(thread.id))] \(thread.status.rawValue): \(thread.title)"
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "set_attention_mode":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            let modeRaw = (args["mode"] ?? "").lowercased()
+            guard let mode = BadAppleAttentionMode(rawValue: modeRaw) else {
+                return "Error: mode must be one of: \(BadAppleAttentionMode.allCases.map(\.rawValue).joined(separator: ", "))"
+            }
+            do {
+                try humanLayer.setAttentionMode(mode)
+                return "Attention mode set to \(mode.rawValue)."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
         default:
             if let result = await executeCustomTool(name: resolved, args: args) {
                 return result
@@ -3144,6 +3346,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         out.append("strategy memory: \(exists(home + "/.bad_apple/strategies.redb") ? "present" : "absent")")
         out.append("working memory: \(exists(home + "/.bad_apple/working_memory.txt") ? "present" : "empty")")
         out.append("watchdog findings: \(freshness(home + "/.bad_apple/ify/findings.jsonl", liveWithin: 86400))")
+        out.append("human layer: \(exists(home + "/.bad_apple/human/state.json") ? "present" : "empty")")
 
         out.append("== integrity ==")
         out.append("sovereign checkpoint: \(freshness("/var/lib/bad_apple/ledger.sovereign.checkpoint.json", liveWithin: 129_600))")

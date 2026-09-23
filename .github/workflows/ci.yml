@@ -58,12 +58,20 @@ jobs:
       - name: Swift native logic tests
         run: |
           xcrun swiftc -O \
+            src/platform/apple_desktop/BadAppleHumanLayer.swift \
             src/platform/apple_desktop/BadAppleTools.swift \
             src/platform/apple_desktop/BadAppleSecurity.swift \
             src/platform/apple_desktop/BadAppleRAG.swift \
             tests/test_badapple_native_logic.swift \
             -o /tmp/badapple-native-logic-tests
           /tmp/badapple-native-logic-tests
+      - name: Swift human layer tests
+        run: |
+          xcrun swiftc -O \
+            src/platform/apple_desktop/BadAppleHumanLayer.swift \
+            tests/test_badapple_human_layer.swift \
+            -o /tmp/badapple-human-layer-tests
+          /tmp/badapple-human-layer-tests
       - name: Swift native runtime tests
         run: |
           xcrun swiftc -swift-version 5 \

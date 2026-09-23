@@ -35,6 +35,31 @@ private final class BadAppleNotifyWatcher {
     }
 
     private func poll() {
+        if BadAppleNotify.enabled {
+            if BadAppleHumanLayer.shared.snapshot().attentionMode == .available,
+               let held = try? BadAppleHumanLayer.shared.claimHeldEvents(limit: 20) {
+                for event in held {
+                    BadAppleNotify.push(
+                        kind: event.kind,
+                        title: event.title,
+                        body: event.body,
+                        voice: event.voiceRequested,
+                        debounceSeconds: 0
+                    )
+                }
+            }
+            if let claimed = try? BadAppleHumanLayer.shared.claimDueCommitments() {
+                for commitment in claimed {
+                    BadAppleNotify.push(
+                        kind: "commitment_due:\(commitment.id)",
+                        title: "Commitment due",
+                        body: commitment.title,
+                        voice: true,
+                        debounceSeconds: 1
+                    )
+                }
+            }
+        }
         guard let handle = FileHandle(forReadingAtPath: path) else { return }
         defer { try? handle.close() }
         let size = handle.seekToEndOfFile()
@@ -105,6 +130,88 @@ private final class BadAppleNotifyWatcher {
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", script]
         try? proc.run()
+    }
+}
+
+final class BadAppleHumanHomeWindow: NSObject {
+    private var window: NSWindow?
+    private var textView: NSTextView?
+
+    func show() {
+        if window == nil { buildWindow() }
+        reload()
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func buildWindow() {
+        let size = NSSize(width: 560, height: 480)
+        let wc = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        wc.title = "Human Home"
+        wc.isReleasedWhenClosed = false
+        wc.minSize = NSSize(width: 360, height: 240)
+        wc.center()
+
+        let content = NSView(frame: NSRect(origin: .zero, size: size))
+
+        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshPressed(_:)))
+        refresh.bezelStyle = .rounded
+        refresh.controlSize = .small
+        refresh.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView(frame: .zero)
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        let tv = NSTextView(frame: .zero)
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.textColor = .labelColor
+        tv.drawsBackground = false
+        tv.textContainerInset = NSSize(width: 12, height: 12)
+        tv.minSize = NSSize(width: 0, height: 0)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.containerSize = NSSize(
+            width: scroll.contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        tv.textContainer?.widthTracksTextView = true
+        scroll.documentView = tv
+        textView = tv
+
+        content.addSubview(refresh)
+        content.addSubview(scroll)
+        wc.contentView = content
+
+        NSLayoutConstraint.activate([
+            refresh.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
+            refresh.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            scroll.topAnchor.constraint(equalTo: refresh.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        window = wc
+    }
+
+    @objc private func refreshPressed(_ sender: Any?) {
+        reload()
+    }
+
+    private func reload() {
+        textView?.string = BadAppleHumanLayer.shared.homeText()
     }
 }
 
@@ -4443,6 +4550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private let actionExecutor = BadAppleActionExecutor()
     private let chatHistoryWindow = ChatHistoryWindow()
     private let chatWindow = BadAppleChatWindow()
+    private let humanHomeWindow = BadAppleHumanHomeWindow()
     private var streamedTokenCount = 0
     private var lastPrompt = ""
     private var lastError: String?
@@ -4612,6 +4720,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         ProcessInfo.processInfo.disableAutomaticTermination("Bad Apple menu bar host")
         // Proactive channel: tail the notify queue and surface approvals,
         // kill-switch hits, and task outcomes without waiting to be asked.
+        let storedAttention = BadAppleHumanLayer.shared.snapshot().attentionMode
+        if storedAttention == .available || storedAttention == .focus {
+            try? BadAppleHumanLayer.shared.setAttentionMode(focusEnabled ? .focus : .available)
+        }
         notifyWatcher.onSpeak = { [weak self] text in self?.voiceHost.speak(text) }
         notifyWatcher.start()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -4720,6 +4832,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         chatWindow.onNewChat = { [weak self] in
             self?.newChat()
+        }
+        chatWindow.onOpenHome = { [weak self] in
+            self?.humanHomeWindow.show()
         }
         chatWindow.onDescribeImage = { [weak self] imagePath, imageName, append, finish in
             guard let self = self else { finish(); return }
@@ -5404,6 +5519,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @objc private func toggleFocus() {
         focusEnabled.toggle()
         applyFocusMode(focusEnabled)
+        try? BadAppleHumanLayer.shared.setAttentionMode(focusEnabled ? .focus : .available)
         rebuildMenu()
     }
 
@@ -5730,6 +5846,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     @objc private func showChatWindow() {
         chatWindow.show()
+    }
+
+    @objc private func showHumanHome() {
+        humanHomeWindow.show()
     }
 
     @objc private func showSettings() {
@@ -6405,6 +6525,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let controlCenterItem = NSMenuItem(title: "Dashboard", action: #selector(showControlCenter), keyEquivalent: "")
         controlCenterItem.toolTip = "Open the native glass control center window."
         menu.addItem(controlCenterItem)
+        let humanHomeItem = NSMenuItem(title: "Human Home...", action: #selector(showHumanHome), keyEquivalent: "")
+        humanHomeItem.toolTip = "Show shared-life state: commitments, preferences, life threads, and held notifications."
+        menu.addItem(humanHomeItem)
         let chatItem = NSMenuItem(title: "Chat", action: #selector(showChatWindow), keyEquivalent: "c")
         chatItem.toolTip = "Open the native chat window."
         menu.addItem(chatItem)
@@ -8324,6 +8447,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
 
     var onSubmit: ((String, @escaping (String) -> Void, @escaping () -> Void) -> Void)?
     var onNewChat: (() -> Void)?
+    var onOpenHome: (() -> Void)?
     /// Called when the user drops or pastes an image. The callback receives
     /// the image file path, a display name, and the same append/finish streaming
     /// closures used by `onSubmit`.
@@ -8356,6 +8480,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
     private var personaLabel: NSTextField?
     private var tierLabel: NSTextField?
     private var newChatButton: NSButton?
+    private var homeButton: NSButton?
     private var scrollView: NSScrollView?
     private var transcriptDocument: NSView?
     private var inputBar: NSView?
@@ -8433,6 +8558,11 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         newChatButton!.bezelStyle = .rounded
         newChatButton!.controlSize = .small
         top.addSubview(newChatButton!)
+
+        homeButton = NSButton(title: "Home", target: self, action: #selector(openHome(_:)))
+        homeButton!.bezelStyle = .rounded
+        homeButton!.controlSize = .small
+        top.addSubview(homeButton!)
         visual.addSubview(top)
 
         // Transcript scroll view (document view is laid out manually)
@@ -8530,6 +8660,8 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         tierLabel?.frame = NSRect(x: 214, y: 10, width: 170, height: 20)
         let ncW: CGFloat = 94
         newChatButton?.frame = NSRect(x: bounds.width - 16 - ncW, y: 6, width: ncW, height: 28)
+        let homeW: CGFloat = 64
+        homeButton?.frame = NSRect(x: bounds.width - 16 - ncW - 8 - homeW, y: 6, width: homeW, height: 28)
 
         inputBar?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: inputBarH)
         let sendX = bounds.width - inputPadding - sendW
@@ -8633,6 +8765,10 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         relayoutTranscript(force: true, scrollToBottom: false)
         onNewChat?()
         window?.makeFirstResponder(inputTextView)
+    }
+
+    @objc private func openHome(_ sender: Any?) {
+        onOpenHome?()
     }
 
     func textDidChange(_ notification: Notification) {
