@@ -881,6 +881,72 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: false
         ),
         BadAppleTool(
+            name: "list_people",
+            description: "List the people the owner explicitly asked you to remember, with relationship and follow-up dates. Read-only.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "remember_person",
+            description: "Record a person the owner explicitly named, with an optional relationship label and follow-up date. Only store what the owner stated — never infer sensitive relationships or contact history.",
+            parameters: [
+                .init(name: "name", description: "The person's name as the owner stated it.", required: true),
+                .init(name: "relationship", description: "Optional relationship label the owner stated.", required: false),
+                .init(name: "notes", description: "Optional notes the owner stated.", required: false),
+                .init(name: "follow_up_at", description: "Optional follow-up time: ISO8601, 'yyyy-MM-dd HH:mm', 'today', 'tomorrow 9am', 'in 2 days'.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "record_contact",
+            description: "Record that the owner contacted a remembered person — only when the owner states it happened. Sets last contact now; optionally updates notes and next contact.",
+            parameters: [
+                .init(name: "person", description: "Person name, id, or unique id prefix.", required: true),
+                .init(name: "notes", description: "Optional notes to store.", required: false),
+                .init(name: "next_contact_at", description: "Optional next follow-up time.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "forget_person",
+            description: "Remove a remembered person by name, id, or unique id prefix when the owner asks to forget them.",
+            parameters: [
+                .init(name: "person", description: "Person name, id, or unique id prefix.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "conversation_threads",
+            description: "List named conversation threads with the active one marked. Read-only.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "new_conversation_thread",
+            description: "Create and switch to a named conversation thread when the owner asks for a separate conversation.",
+            parameters: [
+                .init(name: "title", description: "The thread name the owner stated.", required: true),
+                .init(name: "summary", description: "Optional summary.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "switch_conversation_thread",
+            description: "Switch the active conversation to a named thread by title, id, or unique id prefix.",
+            parameters: [
+                .init(name: "thread", description: "Thread title, id, or unique id prefix.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "close_conversation_thread",
+            description: "Close a named conversation thread by title, id, or unique id prefix when the owner asks to finish it.",
+            parameters: [
+                .init(name: "thread", description: "Thread title, id, or unique id prefix.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
             name: "kill_switch",
             description: "Engage the Bad Apple kill switch. Immediately pauses all generation, tools, and ambient actions until the user says 'resume bad apple'.",
             parameters: [],
@@ -995,6 +1061,14 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "remind me", "don't let me forget", "dont let me forget", "commitment", "mark complete", "i promised",
         "life thread", "keep track of this", "track this situation", "next action",
         "attention mode", "focus mode", "quiet mode", "sleep mode", "available mode",
+        "people to remember", "who should i contact", "who am i forgetting",
+        "remember person", "remember this person", "follow up with",
+        "record contact", "i talked to", "i spoke to",
+        "forget person", "remove person",
+        "conversation threads", "list conversations", "show conversations",
+        "new conversation about", "new conversation thread", "start a conversation about",
+        "switch conversation", "open conversation", "continue conversation",
+        "close conversation", "finish conversation",
     ]
 
     /// Maps keyword groups to the tools they suggest.
@@ -1042,6 +1116,14 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["mark complete"], ["update_commitment"]),
         (["life thread", "keep track of this", "track this situation", "next action"], ["manage_life_thread"]),
         (["attention mode", "focus mode", "quiet mode", "sleep mode", "available mode"], ["set_attention_mode"]),
+        (["people to remember", "who should i contact", "who am i forgetting"], ["list_people"]),
+        (["remember person", "remember this person", "follow up with"], ["remember_person"]),
+        (["record contact", "i talked to", "i spoke to"], ["record_contact"]),
+        (["forget person", "remove person"], ["forget_person"]),
+        (["conversation threads", "list conversations", "show conversations"], ["conversation_threads"]),
+        (["new conversation about", "new conversation thread", "start a conversation about"], ["new_conversation_thread"]),
+        (["switch conversation", "open conversation", "continue conversation"], ["switch_conversation_thread"]),
+        (["close conversation", "finish conversation"], ["close_conversation_thread"]),
     ]
 
     // MARK: - Prompt Routing
@@ -1056,6 +1138,182 @@ final class BadAppleToolRouter: @unchecked Sendable {
         let keywordWords = keyword.split(separator: " ").map { String($0) }
         guard !keywordWords.isEmpty else { return false }
         return Set(keywordWords).isSubset(of: words)
+    }
+
+    private let humanToolNames: Set<String> = [
+        "human_home", "remember_preference", "forget_preference", "add_commitment",
+        "update_commitment", "manage_life_thread", "set_attention_mode",
+        "list_people", "remember_person", "record_contact", "forget_person",
+        "conversation_threads", "new_conversation_thread",
+        "switch_conversation_thread", "close_conversation_thread",
+    ]
+
+    func requiresHumanToolExecution(_ text: String) -> Bool {
+        keywordToolMap.contains { group in
+            group.toolNames.contains(where: { humanToolNames.contains($0) })
+                && group.keywords.contains { matchesKeyword($0, in: text) }
+        }
+    }
+
+    func explicitHumanCommand(for text: String) -> (name: String, args: [String: String])? {
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let last = body.last, ".?!".contains(last) { body.removeLast() }
+        body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        let lower = body.lowercased()
+
+        func remainder(after prefix: String) -> String? {
+            guard lower.hasPrefix(prefix) else { return nil }
+            let rest = String(body.dropFirst(prefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return rest.isEmpty ? nil : rest
+        }
+
+        func dueSuffixSplit(_ rest: String) -> (head: String, due: String)? {
+            let words = rest.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            for index in 1..<words.count {
+                let suffix = words[index...].joined(separator: " ")
+                if BadAppleHumanLayer.parseDueDate(suffix) != nil {
+                    return (words[..<index].joined(separator: " "), suffix)
+                }
+            }
+            return nil
+        }
+
+        let attentionModes: Set<String> = ["available", "focus", "quiet", "sleep"]
+        for prefix in ["set attention mode to ", "set attention mode "] {
+            if let rest = remainder(after: prefix), attentionModes.contains(rest.lowercased()) {
+                return ("set_attention_mode", ["mode": rest.lowercased()])
+            }
+        }
+        if lower.hasPrefix("switch to "), lower.hasSuffix(" mode") {
+            let mode = String(body.dropFirst("switch to ".count).dropLast(" mode".count))
+                .trimmingCharacters(in: .whitespaces)
+            if attentionModes.contains(mode.lowercased()) {
+                return ("set_attention_mode", ["mode": mode.lowercased()])
+            }
+        }
+
+        for prefix in ["remember person ", "remember this person "] {
+            if var rest = remainder(after: prefix) {
+                if rest.lowercased().hasPrefix("named ") {
+                    rest = String(rest.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                }
+                guard !rest.isEmpty else { return nil }
+                if let split = rest.range(of: " as ", options: .caseInsensitive) {
+                    let name = String(rest[..<split.lowerBound])
+                        .trimmingCharacters(in: .whitespaces)
+                    let relationship = String(rest[split.upperBound...])
+                        .trimmingCharacters(in: .whitespaces)
+                    guard !name.isEmpty else { return nil }
+                    var args = ["name": name]
+                    if !relationship.isEmpty { args["relationship"] = relationship }
+                    return ("remember_person", args)
+                }
+                return ("remember_person", ["name": rest])
+            }
+        }
+        for prefix in ["forget person ", "remove person "] {
+            if let rest = remainder(after: prefix) {
+                return ("forget_person", ["person": rest])
+            }
+        }
+        for prefix in ["record contact ", "i talked to ", "i spoke to "] {
+            if let rest = remainder(after: prefix) {
+                return ("record_contact", ["person": rest])
+            }
+        }
+        if let rest = remainder(after: "follow up with ") {
+            if let split = dueSuffixSplit(rest) {
+                return ("remember_person", ["name": split.head, "follow_up_at": split.due])
+            }
+            return nil
+        }
+
+        for prefix in ["new conversation about ", "new conversation thread ",
+                       "start a conversation about "] {
+            if let rest = remainder(after: prefix) {
+                return ("new_conversation_thread", ["title": rest])
+            }
+        }
+        for prefix in ["switch conversation ", "open conversation ", "continue conversation "] {
+            if var rest = remainder(after: prefix) {
+                if rest.lowercased().hasPrefix("to ") {
+                    rest = String(rest.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                }
+                guard !rest.isEmpty else { return nil }
+                return ("switch_conversation_thread", ["thread": rest])
+            }
+        }
+        for prefix in ["close conversation ", "finish conversation "] {
+            if let rest = remainder(after: prefix) {
+                return ("close_conversation_thread", ["thread": rest])
+            }
+        }
+
+        if let rest = remainder(after: "mark complete ") {
+            return ("update_commitment", ["id": rest, "status": "completed"])
+        }
+        if let rest = remainder(after: "mark commitment ") {
+            for suffix in [" complete", " completed"] {
+                if rest.lowercased().hasSuffix(suffix) {
+                    let id = String(rest.dropLast(suffix.count))
+                        .trimmingCharacters(in: .whitespaces)
+                    if !id.isEmpty {
+                        return ("update_commitment", ["id": id, "status": "completed"])
+                    }
+                }
+            }
+            return nil
+        }
+        if let rest = remainder(after: "dismiss commitment ") {
+            return ("update_commitment", ["id": rest, "status": "dismissed"])
+        }
+        for prefix in ["remind me to ", "don't let me forget to ", "dont let me forget to "] {
+            if let rest = remainder(after: prefix) {
+                if let split = dueSuffixSplit(rest) {
+                    var title = split.head
+                    for trail in [" at", " on"] {
+                        if title.lowercased().hasSuffix(trail) {
+                            title = String(title.dropLast(trail.count))
+                                .trimmingCharacters(in: .whitespaces)
+                        }
+                    }
+                    if !title.isEmpty {
+                        return ("add_commitment", ["title": title, "due_at": split.due])
+                    }
+                }
+                return ("add_commitment", ["title": rest])
+            }
+        }
+
+        for prefix in ["keep track of this situation", "track this situation"] {
+            if lower == prefix || lower.hasPrefix(prefix + ":") || lower.hasPrefix(prefix + " ") {
+                var rest = String(body.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespaces)
+                if rest.hasPrefix(":") { rest = String(rest.dropFirst()) }
+                rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !rest.isEmpty else { return nil }
+                return ("manage_life_thread", ["title": rest, "status": "active"])
+            }
+        }
+
+        if let rest = remainder(after: "remember that i prefer ") {
+            return ("remember_preference", ["key": "preference: \(rest)", "value": rest])
+        }
+        if let rest = remainder(after: "i prefer ") {
+            return ("remember_preference", ["key": "preference: \(rest)", "value": rest])
+        }
+        if let rest = remainder(after: "remember that ") {
+            return ("remember_preference", ["key": rest, "value": "true"])
+        }
+        for prefix in ["forget preference ", "forget that preference ", "stop remembering "] {
+            if let rest = remainder(after: prefix) {
+                return ("forget_preference", ["key": rest])
+            }
+        }
+
+        return nil
     }
 
     /// Return formatted definitions for all tools. Used by the agent, which
@@ -1322,6 +1580,43 @@ final class BadAppleToolRouter: @unchecked Sendable {
                 if let string = value as? String { return string }
                 return String(describing: value)
             }
+            calls.append((name: name, args: args))
+        }
+
+        let knownNames = Set(registeredToolNames())
+        let tagMatches = regexAllMatches(
+            #"<([A-Za-z_][A-Za-z0-9_]*)\s+([^<>]*?)\s*/>"#,
+            in: text
+        )
+        for match in tagMatches {
+            guard match.numberOfRanges >= 3,
+                  let nameRange = Range(match.range(at: 1), in: text),
+                  let attrsRange = Range(match.range(at: 2), in: text) else { continue }
+            let name = String(text[nameRange])
+            guard knownNames.contains(name) else { continue }
+            let attrsText = String(text[attrsRange])
+            var args: [String: String] = [:]
+            let attrMatches = regexAllMatches(
+                #"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#,
+                in: attrsText
+            )
+            for attrMatch in attrMatches {
+                guard attrMatch.numberOfRanges >= 4,
+                      let keyRange = Range(attrMatch.range(at: 1), in: attrsText) else { continue }
+                let rawValue: String
+                if let valueRange = Range(attrMatch.range(at: 2), in: attrsText) {
+                    rawValue = String(attrsText[valueRange])
+                } else if let valueRange = Range(attrMatch.range(at: 3), in: attrsText) {
+                    rawValue = String(attrsText[valueRange])
+                } else { continue }
+                args[String(attrsText[keyRange])] = rawValue
+                    .replacingOccurrences(of: "&quot;", with: "\"")
+                    .replacingOccurrences(of: "&apos;", with: "'")
+                    .replacingOccurrences(of: "&lt;", with: "<")
+                    .replacingOccurrences(of: "&gt;", with: ">")
+                    .replacingOccurrences(of: "&amp;", with: "&")
+            }
+            guard !args.isEmpty else { continue }
             calls.append((name: name, args: args))
         }
 
@@ -2210,7 +2505,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         "inspect_output_firewall", "update_output_firewall", "undo_last", "self_audit", "screen_capture",
         "kill_switch", "resume", "submit_agent_task",
         "human_home", "remember_preference", "forget_preference", "add_commitment",
-        "update_commitment", "manage_life_thread", "set_attention_mode"
+        "update_commitment", "manage_life_thread", "set_attention_mode",
+        "list_people", "remember_person", "record_contact", "forget_person",
+        "conversation_threads", "new_conversation_thread", "switch_conversation_thread",
+        "close_conversation_thread"
     ]
 
     private func resolveToolName(_ name: String) -> String {
@@ -2522,6 +2820,151 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             do {
                 try humanLayer.setAttentionMode(mode)
                 return "Attention mode set to \(mode.rawValue)."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "list_people":
+            do {
+                let people = humanLayer.snapshot().people.filter {
+                    $0.status == .active || $0.status == .waiting
+                }
+                guard !people.isEmpty else {
+                    return "No people saved yet."
+                }
+                var lines: [String] = []
+                for person in people.sorted(by: { $0.name < $1.name }) {
+                    var line = "- [\(BadAppleHumanLayer.shortID(person.id))] \(person.name)"
+                    if !person.relationship.isEmpty {
+                        line += " (\(person.relationship))"
+                    }
+                    if let lastContactAt = person.lastContactAt {
+                        line += " — last contact \(BadAppleHumanLayer.formatDate(lastContactAt))"
+                    }
+                    if let nextContactAt = person.nextContactAt {
+                        line += " — next \(BadAppleHumanLayer.formatDate(nextContactAt))"
+                    }
+                    if !person.notes.isEmpty {
+                        line += " — \(person.notes)"
+                    }
+                    lines.append(line)
+                }
+                return lines.joined(separator: "\n")
+            }
+        case "remember_person":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            var followUpAt: Date? = nil
+            if let followText = args["follow_up_at"],
+               !followText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard let parsed = BadAppleHumanLayer.parseDueDate(followText) else {
+                    return "Error: could not parse follow_up_at '\(followText)'. Use ISO8601, 'yyyy-MM-dd HH:mm', 'today', 'tomorrow 9am', or 'in 2 days'."
+                }
+                followUpAt = parsed
+            }
+            do {
+                let person = try humanLayer.rememberPerson(
+                    name: args["name"] ?? "",
+                    relationship: args["relationship"] ?? "",
+                    notes: args["notes"] ?? "",
+                    nextContactAt: followUpAt
+                )
+                return "Remembered \(person.name) [\(BadAppleHumanLayer.shortID(person.id))]."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "record_contact":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            var nextContactAt: Date? = nil
+            if let nextText = args["next_contact_at"],
+               !nextText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard let parsed = BadAppleHumanLayer.parseDueDate(nextText) else {
+                    return "Error: could not parse next_contact_at '\(nextText)'. Use ISO8601, 'yyyy-MM-dd HH:mm', 'today', 'tomorrow 9am', or 'in 2 days'."
+                }
+                nextContactAt = parsed
+            }
+            do {
+                guard let person = try humanLayer.recordContact(
+                    idOrName: args["person"] ?? "",
+                    notes: args["notes"] ?? "",
+                    nextContactAt: nextContactAt
+                ) else {
+                    return "No person found matching '\(args["person"] ?? "")'."
+                }
+                return "Recorded contact with \(person.name) [\(BadAppleHumanLayer.shortID(person.id))]."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "forget_person":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            do {
+                return try humanLayer.forgetPerson(idOrName: args["person"] ?? "")
+                    ? "Forgot that person."
+                    : "No person found matching '\(args["person"] ?? "")'."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "conversation_threads":
+            do {
+                if humanPersistenceAllowed() {
+                    _ = try humanLayer.ensureDefaultConversationThread()
+                }
+                let threads = try humanLayer.listConversationThreads()
+                let activeID = humanLayer.snapshot().activeConversationThreadID
+                guard !threads.isEmpty else {
+                    return "No conversation threads yet."
+                }
+                var lines: [String] = []
+                for thread in threads {
+                    let marker = thread.id == activeID ? "*" : "-"
+                    lines.append("\(marker) [\(BadAppleHumanLayer.shortID(thread.id))] \(thread.title)")
+                }
+                return lines.joined(separator: "\n")
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "new_conversation_thread":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            do {
+                let thread = try humanLayer.createConversationThread(
+                    title: args["title"] ?? "",
+                    summary: args["summary"] ?? ""
+                )
+                return "Conversation '\(thread.title)' [\(BadAppleHumanLayer.shortID(thread.id))] is now active."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "switch_conversation_thread":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            do {
+                guard let thread = try humanLayer.switchConversationThread(
+                    idOrTitle: args["thread"] ?? ""
+                ) else {
+                    return "No open conversation thread matching '\(args["thread"] ?? "")'."
+                }
+                return "Switched to conversation '\(thread.title)' [\(BadAppleHumanLayer.shortID(thread.id))]."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "close_conversation_thread":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            do {
+                guard let thread = try humanLayer.closeConversationThread(
+                    idOrTitle: args["thread"] ?? ""
+                ) else {
+                    return "No conversation thread matching '\(args["thread"] ?? "")'."
+                }
+                return "Closed conversation '\(thread.title)' [\(BadAppleHumanLayer.shortID(thread.id))]."
             } catch {
                 return "Error: \(error.localizedDescription)"
             }
@@ -3347,6 +3790,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         out.append("working memory: \(exists(home + "/.bad_apple/working_memory.txt") ? "present" : "empty")")
         out.append("watchdog findings: \(freshness(home + "/.bad_apple/ify/findings.jsonl", liveWithin: 86400))")
         out.append("human layer: \(exists(home + "/.bad_apple/human/state.json") ? "present" : "empty")")
+        let humanSnapshot = humanLayer.snapshot()
+        out.append("people remembered: \(humanSnapshot.people.count), conversation threads: \(humanSnapshot.conversationThreads.count)")
 
         out.append("== integrity ==")
         out.append("sovereign checkpoint: \(freshness("/var/lib/bad_apple/ledger.sovereign.checkpoint.json", liveWithin: 129_600))")

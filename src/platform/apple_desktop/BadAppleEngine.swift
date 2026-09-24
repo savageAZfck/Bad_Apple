@@ -30,7 +30,8 @@ enum BadAppleNotify {
     }
 
     static func push(kind: String, title: String, body: String,
-                     voice: Bool = false, debounceSeconds: TimeInterval = 300) {
+                     voice: Bool = false, debounceSeconds: TimeInterval = 300,
+                     referenceID: String? = nil) {
         guard enabled else { return }
         lock.lock()
         defer { lock.unlock() }
@@ -61,7 +62,8 @@ enum BadAppleNotify {
             urgency: classification.urgency,
             requiresAction: classification.requiresAction,
             voiceRequested: voice,
-            createdAt: now
+            createdAt: now,
+            referenceID: referenceID
         )
         let decision = BadAppleHumanLayer.shared.route(event: event, now: now)
         if decision.channel == .silent { return }
@@ -70,7 +72,7 @@ enum BadAppleNotify {
             return
         }
 
-        let entry: [String: Any] = [
+        var entry: [String: Any] = [
             "ts": now.timeIntervalSince1970,
             "kind": kind,
             "title": title,
@@ -80,6 +82,9 @@ enum BadAppleNotify {
             "channel": decision.channel.rawValue,
             "reason": decision.reason,
         ]
+        if let referenceID {
+            entry["reference_id"] = referenceID
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: entry),
               var line = String(data: data, encoding: .utf8)
         else { return }
@@ -166,12 +171,14 @@ final class BadAppleEngine: @unchecked Sendable {
     private lazy var semanticCache = BadAppleSemanticCache(
         embeddingProvider: NativeEmbeddingProvider(engine: embeddingEngine)
     )
+    private static let nonCacheableResponseTiers: Set<String> = [
+        "approval", "human_tool", "human_command", "human_parse_error",
+    ]
     private let rag = BadAppleRAG()
     private let runtime = BadAppleNativeRuntime()
     private let modelOperationGate = BadAppleModelOperationGate()
     private let conversation = BadAppleConversation()
     let modelManager = BadAppleModelManager.shared
-    private let conversationSessionId = "default"
     private let approvalLock = NSLock()
     private var pendingApprovals: [String: (name: String, args: [String: String], created: Date)] = [:]
     private var approvalsLoaded = false
@@ -826,28 +833,34 @@ final class BadAppleEngine: @unchecked Sendable {
 
     // MARK: - Generation
 
-    private func inferenceHistory() -> [BadAppleInference.ChatMessage] {
-        conversation.loadConversation(sessionId: conversationSessionId).map {
+    private func conversationSessionID() -> String {
+        let state = BadAppleHumanLayer.shared.snapshot()
+        if let activeID = state.activeConversationThreadID,
+           let thread = state.conversationThreads.first(where: {
+               $0.id == activeID
+                   && ($0.status == .active || $0.status == .waiting)
+           }) {
+            return thread.sessionID
+        }
+        if privateMode { return "default" }
+        return (try? BadAppleHumanLayer.shared.activeConversationThread().sessionID) ?? "default"
+    }
+
+    private func inferenceHistory(sessionID: String) -> [BadAppleInference.ChatMessage] {
+        conversation.loadConversation(sessionId: sessionID).map {
             BadAppleInference.ChatMessage(role: $0.role, content: $0.content)
         }
     }
 
-    private func saveTurn(prompt: String, response: String) {
+    private func saveTurn(prompt: String, response: String, sessionID: String) {
         // Private mode: skip persistence entirely.
         guard !privateMode else { return }
-        var messages = conversation.loadConversation(sessionId: conversationSessionId)
-        messages.append(BadAppleMessage(role: "user", content: prompt))
-        messages.append(BadAppleMessage(role: "assistant", content: response))
-        // Prune oldest turns to prevent unbounded context growth.
-        let maxMessages = Self.maxHistoryTurns * 2
-        if messages.count > maxMessages {
-            messages = Array(messages.suffix(maxMessages))
-        }
-        conversation.saveConversation(sessionId: conversationSessionId, messages: messages)
+        conversation.appendTurn(sessionId: sessionID, prompt: prompt, response: response)
     }
 
     func resetConversation() {
-        conversation.clearConversation(sessionId: conversationSessionId)
+        guard !privateMode else { return }
+        conversation.clearConversation(sessionId: conversationSessionID())
     }
 
     private func planAgentGoal(
@@ -970,7 +983,8 @@ final class BadAppleEngine: @unchecked Sendable {
             title: "Bad Apple needs approval",
             body: "`\(name)` is waiting — reply `approve \(id)` to allow once.",
             voice: true,
-            debounceSeconds: 120
+            debounceSeconds: 120,
+            referenceID: id
         )
         return id
     }
@@ -1017,6 +1031,26 @@ final class BadAppleEngine: @unchecked Sendable {
         )
     }
 
+    private func executeExplicitHumanCommand(
+        _ command: (name: String, args: [String: String]),
+        persona: String
+    ) async -> String {
+        auditLedger.append(
+            eventType: "tool_call",
+            data: ["name": command.name, "arguments": command.args, "via": "explicit_human_phrase"],
+            persona: persona
+        )
+        let output = await toolExecutor.executeTool(
+            name: command.name, args: command.args, approved: true
+        )
+        auditLedger.append(
+            eventType: "tool_result",
+            data: ["name": command.name, "result": output],
+            persona: persona
+        )
+        return output
+    }
+
     private func approvalPromptText(id: String, name: String, args: [String: String]) -> String {
         var detail = ""
         for key in ["command", "script", "path", "shortcut", "query", "text", "dir", "file", "goal"] {
@@ -1051,7 +1085,7 @@ final class BadAppleEngine: @unchecked Sendable {
         var currentHistory = history
         var lastResult = BadAppleInference.GenerationResult(text: "")
 
-        for _ in 0..<5 {
+        for iteration in 0..<5 {
             lastResult = try await inference.generate(
                 prompt: currentPrompt,
                 systemPrompt: systemPrompt,
@@ -1067,7 +1101,15 @@ final class BadAppleEngine: @unchecked Sendable {
             } else {
                 calls = lastResult.toolCalls.map { (name: $0.name, args: $0.arguments) }
             }
-            guard !calls.isEmpty else { return lastResult }
+            if calls.isEmpty {
+                if iteration == 0, toolRouter.requiresHumanToolExecution(prompt) {
+                    return BadAppleInference.GenerationResult(
+                        text: "I couldn't safely execute that Human Home command because I couldn't parse the requested change. Rephrase it with the person, commitment, conversation, preference, or attention mode stated explicitly.",
+                        tier: "human_parse_error"
+                    )
+                }
+                return lastResult
+            }
 
             var outputs: [String] = []
             for call in calls {
@@ -1146,6 +1188,25 @@ final class BadAppleEngine: @unchecked Sendable {
                 outputs.append("\(call.name): \(output)")
             }
 
+            let directHumanTools: Set<String> = [
+                "human_home", "remember_preference", "forget_preference", "add_commitment",
+                "update_commitment", "manage_life_thread", "set_attention_mode",
+                "list_people", "remember_person", "record_contact", "forget_person",
+                "conversation_threads", "new_conversation_thread",
+                "switch_conversation_thread", "close_conversation_thread",
+            ]
+            if calls.allSatisfy({ directHumanTools.contains($0.name) }) {
+                let text: String
+                if outputs.count == 1, let only = outputs.first,
+                   let separator = only.firstIndex(of: ":") {
+                    text = String(only[only.index(after: separator)...])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    text = outputs.joined(separator: "\n")
+                }
+                return BadAppleInference.GenerationResult(text: text, tier: "human_tool")
+            }
+
             currentHistory.append(BadAppleInference.ChatMessage(role: "user", content: currentPrompt))
             currentHistory.append(BadAppleInference.ChatMessage(role: "assistant", content: lastResult.text))
             currentPrompt = "Tool results:\n\(outputs.joined(separator: "\n"))\n\nAnswer the user's original request using these results."
@@ -1169,6 +1230,7 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
         let startedAt = Date()
+        let requestSessionID = conversationSessionID()
 
         let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
             || prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("deny ")
@@ -1200,7 +1262,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         persona: activePersona
                     )
                 }
-                saveTurn(prompt: prompt, response: output)
+                saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
                 await runtime.recordQuery(
                     latencySeconds: Date().timeIntervalSince(startedAt),
                     tokenCount: 0,
@@ -1229,7 +1291,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Meta responses (identity, creator, capabilities) are deterministic.
         if let meta = metaResponse(for: prompt) {
             let filtered = outputFirewall.check(meta)
-            saveTurn(prompt: prompt, response: filtered)
+            saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
             auditLedger.append(
                 eventType: "response",
                 data: ["text": filtered, "tier": "meta"],
@@ -1251,7 +1313,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         if let fast = deterministicResponse(for: prompt) {
             let filtered = outputFirewall.check(fast)
-            saveTurn(prompt: prompt, response: filtered)
+            saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
             auditLedger.append(
                 eventType: "response",
                 data: ["text": filtered, "tier": "deterministic"],
@@ -1267,6 +1329,29 @@ final class BadAppleEngine: @unchecked Sendable {
             DispatchQueue.main.async {
                 onToken(filtered)
                 onComplete(filtered)
+            }
+            return
+        }
+
+        if let humanCommand = toolRouter.explicitHumanCommand(for: prompt) {
+            Task {
+                let output = await executeExplicitHumanCommand(humanCommand, persona: persona)
+                let filtered = outputFirewall.check(output)
+                auditLedger.append(
+                    eventType: "response",
+                    data: ["text": filtered, "tier": "human_command"],
+                    persona: persona
+                )
+                saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
+                await runtime.recordQuery(
+                    latencySeconds: Date().timeIntervalSince(startedAt),
+                    tokenCount: 0,
+                    succeeded: true
+                )
+                DispatchQueue.main.async {
+                    onToken(filtered)
+                    onComplete(filtered)
+                }
             }
             return
         }
@@ -1303,7 +1388,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         data: ["text": filtered, "tier": "self_audit"],
                         persona: persona
                     )
-                    saveTurn(prompt: prompt, response: filtered)
+                    saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
                     await runtime.recordQuery(
                         latencySeconds: Date().timeIntervalSince(startedAt),
                         tokenCount: result.text.count / 4,
@@ -1340,14 +1425,14 @@ final class BadAppleEngine: @unchecked Sendable {
                     data: ["name": introspection.name, "result": toolOutput],
                     persona: persona
                 )
-                if introspection.name == "human_home" {
+                if ["human_home", "list_people", "conversation_threads"].contains(introspection.name) {
                     let filtered = outputFirewall.check(toolOutput)
                     auditLedger.append(
                         eventType: "response",
-                        data: ["text": filtered, "tier": "human_home"],
+                        data: ["text": filtered, "tier": introspection.name],
                         persona: persona
                     )
-                    saveTurn(prompt: prompt, response: filtered)
+                    saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
                     await runtime.recordQuery(
                         latencySeconds: Date().timeIntervalSince(startedAt),
                         tokenCount: 0,
@@ -1378,7 +1463,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         data: ["text": filtered, "tier": "introspection"],
                         persona: persona
                     )
-                    saveTurn(prompt: prompt, response: filtered)
+                    saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
                     await runtime.recordQuery(
                         latencySeconds: Date().timeIntervalSince(startedAt),
                         tokenCount: result.text.count / 4,
@@ -1407,7 +1492,7 @@ final class BadAppleEngine: @unchecked Sendable {
                     data: ["name": "submit_agent_task", "result": output],
                     persona: persona
                 )
-                saveTurn(prompt: prompt, response: output)
+                saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
                 await runtime.recordQuery(
                     latencySeconds: Date().timeIntervalSince(startedAt),
                     tokenCount: 0,
@@ -1431,6 +1516,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         prompt: prompt,
                         voiceMode: voiceMode,
                         maxTokens: maxTokens,
+                        sessionID: requestSessionID,
                         onToken: onToken,
                         onComplete: onComplete,
                         onError: onError
@@ -1454,9 +1540,11 @@ final class BadAppleEngine: @unchecked Sendable {
                     onComplete: { result in
                         let polished = postprocessOutput(result.text)
                         let filtered = self.outputFirewall.check(polished)
-                        self.saveTurn(prompt: prompt, response: filtered)
-                        Task {
-                            await self.semanticCache.store(prompt: prompt, response: filtered, persona: persona)
+                        self.saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
+                        if !self.privateMode, !Self.nonCacheableResponseTiers.contains(result.tier) {
+                            Task {
+                                await self.semanticCache.store(prompt: prompt, response: filtered, persona: persona)
+                            }
                         }
                         self.stateLock.withLock {
                             self._lastTokensPerSecond = result.tokensPerSecond
@@ -1483,6 +1571,7 @@ final class BadAppleEngine: @unchecked Sendable {
                             prompt: prompt,
                             voiceMode: voiceMode,
                             maxTokens: maxTokens,
+                            sessionID: requestSessionID,
                             onToken: onToken,
                             onComplete: onComplete,
                             onError: onError
@@ -1497,6 +1586,7 @@ final class BadAppleEngine: @unchecked Sendable {
             prompt: prompt,
             voiceMode: voiceMode,
             maxTokens: maxTokens,
+            sessionID: requestSessionID,
             onToken: onToken,
             onComplete: onComplete,
             onError: onError
@@ -1508,6 +1598,7 @@ final class BadAppleEngine: @unchecked Sendable {
         prompt: String,
         voiceMode: Bool,
         maxTokens: Int,
+        sessionID: String,
         onToken: @escaping (String) -> Void,
         onComplete: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
@@ -1518,15 +1609,15 @@ final class BadAppleEngine: @unchecked Sendable {
         Task {
             await refreshAmbientContext()
 
-            let history = inferenceHistory()
-            if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
+            let history = inferenceHistory(sessionID: sessionID)
+            if !privateMode, let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
                 stateLock.withLock { _lastCacheHit = true }
                 auditLedger.append(
                     eventType: "cache_hit",
                     data: ["prompt": prompt],
                     persona: persona
                 )
-                saveTurn(prompt: prompt, response: cached)
+                saveTurn(prompt: prompt, response: cached, sessionID: sessionID)
                 DispatchQueue.main.async {
                     onToken(cached)
                     onComplete(cached)
@@ -1561,13 +1652,13 @@ final class BadAppleEngine: @unchecked Sendable {
                         persona: persona
                     )
                     let filtered = outputFirewall.check(postprocessOutput(result.text))
-                    saveTurn(prompt: prompt, response: filtered)
-                    if result.tier != "approval" {
+                    saveTurn(prompt: prompt, response: filtered, sessionID: sessionID)
+                    if !privateMode, !Self.nonCacheableResponseTiers.contains(result.tier) {
                         await semanticCache.store(prompt: prompt, response: filtered, persona: persona)
                     }
                     auditLedger.append(
                         eventType: "response",
-                        data: ["text": filtered, "tps": result.tokensPerSecond],
+                        data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
                         persona: persona
                     )
                     DispatchQueue.main.async {
@@ -1599,10 +1690,11 @@ final class BadAppleEngine: @unchecked Sendable {
             let onCompleteCb: @Sendable (BadAppleInference.GenerationResult) -> Void = { result in
                 let polished = postprocessOutput(result.text)
                 let filtered = self.outputFirewall.check(polished)
-                self.saveTurn(prompt: prompt, response: filtered)
+                self.saveTurn(prompt: prompt, response: filtered, sessionID: sessionID)
                 // Do not cache responses that were likely truncated by the token limit.
                 let looksComplete = result.tokenCount == 0 || result.tokenCount < maxTokens - 5
-                if looksComplete {
+                if looksComplete, !self.privateMode,
+                   !Self.nonCacheableResponseTiers.contains(result.tier) {
                     Task {
                         await self.semanticCache.store(
                             prompt: prompt,
@@ -1729,6 +1821,7 @@ final class BadAppleEngine: @unchecked Sendable {
         guard isLoaded else {
             return "The AI model is not loaded yet. Please wait a moment and try again."
         }
+        let requestSessionID = conversationSessionID()
 
         let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
         if killed && !isApproval {
@@ -1746,13 +1839,13 @@ final class BadAppleEngine: @unchecked Sendable {
                 data: ["id": approval.id, "name": approval.name, "result": output],
                 persona: activePersona
             )
-            saveTurn(prompt: prompt, response: output)
+            saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
             return output
         }
 
         let persona = activePersona
         await refreshAmbientContext()
-        let history = inferenceHistory()
+        let history = inferenceHistory(sessionID: requestSessionID)
         stateLock.withLock { _lastCacheHit = false }
 
         // Check prompt hot-reload before generation.
@@ -1761,7 +1854,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Meta responses (identity, creator, capabilities) are deterministic.
         if let meta = metaResponse(for: prompt) {
             let filtered = outputFirewall.check(meta)
-            saveTurn(prompt: prompt, response: filtered)
+            saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
             auditLedger.append(
                 eventType: "response",
                 data: ["text": filtered, "tier": "meta"],
@@ -1772,12 +1865,24 @@ final class BadAppleEngine: @unchecked Sendable {
 
         if let fast = deterministicResponse(for: prompt) {
             let filtered = outputFirewall.check(fast)
-            saveTurn(prompt: prompt, response: filtered)
+            saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
             auditLedger.append(
                 eventType: "response",
                 data: ["text": filtered, "tier": "deterministic"],
                 persona: persona
             )
+            return filtered
+        }
+
+        if let humanCommand = toolRouter.explicitHumanCommand(for: prompt) {
+            let output = await executeExplicitHumanCommand(humanCommand, persona: persona)
+            let filtered = outputFirewall.check(output)
+            auditLedger.append(
+                eventType: "response",
+                data: ["text": filtered, "tier": "human_command"],
+                persona: persona
+            )
+            saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
             return filtered
         }
 
@@ -1811,7 +1916,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 data: ["text": filtered, "tier": "self_audit"],
                 persona: persona
             )
-            saveTurn(prompt: prompt, response: filtered)
+            saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
             return filtered
         }
 
@@ -1831,14 +1936,14 @@ final class BadAppleEngine: @unchecked Sendable {
                 data: ["name": introspection.name, "result": toolOutput],
                 persona: persona
             )
-            if introspection.name == "human_home" {
+            if ["human_home", "list_people", "conversation_threads"].contains(introspection.name) {
                 let filtered = outputFirewall.check(toolOutput)
                 auditLedger.append(
                     eventType: "response",
-                    data: ["text": filtered, "tier": "human_home"],
+                    data: ["text": filtered, "tier": introspection.name],
                     persona: persona
                 )
-                saveTurn(prompt: prompt, response: filtered)
+                saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
                 return filtered
             }
             let sysPrompt = systemPrompt(voiceMode: voiceMode)
@@ -1859,7 +1964,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 data: ["text": filtered, "tier": "introspection"],
                 persona: persona
             )
-            saveTurn(prompt: prompt, response: filtered)
+            saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
             return filtered
         }
 
@@ -1872,19 +1977,19 @@ final class BadAppleEngine: @unchecked Sendable {
                 data: ["name": "submit_agent_task", "result": output],
                 persona: persona
             )
-            saveTurn(prompt: prompt, response: output)
+            saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
             return output
         }
 
         // Check semantic cache for a matching response.
-        if let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
+        if !privateMode, let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
             stateLock.withLock { _lastCacheHit = true }
             auditLedger.append(
                 eventType: "cache_hit",
                 data: ["prompt": prompt],
                 persona: persona
             )
-            saveTurn(prompt: prompt, response: cached)
+            saveTurn(prompt: prompt, response: cached, sessionID: requestSessionID)
             return cached
         }
 
@@ -1940,7 +2045,8 @@ final class BadAppleEngine: @unchecked Sendable {
         // Do not cache responses that were likely truncated by the token limit,
         // and never cache approval prompts — they embed one-time approval IDs.
         let looksComplete = result.tokenCount == 0 || result.tokenCount < maxTokens - 5
-        if looksComplete, result.tier != "approval" {
+        if looksComplete, !privateMode,
+           !Self.nonCacheableResponseTiers.contains(result.tier) {
             await semanticCache.store(
                 prompt: prompt,
                 response: filtered,
@@ -1951,10 +2057,10 @@ final class BadAppleEngine: @unchecked Sendable {
         // Audit log.
         auditLedger.append(
             eventType: "response",
-            data: ["text": filtered, "tps": result.tokensPerSecond],
+            data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
             persona: persona
         )
-        saveTurn(prompt: prompt, response: filtered)
+        saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
 
         return filtered
     }
@@ -2231,6 +2337,16 @@ final class BadAppleEngine: @unchecked Sendable {
             "whats up today",
         ].contains(where: { lower.contains($0) }) {
             return ("human_home", [:])
+        }
+        if [
+            "people to remember", "who should i contact", "who am i forgetting",
+        ].contains(where: { lower.contains($0) }) {
+            return ("list_people", [:])
+        }
+        if [
+            "conversation threads", "list conversations", "show conversations",
+        ].contains(where: { lower.contains($0) }) {
+            return ("conversation_threads", [:])
         }
         if [
             "your history", "self history", "self-history", "what happened",
@@ -3397,7 +3513,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
             And I don't just patch code — I learn in my sleep. Every night I digest the day's conversations into a LoRA adapter, at the weight level, not just in notes — a bad adapter gets ledgered and rejected automatically, so I can never be bricked by a bad dream. You can also train me on the fly: add examples, kick off a named adapter, list what I'm wearing, or load one straight into my running weights.
 
-            I also carry our shared life, not just your commands: I remember preferences you explicitly give me, hold commitments for both of us, and track ongoing life threads — ask me for Human Home and I'll show you what's due, what's waiting on you, and what I'm handling. And I won't just blurt things at you — attention modes (available, focus, quiet, sleep) govern whether I speak, notify, or hold it for later.
+            I also carry our shared life, not just your commands: I remember preferences you explicitly give me, hold commitments for both of us, track ongoing life threads, and keep the people you name with follow-up reminders — ask me for Human Home and I'll show you what's due, what's waiting on you, and what I'm handling. Conversations live in named threads you can switch between, so continuity survives restarts. Notifications are actionable — mark a commitment done, snooze it an hour, or approve and deny right from the banner. And I won't just blurt things at you — attention modes (available, focus, quiet, sleep) govern whether I speak, notify, or hold it for later, and "Stop Speaking" cuts my voice off mid-sentence.
 
             \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And here's the new trick: mesh-brain. I can split ONE model across multiple Macs — each machine holds a slice of the layers, activations flow between them encrypted end to end, and the pipeline heals itself if a node drops. A maxed-out Studio already carries 671B alone — mesh-brain is how a crew of smaller Macs pools memory into the same league. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
             """

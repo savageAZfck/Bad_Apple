@@ -14,12 +14,16 @@ import UserNotifications
 /// agent runner, and kill switch write to — and turns each entry into a real
 /// macOS notification (UNUserNotificationCenter, osascript fallback) plus a
 /// spoken alert when the entry asks for voice and policy allows it.
-private final class BadAppleNotifyWatcher {
+private final class BadAppleNotifyWatcher: NSObject, UNUserNotificationCenterDelegate {
     private var timer: Timer?
     private var offset: UInt64 = 0
     private let path = NSHomeDirectory() + "/.bad_apple/notify_queue.jsonl"
     /// Spoken-alert hook — wired to the app's voice host by the delegate.
     var onSpeak: ((String) -> Void)?
+    var onOpenHome: (() -> Void)?
+    var onOpenChat: (() -> Void)?
+    var onApprovalCommand: ((String) -> Void)?
+    var persistenceAllowed: () -> Bool = { true }
     private var notificationsAuthorized = false
     private var notificationAuthRequested = false
 
@@ -29,14 +33,92 @@ private final class BadAppleNotifyWatcher {
            let size = (attrs[.size] as? NSNumber)?.uint64Value {
             offset = size
         }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.setNotificationCategories([
+            UNNotificationCategory(
+                identifier: "BADAPPLE_COMMITMENT",
+                actions: [
+                    UNNotificationAction(identifier: "COMMITMENT_DONE", title: "Done"),
+                    UNNotificationAction(identifier: "COMMITMENT_SNOOZE", title: "Snooze 1 Hour"),
+                    UNNotificationAction(identifier: "OPEN_HOME", title: "Open Human Home"),
+                ],
+                intentIdentifiers: []
+            ),
+            UNNotificationCategory(
+                identifier: "BADAPPLE_APPROVAL",
+                actions: [
+                    UNNotificationAction(
+                        identifier: "APPROVE_ACTION", title: "Approve",
+                        options: [.authenticationRequired]
+                    ),
+                    UNNotificationAction(identifier: "DENY_ACTION", title: "Deny"),
+                    UNNotificationAction(identifier: "OPEN_CHAT", title: "Open Chat"),
+                ],
+                intentIdentifiers: []
+            ),
+            UNNotificationCategory(
+                identifier: "BADAPPLE_GENERAL",
+                actions: [
+                    UNNotificationAction(identifier: "OPEN_HOME", title: "Open Human Home"),
+                ],
+                intentIdentifiers: []
+            ),
+        ])
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.poll()
         }
     }
 
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let info = response.notification.request.content.userInfo
+        let referenceID = info["reference_id"] as? String
+        switch response.actionIdentifier {
+        case "COMMITMENT_DONE":
+            if persistenceAllowed(), let referenceID {
+                _ = try? BadAppleHumanLayer.shared.updateCommitment(
+                    id: referenceID, status: .completed
+                )
+            }
+        case "COMMITMENT_SNOOZE":
+            if persistenceAllowed(), let referenceID {
+                _ = try? BadAppleHumanLayer.shared.snoozeCommitment(
+                    id: referenceID, until: Date().addingTimeInterval(3600)
+                )
+            }
+        case "APPROVE_ACTION":
+            if let referenceID {
+                DispatchQueue.main.async { self.onApprovalCommand?("approve \(referenceID)") }
+            }
+        case "DENY_ACTION":
+            if let referenceID {
+                DispatchQueue.main.async { self.onApprovalCommand?("deny \(referenceID)") }
+            }
+        case "OPEN_HOME":
+            DispatchQueue.main.async { self.onOpenHome?() }
+        case "OPEN_CHAT":
+            DispatchQueue.main.async { self.onOpenChat?() }
+        default:
+            break
+        }
+        completionHandler()
+    }
+
     private func poll() {
         if BadAppleNotify.enabled {
-            if BadAppleHumanLayer.shared.snapshot().attentionMode == .available,
+            if persistenceAllowed(), BadAppleHumanLayer.shared.snapshot().attentionMode == .available,
                let held = try? BadAppleHumanLayer.shared.claimHeldEvents(limit: 20) {
                 for event in held {
                     BadAppleNotify.push(
@@ -44,18 +126,36 @@ private final class BadAppleNotifyWatcher {
                         title: event.title,
                         body: event.body,
                         voice: event.voiceRequested,
-                        debounceSeconds: 0
+                        debounceSeconds: 0,
+                        referenceID: event.referenceID
                     )
                 }
             }
-            if let claimed = try? BadAppleHumanLayer.shared.claimDueCommitments() {
+            if persistenceAllowed(), let claimed = try? BadAppleHumanLayer.shared.claimDueCommitments() {
                 for commitment in claimed {
                     BadAppleNotify.push(
                         kind: "commitment_due:\(commitment.id)",
                         title: "Commitment due",
                         body: commitment.title,
                         voice: true,
-                        debounceSeconds: 1
+                        debounceSeconds: 1,
+                        referenceID: commitment.id
+                    )
+                }
+            }
+            if persistenceAllowed(), let people = try? BadAppleHumanLayer.shared.claimDuePeople() {
+                for person in people {
+                    var body = person.name
+                    if !person.relationship.isEmpty {
+                        body += " — \(person.relationship)"
+                    }
+                    BadAppleNotify.push(
+                        kind: "person_followup:\(person.id)",
+                        title: "Time to reconnect",
+                        body: body,
+                        voice: false,
+                        debounceSeconds: 1,
+                        referenceID: person.id
                     )
                 }
             }
@@ -73,10 +173,9 @@ private final class BadAppleNotifyWatcher {
             guard let raw = line.data(using: .utf8),
                   let entry = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
             else { continue }
-            let title = entry["title"] as? String ?? "Bad Apple"
             let body = entry["body"] as? String ?? ""
             let wantsVoice = entry["voice"] as? Bool ?? false
-            postNotification(title: title, body: body)
+            postNotification(entry: entry)
             if wantsVoice, Self.proactiveVoiceEnabled() {
                 let spoken = String(body.prefix(300))
                 DispatchQueue.main.async { [weak self] in self?.onSpeak?(spoken) }
@@ -101,7 +200,10 @@ private final class BadAppleNotifyWatcher {
         return notifyOn && voiceOn
     }
 
-    private func postNotification(title: String, body: String) {
+    private func postNotification(entry: [String: Any]) {
+        let title = entry["title"] as? String ?? "Bad Apple"
+        let body = entry["body"] as? String ?? ""
+        let kind = entry["kind"] as? String ?? ""
         let center = UNUserNotificationCenter.current()
         if !notificationAuthRequested {
             notificationAuthRequested = true
@@ -114,6 +216,21 @@ private final class BadAppleNotifyWatcher {
             content.title = title
             content.body = body
             content.sound = .default
+            if kind.hasPrefix("commitment_due") {
+                content.categoryIdentifier = "BADAPPLE_COMMITMENT"
+            } else if kind.hasPrefix("approval:") {
+                content.categoryIdentifier = "BADAPPLE_APPROVAL"
+            } else {
+                content.categoryIdentifier = "BADAPPLE_GENERAL"
+            }
+            var userInfo: [String: Any] = ["kind": kind]
+            if let referenceID = entry["reference_id"] as? String {
+                userInfo["reference_id"] = referenceID
+            }
+            if let eventID = entry["event_id"] as? String {
+                userInfo["event_id"] = eventID
+            }
+            content.userInfo = userInfo
             let req = UNNotificationRequest(
                 identifier: UUID().uuidString, content: content, trigger: nil
             )
@@ -212,6 +329,103 @@ final class BadAppleHumanHomeWindow: NSObject {
 
     private func reload() {
         textView?.string = BadAppleHumanLayer.shared.homeText()
+    }
+}
+
+final class BadAppleRelationshipOnboardingWindow: NSObject, NSTextFieldDelegate {
+    private var window: NSWindow?
+    private var nameField: NSTextField?
+    private var styleField: NSTextField?
+    private var carryField: NSTextField?
+    private var saveButton: NSButton?
+
+    var onSave: ((String, String, String) -> Bool)?
+    var onSkip: (() -> Void)?
+
+    func show(force: Bool = false) {
+        if !force, UserDefaults.standard.bool(forKey: "BadAppleRelationshipOnboarded") { return }
+        if window == nil { buildWindow() }
+        updateSaveEnabled()
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func buildWindow() {
+        let size = NSSize(width: 480, height: 250)
+        let wc = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        wc.title = "Relationship Setup"
+        wc.isReleasedWhenClosed = false
+        wc.center()
+
+        let content = NSView(frame: NSRect(origin: .zero, size: size))
+
+        func makeLabel(_ text: String, _ y: CGFloat) {
+            let label = NSTextField(labelWithString: text)
+            label.font = .systemFont(ofSize: 13, weight: .medium)
+            label.frame = NSRect(x: 20, y: y, width: 440, height: 18)
+            content.addSubview(label)
+        }
+        func makeField(_ y: CGFloat) -> NSTextField {
+            let field = NSTextField(frame: NSRect(x: 20, y: y, width: 440, height: 24))
+            field.bezelStyle = .roundedBezel
+            field.delegate = self
+            content.addSubview(field)
+            return field
+        }
+
+        makeLabel("What should I call you?", 214)
+        nameField = makeField(186)
+        makeLabel("How should I communicate with you?", 152)
+        styleField = makeField(124)
+        makeLabel("What is one thing you want me to help carry?", 90)
+        carryField = makeField(62)
+
+        let save = NSButton(title: "Save", target: self, action: #selector(savePressed(_:)))
+        save.bezelStyle = .rounded
+        save.frame = NSRect(x: 390, y: 16, width: 70, height: 28)
+        save.isEnabled = false
+        content.addSubview(save)
+        saveButton = save
+
+        let skip = NSButton(title: "Skip", target: self, action: #selector(skipPressed(_:)))
+        skip.bezelStyle = .rounded
+        skip.frame = NSRect(x: 310, y: 16, width: 70, height: 28)
+        content.addSubview(skip)
+
+        wc.contentView = content
+        window = wc
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        updateSaveEnabled()
+    }
+
+    private func updateSaveEnabled() {
+        let anyText = [nameField, styleField, carryField].contains {
+            !($0?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }
+        saveButton?.isEnabled = anyText
+    }
+
+    @objc private func savePressed(_ sender: Any?) {
+        let name = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let style = styleField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let carry = carryField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !(name.isEmpty && style.isEmpty && carry.isEmpty) else { return }
+        guard onSave?(name, style, carry) ?? false else { return }
+        UserDefaults.standard.set(true, forKey: "BadAppleRelationshipOnboarded")
+        window?.close()
+    }
+
+    @objc private func skipPressed(_ sender: Any?) {
+        UserDefaults.standard.set(true, forKey: "BadAppleRelationshipOnboarded")
+        window?.close()
+        onSkip?()
     }
 }
 
@@ -1154,6 +1368,19 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
         }
         stablePrompt = ""
         lastTranscript = ""
+        scheduleRestart(after: 0.05)
+    }
+
+    func interruptAndListen() {
+        currentSpeakID += 1
+        pendingSpeechUtterances = 0
+        cancelSpeechSafetyTimer()
+        streamTTSBuffer = ""
+        streamTTSInFence = false
+        streamTTSEmittedAny = false
+        synthesizer.stopSpeaking(at: .immediate)
+        PiperTTSClient.shared.stop()
+        guard enabled else { state = .disabled; return }
         scheduleRestart(after: 0.05)
     }
 
@@ -4551,6 +4778,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private let chatHistoryWindow = ChatHistoryWindow()
     private let chatWindow = BadAppleChatWindow()
     private let humanHomeWindow = BadAppleHumanHomeWindow()
+    private let conversationStore = BadAppleConversation()
+    private let relationshipOnboarding = BadAppleRelationshipOnboardingWindow()
     private var streamedTokenCount = 0
     private var lastPrompt = ""
     private var lastError: String?
@@ -4595,6 +4824,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         get { UserDefaults.standard.object(forKey: "BadAppleFocusEnabled") as? Bool ?? false }
         set { UserDefaults.standard.set(newValue, forKey: "BadAppleFocusEnabled") }
     }
+    private var humanWritesAllowed: Bool {
+        if BadAppleEngine.shared.isLoaded { return !BadAppleEngine.shared.privateMode }
+        return !(runtimeState["private_mode"] as? Bool ?? false)
+    }
     private let voiceHUD = BadAppleVoiceHUD()
     private let voiceOnboarding = BadAppleVoiceOnboarding()
     private let firstRunOnboarding = BadAppleFirstRunOnboarding()
@@ -4607,6 +4840,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
     private lazy var askShortcut = BadAppleGlobalShortcut(name: "ask-palette", keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | shiftKey | optionKey), id: 2) { [weak self] in
         self?.askPalette.show()
+    }
+    private lazy var stopSpeakingShortcut = BadAppleGlobalShortcut(name: "stop-speaking", keyCode: UInt32(kVK_Escape), modifiers: UInt32(cmdKey | shiftKey), id: 3) { [weak self] in
+        self?.voiceHost.interruptAndListen()
     }
     private let askPalette = BadAppleAskPalette()
     private let controlCenter = BadAppleControlCenter()
@@ -4721,10 +4957,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         // Proactive channel: tail the notify queue and surface approvals,
         // kill-switch hits, and task outcomes without waiting to be asked.
         let storedAttention = BadAppleHumanLayer.shared.snapshot().attentionMode
-        if storedAttention == .available || storedAttention == .focus {
+        if humanWritesAllowed && (storedAttention == .available || storedAttention == .focus) {
             try? BadAppleHumanLayer.shared.setAttentionMode(focusEnabled ? .focus : .available)
         }
         notifyWatcher.onSpeak = { [weak self] text in self?.voiceHost.speak(text) }
+        notifyWatcher.onOpenHome = { [weak self] in self?.humanHomeWindow.show() }
+        notifyWatcher.onOpenChat = { [weak self] in self?.chatWindow.show() }
+        notifyWatcher.onApprovalCommand = { [weak self] command in
+            self?.runApprovalCommand(command)
+        }
+        notifyWatcher.persistenceAllowed = { [weak self] in self?.humanWritesAllowed ?? false }
         notifyWatcher.start()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.title = "🍎"
@@ -4756,6 +4998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         _ = voiceShortcut
         _ = askShortcut
+        _ = stopSpeakingShortcut
         voiceHost.onPrompt = { [weak self] prompt in
             self?.voiceHUD.updateCommand(prompt)
             self?.submitVoicePrompt(prompt)
@@ -4835,6 +5078,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         chatWindow.onOpenHome = { [weak self] in
             self?.humanHomeWindow.show()
+        }
+        chatWindow.onWillShow = { [weak self] in
+            guard let self = self else { return }
+            self.loadActiveThreadTranscript()
+            self.refreshConversationControls()
+        }
+        chatWindow.onThreadSelected = { [weak self] threadID in
+            guard let self = self else { return }
+            guard self.humanWritesAllowed else {
+                self.showHumanWritesBlockedAlert()
+                self.refreshConversationControls()
+                return
+            }
+            _ = try? BadAppleHumanLayer.shared.switchConversationThread(idOrTitle: threadID)
+            self.loadActiveThreadTranscript()
+            self.refreshConversationControls()
+        }
+        chatWindow.onNewThread = { [weak self] in
+            self?.promptForNewConversationThread()
         }
         chatWindow.onDescribeImage = { [weak self] imagePath, imageName, append, finish in
             guard let self = self else { finish(); return }
@@ -5023,6 +5285,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             self?.rebuildMenu()
         }
 
+        relationshipOnboarding.onSave = { [weak self] name, style, carry in
+            guard let self = self else { return false }
+            guard self.humanWritesAllowed else {
+                self.showHumanWritesBlockedAlert()
+                return false
+            }
+            if !name.isEmpty {
+                _ = try? BadAppleHumanLayer.shared.rememberPreference(
+                    key: "preferred_name", value: name, source: "onboarding"
+                )
+            }
+            if !style.isEmpty {
+                _ = try? BadAppleHumanLayer.shared.rememberPreference(
+                    key: "communication_style", value: style, source: "onboarding"
+                )
+            }
+            if !carry.isEmpty {
+                _ = try? BadAppleHumanLayer.shared.upsertThread(
+                    id: nil,
+                    title: carry,
+                    summary: "Added during relationship setup",
+                    nextAction: "Decide the first step together",
+                    status: .active
+                )
+            }
+            self.humanHomeWindow.show()
+            self.rebuildMenu()
+            return true
+        }
+        relationshipOnboarding.onSkip = {}
+
         memoryGovernor.autoPurge = autoPurgeEnabled
         memoryGovernor.onUpdate = { [weak self] used, total, pressure in
             guard let self = self else { return }
@@ -5086,6 +5379,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     /// wizard is shown on the next launch once the platform is installed.
     func showOnboardingIfNeeded() {
         if UserDefaults.standard.bool(forKey: "BadAppleOnboarded") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.relationshipOnboarding.show()
+            }
             return
         }
         let installed = FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.badapple.mlx.plist")
@@ -5096,6 +5392,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self = self else { return }
             if installed {
+                self.onboardingWindow.onComplete = { [weak self] in
+                    self?.relationshipOnboarding.show()
+                }
                 self.onboardingWindow.show()
             } else {
                 self.firstRunOnboarding.showIfNeeded()
@@ -5519,8 +5818,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @objc private func toggleFocus() {
         focusEnabled.toggle()
         applyFocusMode(focusEnabled)
-        try? BadAppleHumanLayer.shared.setAttentionMode(focusEnabled ? .focus : .available)
+        if humanWritesAllowed {
+            try? BadAppleHumanLayer.shared.setAttentionMode(focusEnabled ? .focus : .available)
+        } else {
+            showHumanWritesBlockedAlert()
+        }
         rebuildMenu()
+    }
+
+    private func showHumanWritesBlockedAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Private mode is on"
+        alert.informativeText = "I did not save that."
+        alert.alertStyle = .informational
+        alert.runModal()
     }
 
     private func applyFocusMode(_ enabled: Bool) {
@@ -5857,12 +6169,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     @objc private func newChat() {
-        BadAppleEngine.shared.resetConversation()
+        if humanWritesAllowed {
+            BadAppleEngine.shared.resetConversation()
+        }
         lastPrompt = "new chat"
         lastError = nil
         streamedTokenCount = 0
+        chatWindow.replaceTranscript(with: [])
+        refreshConversationControls()
         voiceHost.speak("Started a new chat.")
         rebuildMenu()
+    }
+
+    private func refreshConversationControls() {
+        let threads = (try? BadAppleHumanLayer.shared.listConversationThreads()) ?? []
+        let activeID = BadAppleHumanLayer.shared.snapshot().activeConversationThreadID
+        chatWindow.updateConversationThreads(threads, activeID: activeID)
+    }
+
+    private func loadActiveThreadTranscript() {
+        let thread: BadAppleConversationThread?
+        if humanWritesAllowed {
+            thread = try? BadAppleHumanLayer.shared.activeConversationThread()
+        } else {
+            let state = BadAppleHumanLayer.shared.snapshot()
+            thread = state.conversationThreads.first {
+                $0.id == state.activeConversationThreadID
+                    && ($0.status == .active || $0.status == .waiting)
+            }
+        }
+        guard let thread = thread else {
+            chatWindow.replaceTranscript(with: [])
+            return
+        }
+        chatWindow.replaceTranscript(with: conversationStore.loadConversation(sessionId: thread.sessionID))
+    }
+
+    private func promptForNewConversationThread() {
+        guard humanWritesAllowed else {
+            showHumanWritesBlockedAlert()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "New Conversation"
+        alert.informativeText = "Name this conversation thread."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Conversation name"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let title = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        _ = try? BadAppleHumanLayer.shared.createConversationThread(title: title)
+        loadActiveThreadTranscript()
+        refreshConversationControls()
+    }
+
+    @objc private func selectConversationThread(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        guard humanWritesAllowed else {
+            showHumanWritesBlockedAlert()
+            return
+        }
+        _ = try? BadAppleHumanLayer.shared.switchConversationThread(idOrTitle: id)
+        loadActiveThreadTranscript()
+        refreshConversationControls()
+        rebuildMenu()
+    }
+
+    @objc private func newConversationThread() {
+        promptForNewConversationThread()
+        rebuildMenu()
+    }
+
+    @objc private func stopSpeaking() {
+        voiceHost.interruptAndListen()
+    }
+
+    @objc private func showRelationshipSetup() {
+        relationshipOnboarding.show(force: true)
+    }
+
+    private func runApprovalCommand(_ command: String) {
+        let pushResult: (String) -> Void = { result in
+            let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+            BadAppleNotify.push(
+                kind: "approval_result",
+                title: "Approval result",
+                body: trimmed.isEmpty ? "Done." : String(trimmed.prefix(300)),
+                voice: false,
+                debounceSeconds: 0
+            )
+        }
+        if BadAppleEngine.shared.isLoaded {
+            BadAppleEngine.shared.generateStreaming(
+                prompt: command,
+                voiceMode: false,
+                maxTokens: 512
+            ) { _ in
+            } onComplete: { result in
+                pushResult(result)
+            } onError: { error in
+                pushResult("Error: \(error)")
+            }
+            return
+        }
+        Task {
+            do {
+                let output = try await self.runBadAppleCLIStreaming(
+                    prompt: command,
+                    socketPath: BadAppleBrain.deepSocket,
+                    maxTokens: 512
+                ) { _ in }
+                pushResult(output)
+            } catch {
+                pushResult("Error: \(error.localizedDescription)")
+            }
+        }
     }
 
     @objc private func toggleRoast() {
@@ -6525,6 +6950,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let controlCenterItem = NSMenuItem(title: "Dashboard", action: #selector(showControlCenter), keyEquivalent: "")
         controlCenterItem.toolTip = "Open the native glass control center window."
         menu.addItem(controlCenterItem)
+        let conversationsMenu = NSMenu(title: "Conversations")
+        let openThreads = (try? BadAppleHumanLayer.shared.listConversationThreads()) ?? []
+        let activeThreadID = BadAppleHumanLayer.shared.snapshot().activeConversationThreadID
+        for thread in openThreads {
+            let item = NSMenuItem(title: thread.title, action: #selector(selectConversationThread(_:)), keyEquivalent: "")
+            item.representedObject = thread.id
+            item.state = thread.id == activeThreadID ? .on : .off
+            conversationsMenu.addItem(item)
+        }
+        if !openThreads.isEmpty {
+            conversationsMenu.addItem(NSMenuItem.separator())
+        }
+        let newConversationItem = NSMenuItem(title: "New Conversation...", action: #selector(newConversationThread), keyEquivalent: "")
+        newConversationItem.toolTip = "Create a named conversation thread."
+        conversationsMenu.addItem(newConversationItem)
+        let conversationsParent = NSMenuItem(title: "Conversations", action: nil, keyEquivalent: "")
+        conversationsParent.submenu = conversationsMenu
+        menu.addItem(conversationsParent)
         let humanHomeItem = NSMenuItem(title: "Human Home...", action: #selector(showHumanHome), keyEquivalent: "")
         humanHomeItem.toolTip = "Show shared-life state: commitments, preferences, life threads, and held notifications."
         menu.addItem(humanHomeItem)
@@ -6534,6 +6977,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         settingsMenuItem.toolTip = "Open the Bad Apple settings window."
         menu.addItem(settingsMenuItem)
+        let relationshipItem = NSMenuItem(title: "Relationship Setup...", action: #selector(showRelationshipSetup), keyEquivalent: "")
+        relationshipItem.toolTip = "Tell Bad Apple what to call you, how to communicate, and what to help carry."
+        menu.addItem(relationshipItem)
         let newChatItem = NSMenuItem(title: "New Chat", action: #selector(newChat), keyEquivalent: "n")
         newChatItem.toolTip = "Start a new conversation."
         menu.addItem(newChatItem)
@@ -6700,6 +7146,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         menu.addItem(meshParent)
 
         let voiceMenu = NSMenu(title: "Voice")
+
+        let stopSpeakingItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
+        stopSpeakingItem.toolTip = "Interrupt the current spoken response and resume listening."
+        voiceMenu.addItem(stopSpeakingItem)
+        voiceMenu.addItem(NSMenuItem.separator())
 
         let settingsItem = NSMenuItem(title: "Voice Settings...", action: #selector(showVoiceSettings), keyEquivalent: ",")
         voiceMenu.addItem(settingsItem)
@@ -7717,6 +8168,7 @@ final class BadAppleSettingsWindow: NSObject {
 /// Walks the user through welcome, privacy, model status, permissions, and
 /// a first query. Pure AppKit — no SwiftUI.
 final class BadAppleOnboardingWindow: NSObject, NSTextFieldDelegate {
+    var onComplete: (() -> Void)?
     private var window: NSWindow?
     private var visual: NSVisualEffectView?
     private var contentContainer: NSView?
@@ -8420,6 +8872,7 @@ final class BadAppleOnboardingWindow: NSObject, NSTextFieldDelegate {
         if currentStep == totalSteps - 1 {
             UserDefaults.standard.set(true, forKey: "BadAppleOnboarded")
             window?.orderOut(nil)
+            onComplete?()
             return
         }
         currentStep += 1
@@ -8448,6 +8901,9 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
     var onSubmit: ((String, @escaping (String) -> Void, @escaping () -> Void) -> Void)?
     var onNewChat: (() -> Void)?
     var onOpenHome: (() -> Void)?
+    var onWillShow: (() -> Void)?
+    var onThreadSelected: ((String) -> Void)?
+    var onNewThread: (() -> Void)?
     /// Called when the user drops or pastes an image. The callback receives
     /// the image file path, a display name, and the same append/finish streaming
     /// closures used by `onSubmit`.
@@ -8464,12 +8920,40 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
 
     func show() {
         if window == nil { buildWindow() }
+        onWillShow?()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.window?.makeFirstResponder(self.inputTextView)
         }
+    }
+
+    func updateConversationThreads(_ threads: [BadAppleConversationThread], activeID: String?) {
+        guard let popup = threadPopup else { return }
+        popup.removeAllItems()
+        for thread in threads {
+            popup.addItem(withTitle: thread.title)
+            popup.lastItem?.representedObject = thread.id
+            popup.lastItem?.toolTip = thread.summary.isEmpty ? nil : thread.summary
+        }
+        if let activeID,
+           let index = popup.itemArray.firstIndex(where: { $0.representedObject as? String == activeID }) {
+            popup.selectItem(at: index)
+        } else if popup.numberOfItems > 0 {
+            popup.selectItem(at: 0)
+        }
+    }
+
+    func replaceTranscript(with messages: [BadAppleMessage]) {
+        for bubble in bubbleViews { bubble.removeFromSuperview() }
+        bubbleViews.removeAll()
+        cachedHeights.removeAll()
+        currentAssistantText = ""
+        for message in messages where message.role == "user" || message.role == "assistant" {
+            appendMessage(role: message.role, text: message.content)
+        }
+        relayoutTranscript(force: true, scrollToBottom: true)
     }
 
     // MARK: State
@@ -8481,6 +8965,8 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
     private var tierLabel: NSTextField?
     private var newChatButton: NSButton?
     private var homeButton: NSButton?
+    private var threadPopup: NSPopUpButton?
+    private var newThreadButton: NSButton?
     private var scrollView: NSScrollView?
     private var transcriptDocument: NSView?
     private var inputBar: NSView?
@@ -8563,6 +9049,20 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         homeButton!.bezelStyle = .rounded
         homeButton!.controlSize = .small
         top.addSubview(homeButton!)
+
+        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+        popup.font = .systemFont(ofSize: 12, weight: .medium)
+        popup.controlSize = .small
+        popup.target = self
+        popup.action = #selector(threadSelected(_:))
+        popup.lineBreakMode = .byTruncatingTail
+        threadPopup = popup
+        top.addSubview(popup)
+
+        newThreadButton = NSButton(title: "+", target: self, action: #selector(newThread(_:)))
+        newThreadButton!.bezelStyle = .rounded
+        newThreadButton!.controlSize = .small
+        top.addSubview(newThreadButton!)
         visual.addSubview(top)
 
         // Transcript scroll view (document view is laid out manually)
@@ -8656,12 +9156,22 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         let inputBarH = max(44, inputH + 12)
 
         topBar?.frame = NSRect(x: 0, y: bounds.height - topH, width: bounds.width, height: topH)
-        personaLabel?.frame = NSRect(x: 16, y: 10, width: 190, height: 20)
-        tierLabel?.frame = NSRect(x: 214, y: 10, width: 170, height: 20)
         let ncW: CGFloat = 94
-        newChatButton?.frame = NSRect(x: bounds.width - 16 - ncW, y: 6, width: ncW, height: 28)
         let homeW: CGFloat = 64
-        homeButton?.frame = NSRect(x: bounds.width - 16 - ncW - 8 - homeW, y: 6, width: homeW, height: 28)
+        let plusW: CGFloat = 30
+        let newChatX = bounds.width - 16 - ncW
+        newChatButton?.frame = NSRect(x: newChatX, y: 6, width: ncW, height: 28)
+        let homeX = newChatX - 8 - homeW
+        homeButton?.frame = NSRect(x: homeX, y: 6, width: homeW, height: 28)
+        let plusX = homeX - 8 - plusW
+        newThreadButton?.frame = NSRect(x: plusX, y: 6, width: plusW, height: 28)
+        let leftW = max(0, plusX - 8 - 16)
+        let personaW = min(140, floor(leftW * 0.4))
+        let tierW = min(120, floor(leftW * 0.33))
+        personaLabel?.frame = NSRect(x: 16, y: 10, width: personaW, height: 20)
+        tierLabel?.frame = NSRect(x: 16 + personaW + 8, y: 10, width: tierW, height: 20)
+        let popupX = 16 + personaW + 8 + tierW + 8
+        threadPopup?.frame = NSRect(x: popupX, y: 7, width: max(40, plusX - 8 - popupX), height: 26)
 
         inputBar?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: inputBarH)
         let sendX = bounds.width - inputPadding - sendW
@@ -8769,6 +9279,15 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
 
     @objc private func openHome(_ sender: Any?) {
         onOpenHome?()
+    }
+
+    @objc private func threadSelected(_ sender: NSPopUpButton) {
+        guard let id = sender.selectedItem?.representedObject as? String else { return }
+        onThreadSelected?(id)
+    }
+
+    @objc private func newThread(_ sender: Any?) {
+        onNewThread?()
     }
 
     func textDidChange(_ notification: Notification) {

@@ -124,6 +124,33 @@ enum BadAppleHumanLayerTests {
                 fail("tomorrow 14:30 lands on tomorrow at 14:30")
             }
         }
+        if let parsed = BadAppleHumanLayer.parseDueDate("today at 6pm", now: now) {
+            let comps = Calendar.current.dateComponents([.hour, .minute], from: parsed)
+            guard comps.hour == 18, comps.minute == 0,
+                  Calendar.current.isDateInToday(parsed) else {
+                fail("today at 6pm lands today at 18:00")
+            }
+        } else {
+            fail("parseDueDate 'today at 6pm'")
+        }
+        if let parsed = BadAppleHumanLayer.parseDueDate("tomorrow at 9am", now: now) {
+            let comps = Calendar.current.dateComponents([.hour, .minute], from: parsed)
+            guard comps.hour == 9, comps.minute == 0,
+                  Calendar.current.isDateInTomorrow(parsed) else {
+                fail("tomorrow at 9am lands tomorrow at 09:00")
+            }
+        } else {
+            fail("parseDueDate 'tomorrow at 9am'")
+        }
+        if let parsed = BadAppleHumanLayer.parseDueDate("Tomorrow At 14:30", now: now) {
+            let comps = Calendar.current.dateComponents([.hour, .minute], from: parsed)
+            guard comps.hour == 14, comps.minute == 30,
+                  Calendar.current.isDateInTomorrow(parsed) else {
+                fail("Tomorrow At 14:30 lands tomorrow at 14:30")
+            }
+        } else {
+            fail("parseDueDate 'Tomorrow At 14:30'")
+        }
         if let parsed = BadAppleHumanLayer.parseDueDate("in 2 hours", now: now) {
             let delta = parsed.timeIntervalSince(now)
             guard abs(delta - 7200) < 60 else {
@@ -295,6 +322,200 @@ enum BadAppleHumanLayerTests {
                 fail("malformed state overwritten by a read")
             }
         } catch { fail("malformed state fixture: \(error)") }
+
+        do {
+            let person = try layer.rememberPerson(
+                name: "Maya", relationship: "sister", notes: "", nextContactAt: nil
+            )
+            let upserted = try layer.rememberPerson(
+                name: "maya", relationship: "sibling", notes: "likes tea", nextContactAt: nil
+            )
+            guard upserted.id == person.id,
+                  layer.snapshot().people.count == 1,
+                  upserted.relationship == "sibling",
+                  upserted.notes == "likes tea" else {
+                fail("person upsert case-insensitive")
+            }
+            let prefix = String(person.id.prefix(8))
+            guard let byPrefix = try layer.recordContact(
+                idOrName: prefix, notes: "", nextContactAt: now.addingTimeInterval(3600), at: now
+            ) else {
+                fail("recordContact by unique prefix")
+            }
+            guard byPrefix.lastContactAt == now,
+                  byPrefix.nextContactAt == now.addingTimeInterval(3600),
+                  byPrefix.lastNotifiedAt == nil else {
+                fail("recordContact field updates")
+            }
+            guard try layer.recordContact(idOrName: "MAYA", notes: "", nextContactAt: nil, at: now) != nil else {
+                fail("recordContact by case-insensitive name")
+            }
+            guard layer.homeText(now: now).contains("PEOPLE TO REMEMBER"),
+                  layer.homeText(now: now).contains("Maya (sibling)") else {
+                fail("PEOPLE TO REMEMBER section")
+            }
+            guard try layer.claimDuePeople(now: now).isEmpty else {
+                fail("claimDuePeople before due")
+            }
+            let duePeople = try layer.claimDuePeople(now: now.addingTimeInterval(3601))
+            guard duePeople.count == 1, duePeople[0].name == "Maya" else {
+                fail("claimDuePeople initial claim")
+            }
+            guard try layer.claimDuePeople(now: now.addingTimeInterval(3602)).isEmpty else {
+                fail("claimDuePeople re-notified within 24h")
+            }
+            guard try layer.claimDuePeople(now: now.addingTimeInterval(3601 + 25 * 3600)).count == 1 else {
+                fail("claimDuePeople re-notifies after 24h")
+            }
+            guard try layer.forgetPerson(idOrName: "maya"),
+                  try layer.forgetPerson(idOrName: "maya") == false else {
+                fail("forgetPerson")
+            }
+        } catch { fail("people: \(error)") }
+
+        do {
+            let general = try layer.ensureDefaultConversationThread()
+            guard general.title == "General", general.sessionID == "default" else {
+                fail("default conversation thread shape")
+            }
+            guard try layer.ensureDefaultConversationThread().id == general.id,
+                  layer.snapshot().conversationThreads.filter({ $0.sessionID == "default" }).count == 1 else {
+                fail("ensureDefaultConversationThread must not duplicate General")
+            }
+            let work = try layer.createConversationThread(title: "Work", summary: "job stuff")
+            guard work.sessionID.hasPrefix("thread-"),
+                  layer.snapshot().activeConversationThreadID == work.id else {
+                fail("createConversationThread activates new thread")
+            }
+            guard try layer.listConversationThreads().count == 2 else {
+                fail("listConversationThreads open threads")
+            }
+            guard let switched = try layer.switchConversationThread(idOrTitle: "general"),
+                  switched.id == general.id,
+                  layer.snapshot().activeConversationThreadID == general.id else {
+                fail("switchConversationThread by title")
+            }
+            guard let closed = try layer.closeConversationThread(idOrTitle: "General"),
+                  closed.status == .completed,
+                  layer.snapshot().activeConversationThreadID == work.id else {
+                fail("closeConversationThread falls back to most recent open thread")
+            }
+            let third = BadAppleHumanLayer(directory: dir)
+            guard third.snapshot().conversationThreads.count >= 2,
+                  third.snapshot().activeConversationThreadID == work.id else {
+                fail("conversation threads persist across instances")
+            }
+            _ = try layer.closeConversationThread(idOrTitle: "work")
+            guard let active = try? layer.activeConversationThread(),
+                  active.sessionID == "default", active.status == .active else {
+                fail("closing last open thread reactivates General")
+            }
+            guard try layer.switchConversationThread(idOrTitle: "work") == nil else {
+                fail("switchConversationThread on closed thread")
+            }
+            let homeNow = layer.homeText(now: now)
+            guard homeNow.contains("CONVERSATIONS"), homeNow.contains("*") else {
+                fail("CONVERSATIONS section marks active")
+            }
+        } catch { fail("conversation threads: \(error)") }
+
+        let convOnlyDir = fm.temporaryDirectory
+            .appendingPathComponent("badapple-human-convctx-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: convOnlyDir) }
+        let convOnlyLayer = BadAppleHumanLayer(directory: convOnlyDir)
+        do {
+            _ = try convOnlyLayer.createConversationThread(
+                title: "Kitchen remodel", summary: "Choosing cabinets"
+            )
+            let ctx = convOnlyLayer.promptContext(now: now)
+            guard !ctx.isEmpty,
+                  ctx.contains("Kitchen remodel"), ctx.contains("Choosing cabinets") else {
+                fail("active-conversation-only promptContext: \(ctx)")
+            }
+        } catch { fail("conversation-only promptContext: \(error)") }
+
+        do {
+            let commitment = try layer.addCommitment(
+                title: "Snooze me", owner: .user,
+                dueAt: now.addingTimeInterval(-10), threadID: nil
+            )
+            let snoozed = try layer.snoozeCommitment(id: commitment.id, until: now.addingTimeInterval(3600))
+            guard snoozed?.dueAt == now.addingTimeInterval(3600),
+                  snoozed?.status == .active,
+                  snoozed?.lastNotifiedAt == nil else {
+                fail("snoozeCommitment fields")
+            }
+            guard try layer.claimDueCommitments(now: now.addingTimeInterval(1800))
+                .allSatisfy({ $0.id != commitment.id }) else {
+                fail("snoozed commitment claimed early")
+            }
+            guard try layer.claimDueCommitments(now: now.addingTimeInterval(3601))
+                .contains(where: { $0.id == commitment.id }) else {
+                fail("snoozed commitment not claimable after snooze")
+            }
+        } catch { fail("snoozeCommitment: \(error)") }
+
+        do {
+            let snoozed = BadAppleHumanEvent(
+                id: "snoozed-event", kind: "task_done", title: "Later task",
+                body: "b", importance: 3, urgency: 2,
+                requiresAction: false, voiceRequested: false,
+                createdAt: now, referenceID: "ref-123"
+            )
+            let decision = layer.route(event: snoozed)
+            try layer.snooze(event: snoozed, until: now.addingTimeInterval(3600), decision: decision)
+            guard try layer.claimHeldEvents(now: now).isEmpty else {
+                fail("snoozed event claimed before availableAfter")
+            }
+            let claimed = try layer.claimHeldEvents(now: now.addingTimeInterval(3601))
+            guard claimed.map(\.id) == ["snoozed-event"],
+                  claimed[0].referenceID == "ref-123" else {
+                fail("snoozed event not claimable after availableAfter")
+            }
+        } catch { fail("snooze event: \(error)") }
+
+        let migrateDir = fm.temporaryDirectory
+            .appendingPathComponent("badapple-human-migrate-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: migrateDir) }
+        let migrateLayer = BadAppleHumanLayer(directory: migrateDir)
+        let v1Fixture = """
+        {
+          "schemaVersion": 1,
+          "attentionMode": "focus",
+          "preferences": [{"id": "p1", "key": "drink", "value": "coffee", "source": "user", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"}],
+          "commitments": [{"id": "c1", "title": "Old commitment", "owner": "user", "status": "active", "dueAt": null, "threadID": null, "detail": "", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z", "lastNotifiedAt": null}],
+          "threads": [],
+          "inbox": [{"event": {"id": "e1", "kind": "task_done", "title": "old", "body": "", "importance": 2, "urgency": 2, "requiresAction": false, "voiceRequested": false, "createdAt": "2026-01-01T00:00:00Z"}, "decision": {"channel": "queue", "reason": "r"}, "status": "waiting"}]
+        }
+        """
+        do {
+            try v1Fixture.write(
+                to: migrateDir.appendingPathComponent("state.json"),
+                atomically: true, encoding: .utf8
+            )
+            let migrated = migrateLayer.snapshot()
+            guard migrated.schemaVersion == 2,
+                  migrated.attentionMode == .focus,
+                  migrated.preferences.count == 1,
+                  migrated.commitments.count == 1,
+                  migrated.inbox.count == 1,
+                  migrated.inbox[0].availableAfter == nil,
+                  migrated.inbox[0].event.referenceID == nil,
+                  migrated.people.isEmpty,
+                  migrated.conversationThreads.isEmpty,
+                  migrated.activeConversationThreadID == nil else {
+                fail("schema v1 migration decode")
+            }
+            _ = try migrateLayer.rememberPreference(key: "added", value: "yes")
+            let raw = try Data(contentsOf: migrateDir.appendingPathComponent("state.json"))
+            let obj = try JSONSerialization.jsonObject(with: raw) as? [String: Any]
+            guard obj?["people"] != nil,
+                  obj?["conversationThreads"] != nil,
+                  (obj?["commitments"] as? [[String: Any]])?.first?["title"] as? String == "Old commitment",
+                  (obj?["inbox"] as? [[String: Any]])?.first?["status"] as? String == "waiting" else {
+                fail("v1 state rewritten without loss")
+            }
+        } catch { fail("v1 migration: \(error)") }
 
         let statePath = dir.appendingPathComponent("state.json").path
         if let attrs = try? fm.attributesOfItem(atPath: statePath),

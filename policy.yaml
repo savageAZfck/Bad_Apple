@@ -433,3 +433,43 @@ tools:
     allowed: true
     require_approval: false
     max_timeout: 10
+
+  list_people:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  remember_person:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  record_contact:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  forget_person:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  conversation_threads:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  new_conversation_thread:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  switch_conversation_thread:
+    allowed: true
+    require_approval: false
+    max_timeout: 10
+
+  close_conversation_thread:
+    allowed: true
+    require_approval: false
+    max_timeout: 10

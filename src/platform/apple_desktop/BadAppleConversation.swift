@@ -10,6 +10,7 @@
 // with the default persona hot-reloading its system prompt from prompt.txt.
 // The "teach" command stores custom banter lines in ~/.bad_apple/custom_banter.json.
 
+import Darwin
 import Foundation
 
 // MARK: - Models
@@ -50,7 +51,7 @@ struct BadApplePersona: Codable, Sendable {
 /// Default storage lives under `~/.bad_apple/conversations/`, matching the
 /// Python daemon's behaviour. Only the last `maxPersistedMessages` entries are
 /// written so the on-disk file and token count stay small. Files are written
-/// atomically and made world-readable (0o644) so the menu bar can open them.
+/// atomically and made owner-only (0o600) so only the owner can open them.
 final class BadAppleConversation: @unchecked Sendable {
 
     /// Maximum number of messages persisted to disk. Mirrors the Python
@@ -59,6 +60,9 @@ final class BadAppleConversation: @unchecked Sendable {
 
     private let fileManager: FileManager
     private let lock = NSLock()
+    private var lockURL: URL {
+        conversationsDirectory.appendingPathComponent(".conversation.lock")
+    }
 
     /// Root directory for conversation files. Defaults to
     /// `~/.bad_apple/conversations/`.
@@ -76,6 +80,26 @@ final class BadAppleConversation: @unchecked Sendable {
                 .appendingPathComponent(".bad_apple", isDirectory: true)
                 .appendingPathComponent("conversations", isDirectory: true)
         }
+        try? fileManager.createDirectory(
+            at: self.conversationsDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: self.conversationsDirectory.path
+        )
+        if let entries = try? fileManager.contentsOfDirectory(
+            atPath: self.conversationsDirectory.path
+        ) {
+            for entry in entries where entry.hasSuffix(".json") {
+                try? fileManager.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: self.conversationsDirectory
+                        .appendingPathComponent(entry).path
+                )
+            }
+        }
     }
 
     /// Returns the on-disk path for a conversation, creating the parent
@@ -89,9 +113,40 @@ final class BadAppleConversation: @unchecked Sendable {
         let url = conversationsDirectory.appendingPathComponent("\(safeName).json")
         try? fileManager.createDirectory(
             at: conversationsDirectory,
-            withIntermediateDirectories: true
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
         return url
+    }
+
+    private func withFileLock<T>(_ operation: Int32, _ body: () throws -> T) throws -> T {
+        let fd = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        _ = fchmod(fd, 0o600)
+        guard flock(fd, operation) == 0 else {
+            let code = errno
+            _ = close(fd)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+        defer {
+            _ = flock(fd, LOCK_UN)
+            _ = close(fd)
+        }
+        return try body()
+    }
+
+    private func withReadLock<T>(_ body: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try withFileLock(LOCK_SH, body)
+    }
+
+    private func withWriteLock<T>(_ body: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try withFileLock(LOCK_EX, body)
     }
 
     /// Load the messages for a session. Returns an empty array if the file is
@@ -103,9 +158,10 @@ final class BadAppleConversation: @unchecked Sendable {
     /// Load messages from an explicit path. Only entries that contain both a
     /// `role` and `content` string are kept, matching the Python filter.
     func loadConversation(at path: URL) -> [BadAppleMessage] {
-        lock.lock()
-        defer { lock.unlock() }
+        (try? withReadLock { loadConversationUnlocked(at: path) }) ?? []
+    }
 
+    private func loadConversationUnlocked(at path: URL) -> [BadAppleMessage] {
         guard let data = try? Data(contentsOf: path) else { return [] }
         do {
             // JSONSerialization is used (rather than JSONDecoder) so we can
@@ -134,11 +190,22 @@ final class BadAppleConversation: @unchecked Sendable {
     }
 
     /// Persist messages to an explicit path. The file is written atomically
-    /// and chmod'd to 0o644 so the menu bar can read it.
+    /// and chmod'd to 0o600 so only the owner can read it.
     func saveConversation(at path: URL, messages: [BadAppleMessage]) {
-        lock.lock()
-        defer { lock.unlock() }
+        try? withWriteLock { saveConversationUnlocked(at: path, messages: messages) }
+    }
 
+    func appendTurn(sessionId: String, prompt: String, response: String) {
+        let path = conversationPath(sessionId: sessionId)
+        try? withWriteLock {
+            var messages = loadConversationUnlocked(at: path)
+            messages.append(BadAppleMessage(role: "user", content: prompt))
+            messages.append(BadAppleMessage(role: "assistant", content: response))
+            saveConversationUnlocked(at: path, messages: messages)
+        }
+    }
+
+    private func saveConversationUnlocked(at path: URL, messages: [BadAppleMessage]) {
         let trimmed = Array(messages.suffix(Self.maxPersistedMessages))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -146,13 +213,14 @@ final class BadAppleConversation: @unchecked Sendable {
         do {
             try fileManager.createDirectory(
                 at: path.deletingLastPathComponent(),
-                withIntermediateDirectories: true
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
             )
             try data.write(to: path, options: .atomic)
-            // Match the Python `os.chmod(path, 0o644)` so the menu bar can
+            // Match the Python `os.chmod(path, 0o600)` so only the owner can
             // open the file.
             try? fileManager.setAttributes(
-                [.posixPermissions: 0o644],
+                [.posixPermissions: 0o600],
                 ofItemAtPath: path.path
             )
         } catch {
@@ -163,8 +231,19 @@ final class BadAppleConversation: @unchecked Sendable {
 
     /// Remove a conversation file from disk. No-op if the file is missing.
     func clearConversation(sessionId: String) {
-        let url = conversationPath(sessionId: sessionId)
-        try? fileManager.removeItem(at: url)
+        try? withWriteLock {
+            let url = conversationPath(sessionId: sessionId)
+            try? fileManager.removeItem(at: url)
+        }
+    }
+
+    func listSessionIDs() -> [String] {
+        (try? withReadLock {
+            try fileManager.contentsOfDirectory(atPath: conversationsDirectory.path)
+                .filter { $0.hasSuffix(".json") }
+                .map { String($0.dropLast(".json".count)) }
+                .sorted()
+        }) ?? []
     }
 }
 

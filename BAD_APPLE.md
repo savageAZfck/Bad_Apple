@@ -126,7 +126,7 @@ When asked, it can say:
 - **Human-in-the-loop approvals** for destructive tools
 - **Council of Minds**: 14 deterministic strategist/financial seats vote on every gated action — passed votes execute under autopilot, failed votes escalate to the human; semantic `council <question>` sessions voice all seats; deliberations journaled on the ledger
 - **Bounded Curious self-improvement autopilot** — when `curious` persona is active and autopilot is on, the engine runs a local self-check (cert suite, doctor, output firewall, git status, source TODO/FIXME scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger manually with `badapple "curious check"`.
-- **Human layer** (`~/.bad_apple/human/state.json`, mode 0600): persistent relationship preferences, shared commitments with due dates, and ongoing life threads. Private mode blocks all writes. The active attention mode (`available`/`focus`/`quiet`/`sleep`) governs whether proactive events speak, notify, or are held in Human Home; due commitments surface as `commitment_due` notifications through the same governed channel.
+- **Human layer** (`~/.bad_apple/human/state.json`, mode 0600): persistent relationship preferences, shared commitments with due dates, ongoing life threads, explicitly named people with follow-up dates, and durable named conversation threads. Private mode blocks all writes. The active attention mode (`available`/`focus`/`quiet`/`sleep`) governs whether proactive events speak, notify, or are held in Human Home; due commitments and person follow-ups surface as actionable notifications — mark a commitment Done, Snooze 1 Hour, or Approve/Deny a pending action right from the banner. People and contact history are only stored when the owner explicitly states them; nothing is inferred. Explicit Human commands (remember/forget people, commitments, conversation threads, preferences, attention mode) parse deterministically and fail closed with a rephrase prompt rather than claim a state change that did not execute.
 
 ### Tools (local, no cloud)
 
@@ -149,6 +149,8 @@ The server can run these directly, either through a fast deterministic parser or
 - `add_commitment`, `update_commitment` — record and complete commitments (`owner` user or bad_apple, optional `due_at`)
 - `manage_life_thread` — create/update ongoing life threads
 - `set_attention_mode` — set `available`, `focus`, `quiet`, or `sleep` delivery
+- `list_people`, `remember_person`, `record_contact`, `forget_person` — explicit people the owner asked to remember, with relationship labels, notes, and follow-up dates
+- `conversation_threads`, `new_conversation_thread`, `switch_conversation_thread`, `close_conversation_thread` — named conversation threads with per-thread transcript files under `~/.bad_apple/conversations/` (dir 0700, files 0600); the active thread is where new turns persist
 
 ### Feature roadmap status
 
@@ -177,8 +179,12 @@ The current build covers the following roadmap phases:
 `Bad Apple.app` lives in the macOS status bar. The first time it runs, a plain-English onboarding panel walks you through installing the small background helper. After that, right-click the apple icon for:
 
 - **Status...** — plain-English snapshot of brain, memory, P2P, and MCP
-- **Human Home...** — read-only window showing the human layer: NOW (due commitments), WAITING ON YOU, I'M HANDLING, REMEMBERING, LIFE THREADS, and HELD FOR LATER
-- **New Chat** — clears conversation history
+- **Conversations** — submenu listing open conversation threads with the active one checked, plus New Conversation...
+- **Human Home...** — read-only window showing the human layer: NOW (due commitments), WAITING ON YOU, I'M HANDLING, REMEMBERING, PEOPLE TO REMEMBER, CONVERSATIONS, LIFE THREADS, and HELD FOR LATER
+- **Relationship Setup...** — three-question first-relationship panel (name, communication style, one thing to help carry) that writes explicit preferences and a life thread
+- **New Chat** — clears conversation history for the active thread
+- **Stop Speaking** — Voice menu item (also ⌘⇧⎋) that cuts off the current spoken response and resumes listening
+- **Actionable notifications** — commitment-due banners carry Done / Snooze 1 Hour / Open Human Home buttons; approval banners carry Approve / Deny / Open Chat, and Approve requires macOS authentication (an unlocked session)
 - **Chat History** — opens the transcript window
 - **Voice Listening** — toggle always-on voice wake
 - **Roast Mode** — alias for the `drill` persona on the next voice query
@@ -192,6 +198,7 @@ Voice queries respect the selected persona and roast mode by passing `--persona 
 ### Voice / TTS
 
 - `--speak` streams each sentence to the local **native TTS server** (`badapple-tts`) and plays with `afplay`
+- `⌘⇧⎋` or the Voice → Stop Speaking menu item interrupts any in-flight speech immediately and returns the mic to listening
 - Voice can be changed via `BADAPPLE_TTS_VOICE` (default `en_US-amy-medium`)
 - `BADAPPLE_TTS_LENGTH_SCALE` and `BADAPPLE_TTS_VOLUME` control voice speed and volume
 - TTS server runs under `com.badapple.tts`

@@ -60,6 +60,20 @@ struct BadAppleHumanEvent: Codable, Equatable, Sendable {
     let requiresAction: Bool
     let voiceRequested: Bool
     let createdAt: Date
+    var referenceID: String?
+
+    init(id: String, kind: String, title: String, body: String, importance: Int, urgency: Int, requiresAction: Bool, voiceRequested: Bool, createdAt: Date, referenceID: String? = nil) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.importance = importance
+        self.urgency = urgency
+        self.requiresAction = requiresAction
+        self.voiceRequested = voiceRequested
+        self.createdAt = createdAt
+        self.referenceID = referenceID
+    }
 }
 
 struct BadAppleInteractionDecision: Codable, Equatable, Sendable {
@@ -71,6 +85,38 @@ struct BadAppleHumanInboxItem: Codable, Equatable, Sendable {
     let event: BadAppleHumanEvent
     let decision: BadAppleInteractionDecision
     var status: BadAppleHumanStatus
+    var availableAfter: Date?
+
+    init(event: BadAppleHumanEvent, decision: BadAppleInteractionDecision, status: BadAppleHumanStatus, availableAfter: Date? = nil) {
+        self.event = event
+        self.decision = decision
+        self.status = status
+        self.availableAfter = availableAfter
+    }
+}
+
+struct BadApplePerson: Codable, Equatable, Sendable {
+    let id: String
+    var name: String
+    var relationship: String
+    var notes: String
+    var lastContactAt: Date?
+    var nextContactAt: Date?
+    var status: BadAppleHumanStatus
+    let createdAt: Date
+    var updatedAt: Date
+    var lastNotifiedAt: Date?
+}
+
+struct BadAppleConversationThread: Codable, Equatable, Sendable {
+    let id: String
+    var title: String
+    var summary: String
+    let sessionID: String
+    var status: BadAppleHumanStatus
+    let createdAt: Date
+    var updatedAt: Date
+    var lastOpenedAt: Date
 }
 
 struct BadAppleHumanState: Codable, Equatable, Sendable {
@@ -80,6 +126,45 @@ struct BadAppleHumanState: Codable, Equatable, Sendable {
     var commitments: [BadAppleHumanCommitment]
     var threads: [BadAppleLifeThread]
     var inbox: [BadAppleHumanInboxItem]
+    var people: [BadApplePerson]
+    var conversationThreads: [BadAppleConversationThread]
+    var activeConversationThreadID: String?
+
+    init(
+        schemaVersion: Int,
+        attentionMode: BadAppleAttentionMode,
+        preferences: [BadAppleHumanPreference],
+        commitments: [BadAppleHumanCommitment],
+        threads: [BadAppleLifeThread],
+        inbox: [BadAppleHumanInboxItem],
+        people: [BadApplePerson],
+        conversationThreads: [BadAppleConversationThread],
+        activeConversationThreadID: String?
+    ) {
+        self.schemaVersion = schemaVersion
+        self.attentionMode = attentionMode
+        self.preferences = preferences
+        self.commitments = commitments
+        self.threads = threads
+        self.inbox = inbox
+        self.people = people
+        self.conversationThreads = conversationThreads
+        self.activeConversationThreadID = activeConversationThreadID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 2
+        schemaVersion = max(2, decodedVersion)
+        attentionMode = try container.decodeIfPresent(BadAppleAttentionMode.self, forKey: .attentionMode) ?? .available
+        preferences = try container.decodeIfPresent([BadAppleHumanPreference].self, forKey: .preferences) ?? []
+        commitments = try container.decodeIfPresent([BadAppleHumanCommitment].self, forKey: .commitments) ?? []
+        threads = try container.decodeIfPresent([BadAppleLifeThread].self, forKey: .threads) ?? []
+        inbox = try container.decodeIfPresent([BadAppleHumanInboxItem].self, forKey: .inbox) ?? []
+        people = try container.decodeIfPresent([BadApplePerson].self, forKey: .people) ?? []
+        conversationThreads = try container.decodeIfPresent([BadAppleConversationThread].self, forKey: .conversationThreads) ?? []
+        activeConversationThreadID = try container.decodeIfPresent(String.self, forKey: .activeConversationThreadID)
+    }
 }
 
 enum BadAppleHumanLayerError: LocalizedError {
@@ -102,11 +187,13 @@ enum BadAppleHumanLayerError: LocalizedError {
 final class BadAppleHumanLayer: @unchecked Sendable {
     static let shared = BadAppleHumanLayer()
 
-    static let schemaVersion = 1
+    static let schemaVersion = 2
     private static let maxPreferences = 500
     private static let maxCommitments = 1000
     private static let maxThreads = 500
     private static let maxInbox = 500
+    private static let maxPeople = 500
+    private static let maxConversationThreads = 200
     private static let renotifyInterval: TimeInterval = 24 * 3600
 
     private let lock = NSLock()
@@ -138,7 +225,10 @@ final class BadAppleHumanLayer: @unchecked Sendable {
             preferences: [],
             commitments: [],
             threads: [],
-            inbox: []
+            inbox: [],
+            people: [],
+            conversationThreads: [],
+            activeConversationThreadID: nil
         )
     }
 
@@ -478,11 +568,14 @@ final class BadAppleHumanLayer: @unchecked Sendable {
         }
     }
 
-    func claimHeldEvents(limit: Int = 20) throws -> [BadAppleHumanEvent] {
+    func claimHeldEvents(limit: Int = 20, now: Date = Date()) throws -> [BadAppleHumanEvent] {
         let capped = max(1, min(limit, 100))
         return try mutate { state in
             let indices = state.inbox.indices
-                .filter { state.inbox[$0].status == .waiting }
+                .filter {
+                    state.inbox[$0].status == .waiting
+                        && (state.inbox[$0].availableAfter ?? .distantPast) <= now
+                }
                 .sorted { state.inbox[$0].event.createdAt < state.inbox[$1].event.createdAt }
                 .prefix(capped)
             var events: [BadAppleHumanEvent] = []
@@ -492,6 +585,287 @@ final class BadAppleHumanLayer: @unchecked Sendable {
             }
             return events
         }
+    }
+
+    @discardableResult
+    func snoozeCommitment(id: String, until: Date) throws -> BadAppleHumanCommitment? {
+        let normalizedID = Self.normalize(id)
+        guard !normalizedID.isEmpty else { throw BadAppleHumanLayerError.emptyField("id") }
+        return try mutate { state in
+            guard let index = try Self.resolveCommitmentIndex(normalizedID, in: state) else {
+                return nil
+            }
+            state.commitments[index].dueAt = until
+            state.commitments[index].lastNotifiedAt = nil
+            state.commitments[index].status = .active
+            state.commitments[index].updatedAt = Date()
+            return state.commitments[index]
+        }
+    }
+
+    func snooze(event: BadAppleHumanEvent, until: Date, decision: BadAppleInteractionDecision) throws {
+        try mutate { state in
+            let item = BadAppleHumanInboxItem(
+                event: event, decision: decision, status: .waiting, availableAfter: until
+            )
+            if let index = state.inbox.firstIndex(where: { $0.event.id == event.id }) {
+                state.inbox[index] = item
+            } else {
+                state.inbox.append(item)
+            }
+            Self.trimInbox(&state.inbox)
+        }
+    }
+
+    @discardableResult
+    func rememberPerson(name: String, relationship: String, notes: String, nextContactAt: Date?) throws -> BadApplePerson {
+        let normalizedName = Self.normalize(name)
+        guard !normalizedName.isEmpty else { throw BadAppleHumanLayerError.emptyField("name") }
+        return try mutate { state in
+            let normalizedRelationship = Self.normalize(relationship)
+            let normalizedNotes = Self.normalize(notes)
+            if let index = state.people.firstIndex(where: {
+                $0.name.lowercased() == normalizedName.lowercased()
+            }) {
+                if !normalizedRelationship.isEmpty {
+                    state.people[index].relationship = normalizedRelationship
+                }
+                if !normalizedNotes.isEmpty {
+                    state.people[index].notes = normalizedNotes
+                }
+                if let nextContactAt {
+                    state.people[index].nextContactAt = nextContactAt
+                }
+                if !Self.isOpen(state.people[index].status) {
+                    state.people[index].status = .active
+                }
+                state.people[index].updatedAt = Date()
+                return state.people[index]
+            }
+            let person = BadApplePerson(
+                id: Self.newID(),
+                name: normalizedName,
+                relationship: normalizedRelationship,
+                notes: normalizedNotes,
+                lastContactAt: nil,
+                nextContactAt: nextContactAt,
+                status: .active,
+                createdAt: Date(),
+                updatedAt: Date(),
+                lastNotifiedAt: nil
+            )
+            state.people.append(person)
+            Self.trimPeople(&state.people)
+            return person
+        }
+    }
+
+    @discardableResult
+    func recordContact(idOrName: String, notes: String, nextContactAt: Date?, at: Date = Date()) throws -> BadApplePerson? {
+        let normalized = Self.normalize(idOrName)
+        guard !normalized.isEmpty else { throw BadAppleHumanLayerError.emptyField("person") }
+        return try mutate { state in
+            guard let index = try Self.resolvePersonIndex(normalized, in: state) else {
+                return nil
+            }
+            state.people[index].lastContactAt = at
+            let normalizedNotes = Self.normalize(notes)
+            if !normalizedNotes.isEmpty {
+                state.people[index].notes = normalizedNotes
+            }
+            if let nextContactAt {
+                state.people[index].nextContactAt = nextContactAt
+            }
+            state.people[index].lastNotifiedAt = nil
+            state.people[index].updatedAt = at
+            return state.people[index]
+        }
+    }
+
+    @discardableResult
+    func forgetPerson(idOrName: String) throws -> Bool {
+        let normalized = Self.normalize(idOrName)
+        guard !normalized.isEmpty else { throw BadAppleHumanLayerError.emptyField("person") }
+        return try mutate { state in
+            guard let index = try Self.resolvePersonIndex(normalized, in: state) else {
+                return false
+            }
+            state.people.remove(at: index)
+            return true
+        }
+    }
+
+    func claimDuePeople(now: Date = Date()) throws -> [BadApplePerson] {
+        try mutate { state in
+            var claimed: [BadApplePerson] = []
+            for index in state.people.indices {
+                let person = state.people[index]
+                guard person.status == .active || person.status == .waiting,
+                      let nextContactAt = person.nextContactAt, nextContactAt <= now
+                else { continue }
+                if let last = person.lastNotifiedAt,
+                   now.timeIntervalSince(last) < Self.renotifyInterval {
+                    continue
+                }
+                state.people[index].lastNotifiedAt = now
+                state.people[index].updatedAt = now
+                claimed.append(state.people[index])
+            }
+            return claimed
+        }
+    }
+
+    private static func resolvePersonIndex(_ key: String, in state: BadAppleHumanState) throws -> Int? {
+        if let exact = state.people.firstIndex(where: { $0.id == key }) {
+            return exact
+        }
+        if let byName = state.people.firstIndex(where: { $0.name.lowercased() == key.lowercased() }) {
+            return byName
+        }
+        let matches = state.people.indices.filter { state.people[$0].id.hasPrefix(key) }
+        if matches.count > 1 { throw BadAppleHumanLayerError.ambiguousID(key) }
+        return matches.first
+    }
+
+    @discardableResult
+    func ensureDefaultConversationThread() throws -> BadAppleConversationThread {
+        try mutate { state in
+            Self.ensureDefaultThreadLocked(&state)
+        }
+    }
+
+    func activeConversationThread() throws -> BadAppleConversationThread {
+        try mutate { state in
+            if let activeID = state.activeConversationThreadID,
+               let index = state.conversationThreads.firstIndex(where: {
+                   $0.id == activeID && Self.isOpen($0.status)
+               }) {
+                return state.conversationThreads[index]
+            }
+            return Self.ensureDefaultThreadLocked(&state)
+        }
+    }
+
+    @discardableResult
+    func createConversationThread(title: String, summary: String = "") throws -> BadAppleConversationThread {
+        let normalizedTitle = Self.normalize(title)
+        guard !normalizedTitle.isEmpty else { throw BadAppleHumanLayerError.emptyField("title") }
+        return try mutate { state in
+            let now = Date()
+            let thread = BadAppleConversationThread(
+                id: Self.newID(),
+                title: normalizedTitle,
+                summary: Self.normalize(summary),
+                sessionID: "thread-\(UUID().uuidString.lowercased())",
+                status: .active,
+                createdAt: now,
+                updatedAt: now,
+                lastOpenedAt: now
+            )
+            state.conversationThreads.append(thread)
+            state.activeConversationThreadID = thread.id
+            Self.trimConversationThreads(&state.conversationThreads)
+            return thread
+        }
+    }
+
+    @discardableResult
+    func switchConversationThread(idOrTitle: String) throws -> BadAppleConversationThread? {
+        let normalized = Self.normalize(idOrTitle)
+        guard !normalized.isEmpty else { throw BadAppleHumanLayerError.emptyField("thread") }
+        return try mutate { state in
+            guard let index = try Self.resolveThreadIndex(normalized, in: state),
+                  Self.isOpen(state.conversationThreads[index].status) else {
+                return nil
+            }
+            let now = Date()
+            state.conversationThreads[index].lastOpenedAt = now
+            state.conversationThreads[index].updatedAt = now
+            state.activeConversationThreadID = state.conversationThreads[index].id
+            return state.conversationThreads[index]
+        }
+    }
+
+    @discardableResult
+    func closeConversationThread(idOrTitle: String) throws -> BadAppleConversationThread? {
+        let normalized = Self.normalize(idOrTitle)
+        guard !normalized.isEmpty else { throw BadAppleHumanLayerError.emptyField("thread") }
+        return try mutate { state in
+            guard let index = try Self.resolveThreadIndex(normalized, in: state) else {
+                return nil
+            }
+            let now = Date()
+            state.conversationThreads[index].status = .completed
+            state.conversationThreads[index].updatedAt = now
+            let closed = state.conversationThreads[index]
+            if state.activeConversationThreadID == closed.id {
+                if let fallback = state.conversationThreads.indices
+                    .filter({ Self.isOpen(state.conversationThreads[$0].status) })
+                    .max(by: {
+                        state.conversationThreads[$0].lastOpenedAt < state.conversationThreads[$1].lastOpenedAt
+                    }) {
+                    state.activeConversationThreadID = state.conversationThreads[fallback].id
+                } else {
+                    _ = Self.ensureDefaultThreadLocked(&state)
+                }
+            }
+            return closed
+        }
+    }
+
+    func listConversationThreads() throws -> [BadAppleConversationThread] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try withReadLock {
+            loadStateUnlocked().conversationThreads
+                .filter { Self.isOpen($0.status) }
+                .sorted { $0.lastOpenedAt > $1.lastOpenedAt }
+        }
+    }
+
+    private static func resolveThreadIndex(_ key: String, in state: BadAppleHumanState) throws -> Int? {
+        if let exact = state.conversationThreads.firstIndex(where: { $0.id == key }) {
+            return exact
+        }
+        if let byTitle = state.conversationThreads.firstIndex(where: {
+            $0.title.lowercased() == key.lowercased()
+        }) {
+            return byTitle
+        }
+        let matches = state.conversationThreads.indices.filter {
+            state.conversationThreads[$0].id.hasPrefix(key)
+        }
+        if matches.count > 1 { throw BadAppleHumanLayerError.ambiguousID(key) }
+        return matches.first
+    }
+
+    private static func ensureDefaultThreadLocked(_ state: inout BadAppleHumanState) -> BadAppleConversationThread {
+        if let index = state.conversationThreads.firstIndex(where: { $0.sessionID == "default" }) {
+            let thread = state.conversationThreads[index]
+            if state.activeConversationThreadID != thread.id || !isOpen(thread.status) {
+                let now = Date()
+                state.conversationThreads[index].status = .active
+                state.conversationThreads[index].updatedAt = now
+                state.conversationThreads[index].lastOpenedAt = now
+                state.activeConversationThreadID = thread.id
+            }
+            return state.conversationThreads[index]
+        }
+        let now = Date()
+        let thread = BadAppleConversationThread(
+            id: newID(),
+            title: "General",
+            summary: "",
+            sessionID: "default",
+            status: .active,
+            createdAt: now,
+            updatedAt: now,
+            lastOpenedAt: now
+        )
+        state.conversationThreads.append(thread)
+        state.activeConversationThreadID = thread.id
+        trimConversationThreads(&state.conversationThreads)
+        return thread
     }
 
     static func formatDate(_ date: Date) -> String {
@@ -570,6 +944,37 @@ final class BadAppleHumanLayer: @unchecked Sendable {
             sections.append(lines.joined(separator: "\n"))
         }
 
+        let openPeople = state.people.filter { Self.isOpen($0.status) }
+        if !openPeople.isEmpty {
+            var lines = ["PEOPLE TO REMEMBER"]
+            for person in openPeople.sorted(by: { $0.name < $1.name }) {
+                var line = "- \(Self.shortID(person.id)) \(person.name)"
+                if !person.relationship.isEmpty {
+                    line += " (\(person.relationship))"
+                }
+                if let lastContactAt = person.lastContactAt {
+                    line += " — last contact \(Self.formatDate(lastContactAt))"
+                }
+                if let nextContactAt = person.nextContactAt {
+                    line += " — next \(Self.formatDate(nextContactAt))"
+                }
+                lines.append(line)
+            }
+            sections.append(lines.joined(separator: "\n"))
+        }
+
+        let openConversations = state.conversationThreads
+            .filter { Self.isOpen($0.status) }
+            .sorted { $0.lastOpenedAt > $1.lastOpenedAt }
+        if !openConversations.isEmpty {
+            var lines = ["CONVERSATIONS"]
+            for thread in openConversations {
+                let marker = thread.id == state.activeConversationThreadID ? "*" : "-"
+                lines.append("\(marker) \(Self.shortID(thread.id)) \(thread.title)")
+            }
+            sections.append(lines.joined(separator: "\n"))
+        }
+
         let openThreads = state.threads.filter { Self.isOpen($0.status) }
         if !openThreads.isEmpty {
             var lines = ["LIFE THREADS"]
@@ -605,12 +1010,18 @@ final class BadAppleHumanLayer: @unchecked Sendable {
         let state = snapshot()
         let openCommitments = state.commitments.filter { Self.isOpen($0.status) }
         let openThreads = state.threads.filter { Self.isOpen($0.status) }
+        let openPeople = state.people.filter { Self.isOpen($0.status) }
         let held = state.inbox.filter { $0.status == .waiting }
+        let activeConversation = state.activeConversationThreadID.flatMap { activeID in
+            state.conversationThreads.first { $0.id == activeID && Self.isOpen($0.status) }
+        }
         let meaningful = state.attentionMode != .available
             || !state.preferences.isEmpty
             || !openCommitments.isEmpty
             || !openThreads.isEmpty
+            || !openPeople.isEmpty
             || !held.isEmpty
+            || activeConversation != nil
         guard meaningful else { return "" }
 
         var lines: [String] = ["attention_mode: \(state.attentionMode.rawValue)"]
@@ -629,6 +1040,26 @@ final class BadAppleHumanLayer: @unchecked Sendable {
                 }
                 lines.append(line)
             }
+        }
+        if !openPeople.isEmpty {
+            lines.append("people:")
+            for person in openPeople.sorted(by: { $0.name < $1.name }) {
+                var line = "- \(person.name)"
+                if !person.relationship.isEmpty {
+                    line += " (\(person.relationship))"
+                }
+                if let nextContactAt = person.nextContactAt {
+                    line += " next contact \(Self.formatDate(nextContactAt))"
+                }
+                lines.append(line)
+            }
+        }
+        if let activeConversation {
+            var line = "conversation_thread: \(activeConversation.title)"
+            if !activeConversation.summary.isEmpty {
+                line += " — \(activeConversation.summary)"
+            }
+            lines.append(line)
         }
         if !openThreads.isEmpty {
             lines.append("life_threads:")
@@ -670,7 +1101,10 @@ final class BadAppleHumanLayer: @unchecked Sendable {
                 return calendar.startOfDay(for: day)
             }
             if lower.hasPrefix(word + " ") {
-                let timeText = String(lower.dropFirst(word.count)).trimmingCharacters(in: .whitespaces)
+                var timeText = String(lower.dropFirst(word.count)).trimmingCharacters(in: .whitespaces)
+                if timeText.hasPrefix("at ") {
+                    timeText = String(timeText.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                }
                 guard let day = calendar.date(byAdding: .day, value: offset, to: now),
                       let (hour, minute) = parseTimeComponent(timeText)
                 else { return nil }
@@ -812,6 +1246,38 @@ final class BadAppleHumanLayer: @unchecked Sendable {
                 list.remove(at: index)
             } else if let index = list.indices.min(by: {
                 list[$0].event.createdAt < list[$1].event.createdAt
+            }) {
+                list.remove(at: index)
+            } else {
+                break
+            }
+        }
+    }
+
+    private static func trimPeople(_ list: inout [BadApplePerson]) {
+        while list.count > maxPeople {
+            if let index = list.indices
+                .filter({ isTerminal(list[$0].status) })
+                .min(by: { list[$0].updatedAt < list[$1].updatedAt }) {
+                list.remove(at: index)
+            } else if let index = list.indices.min(by: {
+                list[$0].createdAt < list[$1].createdAt
+            }) {
+                list.remove(at: index)
+            } else {
+                break
+            }
+        }
+    }
+
+    private static func trimConversationThreads(_ list: inout [BadAppleConversationThread]) {
+        while list.count > maxConversationThreads {
+            if let index = list.indices
+                .filter({ isTerminal(list[$0].status) })
+                .min(by: { list[$0].updatedAt < list[$1].updatedAt }) {
+                list.remove(at: index)
+            } else if let index = list.indices.min(by: {
+                list[$0].createdAt < list[$1].createdAt
             }) {
                 list.remove(at: index)
             } else {

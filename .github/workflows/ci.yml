@@ -72,6 +72,13 @@ jobs:
             tests/test_badapple_human_layer.swift \
             -o /tmp/badapple-human-layer-tests
           /tmp/badapple-human-layer-tests
+      - name: Swift conversation tests
+        run: |
+          xcrun swiftc -O \
+            src/platform/apple_desktop/BadAppleConversation.swift \
+            tests/test_badapple_conversation.swift \
+            -o /tmp/badapple-conversation-tests
+          /tmp/badapple-conversation-tests
       - name: Swift native runtime tests
         run: |
           xcrun swiftc -swift-version 5 \
