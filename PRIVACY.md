@@ -33,7 +33,7 @@ The default configuration is strictly local.
 
 ## Telemetry
 
-The `PILOT_EVALUATION_METRICS.md` report and `metrics.jsonl` files are written to disk in the runtime directory. They are not transmitted anywhere. The live dashboard at `http://127.0.0.1:8080` is served only on localhost.
+The `PILOT_EVALUATION_METRICS.md` report and `metrics.jsonl` files are written to disk in the runtime directory. They are not transmitted anywhere. The live dashboard at `http://127.0.0.1:8787` is served only on localhost.
 
 ## Data retention
 

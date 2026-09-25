@@ -2,6 +2,107 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Prompt-prefix KV cache**: the stable persona/identity head of the
+  system prompt is evaluated once and its KV cache reused every turn.
+  Token-exact boundary verification (sentinel probed inside the system
+  message so the boundary is history-agnostic), keyed by `modelId +
+  head`, fails closed to plain prefill on any mismatch. Wired into both
+  the streaming and speculative paths — the draft model keeps its own
+  warmed cache. `BADAPPLE_PREFIX_CACHE=0` disables. Measured ~47% lower
+  wall time per short query (median 9.5 s vs 17.9 s); decode tok/s
+  unchanged — the win is skipped prefill.
+- **Speculative decoding armed by default**: `com.badapple.mlx.plist`
+  now sets `BADAPPLE_SPECULATIVE_DRAFT` to the cached
+  `mlx-community/Qwen2.5-0.5B-Instruct-4bit` draft. The draft
+  `ModelContext` is held resident across queries instead of reloading
+  per call. `BADAPPLE_NUM_DRAFT_TOKENS` (default 2) tunes proposals.
+  Note: `draft_accept_pct` in `--json` metrics only populates for
+  internal MTP heads — it reads 0.0 for external draft models.
+- **Vigilance organs**: condition watchers (`watch_for` /
+  `list_watchers` / `cancel_watch` over file_exists, file_changed,
+  process_running, process_gone, text_present, mail_from — persistent,
+  optionally firing an `act` goal), standing orders and timed tasks via
+  the scheduler, calendar lookahead, and the sentinel perimeter organ
+  (persistence-surface and network-listener diffing with evidence
+  trails: `threat_scan`, `trace_threat`, `sentinel_status`).
+- **Senses**: opt-in ambient ears (on-device `SFSpeechRecognizer` window
+  capture), screen ocular, clipboard recall, and bounded meeting
+  capture/transcription. `BadAppleASR.swift` is the swappable ASR
+  backend seam — Apple speech is live, MLX whisper is the upgrade path.
+- **Aqua bridge**: local mail, calendar, reminders, and messages tools
+  through the native helper, under policy.
+- **Agent replanning**: a failed agent step replans around the obstacle
+  instead of aborting the goal.
+- **Native task board**: `⌘T` in the menu bar shows live task/step
+  state; tool calls render as activity cards in chat.
+- `personal_agi_proof.sh` — end-to-end organ battery (senses, council,
+  dream, vigilance, receipts).
+- `prefix_cache` field plumbed through daemon metrics → gatekeeper →
+  CLI (`off`/`miss`/`warm`/`hit`).
+
+### Fixed
+- `badapple-lora` helper was missing the
+  `@executable_path/../Frameworks` rpath and could not load
+  `libBadAppleBridge.dylib` — nightly dream cycles were silently
+  `dream_rejected`. The organ proof battery caught it.
+
+## [0.4.2] — 2026-09-23
+
+### Added
+- **Dream pass**: nightly weight-level LoRA learning — the daily
+  consolidation curates query/response exchanges into a dream
+  candidate, trains a bounded LoRA adapter, and adopts it behind an
+  eval gate (held-out loss must not regress) plus a council vote.
+  Previous weights kept as `dream-prev` for instant rollback.
+- Native LoRA training/generation tools (`badapple-lora`).
+- Personal AGI identity update; capabilities answer now surfaces
+  dream/LoRA when asked what she can do.
+
+## [0.4.1] — 2026-09-20
+
+### Added
+- Mesh-brain in her own words — ask "is the mesh up", run the full
+  self-demo with `badapple demo full`.
+
+### Fixed
+- Self-audit polarity bug.
+
+## [0.4.0] — 2026-09-20
+
+### Added
+- **Mesh-brain**: pipeline-parallel inference across trusted peers —
+  layer-range shards, AES-256-GCM activation frames over mutual-HMAC
+  links, model catalog to 671B (512 GB Studio ceiling), mesh-brain cert
+  coverage, sovereign checkpoint attestation, org-signed policy,
+  walkthrough demo (`badapple demo`).
+
+## [0.3.2] — 2026-09-20
+
+### Added
+- **Spoken commands reference**: "what commands can I say", "how do I
+  control you", "voice commands" recite the real phrases in plain
+  language — kill switch, resume, private mode, cert suite, council,
+  personas, teach, approve/deny — grouped by intent, with the live
+  persona list.
+- Self-audit triggers widened ("run the cert suite", "audit yourself",
+  "air gap audit" and friends now hit the live audit path).
+
+### Fixed
+- Audit reporting: a failed cert check no longer reports "unknown / 0
+  checks" — the audit tool parses real results even on non-zero exit.
+
+## [0.3.1] — 2026-09-20
+
+### Changed
+- Capability descriptions rewritten in plain first-person language —
+  the "what can you do" answer, the model's own recitation, the voice
+  persona path, and the Control Center capabilities list. Autopilot is
+  explained as a leash with a council vote that never turns off. No
+  functional changes.
+
 ## [0.3.0] — 2026-09-19
 
 ### Added

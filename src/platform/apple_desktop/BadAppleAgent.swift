@@ -183,6 +183,13 @@ public actor BadAppleAgent {
         _ purpose: String
     ) async throws -> String
 
+    /// Called when a failed step triggers a replan — (taskID, failure
+    /// summary). Optional; the engine uses it for ledger + notification.
+    public typealias ReplanReporter = @Sendable (
+        _ taskID: String,
+        _ failure: String
+    ) -> Void
+
     public static let minimumStepCount = 1
     public static let maximumStepCount = 50
 
@@ -195,6 +202,7 @@ public actor BadAppleAgent {
     private let planner: Planner
     private let generator: Generator
     private let executor: ToolExecutor
+    private let replanReporter: ReplanReporter?
     private let fileManager: FileManager
     private var tasks: [String: BadAppleAgentTask]
     private var runningTasks: [String: RunningTask] = [:]
@@ -205,7 +213,8 @@ public actor BadAppleAgent {
             .appendingPathComponent("agent_tasks", isDirectory: true),
         planner: @escaping Planner,
         generator: @escaping Generator,
-        executor: @escaping ToolExecutor
+        executor: @escaping ToolExecutor,
+        replanReporter: ReplanReporter? = nil
     ) throws {
         let fileManager = FileManager.default
         do {
@@ -222,6 +231,7 @@ public actor BadAppleAgent {
         self.planner = planner
         self.generator = generator
         self.executor = executor
+        self.replanReporter = replanReporter
         self.fileManager = fileManager
     }
 
@@ -345,6 +355,7 @@ public actor BadAppleAgent {
                 try persist(current)
             }
 
+            var replans = 0
             while canContinue(taskID: taskID) {
                 guard let current = tasks[taskID] else { return }
                 let index = current.steps.count
@@ -408,6 +419,33 @@ public actor BadAppleAgent {
                     updated.error = recordedResult
                 }
                 tasks[taskID] = updated
+
+                // Replanning: a failed step invalidates the plan tail. Feed the
+                // goal, completed work, and the failure back through the
+                // planner and splice in replacement steps — budgeted so a
+                // looping failure still ends in `fail`, never a spin.
+                if !interrupted,
+                   Self.isFailureResult(recordedResult),
+                   replans < Self.maxReplansPerTask {
+                    let replanGoal = """
+                    The previous plan hit a failure — produce replacement steps for the remaining work.
+                    Original goal: \(current.goal)
+                    Completed steps: \(updated.steps.map { $0.instruction }.joined(separator: " | "))
+                    Failed step: \(current.plan[index].instruction)
+                    Failure: \(recordedResult.prefix(300))
+                    Original remaining plan: \(updated.plan[(index + 1)...].map { $0.instruction }.joined(separator: " | "))
+                    Route around the failure. If the goal is genuinely impossible, output a single step that records the blocker so the task can finish honestly.
+                    """
+                    if let tail = try? await planner(replanGoal, current.maxSteps - index - 1),
+                       !tail.isEmpty {
+                        updated.plan = Array(updated.plan.prefix(index + 1)) + tail
+                        updated.updatedAt = Date()
+                        tasks[taskID] = updated
+                        replans += 1
+                        replanReporter?(taskID, String(recordedResult.prefix(300)))
+                    }
+                }
+
                 try persist(updated)
                 if interrupted { return }
             }
@@ -520,5 +558,21 @@ public actor BadAppleAgent {
             || normalized.contains("approval required")
             || normalized.contains("needs your approval")
             || normalized.contains("requires approval")
+    }
+
+    /// How many times a task may regenerate its remaining plan. Bounded so a
+    /// looping failure still terminates in `fail` rather than spinning.
+    private static let maxReplansPerTask = 2
+
+    /// Whether a tool result is a step failure worth replanning around.
+    /// Deliberately narrow — content that merely mentions errors inside a
+    /// larger result doesn't count, and approval/policy responses are handled
+    /// earlier as pauses, never as replan triggers.
+    private static func isFailureResult(_ result: String) -> Bool {
+        let normalized = result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.hasPrefix("error")
+            || normalized.hasPrefix("failed")
+            || normalized.hasPrefix("unknown tool")
+            || normalized.hasPrefix("policy denied")
     }
 }

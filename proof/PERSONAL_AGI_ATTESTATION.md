@@ -1,15 +1,15 @@
 # Personal AGI Organism — Attestation
 
 **Machine:** adam’s MacBook Air  
-**Time:** 2026-09-22T22:45:05Z (UTC)  
+**Time:** 2026-09-25T00:34:58Z (UTC)  
 **Bad Apple version:** v0.4.1  
 **Claim:** This machine has been exercised as a complete personal AGI organism — perception, memory, deliberation, action, governance, learning, audit, and sovereignty — and produced cryptographic receipts for every stage.
 
 ## Score
-- PASS: 22
-- FAIL: 0
-- OPTIONAL: 0
-- Verdict: **VERIFIED**
+- PASS: 45
+- FAIL: 1
+- OPTIONAL: 1
+- Verdict: **PARTIAL — review failures above**
 
 ## What was proven
 1. **Awake:** the native Apple-Silicon daemon is running with Secure Enclave identity.
@@ -23,6 +23,11 @@
 9. **Audit:** the air-gap certification suite passed.
 10. **Sovereignty:** a sovereign ledger checkpoint was signed.
 11. **Continuity:** the organism has a hash-chained history spanning days.
+12. **Vigilance:** standing orders schedule recurring work, watchers hold open
+    conditions and fire ledgered events, the sentinel scans for drift and
+    traces threats to source, a failed agent step triggers a bounded replan,
+    and the ASR seam reports its active backend (whisper when a runner is
+    installed, Apple on-device speech otherwise).
 
 ## How to verify on this machine
 ```

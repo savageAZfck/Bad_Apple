@@ -59,6 +59,12 @@ pub struct Metrics {
     /// (gatekeeper resolved locally), or "unknown".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Prompt-prefix KV cache status: "hit", "warm", or "off".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache: Option<String>,
+    /// Whether the daemon's speculative-draft path is armed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

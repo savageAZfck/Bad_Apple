@@ -4,6 +4,7 @@
 // /var/run/badapple/aqua_helper.sock, and performs user-session actions such as
 // Shortcuts, screen capture, UI automation, and AppleScript.
 
+import EventKit
 import Foundation
 import CommonCrypto
 import Dispatch
@@ -344,6 +345,48 @@ final class AquaHelper {
             return uiType(target: req["target"] as? String ?? "", text: req["text"] as? String ?? "")
         case "ui_focus":
             return uiFocus(target: req["target"] as? String ?? "")
+        case "calendar_events":
+            let days = req["days_ahead"] as? Int ?? 7
+            return calendarEvents(daysAhead: days)
+        case "calendar_create":
+            return calendarCreate(
+                title: req["title"] as? String ?? "",
+                start: req["start"] as? String ?? "",
+                end: req["end"] as? String ?? "",
+                notes: req["notes"] as? String ?? ""
+            )
+        case "reminders_list":
+            return remindersList()
+        case "reminder_create":
+            return reminderCreate(
+                title: req["title"] as? String ?? "",
+                due: req["due"] as? String ?? "",
+                notes: req["notes"] as? String ?? ""
+            )
+        case "reminder_complete":
+            return reminderComplete(title: req["title"] as? String ?? "")
+        case "mail_read":
+            let limit = req["limit"] as? Int ?? 10
+            return mailRead(limit: limit)
+        case "mail_draft":
+            return mailWrite(
+                to: req["to"] as? String ?? "",
+                subject: req["subject"] as? String ?? "",
+                body: req["body"] as? String ?? "",
+                send: false
+            )
+        case "mail_send":
+            return mailWrite(
+                to: req["to"] as? String ?? "",
+                subject: req["subject"] as? String ?? "",
+                body: req["body"] as? String ?? "",
+                send: true
+            )
+        case "message_send":
+            return messageSend(
+                to: req["to"] as? String ?? "",
+                text: req["text"] as? String ?? ""
+            )
         default:
             return ["ok": false, "error": "unknown command '\(command)'"]
         }
@@ -810,4 +853,288 @@ private func runProcess(
     let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
     let stderr = String(data: stderrData, encoding: .utf8) ?? ""
     return (stdout, stderr, Int(process.terminationStatus))
+}
+
+// MARK: - Calendar, reminders, and comms
+//
+// These run inside the app process so EventKit and Automation consent
+// resolve against the app's TCC identity — the daemon reaches them through
+// the authenticated aqua socket instead of holding grants itself. Argument
+// strings are passed to osascript via argv, never interpolated into source.
+
+private func requestEventKitAccess(reminders: Bool) -> (store: EKEventStore?, error: String?) {
+    let store = EKEventStore()
+    let sem = DispatchSemaphore(value: 0)
+    var granted = false
+    var accessError: Error?
+    if reminders {
+        store.requestFullAccessToReminders { ok, err in
+            granted = ok
+            accessError = err
+            sem.signal()
+        }
+    } else {
+        store.requestFullAccessToEvents { ok, err in
+            granted = ok
+            accessError = err
+            sem.signal()
+        }
+    }
+    if sem.wait(timeout: .now() + 60) == .timedOut {
+        return (nil, "timed out waiting for access")
+    }
+    if let accessError { return (nil, accessError.localizedDescription) }
+    if !granted {
+        let kind = reminders ? "Reminders" : "Calendar"
+        return (nil, "\(kind) access not granted — approve it in System Settings > Privacy & Security")
+    }
+    return (store, nil)
+}
+
+private let dayStamp: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm"
+    return f
+}()
+
+private func parseDateTime(_ text: String) -> Date? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return nil }
+    let iso = ISO8601DateFormatter()
+    if let d = iso.date(from: trimmed) { return d }
+    let formats = ["yyyy-MM-dd HH:mm", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd"]
+    for fmt in formats {
+        let f = DateFormatter()
+        f.dateFormat = fmt
+        if let d = f.date(from: trimmed) { return d }
+    }
+    return BadAppleHumanLayer.parseDueDate(trimmed)
+}
+
+private func calendarEvents(daysAhead: Int) -> [String: Any] {
+    let (store, error) = requestEventKitAccess(reminders: false)
+    guard let store else { return ["ok": false, "error": error ?? "calendar unavailable"] }
+    let days = min(max(daysAhead, 1), 90)
+    let start = Date()
+    guard let end = Calendar.current.date(byAdding: .day, value: days, to: start) else {
+        return ["ok": false, "error": "bad date range"]
+    }
+    let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
+    let events = store.events(matching: predicate).prefix(50)
+    let rows = events.map { ev -> String in
+        var line = "\(dayStamp.string(from: ev.startDate)) | \(ev.title ?? "(untitled)") | \(ev.calendar.title)"
+        if let loc = ev.location, !loc.isEmpty { line += " | \(loc)" }
+        return line
+    }
+    return ["ok": true, "events": rows]
+}
+
+private func calendarCreate(title: String, start: String, end: String, notes: String) -> [String: Any] {
+    let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !cleanTitle.isEmpty, cleanTitle.count <= 500 else {
+        return ["ok": false, "error": "title required (max 500 chars)"]
+    }
+    guard let startDate = parseDateTime(start) else {
+        return ["ok": false, "error": "could not parse start '\(start)'"]
+    }
+    let endDate = parseDateTime(end) ?? startDate.addingTimeInterval(3600)
+    let (store, error) = requestEventKitAccess(reminders: false)
+    guard let store else { return ["ok": false, "error": error ?? "calendar unavailable"] }
+    let event = EKEvent(eventStore: store)
+    event.title = cleanTitle
+    event.startDate = startDate
+    event.endDate = max(endDate, startDate.addingTimeInterval(60))
+    event.calendar = store.defaultCalendarForNewEvents
+    if !notes.isEmpty { event.notes = String(notes.prefix(2000)) }
+    do {
+        try store.save(event, span: .thisEvent)
+        return ["ok": true, "result": "Created '\(cleanTitle)' on \(dayStamp.string(from: startDate))"]
+    } catch {
+        return ["ok": false, "error": error.localizedDescription]
+    }
+}
+
+private func reminderDate(_ text: String) -> DateComponents? {
+    guard let date = parseDateTime(text) else { return nil }
+    return Calendar.current.dateComponents(
+        [.year, .month, .day, .hour, .minute], from: date
+    )
+}
+
+private func remindersList() -> [String: Any] {
+    let (store, error) = requestEventKitAccess(reminders: true)
+    guard let store else { return ["ok": false, "error": error ?? "reminders unavailable"] }
+    let predicate = store.predicateForReminders(in: nil)
+    let sem = DispatchSemaphore(value: 0)
+    var found: [EKReminder] = []
+    store.fetchReminders(matching: predicate) { reminders in
+        found = reminders ?? []
+        sem.signal()
+    }
+    if sem.wait(timeout: .now() + 30) == .timedOut {
+        return ["ok": false, "error": "timed out reading reminders"]
+    }
+    let open = found.filter { !$0.isCompleted }.prefix(50)
+    let rows = open.map { r -> String in
+        var line = r.title ?? "(untitled)"
+        if let due = r.dueDateComponents?.date {
+            line += " — due \(dayStamp.string(from: due))"
+        }
+        return line
+    }
+    return ["ok": true, "reminders": rows]
+}
+
+private func reminderCreate(title: String, due: String, notes: String) -> [String: Any] {
+    let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !cleanTitle.isEmpty, cleanTitle.count <= 500 else {
+        return ["ok": false, "error": "title required (max 500 chars)"]
+    }
+    let (store, error) = requestEventKitAccess(reminders: true)
+    guard let store else { return ["ok": false, "error": error ?? "reminders unavailable"] }
+    let reminder = EKReminder(eventStore: store)
+    reminder.title = cleanTitle
+    reminder.calendar = store.defaultCalendarForNewReminders()
+    if let dueComponents = reminderDate(due) {
+        reminder.dueDateComponents = dueComponents
+        reminder.addAlarm(EKAlarm(absoluteDate: dueComponents.date ?? Date()))
+    }
+    if !notes.isEmpty { reminder.notes = String(notes.prefix(2000)) }
+    do {
+        try store.save(reminder, commit: true)
+        var reply = "Reminder created: \(cleanTitle)"
+        if let due = reminder.dueDateComponents?.date {
+            reply += " — due \(dayStamp.string(from: due))"
+        }
+        return ["ok": true, "result": reply]
+    } catch {
+        return ["ok": false, "error": error.localizedDescription]
+    }
+}
+
+private func reminderComplete(title: String) -> [String: Any] {
+    let needle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !needle.isEmpty else { return ["ok": false, "error": "title required"] }
+    let (store, error) = requestEventKitAccess(reminders: true)
+    guard let store else { return ["ok": false, "error": error ?? "reminders unavailable"] }
+    let predicate = store.predicateForReminders(in: nil)
+    let sem = DispatchSemaphore(value: 0)
+    var found: [EKReminder] = []
+    store.fetchReminders(matching: predicate) { reminders in
+        found = reminders ?? []
+        sem.signal()
+    }
+    if sem.wait(timeout: .now() + 30) == .timedOut {
+        return ["ok": false, "error": "timed out reading reminders"]
+    }
+    guard let match = found.first(where: {
+        !$0.isCompleted && ($0.title ?? "").localizedCaseInsensitiveContains(needle)
+    }) else {
+        return ["ok": false, "error": "no open reminder matching '\(needle)'"]
+    }
+    match.isCompleted = true
+    do {
+        try store.save(match, commit: true)
+        return ["ok": true, "result": "Completed: \(match.title ?? needle)"]
+    } catch {
+        return ["ok": false, "error": error.localizedDescription]
+    }
+}
+
+private func osascriptArgv(_ script: String, args: [String], timeout: TimeInterval) -> [String: Any] {
+    let result = runProcess(
+        launchPath: "/usr/bin/osascript",
+        arguments: ["-e", script] + args,
+        timeout: timeout
+    )
+    if result.exitCode != 0 {
+        let error = (result.stderr.isEmpty ? result.stdout : result.stderr)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return ["ok": false, "error": error.isEmpty ? "osascript failed" : error]
+    }
+    return ["ok": true, "output": result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)]
+}
+
+private func mailRead(limit: Int) -> [String: Any] {
+    let n = min(max(limit, 1), 50)
+    let script = """
+    on run argv
+      set maxCount to (item 1 of argv) as integer
+      set out to ""
+      tell application "Mail"
+        set msgs to messages of inbox
+        set total to count of msgs
+        set shown to maxCount
+        if total < shown then set shown to total
+        repeat with i from total to (total - shown + 1) by -1
+          set m to item i of msgs
+          try
+            set out to out & (date received of m as string) & " | " & (sender of m) & " | " & (subject of m) & linefeed
+          end try
+        end repeat
+      end tell
+      return out
+    end run
+    """
+    let res = osascriptArgv(script, args: [String(n)], timeout: 30)
+    if (res["ok"] as? Bool) == true {
+        let out = (res["output"] as? String) ?? ""
+        return ["ok": true, "output": out.isEmpty ? "inbox is empty" : out]
+    }
+    return res
+}
+
+private func mailWrite(to: String, subject: String, body: String, send: Bool) -> [String: Any] {
+    let addr = to.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !addr.isEmpty, addr.count <= 320, !addr.contains("\n") else {
+        return ["ok": false, "error": "a valid 'to' address is required"]
+    }
+    guard subject.count <= 500, body.count <= 50_000 else {
+        return ["ok": false, "error": "subject or body too large"]
+    }
+    let sendLine = send ? "send msg" : ""
+    let script = """
+    on run argv
+      set toAddr to item 1 of argv
+      set subj to item 2 of argv
+      set bodyText to item 3 of argv
+      tell application "Mail"
+        set msg to make new outgoing message with properties {subject:subj, content:bodyText, visible:false}
+        tell msg to make new to recipient at end of to recipients with properties {address:toAddr}
+        \(sendLine)
+      end tell
+      return "ok"
+    end run
+    """
+    let res = osascriptArgv(script, args: [addr, subject, body], timeout: 30)
+    if (res["ok"] as? Bool) == true {
+        return ["ok": true, "result": send ? "Mail sent to \(addr)" : "Draft created for \(addr)"]
+    }
+    return res
+}
+
+private func messageSend(to: String, text: String) -> [String: Any] {
+    let target = to.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !target.isEmpty, target.count <= 320, !target.contains("\n") else {
+        return ["ok": false, "error": "a valid recipient is required"]
+    }
+    guard !text.isEmpty, text.count <= 10_000 else {
+        return ["ok": false, "error": "message text required (max 10000 chars)"]
+    }
+    let script = """
+    on run argv
+      set target to item 1 of argv
+      set msgText to item 2 of argv
+      tell application "Messages"
+        set svc to 1st service whose service type = iMessage
+        send msgText to buddy target of svc
+      end tell
+      return "sent"
+    end run
+    """
+    let res = osascriptArgv(script, args: [target, text], timeout: 30)
+    if (res["ok"] as? Bool) == true {
+        return ["ok": true, "result": "Message sent to \(target)"]
+    }
+    return res
 }

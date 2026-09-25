@@ -958,6 +958,185 @@ final class BadAppleToolRouter: @unchecked Sendable {
             parameters: [],
             requiresApproval: false
         ),
+        BadAppleTool(
+            name: "list_calendar_events",
+            description: "List upcoming events from the user's Calendar for the next N days.",
+            parameters: [
+                .init(name: "days_ahead", description: "How many days ahead to look. Default 7, max 90.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "create_calendar_event",
+            description: "Create an event in the user's Calendar.",
+            parameters: [
+                .init(name: "title", description: "Event title.", required: true),
+                .init(name: "start", description: "Start date/time — ISO8601, 'yyyy-MM-dd HH:mm', or natural like 'tomorrow 3pm'.", required: true),
+                .init(name: "end", description: "End date/time. Defaults to one hour after start.", required: false),
+                .init(name: "notes", description: "Optional notes attached to the event.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "list_reminders",
+            description: "List the user's open (incomplete) reminders.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "create_reminder",
+            description: "Create a reminder in the user's Reminders app.",
+            parameters: [
+                .init(name: "title", description: "Reminder text.", required: true),
+                .init(name: "due", description: "Optional due date/time — ISO8601, 'yyyy-MM-dd HH:mm', or natural like 'in 2 hours'.", required: false),
+                .init(name: "notes", description: "Optional notes.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "complete_reminder",
+            description: "Mark a reminder complete by matching its title.",
+            parameters: [
+                .init(name: "title", description: "Text matching the reminder's title.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "read_mail",
+            description: "Read the most recent messages in the user's Mail inbox — returns date, sender, and subject lines.",
+            parameters: [
+                .init(name: "limit", description: "How many recent messages to list. Default 10, max 50.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "draft_mail",
+            description: "Create a draft email in Mail — addressed and written but NOT sent.",
+            parameters: [
+                .init(name: "to", description: "Recipient email address.", required: true),
+                .init(name: "subject", description: "Subject line.", required: true),
+                .init(name: "body", description: "Email body text.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "send_mail",
+            description: "Send an email immediately via Mail. Use draft_mail instead unless the user clearly asked to send.",
+            parameters: [
+                .init(name: "to", description: "Recipient email address.", required: true),
+                .init(name: "subject", description: "Subject line.", required: true),
+                .init(name: "body", description: "Email body text.", required: true),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "send_message",
+            description: "Send an iMessage/SMS via Messages to a phone number or email address.",
+            parameters: [
+                .init(name: "to", description: "Recipient phone number or Apple ID email.", required: true),
+                .init(name: "text", description: "Message text.", required: true),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
+            name: "recall_clipboard",
+            description: "Search the user's clipboard history — text they copied recently, most recent first.",
+            parameters: [
+                .init(name: "query", description: "Optional text to filter entries by.", required: false),
+                .init(name: "limit", description: "Max entries to return. Default 10.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "meeting_start",
+            description: "Start recording a meeting. Audio stays on-device; a transcript is produced when the meeting ends.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "meeting_stop",
+            description: "Stop the active meeting recording and transcribe it on-device.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "meeting_transcript",
+            description: "Read the most recent meeting transcript. Summarize it for the user and offer to file action items as commitments.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "threat_scan",
+            description: "Run a defensive scan now: new/changed startup items, unsigned processes listening on the network, and integrity of Bad Apple's own binaries. Reports findings with evidence trails.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "trace_threat",
+            description: "Follow the evidence trail for a suspicious process (by pid) or file (by path) back to its source — spawn chain, signature, download origin, launchd owner, network connections.",
+            parameters: [
+                .init(name: "target", description: "A process id or absolute file path to trace.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "sentinel_status",
+            description: "Report the defensive sentinel's state: baseline size, recent findings.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "schedule_task",
+            description: "Create a standing order — a goal Bad Apple runs on a cadence, like 'every morning' or 'daily 8am'.",
+            parameters: [
+                .init(name: "goal", description: "What to do each time, as a task goal.", required: true),
+                .init(name: "every", description: "Cadence: 'in 30 minutes', 'every 2 hours', 'hourly', 'daily 8am', 'weekly monday 9am', 'every morning'.", required: true),
+                .init(name: "name", description: "Optional short name for the standing order.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "list_schedules",
+            description: "List the user's standing orders — recurring tasks Bad Apple runs on schedule.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "cancel_schedule",
+            description: "Cancel a standing order by id or name.",
+            parameters: [
+                .init(name: "id_or_name", description: "The schedule's id, id prefix, or name text.", required: true),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "watch_for",
+            description: "Hold a condition open — get told the moment it's true, and optionally run a task when it trips. Kinds: file_exists <path>, file_changed <path>, process_running <name>, process_gone <name>, text_present <path> containing <text>, mail_from <sender>.",
+            parameters: [
+                .init(name: "kind", description: "One of: file_exists, file_changed, process_running, process_gone, text_present, mail_from.", required: true),
+                .init(name: "target", description: "Path, process name, or sender text to watch.", required: true),
+                .init(name: "contains", description: "For text_present only — the text to watch for.", required: false),
+                .init(name: "act", description: "Optional goal to run when it trips.", required: false),
+                .init(name: "every_seconds", description: "Min seconds between checks. Default 60.", required: false),
+                .init(name: "persistent", description: "'yes' to keep watching after it fires.", required: false),
+                .init(name: "name", description: "Optional short name.", required: false),
+            ],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "list_watchers",
+            description: "List active watchers — conditions Bad Apple is holding open.",
+            parameters: [],
+            requiresApproval: false
+        ),
+        BadAppleTool(
+            name: "cancel_watch",
+            description: "Stop a watcher by id or name.",
+            parameters: [
+                .init(name: "id_or_name", description: "The watcher's id, id prefix, or name text.", required: true),
+            ],
+            requiresApproval: false
+        ),
     ]
 
     /// Workshop/custom tools loaded from `~/.bad_apple/custom_tools.json`.
@@ -2570,6 +2749,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
 
         let timeout = policyEngine?.maxTimeout(toolName: resolved) ?? 30
 
+        recordToolActivity(resolved)
+
         switch resolved {
         case "get_current_time":
             return getCurrentTime()
@@ -2968,6 +3149,238 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             } catch {
                 return "Error: \(error.localizedDescription)"
             }
+        case "list_calendar_events":
+            let days = Int(args["days_ahead"] ?? "") ?? 7
+            let res = callAqua(command: "calendar_events", payload: ["days_ahead": days], timeout: 30)
+            guard let res else {
+                return "Calendar is unavailable — is the Bad Apple menu bar app running?"
+            }
+            if let error = res["error"] as? String { return "Error: \(error)" }
+            let events = (res["events"] as? [String]) ?? []
+            return events.isEmpty ? "No events in the next \(days) days." : events.joined(separator: "\n")
+        case "create_calendar_event":
+            let res = callAqua(command: "calendar_create", payload: [
+                "title": args["title"] ?? "",
+                "start": args["start"] ?? "",
+                "end": args["end"] ?? "",
+                "notes": args["notes"] ?? "",
+            ], timeout: 30)
+            return aquaReply(res, missing: "Calendar is unavailable — is the Bad Apple menu bar app running?")
+        case "list_reminders":
+            let res = callAqua(command: "reminders_list", payload: [:], timeout: 30)
+            guard let res else {
+                return "Reminders are unavailable — is the Bad Apple menu bar app running?"
+            }
+            if let error = res["error"] as? String { return "Error: \(error)" }
+            let rows = (res["reminders"] as? [String]) ?? []
+            return rows.isEmpty ? "No open reminders." : rows.joined(separator: "\n")
+        case "create_reminder":
+            let res = callAqua(command: "reminder_create", payload: [
+                "title": args["title"] ?? "",
+                "due": args["due"] ?? "",
+                "notes": args["notes"] ?? "",
+            ], timeout: 30)
+            return aquaReply(res, missing: "Reminders are unavailable — is the Bad Apple menu bar app running?")
+        case "complete_reminder":
+            let res = callAqua(command: "reminder_complete", payload: [
+                "title": args["title"] ?? "",
+            ], timeout: 30)
+            return aquaReply(res, missing: "Reminders are unavailable — is the Bad Apple menu bar app running?")
+        case "read_mail":
+            let limit = Int(args["limit"] ?? "") ?? 10
+            let res = callAqua(command: "mail_read", payload: ["limit": limit], timeout: 30)
+            return aquaReply(res, missing: "Mail is unavailable — is the Bad Apple menu bar app running?")
+        case "draft_mail":
+            let res = callAqua(command: "mail_draft", payload: [
+                "to": args["to"] ?? "",
+                "subject": args["subject"] ?? "",
+                "body": args["body"] ?? "",
+            ], timeout: 30)
+            return aquaReply(res, missing: "Mail is unavailable — is the Bad Apple menu bar app running?")
+        case "send_mail":
+            let res = callAqua(command: "mail_send", payload: [
+                "to": args["to"] ?? "",
+                "subject": args["subject"] ?? "",
+                "body": args["body"] ?? "",
+            ], timeout: 30)
+            return aquaReply(res, missing: "Mail is unavailable — is the Bad Apple menu bar app running?")
+        case "send_message":
+            let res = callAqua(command: "message_send", payload: [
+                "to": args["to"] ?? "",
+                "text": args["text"] ?? "",
+            ], timeout: 30)
+            return aquaReply(res, missing: "Messages is unavailable — is the Bad Apple menu bar app running?")
+        case "recall_clipboard":
+            let path = NSHomeDirectory() + "/.bad_apple/clipboard_history.jsonl"
+            guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
+                return "No clipboard history yet — it builds as you copy things."
+            }
+            let query = (args["query"] ?? "").lowercased()
+            let limit = min(max(Int(args["limit"] ?? "") ?? 10, 1), 50)
+            var entries: [String] = []
+            for line in raw.components(separatedBy: "\n") where !line.isEmpty {
+                guard let data = line.data(using: .utf8),
+                      let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let text = entry["text"] as? String else { continue }
+                if !query.isEmpty && !text.lowercased().contains(query) { continue }
+                let ts = entry["ts"] as? TimeInterval ?? 0
+                let app = entry["app"] as? String ?? ""
+                var head = BadAppleHumanLayer.formatDate(Date(timeIntervalSince1970: ts))
+                if !app.isEmpty { head += " via \(app)" }
+                entries.append("[\(head)] \(text)")
+            }
+            let tail = entries.suffix(limit)
+            if tail.isEmpty {
+                return query.isEmpty
+                    ? "Clipboard history is empty."
+                    : "Nothing in clipboard history matching '\(args["query"] ?? "")'."
+            }
+            return tail.reversed().joined(separator: "\n---\n")
+        case "meeting_start":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not start recording."
+            }
+            let home = NSHomeDirectory() + "/.bad_apple"
+            try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: home + "/meeting_record") {
+                return "A meeting is already recording."
+            }
+            try? "{\"ts\": \(Date().timeIntervalSince1970)}"
+                .write(toFile: home + "/meeting_record", atomically: true, encoding: .utf8)
+            return "Recording the meeting — everything stays on this Mac. Say 'stop the meeting' or ask me to run meeting_stop when you're done; the transcript lands a few seconds later."
+        case "meeting_stop":
+            let controlPath = NSHomeDirectory() + "/.bad_apple/meeting_record"
+            guard FileManager.default.fileExists(atPath: controlPath) else {
+                return "No meeting is recording."
+            }
+            try? FileManager.default.removeItem(atPath: controlPath)
+            return "Stopping — transcribing on-device now. Ask me for the transcript in a few seconds."
+        case "meeting_transcript":
+            let latestPath = NSHomeDirectory() + "/.bad_apple/meetings/latest.json"
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: latestPath)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let transcript = json["transcript"] as? String,
+                  !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "No meeting transcript yet — recording may still be running or transcription hasn't finished."
+            }
+            var head = "Meeting transcript"
+            if let started = json["started"] as? String { head += " (\(started))" }
+            if let duration = json["duration_seconds"] as? Double {
+                head += String(format: ", %.0f min", duration / 60)
+            }
+            return head + ":\n" + String(transcript.prefix(20_000))
+        case "threat_scan":
+            let findings = BadAppleSentinel.scan()
+            if findings.isEmpty {
+                let base = BadAppleSentinel.baselineInfo()
+                if base.takenAt == 0 {
+                    return "Baseline established — watching for changes from here."
+                }
+                return "All clear. Baseline: \(base.items) startup items, \(base.listeners) unsigned listeners — nothing changed."
+            }
+            return findings.map { f in
+                "[\(f.severity.uppercased())] \(f.summary)\n" +
+                f.trail.map { "  → \($0)" }.joined(separator: "\n")
+            }.joined(separator: "\n\n")
+        case "trace_threat":
+            let trail = BadAppleSentinel.trace(target: args["target"] ?? "")
+            return trail.joined(separator: "\n")
+        case "sentinel_status":
+            let base = BadAppleSentinel.baselineInfo()
+            if base.takenAt == 0 {
+                return "Sentinel has not established a baseline yet — it seeds one on its first pass."
+            }
+            let age = Int(Date().timeIntervalSince1970 - base.takenAt) / 60
+            var findingsToday = 0
+            if let raw = try? String(contentsOfFile: BadAppleSentinel.findingsPath, encoding: .utf8) {
+                let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+                for line in raw.components(separatedBy: "\n") where !line.isEmpty {
+                    if let d = line.data(using: .utf8),
+                       let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                       let ts = j["ts"] as? TimeInterval, ts >= dayStart {
+                        findingsToday += 1
+                    }
+                }
+            }
+            return "Sentinel baseline: \(base.items) startup items, \(base.listeners) unsigned listeners (snapshot \(age) min old). Findings today: \(findingsToday)."
+        case "schedule_task":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            let goal = args["goal"] ?? ""
+            guard !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "schedule_task requires a goal"
+            }
+            do {
+                let schedule = try BadAppleScheduler.add(
+                    name: args["name"] ?? "",
+                    goal: goal,
+                    every: args["every"] ?? ""
+                )
+                let next = BadAppleHumanLayer.formatDate(
+                    Date(timeIntervalSince1970: schedule.nextRun)
+                )
+                return "Standing order saved [\(BadAppleHumanLayer.shortID(schedule.id))]: '\(schedule.name)' — next run \(next)."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "list_schedules":
+            let items = BadAppleScheduler.load()
+            if items.isEmpty { return "No standing orders — ask me to run something on a schedule." }
+            return items.map { s in
+                let next = s.enabled
+                    ? "next \(BadAppleHumanLayer.formatDate(Date(timeIntervalSince1970: s.nextRun)))"
+                    : "disabled"
+                var line = "[\(BadAppleHumanLayer.shortID(s.id))] \(s.name) — '\(s.goal)' every '\(s.every)' — \(next)"
+                if let last = s.lastResult { line += " (last: \(last))" }
+                return line
+            }.joined(separator: "\n")
+        case "cancel_schedule":
+            guard let removed = BadAppleScheduler.remove(idOrName: args["id_or_name"] ?? "") else {
+                return "No standing order matching '\(args["id_or_name"] ?? "")'."
+            }
+            return "Cancelled standing order '\(removed.name)'."
+        case "watch_for":
+            guard humanPersistenceAllowed() else {
+                return "Private mode is on. I did not save that."
+            }
+            do {
+                let every = TimeInterval(Int(args["every_seconds"] ?? "") ?? 60)
+                let persistent = ["yes", "true", "1"].contains(
+                    (args["persistent"] ?? "").lowercased()
+                )
+                let watch = try BadAppleWatcher.add(
+                    kind: args["kind"] ?? "",
+                    target: args["target"] ?? "",
+                    contains: args["contains"] ?? "",
+                    act: args["act"] ?? "",
+                    every: every,
+                    persistent: persistent,
+                    name: args["name"] ?? ""
+                )
+                var reply = "Watching [\(BadAppleHumanLayer.shortID(watch.id))]: \(watch.name) — checks every \(Int(watch.every))s"
+                if !watch.act.isEmpty { reply += ", runs '\(watch.act)' when it trips" }
+                if persistent { reply += ", stays armed after firing" }
+                return reply + "."
+            } catch {
+                return "Error: \(error.localizedDescription)"
+            }
+        case "list_watchers":
+            let items = BadAppleWatcher.load()
+            if items.isEmpty { return "No watchers — ask me to watch for something." }
+            return items.map { w in
+                var line = "[\(BadAppleHumanLayer.shortID(w.id))] \(w.name) — \(w.kind) '\(w.target)'"
+                line += w.enabled ? ", every \(Int(w.every))s" : " — fired/disabled"
+                if let fired = w.firedAt {
+                    line += " — fired \(BadAppleHumanLayer.formatDate(Date(timeIntervalSince1970: fired)))"
+                }
+                return line
+            }.joined(separator: "\n")
+        case "cancel_watch":
+            guard let removed = BadAppleWatcher.remove(idOrName: args["id_or_name"] ?? "") else {
+                return "No watcher matching '\(args["id_or_name"] ?? "")'."
+            }
+            return "Stopped watching '\(removed.name)'."
         default:
             if let result = await executeCustomTool(name: resolved, args: args) {
                 return result
@@ -3782,6 +4195,13 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         out.append("vision: screen_capture tool" + (visionProvider != nil
             ? " + image-description model" : " (no vision model loaded — describe_image unavailable)"))
         out.append("speech (TTS): \(exists("/tmp/badapple_tts.sock") ? "live" : "offline")")
+        // ASR backend — whisper activates when a runner exists
+        // (BADAPPLE_WHISPER_BIN or ~/.bad_apple/whisper/run.sh); otherwise
+        // Apple's on-device recognizer. Mirrors BadAppleASR.whisperRunner.
+        let envRunner = ProcessInfo.processInfo.environment["BADAPPLE_WHISPER_BIN"]
+        let whisperPresent = (envRunner.map { fm.isExecutableFile(atPath: $0) } ?? false)
+            || fm.isExecutableFile(atPath: home + "/.bad_apple/whisper/run.sh")
+        out.append("ASR backend: \(whisperPresent ? "whisper (runner present)" : "apple-speech (on-device)")")
 
         out.append("== memory ==")
         out.append("conversation ledger: \(exists("/var/lib/bad_apple/ledger.jsonl") ? "present" : "absent")")
@@ -4997,6 +5417,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             arguments: [
                 "train", "--model", model, "--data", dataDir, "--out", outDir,
                 "--iters", String(iters), "--batch", "1",
+                "--steps-per-eval", String(max(1, iters / 2)),
             ],
             timeout: timeout
         )
@@ -5648,7 +6069,39 @@ private func aquaCanonicalJSON(_ value: Any) -> String? {
     return String(data: data, encoding: .utf8)
 }
 
-private func callAqua(command: String, payload: [String: Any], timeout: TimeInterval) -> [String: Any]? {
+/// Flatten an Aqua response into a tool reply: error string, or the
+/// "result"/"output" payload, or a generic done.
+private func aquaReply(_ res: [String: Any]?, missing: String) -> String {
+    guard let res else { return missing }
+    if let error = res["error"] as? String { return "Error: \(error)" }
+    if let result = res["result"] as? String { return result }
+    if let output = res["output"] as? String { return output.isEmpty ? "done" : output }
+    return "done"
+}
+
+/// Appends a tool-run event to `~/.bad_apple/tool_activity.jsonl`, which the
+/// chat window tails while a turn streams to render live tool cards. Bounded:
+/// when the file passes 48 KB the tail is rewritten to the newest ~100 lines.
+private func recordToolActivity(_ tool: String) {
+    let path = NSHomeDirectory() + "/.bad_apple/tool_activity.jsonl"
+    let ts = Date().timeIntervalSince1970
+    guard let data = "{\"ts\":\(ts),\"tool\":\"\(tool)\"}\n".data(using: .utf8) else { return }
+    if let fh = FileHandle(forWritingAtPath: path) {
+        fh.seekToEndOfFile()
+        fh.write(data)
+        let size = fh.offsetInFile
+        fh.closeFile()
+        if size > 48_000,
+           let tail = try? String(contentsOfFile: path, encoding: .utf8)
+               .components(separatedBy: "\n").filter({ !$0.isEmpty }).suffix(100) {
+            try? tail.joined(separator: "\n").appending("\n").write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    } else {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
+func callAqua(command: String, payload: [String: Any], timeout: TimeInterval) -> [String: Any]? {
     let path = aquaSocketPath()
     guard aquaSocketExists(path) else { return nil }
     guard let secret = loadAquaSlicksSecret(), !secret.isEmpty else { return nil }

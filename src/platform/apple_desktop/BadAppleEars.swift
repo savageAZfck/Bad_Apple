@@ -24,6 +24,14 @@ struct BadAppleEars {
     /// Returns "" on silence, recognizer failure, or missing permission —
     /// callers treat empty as "nothing heard", never as an error to surface.
     static func captureOnce(seconds: Int) -> String {
+        // Whisper backend, when a runner is installed: record the bounded
+        // window to wav and hand it to the runner. Falls through to the Apple
+        // on-device path when no runner exists or the capture fails.
+        if BadAppleASR.whisperRunner != nil,
+           let wav = BadAppleASR.recordWav(seconds: seconds) {
+            defer { try? FileManager.default.removeItem(at: wav) }
+            if let text = BadAppleASR.transcribeFile(url: wav) { return text }
+        }
         guard SFSpeechRecognizer.authorizationStatus() == .authorized,
               AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
               let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),

@@ -2,7 +2,7 @@
 
 ## What it is
 
-Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. It runs a 7B Qwen 2.5 Coder brain as the default reasoning and coding model, with a 9B Qwen 3.5 general model as a switchable option and a 0.5B Qwen 2.5 fast tier for instant simple queries — all on Apple Silicon using MLX. It answers questions, runs local tools, indexes your files, speaks responses through a native TTS server, and can sync with other Bad Apple peers over an encrypted local mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
+Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. It runs a 7B Qwen 2.5 Coder brain as the default reasoning and coding model — accelerated by a resident 0.5B speculative draft and a reusable prompt-prefix KV cache — with a 9B Qwen 3.5 general model as a switchable option, all on Apple Silicon using MLX. It answers questions, runs local tools, indexes your files, watches conditions you set, holds standing orders, anticipates your calendar, speaks responses through a native TTS server, and can shard a single large model layer-range across peer Macs over an encrypted mesh — all without sending prompts, responses, or actions to a cloud service after the initial model download.
 
 ## How to install (consumer)
 
@@ -16,7 +16,12 @@ Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. 
 - **Air-gapped by default**: no prompt, no action, no memory leaves your Mac.
 - **Hardware-bound identity**: SLICKS v2 signs every client–daemon connection and P2P frame with the Apple Secure Enclave.
 - **Actor-ized OS**: resources, circuit breakers, persona, workspace, P2P, MCP, cache, audit, model, and health run as supervised actors.
-- **Two brains, one daemon**: the 0.5B fast tier handles instant greetings/time/math; the 7B Coder brain handles reasoning and coding; the 9B brain is available for heavier general reasoning (`badapple model use main_9b`).
+- **Two brains, one daemon**: a resident 0.5B draft accelerates the 7B Coder brain (speculative decoding + a reusable prompt-prefix KV cache, ~47% faster turns measured); the 9B brain is available for heavier general reasoning (`badapple model use main_9b`).
+- **Persistent attention**: watchers monitor files, processes, text, and mail senders and can fire goals; standing orders and scheduled tasks run through the agent loop; calendar lookahead preps for upcoming events.
+- **Senses**: opt-in ambient hearing (on-device speech recognition), screen ocular, clipboard recall, and bounded meeting capture.
+- **Perimeter sentinel**: diffs launch-agent/persistence surfaces and network listeners; builds evidence trails for anomalies.
+- **Native task board**: `⌘T` in the menu bar shows live task/step state; failed agent steps replan instead of aborting.
+- **Aqua bridge**: local mail, calendar, reminders, and messages tools with policy-gated approvals.
 - **Local tooling**: search files, run AppleScript, run Shortcuts, get the time, write notes, index documents, git helpers, and more.
 - **Persistent memory + RAG**: remembers user facts and searches indexed local documents.
 - **Hot-reloadable persona**: edit `prompt.txt` without restarting the 7B/9B model.
@@ -106,7 +111,7 @@ When asked, it should say:
 
 ### 1. Core AI
 1. Answer questions, explain, summarize, brainstorm, and write short notes
-2. Run a local 7B Qwen 2.5 Coder brain and a 0.5B fast tier on Apple Silicon; 9B Qwen 3.5 is switchable
+2. Run a local 7B Qwen 2.5 Coder brain with a resident 0.5B speculative draft on Apple Silicon; 9B Qwen 3.5 is switchable
 3. Switch persona at runtime: `switch to cali`, `wicket`, `genz`, `drill`, `midwest`
 4. `switch to roast` or `--roast` for the drill persona
 5. `teach <line>` to store a custom quip

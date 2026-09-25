@@ -34,6 +34,8 @@
         <string></string>
         <key>BADAPPLE_DRAFT_MODEL</key>
         <string></string>
+        <key>BADAPPLE_SPECULATIVE_DRAFT</key>
+        <string>mlx-community/Qwen2.5-0.5B-Instruct-4bit</string>
         <key>BADAPPLE_NUM_DRAFT_TOKENS</key>
         <string>__BADAPPLE_NUM_DRAFT_TOKENS__</string>
         <key>BADAPPLE_DFLASH</key>

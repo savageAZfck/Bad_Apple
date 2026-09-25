@@ -121,11 +121,15 @@ cat > "${EMBED_PLIST}" <<'PLIST'
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Bad Apple listens locally for “hey bad apple” and captures the following prompt.</string>
+    <string>Bad Apple listens locally for “hey bad apple”, captures the following prompt, and records meetings you ask it to.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Bad Apple uses only Apple’s on-device speech recognizer to transcribe local voice requests.</string>
+    <string>Bad Apple uses only Apple’s on-device speech recognizer to transcribe local voice requests and meetings.</string>
     <key>NSSiriUsageDescription</key>
     <string>Bad Apple uses Siri to send spoken requests to its local cognitive substrate.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Bad Apple reads and creates calendar events when you ask.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Bad Apple lists and creates reminders when you ask.</string>
 </dict>
 </plist>
 PLIST
@@ -135,7 +139,7 @@ plutil -lint "${EMBED_PLIST}"
 # are pure Foundation and always included. BadAppleEngine requires the MLX
 # dylib, so it's only included when MLX is available.
 LOGIC_SOURCES=""
-for src in BadAppleSecurity.swift BadAppleIdentityClient.swift BadAppleHumanLayer.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift BadAppleModelManager.swift BadAppleWorkspaceWatcher.swift BadAppleCouncil.swift; do
+for src in BadAppleSecurity.swift BadAppleIdentityClient.swift BadAppleHumanLayer.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift BadAppleModelManager.swift BadAppleWorkspaceWatcher.swift BadAppleCouncil.swift BadAppleSentinel.swift BadAppleScheduler.swift BadAppleLookahead.swift BadAppleWatcher.swift; do
     [[ -f "${REPO_ROOT}/src/platform/apple_desktop/${src}" ]] && LOGIC_SOURCES="${LOGIC_SOURCES} ${REPO_ROOT}/src/platform/apple_desktop/${src}"
 done
 
@@ -183,7 +187,11 @@ fi
     ${MLX_FLAGS} \
     -o "${SCRATCH_DIR}/native/BadAppleMenuBar" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleTasksWindow.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleEars.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleASR.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMeeting.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleClipboard.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleUIAccess.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBarUIResponder.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleControlCenter.swift" \
@@ -191,7 +199,7 @@ fi
     ${LOGIC_SOURCES} \
     ${MLX_SOURCES} \
     -lBadAppleBridge -ldl \
-    -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement -framework UserNotifications -framework IOKit \
+    -framework AppKit -framework AVFoundation -framework Speech -framework AudioToolbox -framework ServiceManagement -framework UserNotifications -framework IOKit -framework EventKit \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "${EMBED_PLIST}"
 
 # Copy the MLX runtime and its matching Metal shaders beside one another.
@@ -242,7 +250,8 @@ if [[ -n "${MLX_DYLIB}" && -f "${MLX_DYLIB}" ]]; then
         -F "${FRAMEWORK_SEARCH}" \
         -framework Foundation -framework CryptoKit -framework Security -framework LocalAuthentication -framework IOKit \
         -Xlinker -rpath -Xlinker @executable_path \
-        -Xlinker -rpath -Xlinker @executable_path/../Libraries
+        -Xlinker -rpath -Xlinker @executable_path/../Libraries \
+        -Xlinker -rpath -Xlinker @executable_path/../Frameworks
     install -d "${CONTENTS_DIR}/Helpers"
     install -m 755 "${BUILD_DIR}/badapple-lora" "${CONTENTS_DIR}/Helpers/badapple-lora" 2>/dev/null || true
     echo "Installed badapple-lora into ${BUILD_DIR} and app bundle Helpers."
@@ -363,11 +372,15 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Bad Apple listens locally for “hey bad apple” and captures the following prompt.</string>
+    <string>Bad Apple listens locally for “hey bad apple”, captures the following prompt, and records meetings you ask it to.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Bad Apple uses only Apple’s on-device speech recognizer to transcribe local voice requests.</string>
+    <string>Bad Apple uses only Apple’s on-device speech recognizer to transcribe local voice requests and meetings.</string>
     <key>NSSiriUsageDescription</key>
     <string>Bad Apple uses Siri to send spoken requests to its local cognitive substrate.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Bad Apple reads and creates calendar events when you ask.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Bad Apple lists and creates reminders when you ask.</string>
     <key>NSServices</key>
     <array>
         <dict>

@@ -3080,7 +3080,7 @@ struct BadAppleMenuBarApp {
     }
 }
 
-private enum BadAppleBrain {
+enum BadAppleBrain {
     static let fastSocket = "/var/run/badapple/substrate_fast.sock"
     static let deepSocket = "/var/run/badapple/substrate.sock"
     static let directSocket = "/var/run/badapple/substrate_mlx.sock"
@@ -4769,6 +4769,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var timer: Timer?
     private var earsTimer: Timer?
     private var earsCaptureInFlight = false
+    private var meetingTimer: Timer?
+    private let meetingRecorder = BadAppleMeetingRecorder()
+    private var clipboardTimer: Timer?
+    private let clipboardWatch = BadAppleClipboardWatch()
     private let voiceHost = BadAppleVoiceHost()
     private let notifyWatcher = BadAppleNotifyWatcher()
     // Dedicated serial queue for spawning the badapple CLI during voice
@@ -4777,6 +4781,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private let actionExecutor = BadAppleActionExecutor()
     private let chatHistoryWindow = ChatHistoryWindow()
     private let chatWindow = BadAppleChatWindow()
+    private let tasksWindow = BadAppleTasksWindow()
     private let humanHomeWindow = BadAppleHumanHomeWindow()
     private let conversationStore = BadAppleConversation()
     private let relationshipOnboarding = BadAppleRelationshipOnboardingWindow()
@@ -4976,6 +4981,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
         voiceHUD.attach(statusButton: statusItem?.button)
         startEarsLoop()
+        startMeetingLoop()
+        startClipboardLoop()
         voiceHost.onStateChange = { [weak self] state in
             self?.rebuildMenu()
             self?.updateStatusIcon()
@@ -5807,6 +5814,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
     }
 
+    // MARK: - Meeting capture
+
+    /// Poll ~/.bad_apple/meeting_record — the engine's meeting_start tool writes
+    /// it, meeting_stop removes it. The app owns the mic grant, so the file is
+    /// the whole contract: present means record, gone means finish and
+    /// transcribe on-device.
+    private func startMeetingLoop() {
+        meetingTimer?.invalidate()
+        meetingTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            self?.meetingTick()
+        }
+    }
+
+    private func meetingTick() {
+        if BadAppleMeeting.isRequested, !meetingRecorder.isRecording {
+            _ = meetingRecorder.start()
+        } else if !BadAppleMeeting.isRequested, meetingRecorder.isRecording {
+            finishMeeting()
+        }
+    }
+
+    private func finishMeeting() {
+        let result = meetingRecorder.stop()
+        guard let audioURL = result.audioURL else { return }
+        let startedAt = result.startedAt
+        let duration = result.duration
+        BadAppleMeetingTranscriber.transcribe(url: audioURL) { [weak self] transcript in
+            let record: [String: Any] = [
+                "started": ISO8601DateFormatter().string(from: startedAt ?? Date()),
+                "duration_seconds": duration,
+                "transcript": transcript,
+            ]
+            if let data = try? JSONSerialization.data(
+                withJSONObject: record, options: .prettyPrinted
+            ) {
+                let stamp = ISO8601DateFormatter().string(from: startedAt ?? Date())
+                    .replacingOccurrences(of: ":", with: "-")
+                let out = BadAppleMeeting.directoryURL
+                    .appendingPathComponent("meeting_\(stamp).json")
+                try? data.write(to: out, options: .atomic)
+                try? data.write(
+                    to: BadAppleMeeting.directoryURL.appendingPathComponent("latest.json"),
+                    options: .atomic
+                )
+            }
+            try? FileManager.default.removeItem(at: audioURL)
+            let words = transcript.split(separator: " ").count
+            self?.postLocalNotification(
+                title: "Meeting transcribed",
+                body: words > 0
+                    ? "\(Int(duration / 60)) min, \(words) words — ask me for the transcript or to file action items."
+                    : "Recording ended but nothing was transcribed."
+            )
+        }
+    }
+
+    private func postLocalNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        )
+    }
+
+    // MARK: - Clipboard recall
+
+    /// 2s poll of the general pasteboard. The watcher persists only when the
+    /// changeCount moved and humanWritesAllowed — private mode means it never
+    /// even reads the clipboard.
+    private func startClipboardLoop() {
+        clipboardTimer?.invalidate()
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.clipboardWatch.tick(allowed: self.humanWritesAllowed)
+        }
+    }
+
     @objc private func toggleAutopilot() {
         autopilotEnabled.toggle()
         Task {
@@ -6158,6 +6243,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     @objc private func showChatWindow() {
         chatWindow.show()
+    }
+
+    @objc private func showTasksWindow() {
+        tasksWindow.show()
     }
 
     @objc private func showHumanHome() {
@@ -6637,7 +6726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
     }
 
-    private func runBadAppleCLI(prompt: String, socketPath: String, maxTokens: Int, timeout: TimeInterval = 120.0, extraEnv: [String: String] = [:]) async throws -> String {
+    func runBadAppleCLI(prompt: String, socketPath: String, maxTokens: Int, timeout: TimeInterval = 120.0, extraEnv: [String: String] = [:]) async throws -> String {
         let binary = Bundle.main.bundleURL
             .appendingPathComponent("Contents")
             .appendingPathComponent("Helpers")
@@ -6974,6 +7063,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let chatItem = NSMenuItem(title: "Chat", action: #selector(showChatWindow), keyEquivalent: "c")
         chatItem.toolTip = "Open the native chat window."
         menu.addItem(chatItem)
+        let tasksItem = NSMenuItem(title: "Agent Tasks...", action: #selector(showTasksWindow), keyEquivalent: "t")
+        tasksItem.toolTip = "Live agent task board — goals, plans, pause/resume/cancel."
+        menu.addItem(tasksItem)
         let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         settingsMenuItem.toolTip = "Open the Bad Apple settings window."
         menu.addItem(settingsMenuItem)
@@ -8982,6 +9074,8 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
     private var isSubmitting = false
     private var cursorTimer: Timer?
     private var cursorVisible = true
+    private var toolPollTimer: Timer?
+    private var toolPollSince: TimeInterval = 0
 
     deinit {
         NotificationCenter.default.removeObserver(self)
@@ -9244,6 +9338,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         currentAssistantText = ""
         appendMessage(role: "assistant", text: "", streaming: true)
         startCursor()
+        startToolPoll()
 
         let append: (String) -> Void = { [weak self] chunk in
             guard let self = self else { return }
@@ -9318,11 +9413,49 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
     private func stopCursor() {
         cursorTimer?.invalidate()
         cursorTimer = nil
+        toolPollTimer?.invalidate()
+        toolPollTimer = nil
         if let last = bubbleViews.last, !last.isUser {
             last.streaming = false
             last.cursorVisible = false
         }
         relayoutTranscript(force: true, scrollToBottom: false)
+    }
+
+    // MARK: Live tool cards
+
+    /// While a turn streams, tail the shared tool journal and pin the names of
+    /// the tools she ran onto the streaming bubble as a dimmed card line.
+    private func startToolPoll() {
+        toolPollSince = Date().timeIntervalSince1970
+        toolPollTimer?.invalidate()
+        toolPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.refreshToolLine()
+        }
+    }
+
+    private func refreshToolLine() {
+        guard let last = bubbleViews.last, !last.isUser, last.streaming else { return }
+        let names = Self.toolNames(since: toolPollSince)
+        guard names != last.toolNames else { return }
+        last.toolNames = names
+        relayoutTranscript(force: true, scrollToBottom: true)
+    }
+
+    /// Ordered, de-duplicated tool names journaled since `ts` by the engine.
+    static func toolNames(since ts: TimeInterval) -> [String] {
+        let path = NSHomeDirectory() + "/.bad_apple/tool_activity.jsonl"
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        var seen = Set<String>()
+        var names: [String] = []
+        for line in text.components(separatedBy: "\n") where !line.isEmpty {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let t = obj["ts"] as? TimeInterval, t >= ts,
+                  let name = obj["tool"] as? String, !seen.contains(name) else { continue }
+            seen.insert(name)
+            names.append(name)
+        }
+        return names
     }
 
     // MARK: Transcript management
@@ -9490,6 +9623,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
     private static var linkColor: NSColor { NSColor.controlAccentColor }
 
     private static let headerRegex = badAppleRegex("^(#{1,3})\\s+(.+)$")
+    private static let numberedRegex = badAppleRegex("^(\\d{1,3})\\.\\s+(.+)$")
     private static let inlineRegex = badAppleRegex(
         "\\*\\*([^*]+)\\*\\*|\\*([^*]+)\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)"
     )
@@ -9624,6 +9758,22 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
                 continue
             }
 
+            // Numbered lists ("1. ", "12. ")
+            if let m = numberedRegex?.firstMatch(in: trimmed, range: NSRange(location: 0, length: (trimmed as NSString).length)),
+               m.range.location == 0 {
+                let num = (trimmed as NSString).substring(with: m.range(at: 1))
+                let content = (trimmed as NSString).substring(with: m.range(at: 2))
+                let attr = NSMutableAttributedString(string: "\(num).   ")
+                attr.addAttribute(.font, value: bodyFont, range: NSRange(location: 0, length: attr.length))
+                attr.addAttribute(.foregroundColor, value: baseColor, range: NSRange(location: 0, length: attr.length))
+                attr.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: attr.length))
+                let body = inline(content, baseColor: baseColor, bodyFont: bodyFont)
+                body.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: body.length))
+                attr.append(body)
+                result.append(attr)
+                continue
+            }
+
             // Normal paragraph
             let attr = inline(raw, baseColor: baseColor, bodyFont: bodyFont)
             attr.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: attr.length))
@@ -9743,6 +9893,7 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
         var text = ""
         var streaming = false
         var cursorVisible = false
+        var toolNames: [String] = []
         weak var owner: BadAppleChatWindow?
 
         private let bg = NSView()
@@ -9784,8 +9935,9 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
             bg.layer?.backgroundColor = BadAppleChatWindow.assistantBubbleColor.cgColor
             let segments = BadAppleChatWindow.splitMarkdown(text)
 
-            // Empty assistant: show a thin cursor while streaming, nothing when done.
-            if segments.isEmpty {
+            // Empty assistant with no tool activity: show a thin cursor while
+            // streaming, nothing when done.
+            if segments.isEmpty && toolNames.isEmpty {
                 if streaming {
                     let attr = NSMutableAttributedString(string: " ", attributes: [
                         .font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor,
@@ -9818,6 +9970,15 @@ final class BadAppleChatWindow: NSObject, NSTextViewDelegate {
                 var height: CGFloat
             }
             var rendered: [R] = []
+            // Live tool card — dimmed "⚙ tool · tool" header above the text.
+            if !toolNames.isEmpty {
+                let card = NSMutableAttributedString(string: "⚙ " + toolNames.joined(separator: "  ·  "), attributes: [
+                    .font: NSFont.systemFont(ofSize: 11.5),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ])
+                let (w, h) = BadAppleChatWindow.measureText(card, maxWidth: innerMax)
+                rendered.append(R(attr: card, code: nil, cursorSuffix: nil, width: w, height: h))
+            }
             let lastIndex = segments.count - 1
             for (i, seg) in segments.enumerated() {
                 let showCursor = streaming && cursorVisible && i == lastIndex

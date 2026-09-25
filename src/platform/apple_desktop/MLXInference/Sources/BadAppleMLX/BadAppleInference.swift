@@ -153,6 +153,9 @@ public final class BadAppleInference: @unchecked Sendable {
         public let draftProposedTokens: Int
         public let draftAcceptedTokens: Int
         public let draftAcceptPct: Float
+        /// `hit` = reused warmed prefix KV, `warm` = built it this turn,
+        /// `off` = disabled or prefix mismatch.
+        public let prefixCache: String
 
         public init(
             text: String,
@@ -161,7 +164,8 @@ public final class BadAppleInference: @unchecked Sendable {
             tier: String = "main",
             toolCalls: [ToolCall] = [],
             draftProposedTokens: Int = 0,
-            draftAcceptedTokens: Int = 0
+            draftAcceptedTokens: Int = 0,
+            prefixCache: String = "off"
         ) {
             self.text = text
             self.tokensPerSecond = tokensPerSecond
@@ -170,6 +174,7 @@ public final class BadAppleInference: @unchecked Sendable {
             self.toolCalls = toolCalls
             self.draftProposedTokens = draftProposedTokens
             self.draftAcceptedTokens = draftAcceptedTokens
+            self.prefixCache = prefixCache
             self.draftAcceptPct = if draftProposedTokens > 0 {
                 Float(draftAcceptedTokens) / Float(draftProposedTokens) * 100.0
             } else {
@@ -251,6 +256,192 @@ public final class BadAppleInference: @unchecked Sendable {
 
     private let state = ModelState()
     private let config: ModelConfig
+
+    // MARK: - Prompt-prefix KV cache
+    //
+    // The stable head of the system prompt (persona + shared-life context,
+    // before ambient/RAG/briefing are appended) is byte-identical across
+    // turns. Its KV state is warmed once and reused on later turns so prefill
+    // only evaluates the new history + message. Safety model: the boundary is
+    // located with a sentinel and verified token-for-token every call; the
+    // cache is checked out for the duration of a turn and trimmed back to the
+    // warmed boundary when the stream drains; any miss, offset mismatch, or
+    // non-trimmable cache drops the entry and the turn simply runs uncached.
+    // `BADAPPLE_PREFIX_CACHE=0` disables.
+
+    /// The engine sets this to the stable system-prompt head each query.
+    /// A stale value can't corrupt anything — the token-exact boundary check
+    /// fails closed to a plain full-prefill turn.
+    public var stableSystemPrefix: String?
+
+    public static var envPrefixCache: Bool {
+        ProcessInfo.processInfo.environment["BADAPPLE_PREFIX_CACHE"] != "0"
+    }
+
+    /// Rare delimiter appended to the stable head inside a probe render —
+    /// control chars on both sides keep BPE from merging across it, so its
+    /// standalone tokenization matches its in-context one. The boundary is
+    /// the sentinel's position: the end of the shared head content, before
+    /// `im_end`, history, and the current-turn markup.
+    private static let prefixSentinel = "\u{7}\u{7}BA_PREFIX_SENTINEL\u{7}\u{7}"
+
+    /// One turn's prefix-cache handoff: boundary + sliced inputs going in,
+    /// the warmed/reused cache coming back out.
+    private final class PrefixTicket {
+        var key = ""
+        var boundary = 0
+        var prefixText: LMInput.Text!
+        var suffixInput: LMInput!
+        var checkedOut: [KVCache]?
+        var cacheUsed: [KVCache]?
+        var draftCacheUsed: [KVCache]?
+    }
+
+    private let prefixCacheLock = NSLock()
+    private var prefixCacheKey = ""
+    private var prefixCacheBoundary = 0
+    private var prefixCache: [KVCache]?
+
+    private static func firstIndex(of needle: [Int32], in haystack: [Int32]) -> Int? {
+        guard !needle.isEmpty, haystack.count >= needle.count else { return nil }
+        for i in 0...(haystack.count - needle.count) where haystack[i] == needle[0] {
+            if Array(haystack[i ..< i + needle.count]) == needle { return i }
+        }
+        return nil
+    }
+
+    /// Takes the stored cache for this prefix (if valid) so the turn owns it
+    /// exclusively; `returnPrefixCache` puts it back once it's trimmed.
+    private func checkoutPrefixCache(key: String, boundary: Int) -> [KVCache]? {
+        prefixCacheLock.lock(); defer { prefixCacheLock.unlock() }
+        guard let cache = prefixCache,
+              prefixCacheKey == key, prefixCacheBoundary == boundary,
+              cache.first?.offset == boundary,
+              canTrimPromptCache(cache) else { return nil }
+        prefixCache = nil
+        prefixCacheKey = ""
+        return cache
+    }
+
+    private func returnPrefixCache(_ ticket: PrefixTicket) {
+        guard let cache = ticket.cacheUsed else { return }
+        let extra = (cache.first?.offset ?? 0) - ticket.boundary
+        if extra > 0 { trimPromptCache(cache, numTokens: extra) }
+        guard extra >= 0, cache.first?.offset == ticket.boundary else { return }
+        prefixCacheLock.lock(); defer { prefixCacheLock.unlock() }
+        prefixCacheKey = ticket.key
+        prefixCacheBoundary = ticket.boundary
+        prefixCache = cache
+    }
+
+    /// Sendable probe result — the async half of prefix matching. The caller
+    /// verifies it against the real input's tokens and builds the ticket
+    /// synchronously so `lmInput` never crosses an actor boundary.
+    private struct PrefixProbe: Sendable {
+        var key: String
+        var boundary: Int
+        var prefixTokens: [Int32]
+    }
+
+    /// Renders `head + sentinel` as the system message and locates the
+    /// sentinel's token offset — the exact end of the shared prefix, before
+    /// the system-close tag and any history or user markup that follow in
+    /// real renders.
+    private func probePrefixBoundary(head: String, container: ModelContainer) async -> PrefixProbe? {
+        guard let probe = try? await prepareInput(
+            prompt: "", systemPrompt: head + Self.prefixSentinel, history: [], tools: nil, container: container
+        ) else { return nil }
+        let probeTokens = probe.text.tokens.asType(.int32).asArray(Int32.self)
+        let sentinelTokens = (await container.tokenizer).encode(text: Self.prefixSentinel).map { Int32($0) }
+        guard !sentinelTokens.isEmpty,
+              let boundary = Self.firstIndex(of: sentinelTokens, in: probeTokens),
+              boundary > 0 else { return nil }
+        return PrefixProbe(
+            key: config.modelId + "\u{0}" + head,
+            boundary: boundary,
+            prefixTokens: Array(probeTokens[..<boundary])
+        )
+    }
+
+    /// Token-exact verification + ticket construction. Takes the rendered
+    /// input's token array rather than `LMInput` itself so the caller's
+    /// non-Sendable input never crosses a boundary.
+    private func buildPrefixTicket(probe: PrefixProbe, fullTokens: [Int32]) -> PrefixTicket? {
+        guard fullTokens.count > probe.boundary,
+              Array(fullTokens[..<probe.boundary]) == probe.prefixTokens else { return nil }
+        let ticket = PrefixTicket()
+        ticket.key = probe.key
+        ticket.boundary = probe.boundary
+        ticket.prefixText = LMInput.Text(tokens: MLXArray(probe.prefixTokens))
+        ticket.suffixInput = LMInput(tokens: MLXArray(Array(fullTokens[probe.boundary...])))
+        ticket.checkedOut = checkoutPrefixCache(key: probe.key, boundary: probe.boundary)
+        return ticket
+    }
+
+    // MARK: - Draft model + draft prefix cache (speculative path)
+
+    /// The draft `ModelContext` and its own warmed prefix cache, keyed by
+    /// draft model id + prefix key. Keeps speculative decoding from paying a
+    /// model reload and a full draft prefill on every query.
+    private final class DraftBox {
+        var modelId = ""
+        var context: ModelContext?
+        var prefixKey = ""
+        var boundary = 0
+        var cache: [KVCache]?
+    }
+
+    private let draftLock = NSLock()
+    private let draftBox = DraftBox()
+
+    private func cachedDraftContext(id draftModelId: String) -> ModelContext? {
+        draftLock.lock(); defer { draftLock.unlock() }
+        return draftBox.modelId == draftModelId ? draftBox.context : nil
+    }
+
+    private func storeDraftContext(id draftModelId: String, _ context: ModelContext) {
+        draftLock.lock(); defer { draftLock.unlock() }
+        if draftBox.modelId != draftModelId {
+            // Model changed — stale draft KV must never cross models.
+            draftBox.cache = nil
+            draftBox.prefixKey = ""
+            draftBox.boundary = 0
+        }
+        draftBox.modelId = draftModelId
+        draftBox.context = context
+    }
+
+    private func loadDraftContext(id draftModelId: String) async throws -> ModelContext {
+        if let cached = cachedDraftContext(id: draftModelId) { return cached }
+        let draftContext = try await LLMModelFactory.shared.load(
+            from: HuggingFaceDownloader(client: HubClient.default),
+            using: TokenizersLoader(),
+            configuration: ModelConfiguration(id: draftModelId)
+        )
+        storeDraftContext(id: draftModelId, draftContext)
+        return draftContext
+    }
+
+    private func checkoutDraftPrefix(key: String, boundary: Int) -> [KVCache]? {
+        draftLock.lock(); defer { draftLock.unlock() }
+        guard let cache = draftBox.cache,
+              draftBox.prefixKey == key, draftBox.boundary == boundary,
+              cache.first?.offset == boundary,
+              canTrimPromptCache(cache) else { return nil }
+        draftBox.cache = nil
+        draftBox.prefixKey = ""
+        return cache
+    }
+
+    private func returnDraftPrefix(key: String, boundary: Int, cache: [KVCache]) {
+        let extra = (cache.first?.offset ?? 0) - boundary
+        if extra > 0 { trimPromptCache(cache, numTokens: extra) }
+        guard extra >= 0, cache.first?.offset == boundary else { return }
+        draftLock.lock(); defer { draftLock.unlock() }
+        draftBox.prefixKey = key
+        draftBox.boundary = boundary
+        draftBox.cache = cache
+    }
 
     // MARK: - Initialization
 
@@ -599,7 +790,42 @@ public final class BadAppleInference: @unchecked Sendable {
                     prefillStepSize: BadAppleInference.envPrefillStepSize
                 )
 
-                let stream = try await container.generate(input: lmInput, parameters: params)
+                // Prompt-prefix KV reuse: if the stable system-prompt head is
+                // set and matches this render token-for-token, generate over a
+                // warmed cache and evaluate only the suffix.
+                var ticket: PrefixTicket?
+                if Self.envPrefixCache, let head = stableSystemPrefix, !head.isEmpty,
+                   let probe = await probePrefixBoundary(head: head, container: container) {
+                    ticket = buildPrefixTicket(
+                        probe: probe,
+                        fullTokens: lmInput.text.tokens.asType(.int32).asArray(Int32.self))
+                }
+
+                let stream: AsyncStream<Generation>
+                if let ticket {
+                    stream = try await container.perform(nonSendable: (ticket, params)) { context, payload in
+                        let (ticket, params) = payload
+                        // Deliberately unbounded (parameters: nil): the
+                        // prefix must survive whole, and per-turn growth is
+                        // trimmed back to the boundary when the turn ends.
+                        let cache = ticket.checkedOut
+                            ?? makePromptCache(model: context.model, parameters: nil)
+                        if ticket.checkedOut == nil {
+                            // First turn for this prefix — warm the cache by
+                            // evaluating just the stable head. Tokens are
+                            // 1-D; the model expects a batch axis.
+                            _ = context.model(
+                                ticket.prefixText[text: .newAxis], cache: cache, state: nil)
+                            eval(cache)
+                        }
+                        ticket.cacheUsed = cache
+                        return try MLXLMCommon.generate(
+                            input: ticket.suffixInput, cache: cache,
+                            parameters: params, context: context)
+                    }
+                } else {
+                    stream = try await container.generate(input: lmInput, parameters: params)
+                }
 
                 var fullText = ""
                 var tps: Float = 0
@@ -638,6 +864,9 @@ public final class BadAppleInference: @unchecked Sendable {
                 }
 
                 let finalToolCalls = detectedToolCalls.isEmpty ? parseToolCalls(fullText) : detectedToolCalls
+                // Restore the prefix cache for the next turn — trimmed back to
+                // the warmed boundary, or dropped if anything drifted.
+                if let ticket { returnPrefixCache(ticket) }
                 onComplete(GenerationResult(
                     text: fullText,
                     tokensPerSecond: tps,
@@ -645,7 +874,8 @@ public final class BadAppleInference: @unchecked Sendable {
                     tier: "main",
                     toolCalls: finalToolCalls,
                     draftProposedTokens: draftProposed,
-                    draftAcceptedTokens: draftAccepted
+                    draftAcceptedTokens: draftAccepted,
+                    prefixCache: ticket.map { $0.checkedOut != nil ? "hit" : "warm" } ?? "off"
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))
@@ -876,12 +1106,7 @@ public final class BadAppleInference: @unchecked Sendable {
                 )
                 let lmInput = try await container.prepare(input: userInput)
 
-                let draftConfiguration = ModelConfiguration(id: draftModelId)
-                let draftContext = try await LLMModelFactory.shared.load(
-                    from: HuggingFaceDownloader(client: HubClient.default),
-                    using: TokenizersLoader(),
-                    configuration: draftConfiguration
-                )
+                let draftContext = try await loadDraftContext(id: draftModelId)
 
                 let params = GenerateParameters(
                     maxTokens: maxTokens ?? config.maxTokens,
@@ -891,17 +1116,53 @@ public final class BadAppleInference: @unchecked Sendable {
                     prefillStepSize: BadAppleInference.envPrefillStepSize
                 )
 
+                // Same prefix reuse as the plain path — the main model gets a
+                // warmed cache, and the draft gets its own warmed cache so its
+                // proposals see the full system context too.
+                var ticket: PrefixTicket?
+                if Self.envPrefixCache, let head = stableSystemPrefix, !head.isEmpty,
+                   let probe = await probePrefixBoundary(head: head, container: container) {
+                    ticket = buildPrefixTicket(
+                        probe: probe,
+                        fullTokens: lmInput.text.tokens.asType(.int32).asArray(Int32.self))
+                }
+
                 let stream: AsyncStream<Generation> = try await container.perform(
-                    nonSendable: (draftContext, lmInput)
+                    nonSendable: (draftContext, lmInput, ticket, params)
                 ) { mainContext, payload in
-                    let (draftCtx, input) = payload
+                    let (draftCtx, input, ticket, params) = payload
+                    var cache: [KVCache]? = nil
+                    var draftCache: [KVCache]? = nil
+                    var genInput = input
+                    if let ticket {
+                        let warmed = ticket.checkedOut
+                            ?? makePromptCache(model: mainContext.model, parameters: nil)
+                        if ticket.checkedOut == nil {
+                            _ = mainContext.model(ticket.prefixText, cache: warmed, state: nil)
+                            eval(warmed)
+                        }
+                        ticket.cacheUsed = warmed
+                        cache = warmed
+                        genInput = ticket.suffixInput
+
+                        let dWarmed = self.checkoutDraftPrefix(
+                            key: ticket.key, boundary: ticket.boundary)
+                            ?? draftCtx.model.newCache(parameters: nil)
+                        if dWarmed.first?.offset != ticket.boundary {
+                            _ = draftCtx.model(
+                                ticket.prefixText[text: .newAxis], cache: dWarmed, state: nil)
+                            eval(dWarmed)
+                        }
+                        ticket.draftCacheUsed = dWarmed
+                        draftCache = dWarmed
+                    }
                     return try MLXLMCommon.generate(
-                        input: input,
-                        cache: nil,
+                        input: genInput,
+                        cache: cache,
                         parameters: params,
                         context: mainContext,
                         draftModel: draftCtx.model,
-                        draftCache: nil,
+                        draftCache: draftCache,
                         numDraftTokens: numDraftTokens
                     )
                 }
@@ -927,13 +1188,20 @@ public final class BadAppleInference: @unchecked Sendable {
                     }
                 }
 
+                if let ticket {
+                    returnPrefixCache(ticket)
+                    if let draftCache = ticket.draftCacheUsed {
+                        returnDraftPrefix(key: ticket.key, boundary: ticket.boundary, cache: draftCache)
+                    }
+                }
                 onComplete(GenerationResult(
                     text: fullText,
                     tokensPerSecond: tps,
                     tokenCount: tokenCount,
                     tier: "main",
                     draftProposedTokens: draftProposed,
-                    draftAcceptedTokens: draftAccepted
+                    draftAcceptedTokens: draftAccepted,
+                    prefixCache: ticket.map { $0.checkedOut != nil ? "hit" : "warm" } ?? "off"
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))

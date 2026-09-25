@@ -37,7 +37,7 @@ against live subsystem state — nothing is scripted:
 |---|---|
 | `badapple demo` | Narrated self-demo. Every line is a real subsystem read. |
 | `badapple receipts` | Prints a proof card: attested-action count, organism age, chain tip, sovereign seal, watchdog phase, identity. |
-| `badapple cert` | Runs the **16-check** air-gap/security certification suite; exits non-zero on any failure. |
+| `badapple cert` | Runs the **22-check** air-gap/security certification suite; exits non-zero on any failure. |
 | `badapple export-proof` | Exports a self-contained verification bundle of the AI's own attested history — publicly verifiable, **no secrets required**. |
 | `badapple --doctor` | Diagnostics, binary checks, ledger hash-chain verification. |
 | `badapple ify status` | Shows the watchdog's phase, baseline, and findings. |
@@ -119,16 +119,23 @@ badapple CLI / menu bar / voice / dashboard
               │
               ▼
    badapple-engine  (Swift MLX daemon)
-   ├─ Local models: 7B default · 9B switchable · 0.5B fast tier
+   ├─ Local models: 7B default · 9B switchable
+   ├─ Throughput organ: resident 0.5B speculative draft +
+   │  reusable prompt-prefix KV cache (~47% faster turns, verified)
    ├─ RAG, semantic cache, native embeddings
-   ├─ Policy engine (60+ rules) + human-in-the-loop approvals
+   ├─ Policy engine (80+ per-tool rules) + human-in-the-loop approvals
    ├─ Council of Minds — 14 deterministic seats vote on every gated
    │  action; passed votes run, failed votes escalate to the human
+   ├─ Agent loop with failure replanning + native task board (⌘T)
+   ├─ Senses: ambient ears, screen ocular, clipboard, meeting capture
+   ├─ Vigilance: watchers · standing orders · calendar lookahead ·
+   │  sentinel (persistence/network perimeter diffing)
+   ├─ Aqua bridge: mail · calendar · reminders · messages
    ├─ Streaming output firewall (Aho-Corasick secret redaction)
    ├─ Hash-chained audit ledger
    ├─ IFY watchdog (brake-only) · Curious autopilot (policy-gated)
    ├─ Workspace watcher · MCP host · optional P2P mesh
-   │    (model transfer + delegated inference — borrow a peer's brain)
+   │    (layer-range brain sharding + delegated inference)
    └─ Air-gap certification self-audit
               │
               ▼
@@ -150,7 +157,8 @@ Verification layers (independent of the engine):
 | Secure Enclave checkpoints | Daily signed chain-tip + Merkle root | `badapple receipts` |
 | IFY watchdog | Anomalies and drift surfaced as approval-gated findings | `badapple ify status` |
 | Council | Every gated action carries a journaled 14-seat vote with rationales | `badapple "council <q>"` · `council_deliberation` events |
-| Air-gap cert | 16 runtime checks, incl. zero external sockets | `badapple cert` |
+| Air-gap cert | 22 runtime checks, incl. zero external sockets | `badapple cert` |
+| Organism proof | End-to-end organ battery: senses, council, dream, vigilance | `./personal_agi_proof.sh` |
 | Respawn | All platform state revertible to any snapshot | `badapple-respawn --status` |
 
 Companion open components: [`sovereign_ledger`](https://github.com/savageAZfck/sovereign_ledger),
@@ -193,7 +201,7 @@ badapple-p2p ask <peer> "prompt"         # delegate a query to a peer's brain
 cargo build --release
 cargo fmt --check
 cargo clippy --all-targets --all-features --release -- -D warnings
-cargo test --release          # 103 unit + 21 integration tests
+cargo test --release          # ~120 unit + integration suites (tests/)
 cargo test --release --test cert_suite
 badapple cert                 # live 16-check air-gap certification
 ```

@@ -131,7 +131,7 @@ Bad Apple's security philosophy is structural: the system assumes its own compon
 ## Verification entry points
 
 ```bash
-badapple cert                    # 16-check airgap/security certification; exits nonzero on failure
+badapple cert                    # 22-check airgap/security certification; exits nonzero on failure
 badapple --doctor                # ledger verification + redacted diagnostics
 badapple redteam run             # 12-probe adversarial self-test
 badapple-sovereign --checkpoint  # re-verify + re-sign the independent chain

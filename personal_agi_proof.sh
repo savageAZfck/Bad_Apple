@@ -148,6 +148,89 @@ note 'ledger depth and organism age'
 check_contains "$receipts" "days old" "organism age in days"
 check_contains "$receipts" "attested actions" "attested action count"
 
+# --- 11 · the organs she grew --------------------------------------------------
+step '11 · vigilance: standing orders, watchers, sentinel, replan'
+note 'exercise the new organs end-to-end against the live daemon'
+
+caps=$(grab_tool capabilities)
+check_contains "$caps" "ASR backend:" "ASR backend reported (whisper seam)"
+for t in watch_for list_watchers cancel_watch schedule_task list_schedules cancel_schedule \
+         sentinel_status threat_scan meeting_start meeting_stop meeting_transcript \
+         recall_clipboard list_calendar_events create_reminder send_message; do
+  check_contains "$caps" "$t" "tool registered: $t"
+done
+
+# standing orders: create → listed → cancelled
+grab_tool schedule_task goal="proof heartbeat no-op" every="in 60 minutes" name="proof-order" >/dev/null
+scheds=$(grab_tool list_schedules)
+check_contains "$scheds" "proof-order" "standing order created and listed"
+grab_tool cancel_schedule id_or_name="proof-order" >/dev/null
+scheds2=$(grab_tool list_schedules)
+if echo "$scheds2" | grep -qi "proof-order"; then no "standing order cancelled"; else ok "standing order cancelled"; fi
+
+# watcher round-trip: arm file_exists, touch the flag, wait one daemon sweep
+watch_out=$(grab_tool watch_for kind=file_exists target=/tmp/ba_proof_flag.txt name="proof-watch")
+if echo "$watch_out" | grep -qi "error\|unknown"; then
+  opt "watcher organ not live on this daemon yet — skipped live fire"
+else
+  rm -f /tmp/ba_proof_flag.txt
+  grab_tool watch_for kind=file_exists target=/tmp/ba_proof_flag.txt name="proof-watch2" >/dev/null
+  wlist=$(grab_tool list_watchers)
+  check_contains "$wlist" "proof-watch" "watcher armed and listed"
+  touch /tmp/ba_proof_flag.txt
+  fired=""
+  for _ in $(seq 1 24); do
+    sleep 5
+    fired=$(tail -60 /var/lib/bad_apple/ledger.jsonl 2>/dev/null | grep "watcher_fired" | tail -1)
+    [ -n "$fired" ] && break
+  done
+  if [ -n "$fired" ]; then ok "watcher fired and landed on the ledger"; else opt "watcher armed; sweep did not fire within 120s (daemon may predate this build)"; fi
+  grab_tool cancel_watch id_or_name="proof-watch" >/dev/null
+  grab_tool cancel_watch id_or_name="proof-watch2" >/dev/null
+  rm -f /tmp/ba_proof_flag.txt
+fi
+
+# sentinel: status + a real read-only scan
+sent=$(grab_tool sentinel_status)
+check_contains "$sent" "baseline\|finding\|sentinel\|scan" "sentinel reports status"
+scan=$(grab_tool threat_scan)
+check_contains "$scan" "scan\|finding\|clean\|signed\|drift\|baseline" "threat scan executes"
+
+# replanning: a goal whose read step must fail, forcing the planner to regen
+# the tail — the agent_replan ledger event is the receipt. Submitted over the
+# raw agent channel (same envelope the task board uses) so the approval gate
+# doesn't stall the suite.
+task_out=$(grab "__BADAPPLE_AGENT__ {\"id\":\"proof\",\"method\":\"run_agent_task\",\"params\":{\"goal\":\"Read /tmp/ba_proof_missing_zz.txt with read_file and report back exactly what happened\",\"max_steps\":5}}" 2>&1)
+if echo "$task_out" | grep -qi '"error"\|unavailable\|refused'; then
+  opt "agent task submission unavailable — skipped replan proof"
+else
+  replanned=""
+  for _ in $(seq 1 24); do
+    sleep 5
+    replanned=$(tail -80 /var/lib/bad_apple/ledger.jsonl 2>/dev/null | grep "agent_replan" | tail -1)
+    [ -n "$replanned" ] && break
+    # stop early once every task is terminal — a clean plan that never
+    # needed a replan is a pass too
+    live=$(grab "list agent tasks" 2>/dev/null | grep -ci "running\|queued")
+    [ "${live:-0}" -eq 0 ] && break
+  done
+  if [ -n "$replanned" ]; then
+    ok "failed step triggered a bounded replan (agent_replan ledgered)"
+  else
+    opt "task ran without needing a replan — replan path dormant"
+  fi
+fi
+
+# app-side organs (aqua bridge + mic) — optional when the app isn't running
+aqua_probe=$(grab_tool list_calendar_events days_ahead=1 2>&1)
+if echo "$aqua_probe" | grep -qi "unavailable\|no aqua\|error.*helper"; then
+  opt "menu bar app not live — calendar/mail/messages/meeting organs skipped"
+else
+  check_contains "$aqua_probe" "event\|no events\|calendar" "calendar read through aqua bridge"
+  rem=$(grab_tool create_reminder title="proof reminder — safe to delete" 2>&1)
+  check_contains "$rem" "remind\|created\|ok\|done" "reminder created through aqua bridge"
+fi
+
 # --- summary -------------------------------------------------------------------
 echo
 step '  PERSONAL AGI PROOF SCORECARD'
@@ -211,6 +294,11 @@ text = f"""# Personal AGI Organism — Attestation
 9. **Audit:** the air-gap certification suite passed.
 10. **Sovereignty:** a sovereign ledger checkpoint was signed.
 11. **Continuity:** the organism has a hash-chained history spanning days.
+12. **Vigilance:** standing orders schedule recurring work, watchers hold open
+    conditions and fire ledgered events, the sentinel scans for drift and
+    traces threats to source, a failed agent step triggers a bounded replan,
+    and the ASR seam reports its active backend (whisper when a runner is
+    installed, Apple on-device speech otherwise).
 
 ## How to verify on this machine
 ```

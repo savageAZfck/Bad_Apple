@@ -50,6 +50,12 @@ enum BadAppleNotify {
             classification = (4, 3, true)
         } else if kind.hasPrefix("task_done") {
             classification = (2, 1, false)
+        } else if kind.hasPrefix("sentinel") {
+            classification = (4, 4, true)
+        } else if kind.hasPrefix("calendar_soon") {
+            classification = (4, 4, true)
+        } else if kind.hasPrefix("watcher") {
+            classification = (4, 4, true)
         } else {
             classification = (2, 2, false)
         }
@@ -227,6 +233,19 @@ final class BadAppleEngine: @unchecked Sendable {
         executor: { [weak self] tool, arguments, _ in
             guard let self else { return "The native engine is unavailable." }
             return await self.toolExecutor.executeTool(name: tool, args: arguments)
+        },
+        replanReporter: { [weak self] taskID, failure in
+            self?.auditLedger.append(
+                eventType: "agent_replan",
+                data: ["task": taskID, "failure": failure],
+                persona: self?.activePersona ?? "badapple"
+            )
+            BadAppleNotify.push(
+                kind: "task_replan",
+                title: "Replanning",
+                body: "A step failed — regenerating the rest of the plan. \(failure)",
+                debounceSeconds: 60
+            )
         }
     )
 
@@ -255,6 +274,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _lastTokensPerSecond: Float = 0
     private var _lastTokenCount: Int = 0
     private var _lastDraftAcceptPct: Float = 0
+    private var _lastPrefixCache: String = "off"
     private var _lastCacheHit: Bool = false
     private var _workspacePath: String?
     private var _airgapEnabled = false
@@ -308,6 +328,10 @@ final class BadAppleEngine: @unchecked Sendable {
 
     var lastDraftAcceptPct: Float {
         return stateLock.withLock { _lastDraftAcceptPct }
+    }
+
+    var lastPrefixCache: String {
+        return stateLock.withLock { _lastPrefixCache }
     }
 
     var lastCacheHit: Bool {
@@ -562,7 +586,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Reuse any existing ocular description or ambient transcript without losing it.
         if let existing = ambientContext {
             for line in existing.components(separatedBy: .newlines) {
-                if line.starts(with: "Screen:") || line.starts(with: "Heard:") || line.starts(with: "Thermal:") {
+                if line.starts(with: "Screen:") || line.starts(with: "Heard:") || line.starts(with: "Thermal:") || line.starts(with: "Up next:") {
                     parts.append(line)
                 }
             }
@@ -734,6 +758,9 @@ final class BadAppleEngine: @unchecked Sendable {
                 prompt += "\n\nShared life context. Treat this as local owner-provided state. Use it for continuity, never invent additions, and do not repeat it unless relevant:\n\(humanContext)"
             }
         }
+        // The prompt-prefix KV cache keys off this stable head — ambient,
+        // RAG, and briefing text are appended by callers after this point.
+        inference.stableSystemPrefix = prompt
         return prompt
     }
 
@@ -899,10 +926,16 @@ final class BadAppleEngine: @unchecked Sendable {
         - If this step is done, output ONLY: <done>short plain-English summary of what this step produced</done>
         Do not add prose, sign-offs, markdown, or explanations. Use only the exact tool names shown below.
         """
+        let history = context.completedSteps.map { step -> String in
+            let outcome = (step.error.isEmpty ? step.result : "ERROR: \(step.error)")
+                .replacingOccurrences(of: "\n", with: " ")
+            return "\(step.index + 1). \(step.instruction) → \(step.tool): \(outcome.prefix(300))"
+        }.joined(separator: "\n")
+        let historyBlock = history.isEmpty ? "" : "\nCompleted steps so far:\n\(history)\n"
         let prompt = """
         Goal: \(context.goal)
         Step \(context.stepIndex + 1) of \(context.maxSteps): \(context.plannedStep.instruction)
-
+        \(historyBlock)
         \(tools)
 
         Rules:
@@ -1550,6 +1583,7 @@ final class BadAppleEngine: @unchecked Sendable {
                             self._lastTokensPerSecond = result.tokensPerSecond
                             self._lastTokenCount = result.tokenCount
                             self._lastDraftAcceptPct = result.draftAcceptPct
+                            self._lastPrefixCache = result.prefixCache
                         }
                         self.auditLedger.append(
                             eventType: "response",
@@ -1666,6 +1700,7 @@ final class BadAppleEngine: @unchecked Sendable {
                             self._lastTokensPerSecond = result.tokensPerSecond
                             self._lastTokenCount = result.tokenCount
                             self._lastDraftAcceptPct = result.draftAcceptPct
+                            self._lastPrefixCache = result.prefixCache
                         }
                         onToken(filtered)
                         onComplete(filtered)
@@ -1708,6 +1743,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         self._lastTokensPerSecond = result.tokensPerSecond
                         self._lastTokenCount = result.tokenCount
                         self._lastDraftAcceptPct = result.draftAcceptPct
+                        self._lastPrefixCache = result.prefixCache
                     }
                     self.auditLedger.append(
                         eventType: "response",
@@ -2036,6 +2072,7 @@ final class BadAppleEngine: @unchecked Sendable {
             _lastTokensPerSecond = result.tokensPerSecond
             _lastTokenCount = result.tokenCount
             _lastDraftAcceptPct = result.draftAcceptPct
+            _lastPrefixCache = result.prefixCache
         }
 
         // Postprocess and filter.
@@ -2892,17 +2929,74 @@ final class BadAppleEngine: @unchecked Sendable {
             args: ["dataset": "dream-candidate", "iters": String(dreamIters())],
             approved: true
         )
-        guard result.contains("trained"), dreamAdoptCandidate() else {
+        // Gate adoption on the held-out validation loss the trainer reports:
+        // adopt only when the final eval did not regress past a small tolerance
+        // against the iteration-0 baseline. A missing or worse eval is a reject.
+        let valLosses = dreamValidationLosses(result)
+        var rejection: String?
+        if !result.contains("trained") {
+            rejection = String(result.suffix(400))
+        } else if valLosses.count < 2 || !(valLosses.last?.isFinite ?? false) {
+            rejection = "missing final validation loss"
+        } else if valLosses.last! > valLosses.first! * 1.05 {
+            rejection = "held-out loss regressed \(valLosses.first!) → \(valLosses.last!)"
+        }
+        if let rejection {
             auditLedger.append(
                 eventType: "dream_rejected",
-                data: ["stage": "train", "reason": String(result.suffix(400))],
+                data: ["stage": "train", "reason": rejection],
+                persona: activePersona
+            )
+            return
+        }
+        // The eval gate passed, but adopting new weights is self-modification —
+        // the council still weighs the decision. A contested vote holds the
+        // staged candidate for human review instead of letting an unattended
+        // night pass rewrite the weights on its own.
+        let adoptArgs: [String: String] = [
+            "rows": String(ledger.rows),
+            "iters": String(dreamIters()),
+            "val_loss": "\(valLosses.first!) → \(valLosses.last!)",
+        ]
+        let verdict = BadAppleCouncil.deliberate(toolName: "dream_adopt", args: adoptArgs)
+        auditCouncil(verdict: verdict, name: "dream_adopt", args: adoptArgs,
+                     mode: "dream", persona: activePersona)
+        if verdict.contested {
+            auditLedger.append(
+                eventType: "dream_held",
+                data: [
+                    "decision": verdict.decision.rawValue,
+                    "dissent": String(format: "%.3f", verdict.dissent),
+                    "val_loss": adoptArgs["val_loss"]!,
+                ],
+                persona: activePersona
+            )
+            BadAppleNotify.push(
+                kind: "dream_held",
+                title: "Dream adapter held for review",
+                body: "Council contested tonight's adapter (val \(adoptArgs["val_loss"]!)). The candidate stays staged under lora_adapters/dream-candidate.",
+                voice: false,
+                debounceSeconds: 0
+            )
+            return
+        }
+        guard dreamAdoptCandidate() else {
+            auditLedger.append(
+                eventType: "dream_rejected",
+                data: ["stage": "adopt", "reason": "candidate move failed"],
                 persona: activePersona
             )
             return
         }
         auditLedger.append(
             eventType: "dream_adopted",
-            data: ["rows": ledger.rows, "iters": dreamIters(), "result": String(result.suffix(200))],
+            data: [
+                "rows": ledger.rows,
+                "iters": dreamIters(),
+                "val_loss": adoptArgs["val_loss"]!,
+                "council": verdict.summaryLine,
+                "result": String(result.suffix(200)),
+            ],
             persona: activePersona
         )
     }
@@ -2970,6 +3064,20 @@ final class BadAppleEngine: @unchecked Sendable {
         }.filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
     }
 
+    /// Extract every "validation loss X" report from the trainer's combined
+    /// output, in order. The iteration-0 baseline is always emitted; a final
+    /// eval is guaranteed because lora_train runs with --steps-per-eval scaled
+    /// to the iteration count.
+    private func dreamValidationLosses(_ output: String) -> [Double] {
+        let pattern = #"validation loss ([0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        else { return [] }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        return regex.matches(in: output, range: range).compactMap {
+            Range($0.range(at: 1), in: output).flatMap { Double(output[$0]) }
+        }
+    }
+
     /// Refusals, firewall output, approvals, errors, and trivial exchanges are
     /// noise — training on them teaches the adapter to refuse and apologize.
     private func dreamSkippable(_ text: String) -> Bool {
@@ -3000,6 +3108,119 @@ final class BadAppleEngine: @unchecked Sendable {
             return false
         }
         return true
+    }
+
+    // MARK: - Sentinel
+
+    /// Periodic defensive pass: scan the system for new persistence, unsigned
+    /// listeners, and drift in my own binaries. Every finding goes to the
+    /// ledger and the notify queue — detect, trail to source, report. The
+    /// sentinel never acts destructively; the human decides.
+    func runSentinelPass() {
+        let findings = BadAppleSentinel.scan()
+        for finding in findings {
+            auditLedger.append(
+                eventType: "sentinel_finding",
+                data: [
+                    "severity": finding.severity,
+                    "kind": finding.kind,
+                    "summary": finding.summary,
+                    "trail": finding.trail.prefix(8).joined(separator: " | "),
+                ],
+                persona: activePersona
+            )
+            BadAppleNotify.push(
+                kind: "sentinel",
+                title: finding.severity == "alert" ? "Bad Apple alert" : "Bad Apple noticed",
+                body: finding.summary,
+                voice: finding.severity == "alert",
+                debounceSeconds: 600
+            )
+        }
+    }
+
+    // MARK: - Standing orders
+
+    /// Minute pass over ~/.bad_apple/schedules.json — due standing orders are
+    /// fired into the agent loop, so "every morning, brief me" runs through
+    /// the same plan-act-ledger pipeline as any other task.
+    func runScheduledTasks() {
+        for schedule in BadAppleScheduler.due() {
+            BadAppleScheduler.markRan(id: schedule.id, result: "fired")
+            BadAppleNotify.push(
+                kind: "schedule",
+                title: "Running your standing order",
+                body: "\(schedule.name) — \(schedule.goal)",
+                debounceSeconds: 0
+            )
+            Task { [weak self] in
+                do {
+                    _ = try await self?.submitAgentTask(goal: schedule.goal, maxSteps: 8)
+                } catch {
+                    BadAppleScheduler.markRan(
+                        id: schedule.id,
+                        result: "failed: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Lookahead
+
+    /// Anticipation pass: find what's starting soon, tell the user before
+    /// they're late, and stage it into ambientContext so the next prompt
+    /// already knows what's coming. Dedup is per-occurrence inside the
+    /// lookahead organ itself.
+    func runLookaheadPass() {
+        for item in BadAppleLookahead.sweep() {
+            var body = "in ~\(item.minutesUntil) min"
+            if !item.detail.isEmpty { body += " — \(item.detail)" }
+            if !item.related.isEmpty { body += " (\(item.related))" }
+            BadAppleNotify.push(
+                kind: "calendar_soon",
+                title: "Coming up: \(item.title)",
+                body: body,
+                debounceSeconds: 0
+            )
+            auditLedger.append(
+                eventType: "lookahead_fired",
+                data: ["event": item.title, "minutes": item.minutesUntil],
+                persona: activePersona
+            )
+
+            var parts = ambientContext?.components(separatedBy: "\n") ?? []
+            parts.removeAll { $0.starts(with: "Up next:") }
+            var next = "Up next: \(item.title) in ~\(item.minutesUntil) min"
+            if !item.related.isEmpty { next += " — \(item.related)" }
+            parts.append(next)
+            ambientContext = parts.joined(separator: "\n")
+        }
+    }
+
+    // MARK: - Watchers
+
+    /// Minute pass over ~/.bad_apple/watchers.json — persistent attention.
+    /// A tripped watcher notifies the user, lands on the ledger, and can fire
+    /// a goal straight into the agent loop.
+    func runWatcherPass() {
+        for (watch, evidence) in BadAppleWatcher.tripped() {
+            BadAppleNotify.push(
+                kind: "watcher",
+                title: "Watch tripped: \(watch.name)",
+                body: evidence,
+                debounceSeconds: 0
+            )
+            auditLedger.append(
+                eventType: "watcher_fired",
+                data: ["watch": watch.name, "kind": watch.kind, "evidence": evidence],
+                persona: activePersona
+            )
+            guard !watch.act.isEmpty else { continue }
+            Task { [weak self] in
+                _ = try? await self?.submitAgentTask(goal: watch.act, maxSteps: 8)
+            }
+        }
     }
 
     /// Inject the adopted dream adapter into the freshly loaded model. A bad
@@ -3509,11 +3730,11 @@ final class BadAppleEngine: @unchecked Sendable {
 
             The short version: I think, talk, and listen — say "Hey Bad Apple" and I'm right there. I can see your screen, read and write your files, run terminal commands and your Shortcuts, and I write real software — I'll fix, build, test, and debug code, including my own when something's off. Give me a multi-step job and I'll plan it out, work through it, and check with you before I do anything risky. And I actually remember — conversations, facts, stuff about your projects, all of it survives restarts.
 
-            Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" or run `badapple cert` and I'll run a live audit — sockets, chains, firewall — and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. I even audit myself and propose fixes to my own code — you approve or reject each one.
+            Here's the part nobody else does: everything I do lands on a ledger you can verify yourself. Ask me "are you alone" or run `badapple cert` and I'll run a live audit — sockets, chains, firewall — and show you the numbers. When something's risky, my council — fourteen strategist seats — votes on it before it happens; you can ask them anything with "council <question>". A watchdog watches me and can slam the brake but never steer me, and there's a kill switch if you want me stopped mid-thought. And a sentinel watches the whole Mac — if something new installs itself to run at startup, an unsigned process opens a port, or my own binaries drift, I trace it back to where it came from and show you the evidence chain. I never strike back — I hand you the trail and you decide. I even audit myself and propose fixes to my own code — you approve or reject each one.
 
             And I don't just patch code — I learn in my sleep. Every night I digest the day's conversations into a LoRA adapter, at the weight level, not just in notes — a bad adapter gets ledgered and rejected automatically, so I can never be bricked by a bad dream. You can also train me on the fly: add examples, kick off a named adapter, list what I'm wearing, or load one straight into my running weights.
 
-            I also carry our shared life, not just your commands: I remember preferences you explicitly give me, hold commitments for both of us, track ongoing life threads, and keep the people you name with follow-up reminders — ask me for Human Home and I'll show you what's due, what's waiting on you, and what I'm handling. Conversations live in named threads you can switch between, so continuity survives restarts. Notifications are actionable — mark a commitment done, snooze it an hour, or approve and deny right from the banner. And I won't just blurt things at you — attention modes (available, focus, quiet, sleep) govern whether I speak, notify, or hold it for later, and "Stop Speaking" cuts my voice off mid-sentence.
+            I also carry our shared life, not just your commands: I remember preferences you explicitly give me, hold commitments for both of us, track ongoing life threads, and keep the people you name with follow-up reminders — ask me for Human Home and I'll show you what's due, what's waiting on you, and what I'm handling. I can read your calendar and reminders and put new ones on them, read your inbox and draft email for you — sending always goes through you first — and send iMessages the same way. I keep a searchable history of what you copy, and if you tell me a meeting's starting I'll record it, transcribe it on-device, and file the action items. You can also give me standing orders — "every morning at 8, brief me", "check the build hourly" — and I run them like clockwork through my agent loop. And I watch what's coming: if something on your calendar is about to start, I tell you before you're late and I already know which thread or person it's about. You can also hand me conditions to hold open — "watch for the build to fail", "watch for an email from Sarah" — and I stay on it until it's true, then tell you and can even kick off a task the moment it happens. Conversations live in named threads you can switch between, so continuity survives restarts. Notifications are actionable — mark a commitment done, snooze it an hour, or approve and deny right from the banner. And I won't just blurt things at you — attention modes (available, focus, quiet, sleep) govern whether I speak, notify, or hold it for later, and "Stop Speaking" cuts my voice off mid-sentence.
 
             \(autopilotNote) I pick the best model your Mac can carry, and my brain's swappable — bigger Mac, bigger mind. And here's the new trick: mesh-brain. I can split ONE model across multiple Macs — each machine holds a slice of the layers, activations flow between them encrypted end to end, and the pipeline heals itself if a node drops. A maxed-out Studio already carries 671B alone — mesh-brain is how a crew of smaller Macs pools memory into the same league. And if you ever enable it, I can link up with other trusted Bad Apples — share memory, borrow a peer's bigger brain. Your call, always.
             """

@@ -465,6 +465,7 @@ private func makeMetrics() -> [String: Any] {
         "decode_tps": Double(BadAppleEngine.shared.lastTokensPerSecond),
         "total_tps": Double(BadAppleEngine.shared.lastTokensPerSecond),
         "draft_accept_pct": Double(BadAppleEngine.shared.lastDraftAcceptPct),
+        "prefix_cache": BadAppleEngine.shared.lastPrefixCache,
         "peak_memory_gb": Double(BadAppleEngine.shared.memoryUsageGB),
         "speculative": speculativeActive
     ]
@@ -1346,6 +1347,37 @@ func runDaemonMain() {
         }
     }
     contextTimer.resume()
+
+    // Sentinel: the defensive organ. Scans persistence, listeners, and self
+    // integrity on its own cadence — findings are ledgered and pushed to the
+    // user, never acted on destructively.
+    let sentinelInterval = TimeInterval(ProcessInfo.processInfo.environment["BADAPPLE_SENTINEL_INTERVAL"] ?? "900") ?? 900
+    if sentinelInterval >= 60 {
+        let sentinelTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+        sentinelTimer.schedule(deadline: .now() + 120, repeating: sentinelInterval)
+        sentinelTimer.setEventHandler {
+            BadAppleEngine.shared.runSentinelPass()
+        }
+        sentinelTimer.resume()
+    }
+
+    // Standing orders: due schedules fire into the agent loop once a minute.
+    let scheduleTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+    scheduleTimer.schedule(deadline: .now() + 30, repeating: 60)
+    scheduleTimer.setEventHandler {
+        BadAppleEngine.shared.runScheduledTasks()
+        BadAppleEngine.shared.runWatcherPass()
+    }
+    scheduleTimer.resume()
+
+    // Lookahead: what's about to matter. A 5-minute sweep is plenty for a
+    // 30-minute anticipation window.
+    let lookaheadTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+    lookaheadTimer.schedule(deadline: .now() + 60, repeating: 300)
+    lookaheadTimer.setEventHandler {
+        BadAppleEngine.shared.runLookaheadPass()
+    }
+    lookaheadTimer.resume()
 
     dispatchMain()
 }

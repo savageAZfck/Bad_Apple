@@ -35,7 +35,7 @@ This document describes the current structure, data flow, and invariants of the 
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Swift MLX daemon (`badapple-engine`)                                         │
-│  ├── `BadAppleMLX` — MLX-LM model loading and speculative decoding          │
+│  ├── `BadAppleMLX` — MLX-LM loading, speculative draft, prefix KV cache   │
 │  ├── `BadAppleEngine` — prompt handling, tool routing, RAG, cache           │
 │  ├── `BadAppleModelManager` — model registry and memory admission           │
 │  ├── `BadAppleTools` — policy enforcement and native tool invocation        │
@@ -44,7 +44,14 @@ This document describes the current structure, data flow, and invariants of the 
 │  ├── `BadAppleSecurity` — SLICKS v2 Secure Enclave identity client          │
 │  ├── `BadAppleConversation` — chat history and streaming                    │
 │  ├── `BadAppleWorkspaceWatcher` — FSEvents-based workspace indexing         │
-│  └── `BadAppleMenuBar` — native menu bar and TTS playback                   │
+│  ├── `BadAppleWatcher` — condition watchers that can fire agent goals      │
+│  ├── `BadAppleScheduler` — standing orders and timed tasks                 │
+│  ├── `BadAppleLookahead` — calendar anticipation                            │
+│  ├── `BadAppleSentinel` — persistence/network perimeter diffing            │
+│  ├── `BadAppleEars` + `BadAppleASR` — opt-in ambient hearing, ASR seam     │
+│  ├── `BadAppleMeeting` — bounded meeting capture/transcription             │
+│  ├── `BadAppleAquaHelper` — mail/calendar/reminders/messages bridge        │
+│  └── `BadAppleMenuBar` — native menu bar, task board (⌘T), TTS playback   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,7 +59,7 @@ This document describes the current structure, data flow, and invariants of the 
 
 Core runtime (`src/`):
 
-- `lib.rs` — C FFI bridge, public API, and the 103 Rust unit tests.
+- `lib.rs` — C FFI bridge, public API, and the Rust unit tests (~120 across `src/`).
 - `bad_apple_ipc.rs` — SLICKS frame protocol, replay cache, hash-chained audit ledger.
 - `cert.rs` — Air-gap certification and runtime checks.
 - `config.rs` — Centralized `BADAPPLE_*` environment configuration.

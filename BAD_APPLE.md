@@ -14,8 +14,8 @@ The runtime now uses a 7B Qwen 2.5 Coder 4-bit brain as the default for both tex
 |---|---|---|---|
 | Target LLM (default) | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | ~4.2 GB | Coding, general chat, and tool reasoning |
 | Target LLM (switchable) | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | Heavier general reasoning: `badapple model use main_9b` |
-| Fast tier / tiny brain | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Instant answers for greetings, identity, time, simple math, and deterministic queries |
-| MLX-LM speculative draft (optional) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional small draft for the main brain; set `BADAPPLE_SPECULATIVE_DRAFT=auto` to enable |
+| Speculative draft (armed) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Resident draft model — proposes tokens, the 7B verifies; `BADAPPLE_SPECULATIVE_DRAFT` in the daemon plist |
+| Fast tier (config-gated) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional instant-answer tier; needs `BADAPPLE_FAST_TIER=1` + `BADAPPLE_FAST_MODEL` set |
 | RAG embeddings | `BAAI/bge-small-en-v1.5` | small | Local sentence-transformer on CPU |
 | TTS voice | `en_US-amy-medium` (default) | small | Native AVFoundation TTS server (`badapple-tts`) |
 
@@ -41,7 +41,9 @@ Observed ranges on a 16 GB Apple Silicon Mac with the 7B Coder brain loaded:
 
 - Typical first-token latency: **~0.4–1.0 s** for warm cached prompts; **~14 s** for a cold cache/model-load start on a 16 GB Mac.
 - Typical decode throughput: **~16–23 tok/s**, with a suite average of **19.6 tok/s** on this quant once the model is warm and no build is running.
-- Peak memory stays **~4.1 GB**.
+- Peak memory stays **~4.1 GB** (main brain) plus ~0.3 GB for the resident draft.
+- **Prompt-prefix KV cache (new):** the stable persona/identity head of the system prompt is evaluated once and reused every turn — measured **~47% lower wall time per query** (median 9.5 s vs 17.9 s on short answers). Token-exact boundary verification, auto-invalidates on persona/model change, `BADAPPLE_PREFIX_CACHE=0` disables.
+- **Speculative decoding (armed):** the resident 0.5B drafts tokens, the 7B verifies in one pass. `BADAPPLE_NUM_DRAFT_TOKENS` tunes proposals per round.
 - **Important:** running `cargo build`, `swift build`, or packaging immediately before benchmarking will increase swap and can drop tok/s by 25-40%. Run the benchmark after the build has finished and the system has had ~30-60 s to settle.
 
 ### Text mode (9B, switchable)
@@ -86,8 +88,9 @@ Voice uses the 7B brain by default. When fast tier is on, short voice greetings 
 ### Inference tuning
 
 - `BADAPPLE_DFLASH=0` — DFlash is off because it does not reliably beat plain `mlx-lm` on this quant.
-- `BADAPPLE_SPECULATIVE_DRAFT=auto` — when set, Bad Apple scans the HF cache for a small compatible draft model and uses it with `mlx-lm` speculative decoding.
-- `BADAPPLE_FAST_TIER=1` — the 0.5B fast model is enabled for appropriate queries.
+- `BADAPPLE_SPECULATIVE_DRAFT=mlx-community/Qwen2.5-0.5B-Instruct-4bit` — armed in the shipped daemon plist: the 0.5B stays resident, proposes `BADAPPLE_NUM_DRAFT_TOKENS` (default 2) draft tokens per round, and the main brain verifies. Draft state is held warm across turns. **Honest caveat:** the vendored `mlx-lm` spec path does not report draft-acceptance stats for external draft models (`draft_accept_pct` reads 0.0 in metrics — an instrumentation gap, not a measured benefit).
+- `BADAPPLE_PREFIX_CACHE=1` — on by default: the stable persona/identity head of the system prompt is evaluated once and reused each turn (token-exact verified, model-keyed, fails closed to plain prefill). Set `0` to disable.
+- `BADAPPLE_FAST_TIER=1` — the 0.5B fast model is enabled for appropriate queries; also requires `BADAPPLE_FAST_MODEL` to be set (empty by default).
 - `prefill_step_size=2048` and `max_kv_size=2048` are the installer defaults on a 16 GB Mac; they keep prompt encoding in one or two shots and bound KV-cache growth. Set them higher if you have 32 GB+ and need longer context.
 - `prompt.txt` is hot-reloaded and kept compact; the 7B/9B chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
 
@@ -95,7 +98,7 @@ Voice uses the 7B brain by default. When fast tier is on, short voice greetings 
 
 ## What Bad Apple can do
 
-Bad Apple is a private, on-device personal AGI for macOS. It runs a 7B Qwen 2.5 Coder brain and a 0.5B fast tier on Apple Silicon using MLX, with a 9B Qwen 3.5 brain as a switchable option. It answers questions, runs local tools, indexes files, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
+Bad Apple is a private, on-device personal AGI for macOS. It runs a 7B Qwen 2.5 Coder brain on Apple Silicon using MLX — accelerated by a resident 0.5B speculative draft and a reusable prompt-prefix KV cache — with a 9B Qwen 3.5 brain as a switchable option. It answers questions, runs local tools, indexes files, watches conditions, holds standing orders, anticipates your calendar, guards the machine's perimeter, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
 
 When asked, it can say:
 
@@ -151,6 +154,31 @@ The server can run these directly, either through a fast deterministic parser or
 - `set_attention_mode` — set `available`, `focus`, `quiet`, or `sleep` delivery
 - `list_people`, `remember_person`, `record_contact`, `forget_person` — explicit people the owner asked to remember, with relationship labels, notes, and follow-up dates
 - `conversation_threads`, `new_conversation_thread`, `switch_conversation_thread`, `close_conversation_thread` — named conversation threads with per-thread transcript files under `~/.bad_apple/conversations/` (dir 0700, files 0600); the active thread is where new turns persist
+
+### Vigilance (persistent attention)
+
+- `watch_for` — register a condition watcher (`file_exists`, `file_changed`, `process_running`, `process_gone`, `text_present`, `mail_from`); optional `act` goal fires the agent loop when the condition trips; persistent watchers survive restarts
+- `list_watchers`, `cancel_watch` — manage active watchers
+- `schedule_task` — standing orders and timed tasks that fire through the agent loop
+- `list_schedules`, `cancel_schedule` — manage scheduled tasks
+- Calendar lookahead — anticipates upcoming events and surfaces prep before they hit
+- `sentinel_status`, `threat_scan`, `trace_threat` — perimeter organ: diffs launch-agent/persistence surfaces and network listeners, builds evidence trails
+
+### Senses & OS reach
+
+- Ambient ears — opt-in on-device `SFSpeechRecognizer` window capture into `Heard:` context lines (`~/.bad_apple/ears` is the live switch)
+- Screen ocular — vision-model screen comprehension when a vision model is loaded
+- `recall_clipboard` — clipboard history recall
+- `meeting_start`, `meeting_stop`, `meeting_transcript` — bounded meeting capture and transcription
+- Aqua bridge — local `mail`, `calendar`, `reminders`, `messages` tools through the native helper (approval-gated where destructive)
+- ASR seam — `BadAppleASR.swift` exposes a swappable transcription backend; Apple on-device speech is live, MLX whisper is the planned upgrade path
+
+### Agency & interface
+
+- Agent loop with **failure replanning** — a failed step re-plans around the obstacle instead of aborting the goal
+- Native task board (`⌘T` in the menu bar) — live task/step state across agent runs
+- Tool activity cards in the chat surface — each tool call renders with its status
+- `personal_agi_proof.sh` — end-to-end organ battery that exercises senses, council, dream, vigilance, and receipts
 
 ### Feature roadmap status
 

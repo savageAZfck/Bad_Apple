@@ -293,10 +293,14 @@ target/release/badapple "disable ears"    # removes it + the percept file
   engine injects them as a `Heard:` ambient line, expiring percepts older
   than ~3 refresh intervals.
 
-The cached `mlx-community/whisper-large-v3-turbo-asr-fp16` model is the
-planned ASR upgrade — nothing in the tree can load it today (no mlx_whisper,
-whisper.cpp, or CoreML build). When an MLX whisper Swift runtime lands,
-`BadAppleEars.captureOnce` is the single function to swap backends on.
+ASR is backend-swappable via `BadAppleASR` (`BadAppleASR.swift`): when a
+whisper runner exists — `BADAPPLE_WHISPER_BIN` env or an executable
+`~/.bad_apple/whisper/run.sh` taking a wav path and printing the transcript —
+both ears and meeting transcription route through it; otherwise Apple's
+on-device recognizer runs. The `mlx-community/whisper-large-v3-turbo-asr-fp16`
+weights are already in the HF cache — a runner wrapping `mlx_whisper` or
+whisper.cpp activates the backend with no rebuild. `capabilities` reports the
+active backend.
 
 ## Grounded code index (scavenger)
 
@@ -679,7 +683,8 @@ The platform plists are templates using `__BADAPPLE_ROOT__`, `__CONSOLE_USER__`,
 Set in `src/platform/apple_bridge/com.badapple.mlx.plist`:
 
 - `BADAPPLE_DFLASH=0` — DFlash is off for this quant. DFlash's larger draft model is too heavy to beat the verification overhead, so plain `mlx-lm` is faster overall.
-- `BADAPPLE_SPECULATIVE_DRAFT=auto` — set to a cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft. Default is empty (no speculative decoding) to reduce memory.
+- `BADAPPLE_SPECULATIVE_DRAFT` — set to a cached MLX-LM draft model (e.g. `mlx-community/Qwen2.5-0.5B-Instruct-4bit`) or `auto` to scan the HF cache. Loaded at startup as the main model's draft and held resident across queries. The shipped `com.badapple.mlx.plist` arms it with the 0.5B; empty disables. `BADAPPLE_NUM_DRAFT_TOKENS` (default 2) sets proposals per verify round. Note: `draft_accept_pct` in `--json` metrics only populates for internal MTP heads, not external drafts — it reads 0.0 on this config.
+- `BADAPPLE_PREFIX_CACHE=1` — on by default. `BadAppleInference` evaluates the stable persona/identity prefix once (probe via an in-system-message sentinel so the boundary is history-agnostic), checks the KV cache out per turn, verifies the boundary token-exact, and trims back after generation. Keyed by `modelId + head`; set `0` to disable. Metrics surface `prefix_cache` as `off`/`miss`/`warm`/`hit`. Measured ~47% lower wall time on short queries.
 - `BADAPPLE_NUM_DRAFT_TOKENS=2` — number of tokens the draft model generates per verification step. Runtime command: `set draft tokens to 4`.
 
 In `src/platform/apple_desktop/BadAppleEngineDaemon.swift` (the native `badapple-engine` daemon):

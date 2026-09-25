@@ -45,8 +45,9 @@ Outputs:
 - Desktop notification via `osascript display notification` for
   notable+ findings.
 - Optional narration through the SLICKS socket (`stream_query`), asking
-  the fast tier to render the finding in plain English. Skipped silently
-  when the engine is down.
+  the model to render the finding in plain English — the fast tier when
+  armed (`BADAPPLE_FAST_TIER=1` + `BADAPPLE_FAST_MODEL`), otherwise the
+  main brain. Skipped silently when the engine is down.
 
 ## Phases
 
@@ -135,7 +136,8 @@ never move it.
 ## Narrator
 
 When `BADAPPLE_IFY_NARRATE != 0` and the engine is up, notable findings
-are rendered by the fast tier through the normal query path:
+are rendered by the model through the normal query path (the fast tier
+handles them when armed):
 
 > "IFY noticed: `run_shell` fired 47 times between 3–4am — your baseline
 > for that hour is zero. Finding `ify-20261009-0312-a4f2`. Proposal
