@@ -1,25 +1,32 @@
-BAD APPLE - PROPRIETARY LICENSE
+BAD APPLE - SOURCE-AVAILABLE PROPRIETARY LICENSE
 
 Copyright (c) 2026 Adam Clark. All rights reserved.
 
 This source code and all associated files ("Bad Apple") are the
-proprietary and confidential property of Adam Clark ("the Owner").
+property of Adam Clark ("the Owner").
 
-Permission is hereby granted to select collaborators, contributors, and
-reviewers who have been expressly authorized in writing by the Owner to access,
-use, study, and privately modify this codebase for noncommercial purposes and
-private peer review only.
+GRANTED TO EVERYONE:
 
-No part of this repository may be published, distributed, sublicensed,
-disclosed, or used in any commercial system, product, or derivative work without
-the Owner's explicit prior written consent.
+Permission is hereby granted to any person obtaining a copy of this
+software to access, read, study, audit, and privately modify the source
+code for personal, educational, research, and security-review purposes.
+You may build and run Bad Apple on hardware you own for your own
+personal, non-commercial use.
 
-Any unauthorized copying, sharing, reproduction, or public disclosure, in any
-form or by any means, is strictly prohibited.
+NOT GRANTED WITHOUT WRITTEN CONSENT:
 
-The Owner retains all rights to the Bad Apple, including all rights to
-future commercialization, licensing, and public release.
+No part of this repository may be republished, redistributed,
+sublicensed, sold, or used in any commercial system, product, service,
+or derivative work without the Owner's explicit prior written consent.
+Hosting Bad Apple as a service for third parties, embedding it in a
+product offered to others, or distributing modified copies are all
+prohibited without a commercial license from the Owner.
 
-For permissions, please contact: savagetism@icloud.com
+The Owner retains all rights to Bad Apple, including all rights to
+commercialization, licensing, and future releases. The open-weight
+models Bad Apple runs are distributed under their own licenses and are
+not covered by this license.
 
-ANY USE OUTSIDE OF THESE TERMS IS STRICTLY FORBIDDEN.
+For commercial licensing and permissions: savagetism@icloud.com
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
