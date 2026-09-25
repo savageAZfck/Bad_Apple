@@ -1138,7 +1138,9 @@ public final class BadAppleInference: @unchecked Sendable {
                         let warmed = ticket.checkedOut
                             ?? makePromptCache(model: mainContext.model, parameters: nil)
                         if ticket.checkedOut == nil {
-                            _ = mainContext.model(ticket.prefixText, cache: warmed, state: nil)
+                            // Tokens are 1-D; the model expects a batch axis.
+                            _ = mainContext.model(
+                                ticket.prefixText[text: .newAxis], cache: warmed, state: nil)
                             eval(warmed)
                         }
                         ticket.cacheUsed = warmed
