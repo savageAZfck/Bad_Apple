@@ -293,6 +293,13 @@ final class BadAppleSemanticCache: @unchecked Sendable {
 
     func store(prompt: String, response: String, persona: String) async {
         guard let embeddingProvider else { return }
+        // Never cache responses that still carry tool-call markup — a leaked
+        // <tool …> block is a defect artifact, not an answer worth replaying.
+        // It also poisons recall: identical prompts replay the stale markup.
+        guard !response.contains("<tool"),
+              response.range(of: #"</?[a-z_][a-z0-9_]*\s+[a-z_]+\s*="#,
+                             options: .regularExpression) == nil
+        else { return }
         let embedding = await embeddingProvider.embed(prompt)
         guard !embedding.isEmpty else { return }
         store(prompt: prompt, response: response, persona: persona, embedding: embedding)

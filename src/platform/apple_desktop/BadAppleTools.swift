@@ -1699,6 +1699,38 @@ final class BadAppleToolRouter: @unchecked Sendable {
             calls.append((name: name, args: args))
         }
 
+        // Self-closing attribute form the model often emits on its own:
+        //   `<tool name="run_shell" arguments="{\"command\":\"ls\"}"/>`
+        // The JSON blob may carry backslash-escaped quotes — capture to '/>'.
+        let attrMatches = regexAllMatches(
+            #"<tool\s+name="([^"]+)"\s+arguments\s*=\s*"?([\s\S]*?)\s*/>"#,
+            in: text,
+            options: [.dotMatchesLineSeparators]
+        )
+        for match in attrMatches {
+            guard match.numberOfRanges >= 3,
+                  let nameRange = Range(match.range(at: 1), in: text),
+                  let blobRange = Range(match.range(at: 2), in: text) else { continue }
+            let name = String(text[nameRange])
+            let blob = String(text[blobRange])
+            for candidate in plainJSONCandidates(blob) {
+                var object = candidate.data(using: .utf8)
+                    .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+                if object == nil {
+                    let unescaped = candidate.replacingOccurrences(of: "\\\"", with: "\"")
+                    object = unescaped.data(using: .utf8)
+                        .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+                }
+                guard let object else { continue }
+                let args = object.mapValues { value in
+                    if let string = value as? String { return string }
+                    return String(describing: value)
+                }
+                calls.append((name: name, args: args))
+                break
+            }
+        }
+
         let jsonMatches = regexAllMatches(
             #"<tool_call>\s*(\{.*?\})\s*</tool_call>"#,
             in: text,
@@ -1763,8 +1795,10 @@ final class BadAppleToolRouter: @unchecked Sendable {
         }
 
         let knownNames = Set(registeredToolNames())
+        // Attrs may contain '>' (e.g. command="echo x >> f") — terminate the
+        // tag on '/>' rather than the first bare '>' it sees.
         let tagMatches = regexAllMatches(
-            #"<([A-Za-z_][A-Za-z0-9_]*)\s+([^<>]*?)\s*/>"#,
+            #"<([A-Za-z_][A-Za-z0-9_]*)\s+([\s\S]*?)\s*/>"#,
             in: text
         )
         for match in tagMatches {
