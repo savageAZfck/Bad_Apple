@@ -1,6 +1,6 @@
-use respawn::revert;
-use respawn::snapshot;
-use respawn::store::Store;
+use respawned::revert;
+use respawned::snapshot;
+use respawned::store::Store;
 use std::error::Error;
 use std::path::PathBuf;
 use std::process;
@@ -83,18 +83,18 @@ fn snapshot_dir(dir: &PathBuf, message: &str) -> Result<(), Box<dyn Error>> {
     // should not pile up identical manifests.
     if let Some(id) = store.head()? {
         let manifest = snapshot::load(&store, &id)?;
-        if respawn::drift::detect(dir, &manifest, false)?.clean() {
+        if respawned::drift::detect(dir, &manifest, false)?.clean() {
             println!(
                 "clean: {} unchanged since {}",
                 dir.display(),
-                respawn::short(&id)
+                respawned::short(&id)
             );
             return Ok(());
         }
     }
 
     let id = snapshot::create(&store, dir, message)?;
-    println!("snapshot {} -> {}", respawn::short(&id), dir.display());
+    println!("snapshot {} -> {}", respawned::short(&id), dir.display());
     Ok(())
 }
 
@@ -123,7 +123,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some(r) => println!(
                     "reverted {} to {}: {} restored, {} removed, {} kept-extra",
                     dir.display(),
-                    respawn::short(&id),
+                    respawned::short(&id),
                     r.restored.len(),
                     r.removed.len(),
                     r.skipped_extra.len(),
@@ -139,17 +139,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         };
         let manifest = snapshot::load(&store, &id)?;
-        let report = respawn::drift::detect(&dir, &manifest, args.full)?;
+        let report = respawned::drift::detect(&dir, &manifest, args.full)?;
         if report.clean() {
             println!(
                 "clean: {} matches snapshot {}",
                 dir.display(),
-                respawn::short(&id)
+                respawned::short(&id)
             );
         } else {
             println!(
                 "drift vs {}: {} added, {} modified, {} deleted, {} touched",
-                respawn::short(&id),
+                respawned::short(&id),
                 report.added.len(),
                 report.modified.len(),
                 report.deleted.len(),
