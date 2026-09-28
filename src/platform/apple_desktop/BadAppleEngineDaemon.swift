@@ -154,8 +154,11 @@ private func verifyClientProof(version: Int, secret: Data?, timestampMs: UInt64,
         return helper.verify(message: Data(material.utf8), signature: signature, publicKey: clientPubkeyData)
     }
     guard let secret = secret, !secret.isEmpty else {
-        // Placeholder mode: accept any well-formed hex HMAC (64 chars).
-        return proof.count == 64 && proof.allSatisfy { $0.isHexDigit }
+        // Fail closed: with no shared secret there is nothing to verify
+        // against. Accepting any well-formed proof would make this socket
+        // (invoke_tool, set_workspace, set_autopilot, inference) fully
+        // unauthenticated to any local process that can open it.
+        return false
     }
     let expected = clientProof(version: version, secret: secret, timestampMs: timestampMs, clientNonce: clientNonce, serverNonce: serverNonce, prompt: prompt, maxTokens: maxTokens)
     guard expected == proof.lowercased() else { return false }
@@ -405,6 +408,9 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
     case "new chat", "clear conversation":
         BadAppleEngine.shared.resetConversation()
         return "Okay, so... fresh start."
+    case "clear cache", "clear response cache", "forget cached answers":
+        BadAppleEngine.shared.clearSemanticCache()
+        return "Response cache cleared — fresh answers from here."
     case "runtime status", "health status", "bad apple status":
         let status = await BadAppleEngine.shared.runtimeStatus()
         guard let data = try? JSONSerialization.data(withJSONObject: status, options: .prettyPrinted),
@@ -706,6 +712,9 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
         do {
             let text: String
             if let systemPrompt = params["system_prompt"] as? String, !systemPrompt.isEmpty {
+                BadAppleEngine.shared.auditDaemonEvent(
+                    type: "raw_inference",
+                    data: ["prompt": String(inferencePrompt.prefix(400))])
                 text = await BadAppleEngine.shared.generateRaw(
                     prompt: inferencePrompt,
                     systemPrompt: systemPrompt,
@@ -774,6 +783,10 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
     case "set_autopilot":
         let enabled = params["enabled"] as? Bool ?? false
         BadAppleEngine.shared.autopilot = enabled
+        // Flipping the approval gate is a security-relevant state change —
+        // it belongs on the ledger.
+        BadAppleEngine.shared.auditDaemonEvent(
+            type: "autopilot_changed", data: ["enabled": enabled ? "true" : "false", "via": "agent_rpc"])
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["autopilot": enabled], error: nil)
 
     case "switch_persona":
@@ -789,8 +802,22 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
             agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil, error: "set_workspace requires path")
             return
         }
-        BadAppleEngine.shared.workspacePath = path
-        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["status": "workspace set to \(path)"], error: nil)
+        // The path jail unions the workspace into its allowed roots — an
+        // IPC-set workspace outside $HOME is a jail escape. Reject it.
+        let expanded = (path as NSString).expandingTildeInPath
+        let standardized = (expanded as NSString).standardizingPath
+        let home = NSHomeDirectory()
+        guard standardized == home || standardized.hasPrefix(home + "/")
+              || standardized.hasPrefix("/tmp/") || standardized.hasPrefix("/var/tmp/")
+              || standardized == "/tmp" || standardized == "/var/tmp" else {
+            agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: nil,
+                         error: "workspace must live under the user home directory or /tmp; '\(path)' would widen the file jail")
+            return
+        }
+        BadAppleEngine.shared.workspacePath = standardized
+        BadAppleEngine.shared.auditDaemonEvent(
+            type: "workspace_changed", data: ["path": standardized])
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["status": "workspace set to \(standardized)"], error: nil)
 
     case "get_workspace":
         let ws = BadAppleEngine.shared.workspacePath
@@ -887,11 +914,19 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
                      error: sig == nil ? "identity agent unavailable" : nil)
 
     case "kill_switch":
-        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["runtime": ["mode": "normal"]], error: nil)
+        // The RPC caller is the operator — engage directly, don't report a
+        // stub. This is the panic button; it must actually work.
+        BadAppleEngine.shared.killed = true
+        BadAppleEngine.shared.auditDaemonEvent(
+            type: "kill_switch", data: ["via": "agent_rpc"])
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId,
+                     result: ["runtime": ["mode": "paused"]], error: nil)
 
     case "private_mode":
         let enabled = params["enabled"] as? Bool ?? true
         BadAppleEngine.shared.privateMode = enabled
+        BadAppleEngine.shared.auditDaemonEvent(
+            type: "private_mode", data: ["enabled": enabled ? "true" : "false"])
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["private_mode": enabled], error: nil)
 
     case "set_airgap":
@@ -1041,6 +1076,11 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
 
     // 6) Meta / control commands
     if let metaResponse = await handleMetaRequest(userPrompt) {
+        // Meta commands (kill switch, autopilot, private mode, ears, persona
+        // ops, direct tool phrasing) were previously unaudited — they never
+        // reach the engine's `query` event. Attest them here.
+        BadAppleEngine.shared.auditDaemonEvent(
+            type: "meta_command", data: ["prompt": userPrompt])
         writeQueue.sync {
             _ = writeJSON(fd, ["type": "done", "text": metaResponse, "metrics": makeMetrics()])
         }

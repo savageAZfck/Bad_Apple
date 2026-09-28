@@ -224,19 +224,28 @@ final class BadAppleSemanticCache: @unchecked Sendable {
     /// miss it), and a cached approval prompt resurrects a dead approval id.
     private static func isCacheable(prompt: String, response: String) -> Bool {
         if isApprovalCommand(prompt) { return false }
-        if response.contains("<tool") { return false }
+        // All checks run on the lowercased response — `<TOOL_CALL>`,
+        // `APPROVE <id>`, and `Needs Your Approval` must not slip through.
+        let lower = response.lowercased()
+        if lower.contains("<tool") { return false }
         // Tag with attributes (<run_shell command="…"/>), self-closing
         // (<capabilities/>), or any closing tag (</reply>) — catches the
         // bare-tag tool dialect that pure attribute matching misses.
-        if response.range(
+        if lower.range(
             of: #"</?[a-z_][a-z0-9_]*(\s+[a-z_]+\s*=|/>)|</[a-z_][a-z0-9_]*\s*>"#,
             options: .regularExpression) != nil { return false }
-        if response.contains("Approval required")
-            || response.contains("needs your approval")
-            || response.range(of: #"\bapprove [a-f0-9]{6,}\b"#,
-                              options: .regularExpression) != nil {
+        for marker in [
+            "approval required", "needs your approval", "wants to run",
+            "gated by", "policy gate:", "no approval was issued",
+            "couldn't form a valid call", "nothing is awaiting approval",
+        ] where lower.contains(marker) {
             return false
         }
+        if lower.range(of: #"\bapprove [a-f0-9]{6,}\b"#,
+                       options: .regularExpression) != nil { return false }
+        // Tool-markup prompts don't produce reusable answers either — the
+        // cached response to a call-shaped prompt is markup-shaped.
+        if prompt.lowercased().contains("<tool") { return false }
         return true
     }
 

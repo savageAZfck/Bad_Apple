@@ -1806,7 +1806,9 @@ final class BadAppleToolRouter: @unchecked Sendable {
 
         let knownNames = Set(registeredToolNames())
         // Attrs may contain '>' (e.g. command="echo x >> f") — terminate the
-        // tag on '/>' rather than the first bare '>' it sees.
+        // tag on '/>' rather than the first bare '>' it sees. Zero-arg tools
+        // (`<self_audit/>`, `<capabilities/>`) have no attrs to parse and are
+        // matched by the tag-name form below.
         let tagMatches = regexAllMatches(
             #"<([A-Za-z_][A-Za-z0-9_]*)\s+([\s\S]*?)\s*/>"#,
             in: text
@@ -1819,17 +1821,44 @@ final class BadAppleToolRouter: @unchecked Sendable {
             guard knownNames.contains(name) else { continue }
             let attrsText = String(text[attrsRange])
             let args = parseQuotedAttrs(attrsText)
-            guard !args.isEmpty else { continue }
+            if args.isEmpty {
+                // A zero-arg call is valid only when the tool's schema needs
+                // nothing — otherwise it's a malformed call, not a parse.
+                guard !toolRequiresArguments(name) else { continue }
+            }
             calls.append((name: name, args: args))
         }
 
-        // Bare `name key="value" key="value"` — no tags at all. Small models
-        // emit this dialect inside prose, including mimicking the approval
-        // gate's "wants to run `name`: name args…" text; parsing it here turns
-        // that mimicry back into a real (re-gated) call. Requiring a known
-        // tool name and ≥2 quoted pairs keeps ordinary prose from matching.
+        // Bare self-closing tag with no attrs at all: `<self_audit/>`.
+        let bareTagMatches = regexAllMatches(
+            #"<([A-Za-z_][A-Za-z0-9_]*)\s*/>"#,
+            in: text
+        )
+        for match in bareTagMatches {
+            guard match.numberOfRanges >= 2,
+                  let nameRange = Range(match.range(at: 1), in: text) else { continue }
+            let name = String(text[nameRange])
+            guard knownNames.contains(name), !toolRequiresArguments(name) else { continue }
+            calls.append((name: name, args: [:]))
+        }
+
+        // Bare `name key="value" …` — no tags at all. Small models emit this
+        // dialect inside prose, including mimicking the approval gate's
+        // "wants to run `name`: name args…" text; parsing it here turns that
+        // mimicry back into a real (re-gated) call. Prose needs a known tool
+        // name and ≥2 quoted pairs to match; inside gate-shaped text a single
+        // pair is already high-confidence intent (`self_audit include=all`).
+        let gateMarked = text.contains("wants to run")
+            || text.contains("Approval required")
+            || text.contains("Gated by")
+        let minPairs = gateMarked ? 1 : 2
+        // Gate-mimicry drops quotes too (`self_audit include=all`) — under a
+        // gate marker, unquoted `k=v` also forms a candidate pair.
+        let valueForm = gateMarked
+            ? #"(?:"[^"]*"|'[^']*'|[^\s"']+)"#
+            : #"(?:"[^"]*"|'[^']*')"#
         let bareCallMatches = regexAllMatches(
-            #"\b([A-Za-z_][A-Za-z0-9_]*)((?:\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:"[^"]*"|'[^']*')){2,})"#,
+            "\\b([A-Za-z_][A-Za-z0-9_]*)((?:\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\(valueForm))+)",
             in: text
         )
         for match in bareCallMatches {
@@ -1838,9 +1867,47 @@ final class BadAppleToolRouter: @unchecked Sendable {
                   let attrsRange = Range(match.range(at: 2), in: text) else { continue }
             let name = String(text[nameRange])
             guard knownNames.contains(name) else { continue }
-            let args = parseQuotedAttrs(String(text[attrsRange]))
-            guard args.count >= 2 else { continue }
+            var args = parseQuotedAttrs(String(text[attrsRange]))
+            // Gate-mimicry mixes bare `k=v` (`self_audit include=all`) with
+            // quoted pairs — merge unquoted values only when gate-shaped,
+            // never overwriting an explicitly quoted value.
+            if gateMarked {
+                for (k, v) in parseBareAttrs(String(text[attrsRange]))
+                where args[k] == nil {
+                    args[k] = v
+                }
+            }
+            guard args.count >= minPairs else { continue }
             calls.append((name: name, args: args))
+        }
+
+        // Gate echo may name the tool with no args at all:
+        // "… wants to run `self_audit`." — a backtick-quoted known tool name
+        // inside gate-shaped text is a zero-arg call.
+        if gateMarked {
+            let tickMatches = regexAllMatches(
+                #"`([A-Za-z_][A-Za-z0-9_]*)`"#,
+                in: text
+            )
+            // Gate-echo recovery never dispatches these: kill_switch/resume
+            // bypass policy in the executor entirely, and the rest mutate
+            // state — a mimicked gate must only be able to *read*.
+            let gateEchoExcluded: Set<String> = [
+                "kill_switch", "resume", "resume_bad_apple",
+                "clear_working_memory", "consolidate_memory",
+                "undo_last", "submit_agent_task", "set_autopilot",
+            ]
+            for match in tickMatches {
+                guard match.numberOfRanges >= 2,
+                      let nameRange = Range(match.range(at: 1), in: text) else { continue }
+                let name = String(text[nameRange])
+                // Zero-arg only for tools that genuinely take no args —
+                // backticked `kill_switch`/`run_shell` in gate text must not
+                // become an unargumented dispatch.
+                guard knownNames.contains(name), !toolRequiresArguments(name),
+                      !gateEchoExcluded.contains(name) else { continue }
+                calls.append((name: name, args: [:]))
+            }
         }
 
         var seen = Set<String>()
@@ -1849,6 +1916,13 @@ final class BadAppleToolRouter: @unchecked Sendable {
                 + call.args.keys.sorted().map { "\($0)=\(call.args[$0] ?? "")" }.joined(separator: "\u{1F}")
             return seen.insert(key).inserted
         }
+    }
+
+    /// True when the named tool's schema declares at least one required
+    /// parameter — used to reject attr-less invocations of tools that need
+    /// arguments while accepting genuinely zero-arg tools.
+    private func toolRequiresArguments(_ name: String) -> Bool {
+        allTools().first(where: { $0.name == name })?.parameters.contains(where: \.required) ?? true
     }
 
     /// Parse `key="value"` / `key='value'` pairs from `attrsText`, unescaping
@@ -1874,6 +1948,23 @@ final class BadAppleToolRouter: @unchecked Sendable {
                 .replacingOccurrences(of: "&lt;", with: "<")
                 .replacingOccurrences(of: "&gt;", with: ">")
                 .replacingOccurrences(of: "&amp;", with: "&")
+        }
+        return args
+    }
+
+    /// Parse unquoted `key=value` pairs — only used inside gate-marked text
+    /// where the confidence bar is already met by context.
+    private func parseBareAttrs(_ attrsText: String) -> [String: String] {
+        var args: [String: String] = [:]
+        let matches = regexAllMatches(
+            #"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\s"']+)"#,
+            in: attrsText
+        )
+        for match in matches {
+            guard match.numberOfRanges >= 3,
+                  let keyRange = Range(match.range(at: 1), in: attrsText),
+                  let valueRange = Range(match.range(at: 2), in: attrsText) else { continue }
+            args[String(attrsText[keyRange])] = String(attrsText[valueRange])
         }
         return args
     }
@@ -2171,7 +2262,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
                 }
             }
             for pattern in policy.deniedPatterns {
-                if command.contains(pattern) {
+                if matchesDeniedPattern(pattern, in: command) {
                     return "command matches denied pattern '\(pattern)'"
                 }
             }
@@ -2181,7 +2272,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
             let script = args["script"] ?? ""
             if script.isEmpty { return "run_applescript requires a script" }
             for pattern in policy.deniedPatterns {
-                if script.lowercased().contains(pattern.lowercased()) {
+                if matchesDeniedPattern(pattern, in: script) {
                     return "AppleScript matches denied pattern '\(pattern)'"
                 }
             }
@@ -2198,7 +2289,7 @@ final class BadApplePolicyEngine: @unchecked Sendable {
             let name = args["name"] ?? ""
             if name.isEmpty { return "run_shortcut requires a name" }
             for pattern in policy.deniedPatterns {
-                if name.contains(pattern) {
+                if matchesDeniedPattern(pattern, in: name) {
                     return "shortcut name matches denied pattern '\(pattern)'"
                 }
             }
@@ -2241,10 +2332,22 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         guard !expanded.isEmpty else { return "\(tool) path is empty" }
         if expanded.contains("..") { return "\(tool) path contains path traversal '..'" }
 
-        let targets = [path, expanded]
+        // Compare every form of both sides: a `~/.ssh` pattern must also
+        // deny the literal `/Users/<name>/.ssh/…` path, and an `/etc`
+        // pattern must deny `~/etc/…`-style inputs after expansion.
+        let home = NSHomeDirectory()
+        let collapsed = expanded.hasPrefix(home)
+            ? "~" + expanded.dropFirst(home.count)
+            : expanded
+        let targets = [path, expanded, collapsed]
         for pattern in policy.deniedPatterns {
-            for target in targets where target.contains(pattern) {
-                return "\(tool) path matches denied pattern '\(pattern)'"
+            let patternForms = pattern.hasPrefix("~")
+                ? [pattern, expandPath(pattern)]
+                : [pattern]
+            for pat in patternForms {
+                for target in targets where target.contains(pat) {
+                    return "\(tool) path matches denied pattern '\(pattern)'"
+                }
             }
         }
 
@@ -2255,6 +2358,32 @@ final class BadApplePolicyEngine: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    /// Match a denied pattern against command text. Patterns containing shell
+    /// syntax or whitespace are literal fragments and match as substrings.
+    /// Bare words are command names and match only at token boundaries —
+    /// otherwise 'nc' would flag "include=all" and 'ssh' would flag
+    /// "~/.ssh-agent". Tokens split on whitespace and shell separators, and
+    /// each token's basename is compared so `/usr/bin/nc` still denies.
+    private func matchesDeniedPattern(_ pattern: String, in text: String) -> Bool {
+        let lowered = text.lowercased()
+        let pat = pattern.lowercased()
+        if pat.range(of: #"^[a-z0-9_.\-/]+$"#, options: .regularExpression) == nil {
+            // Fragment patterns: also match a whitespace-collapsed form so
+            // `bash  -c` or `do  shell  script` can't slip past "bash -c" /
+            // "do shell script" with extra spacing.
+            if lowered.contains(pat) { return true }
+            let collapsed = lowered.replacingOccurrences(
+                of: #"\s+"#, with: " ", options: .regularExpression)
+            return collapsed.contains(pat)
+        }
+        let separators = CharacterSet(charactersIn: " \t\n|;&<>(){}\"'`=")
+        for token in lowered.components(separatedBy: separators) where !token.isEmpty {
+            let base = (token as NSString).lastPathComponent
+            if token == pat || base == pat { return true }
+        }
+        return false
     }
 
     private func isPath(_ path: String, under roots: [String]) -> Bool {
@@ -2776,9 +2905,9 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         for (real, aliases) in toolAliases {
             if aliases.contains(lower) { return real }
         }
-        for real in allKnownToolNames.sorted(by: { $0.count > $1.count }) {
-            if lower.contains(real) { return real }
-        }
+        // No substring matching: "a_kill_switch_b" or "run_shell_now" must
+        // stay unresolved and fall through to the default policy rather than
+        // being coerced onto a privileged tool.
 
         // Finally, check the workshop custom tools. They can shadow native names
         // if the user created one with the same id.
@@ -2821,7 +2950,10 @@ final class BadAppleToolExecutor: @unchecked Sendable {
                         break
                     }
                 }
-                return "Approval required — I want to run \(resolved)\(detail.isEmpty ? "" : ": \(detail)"). Gated by: \(basis). Reply 'approve <id>' to allow once, or 'deny <id>' to refuse."
+                // This path (agent steps, direct executor callers) cannot mint
+                // a real approval id — only the engine's tool loop can. Report
+                // the gate honestly instead of advertising an unapprovable id.
+                return "Policy gate: `\(resolved)` requires approval\(detail.isEmpty ? "" : " — \(detail)"). Gated by: \(basis). No approval was issued on this path; nothing was run. Ask the user to approve it via chat."
             case .approved:
                 break
             }
@@ -3271,10 +3403,14 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             let res = callAqua(command: "mail_read", payload: ["limit": limit], timeout: 30)
             return aquaReply(res, missing: "Mail is unavailable — is the Bad Apple menu bar app running?")
         case "draft_mail":
+            let body = mailBody(from: args)
+            guard !body.isEmpty else {
+                return "Error: empty email body — body_file unreadable or no body given"
+            }
             let res = callAqua(command: "mail_draft", payload: [
                 "to": args["to"] ?? "",
                 "subject": args["subject"] ?? "",
-                "body": mailBody(from: args),
+                "body": body,
             ], timeout: 30)
             return aquaReply(res, missing: "Mail is unavailable — is the Bad Apple menu bar app running?")
         case "send_mail":
@@ -3682,8 +3818,14 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         guard let path = jailPath(raw) else { return nil }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
-              !isDir.boolValue,
-              let data = FileManager.default.contents(atPath: path) else { return nil }
+              !isDir.boolValue else { return nil }
+        // Bound the read — an email body doesn't need a multi-gigabyte file,
+        // and unbounded reads make a mail tool an easy memory-exhaustion path.
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let cap = 256 * 1024
+        let data = handle.readData(ofLength: cap + 1)
+        guard data.count <= cap else { return nil }
         return String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1)
     }

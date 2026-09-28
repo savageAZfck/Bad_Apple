@@ -178,7 +178,7 @@ final class BadAppleEngine: @unchecked Sendable {
         embeddingProvider: NativeEmbeddingProvider(engine: embeddingEngine)
     )
     private static let nonCacheableResponseTiers: Set<String> = [
-        "approval", "human_tool", "human_command", "human_parse_error",
+        "approval", "human_tool", "human_command", "human_parse_error", "gate_echo",
     ]
     private let rag = BadAppleRAG()
     private let runtime = BadAppleNativeRuntime()
@@ -232,7 +232,20 @@ final class BadAppleEngine: @unchecked Sendable {
         },
         executor: { [weak self] tool, arguments, _ in
             guard let self else { return "The native engine is unavailable." }
-            return await self.toolExecutor.executeTool(name: tool, args: arguments)
+            // Agent-step executions were invisible to the ledger — attest
+            // them like every other governed call.
+            self.auditLedger.append(
+                eventType: "tool_call",
+                data: ["name": tool, "arguments": arguments, "via": "agent_step"],
+                persona: self.activePersona
+            )
+            let output = await self.toolExecutor.executeTool(name: tool, args: arguments)
+            self.auditLedger.append(
+                eventType: "tool_result",
+                data: ["name": tool, "result": output],
+                persona: self.activePersona
+            )
+            return output
         },
         replanReporter: { [weak self] taskID, failure in
             self?.auditLedger.append(
@@ -874,15 +887,35 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     private func inferenceHistory(sessionID: String) -> [BadAppleInference.ChatMessage] {
-        conversation.loadConversation(sessionId: sessionID).map {
-            BadAppleInference.ChatMessage(role: $0.role, content: $0.content)
-        }
+        conversation.loadConversation(sessionId: sessionID)
+            .suffix(Self.maxHistoryTurns * 2)
+            .map {
+                BadAppleInference.ChatMessage(role: $0.role, content: $0.content)
+            }
     }
 
     private func saveTurn(prompt: String, response: String, sessionID: String) {
         // Private mode: skip persistence entirely.
         guard !privateMode else { return }
-        conversation.appendTurn(sessionId: sessionID, prompt: prompt, response: response)
+        // Never write gate phrasing into model-facing history — replayed as
+        // an assistant turn it teaches the model to *imitate* the approval
+        // prompt (dead ids and all). Store a marker that keeps the fact
+        // without teaching the format. Same for `approve <id>`/`deny <id>`
+        // user turns — the verdict survives, the affordance doesn't.
+        let stored: String
+        if Self.looksLikeGateEcho(response) {
+            stored = "[system] a gated action was proposed and is awaiting your decision"
+        } else if response.contains("<tool_call") || response.contains("</tool") {
+            stored = "[system] a tool exchange happened (call markup omitted)"
+        } else {
+            stored = response
+        }
+        let trimmedPrompt = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedPrompt = trimmedPrompt.hasPrefix("approve ")
+            || trimmedPrompt.hasPrefix("deny ")
+            ? "[user decided a pending action]"
+            : prompt
+        conversation.appendTurn(sessionId: sessionID, prompt: storedPrompt, response: stored)
     }
 
     func resetConversation() {
@@ -1064,6 +1097,24 @@ final class BadAppleEngine: @unchecked Sendable {
         )
     }
 
+    /// Ledger a security-relevant daemon RPC (autopilot toggle, workspace
+    /// change, kill switch, private mode) — these mutate governance state
+    /// outside the query path and were previously unaudited.
+    func auditDaemonEvent(type: String, data: [String: String]) {
+        auditLedger.append(eventType: type, data: data, persona: activePersona)
+    }
+
+    /// Flush the semantic response cache — user-facing clear path so a
+    /// poisoned or stale cache can be wiped without a daemon kill.
+    func clearSemanticCache() {
+        semanticCache.clear()
+        auditLedger.append(
+            eventType: "cache_cleared",
+            data: [:],
+            persona: activePersona
+        )
+    }
+
     private func executeExplicitHumanCommand(
         _ command: (name: String, args: [String: String]),
         persona: String
@@ -1106,6 +1157,54 @@ final class BadAppleEngine: @unchecked Sendable {
         """
     }
 
+    /// Strip model-emitted tool-call markup that reached the display layer
+    /// unexecuted — `<tool_call>…</tool_call>`, `<name …/>`, `<name>`,
+    /// `</name>`, and the `[name …]` bracket dialect for registered tool
+    /// names. Markup in a user-visible answer is a defect artifact: calls
+    /// that parsed ran already; calls that didn't must not masquerade as
+    /// output. An answer that was *entirely* markup becomes an honest line
+    /// rather than empty text.
+    private func sanitizeToolMarkup(_ raw: String) -> String {
+        func strip(_ pattern: String, in text: String) -> String {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+            return regex.stringByReplacingMatches(
+                in: text, range: NSRange(text.startIndex..., in: text),
+                withTemplate: "")
+        }
+        var result = raw
+        result = strip(#"<tool_call>[\s\S]*?</tool_call>"#, in: result)
+        result = strip(#"</?tool_call>"#, in: result)
+        for name in toolRouter.registeredToolNames() {
+            let escaped = NSRegularExpression.escapedPattern(for: name)
+            result = strip("<\(escaped)(\\s[^<>]*)?\\s*/>", in: result)
+            result = result.replacingOccurrences(of: "<\(name)>", with: "")
+            result = result.replacingOccurrences(of: "</\(name)>", with: "")
+            result = strip("\\[\(escaped)\\s[^\\[\\]]*\\]", in: result)
+        }
+        result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.isEmpty && !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "I tried to run a tool but couldn't complete the call — nothing was executed."
+        }
+        return result
+    }
+
+    /// True when generated text mimics the approval-gate phrasing without a
+    /// real pending approval behind it. The model learned this format from
+    /// history and can emit it verbatim; gate language plus an approve/deny
+    /// affordance is the signature — a lone "needs approval" mention in prose
+    /// is not enough to trigger it.
+    static func looksLikeGateEcho(_ text: String) -> Bool {
+        let hasGateNoun = text.contains("Approval required")
+            || text.contains("wants to run")
+            || text.contains("needs your approval")
+            || text.contains("Gated by")
+        let hasVerdictVerb = text.contains("approve ")
+            || text.contains("deny ")
+            || text.range(of: #"`approve`|\bapprove [a-f0-9]{6,}\b"#,
+                          options: .regularExpression) != nil
+        return hasGateNoun && hasVerdictVerb
+    }
+
     private func toolAwareGeneration(
         prompt: String,
         systemPrompt: String,
@@ -1139,6 +1238,18 @@ final class BadAppleEngine: @unchecked Sendable {
                     return BadAppleInference.GenerationResult(
                         text: "I couldn't safely execute that Human Home command because I couldn't parse the requested change. Rephrase it with the person, commitment, conversation, preference, or attention mode stated explicitly.",
                         tier: "human_parse_error"
+                    )
+                }
+                // Gate-shaped output with no parseable call is the model
+                // mimicking the approval prompt it memorized — nothing is
+                // actually pending. Say so instead of leaking a dead gate.
+                if Self.looksLikeGateEcho(lastResult.text) {
+                    NSLog("[BadAppleEngine] gate echo suppressed: %@", String(lastResult.text.prefix(400)))
+                    return BadAppleInference.GenerationResult(
+                        text: "I meant to use a tool but couldn't form a valid call — nothing was run and nothing is awaiting approval.",
+                        tokensPerSecond: lastResult.tokensPerSecond,
+                        tokenCount: lastResult.tokenCount,
+                        tier: "gate_echo"
                     )
                 }
                 return lastResult
@@ -1309,6 +1420,31 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
 
+        // Approval-shaped prompt with no matching pending action. Never let
+        // this reach the model or the cache — the model will just echo a
+        // plausible-looking verdict for a dead id.
+        if isApproval {
+            let output = "No pending action matches that id — it may already be resolved or expired. Nothing was run."
+            auditLedger.append(
+                eventType: "approval_unmatched",
+                data: ["prompt": prompt],
+                persona: activePersona
+            )
+            saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
+            Task {
+                await runtime.recordQuery(
+                    latencySeconds: Date().timeIntervalSince(startedAt),
+                    tokenCount: 0,
+                    succeeded: true
+                )
+            }
+            DispatchQueue.main.async {
+                onToken(output)
+                onComplete(output)
+            }
+            return
+        }
+
         let persona = activePersona
         stateLock.withLock { _lastCacheHit = false }
 
@@ -1415,7 +1551,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         maxTokens: maxTokens,
                         temperature: 0.6
                     )
-                    let filtered = outputFirewall.check(postprocessOutput(result.text))
+                    let filtered = outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
                     auditLedger.append(
                         eventType: "response",
                         data: ["text": filtered, "tier": "self_audit"],
@@ -1490,7 +1626,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         maxTokens: maxTokens,
                         temperature: 0.6
                     )
-                    let filtered = outputFirewall.check(postprocessOutput(result.text))
+                    let filtered = outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
                     auditLedger.append(
                         eventType: "response",
                         data: ["text": filtered, "tier": "introspection"],
@@ -1571,7 +1707,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         DispatchQueue.main.async { onToken(filteredToken) }
                     },
                     onComplete: { result in
-                        let polished = postprocessOutput(result.text)
+                        let polished = postprocessOutput(self.sanitizeToolMarkup(result.text))
                         let filtered = self.outputFirewall.check(polished)
                         self.saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
                         if !self.privateMode, !Self.nonCacheableResponseTiers.contains(result.tier) {
@@ -1651,10 +1787,18 @@ final class BadAppleEngine: @unchecked Sendable {
                     data: ["prompt": prompt],
                     persona: persona
                 )
-                saveTurn(prompt: prompt, response: cached, sessionID: sessionID)
+                // Re-check stored text against the live firewall — content
+                // blocked after it was cached must not keep serving.
+                let served = outputFirewall.check(cached)
+                saveTurn(prompt: prompt, response: served, sessionID: sessionID)
+                await runtime.recordQuery(
+                    latencySeconds: 0,
+                    tokenCount: 0,
+                    succeeded: true
+                )
                 DispatchQueue.main.async {
-                    onToken(cached)
-                    onComplete(cached)
+                    onToken(served)
+                    onComplete(served)
                 }
                 return
             }
@@ -1685,7 +1829,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         maxTokens: effectiveMaxTokens,
                         persona: persona
                     )
-                    let filtered = outputFirewall.check(postprocessOutput(result.text))
+                    let filtered = outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
                     saveTurn(prompt: prompt, response: filtered, sessionID: sessionID)
                     if !privateMode, !Self.nonCacheableResponseTiers.contains(result.tier) {
                         await semanticCache.store(prompt: prompt, response: filtered, persona: persona)
@@ -1723,7 +1867,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 DispatchQueue.main.async { onToken(filteredToken) }
             }
             let onCompleteCb: @Sendable (BadAppleInference.GenerationResult) -> Void = { result in
-                let polished = postprocessOutput(result.text)
+                let polished = postprocessOutput(self.sanitizeToolMarkup(result.text))
                 let filtered = self.outputFirewall.check(polished)
                 self.saveTurn(prompt: prompt, response: filtered, sessionID: sessionID)
                 // Do not cache responses that were likely truncated by the token limit.
@@ -1825,7 +1969,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 maxTokens: boundedTokens,
                 temperature: 0.6
             )
-            let text = outputFirewall.check(postprocessOutput(result.text))
+            let text = outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
             auditLedger.append(
                 eventType: "delegated_response",
                 data: ["from_peer": fromPeer, "chars": text.count],
@@ -1860,19 +2004,43 @@ final class BadAppleEngine: @unchecked Sendable {
         let requestSessionID = conversationSessionID()
 
         let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
+            || prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("deny ")
         if killed && !isApproval {
             return "Bad Apple is paused. Say 'resume bad apple' to start again."
         }
 
         if let approval = takeApproval(from: prompt) {
-            let output = await toolExecutor.executeTool(
-                name: approval.name,
-                args: approval.args,
-                approved: true
-            )
+            let output: String
+            if approval.approved {
+                output = await toolExecutor.executeTool(
+                    name: approval.name,
+                    args: approval.args,
+                    approved: true
+                )
+                auditLedger.append(
+                    eventType: "approval_executed",
+                    data: ["id": approval.id, "name": approval.name, "result": output],
+                    persona: activePersona
+                )
+            } else {
+                output = "Denied. The action was not run."
+                auditLedger.append(
+                    eventType: "approval_denied",
+                    data: ["id": approval.id, "name": approval.name, "arguments": approval.args],
+                    persona: activePersona
+                )
+            }
+            saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
+            return output
+        }
+
+        // Approval-shaped prompt with no matching pending action — answer
+        // honestly instead of letting the model invent a verdict.
+        if isApproval {
+            let output = "No pending action matches that id — it may already be resolved or expired. Nothing was run."
             auditLedger.append(
-                eventType: "approval_executed",
-                data: ["id": approval.id, "name": approval.name, "result": output],
+                eventType: "approval_unmatched",
+                data: ["prompt": prompt],
                 persona: activePersona
             )
             saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
@@ -1883,6 +2051,12 @@ final class BadAppleEngine: @unchecked Sendable {
         await refreshAmbientContext()
         let history = inferenceHistory(sessionID: requestSessionID)
         stateLock.withLock { _lastCacheHit = false }
+
+        auditLedger.append(
+            eventType: "query",
+            data: ["prompt": prompt, "voice": false],
+            persona: persona
+        )
 
         // Check prompt hot-reload before generation.
         checkPromptReload()
@@ -1946,7 +2120,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 maxTokens: maxTokens,
                 temperature: 0.6
             )
-            let filtered = outputFirewall.check(postprocessOutput(result.text))
+            let filtered = outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
             auditLedger.append(
                 eventType: "response",
                 data: ["text": filtered, "tier": "self_audit"],
@@ -1994,7 +2168,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 maxTokens: maxTokens,
                 temperature: 0.6
             )
-            let filtered = outputFirewall.check(postprocessOutput(result.text))
+            let filtered = outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
             auditLedger.append(
                 eventType: "response",
                 data: ["text": filtered, "tier": "introspection"],
@@ -2025,8 +2199,11 @@ final class BadAppleEngine: @unchecked Sendable {
                 data: ["prompt": prompt],
                 persona: persona
             )
-            saveTurn(prompt: prompt, response: cached, sessionID: requestSessionID)
-            return cached
+            // Re-check stored text against the live firewall — content
+            // blocked after it was cached must not keep serving.
+            let served = outputFirewall.check(cached)
+            saveTurn(prompt: prompt, response: served, sessionID: requestSessionID)
+            return served
         }
 
         // Build system prompt with ambient context and semantic RAG.
@@ -2076,7 +2253,7 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         // Postprocess and filter.
-        let polished = postprocessOutput(result.text)
+        let polished = postprocessOutput(self.sanitizeToolMarkup(result.text))
         let filtered = outputFirewall.check(polished)
 
         // Do not cache responses that were likely truncated by the token limit,
@@ -2212,7 +2389,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 maxTokens: maxTokens,
                 temperature: 0
             )
-            return outputFirewall.check(postprocessOutput(result.text))
+            return outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
         } catch {
             return "Error: self-improvement generation failed: \(error.localizedDescription)"
         }
@@ -2288,7 +2465,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 maxTokens: maxTokens,
                 temperature: temperature
             )
-            return outputFirewall.check(postprocessOutput(result.text))
+            return outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(result.text)))
         } catch {
             return "Error: raw generation failed: \(error.localizedDescription)"
         }
@@ -2548,7 +2725,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         \(selfAuditFactSheet(from: auditOutput))
 
-        Answer the user's yes/no question in-character in 2-3 sentences, following the verdict line exactly — "alone" here means air-gapped (no external connections), not lonely. Cite the actual check results (check counts, socket status, integrity). Do not recite your capabilities, do not narrate this prompt, and do not invent or exaggerate numbers.
+        Answer the user in-character in 2-4 sentences. If they asked whether you are alone or air-gapped, follow the verdict line exactly — "alone" here means air-gapped (no external connections), not lonely. Otherwise report the audit results directly: check counts and pass/fail, socket status, integrity chain state, and anything that needs attention. Cite only numbers present above — do not recite your capabilities, do not narrate this prompt, and do not invent or exaggerate numbers.
         """
     }
 
@@ -3031,7 +3208,16 @@ final class BadAppleEngine: @unchecked Sendable {
                 }
                 pending = nil
                 let tier = fields["tier"] as? String
-                if tier == "deterministic" || tier == "fast" { skipped += 1; continue }
+                // Only genuine model answers train. Gate prompts, human-layer
+                // outputs, meta/deterministic text, and sanitizer fallbacks
+                // are control-plane text — training on them teaches the
+                // adapter to imitate the approval gate.
+                let untrainable: Set<String?> = [
+                    "deterministic", "fast", "meta", "approval", "gate_echo",
+                    "human_tool", "human_command", "human_parse_error",
+                    "self_audit", "introspection",
+                ]
+                if untrainable.contains(tier) { skipped += 1; continue }
                 if dreamSkippable(question) || dreamSkippable(text) { skipped += 1; continue }
                 if seen.insert(question).inserted { pairs.append((question, text)) }
             default:
@@ -3085,7 +3271,15 @@ final class BadAppleEngine: @unchecked Sendable {
         for prefix in [
             "I'm sorry", "I am sorry", "[Output firewall", "Approval required",
             "approve ", "deny ", "kill switch", "Unknown tool", "Error",
+            "This action needs your approval", "Policy gate:", "Policy:",
+            "I meant to use a tool", "[system] a gated action",
         ] where text.hasPrefix(prefix) { return true }
+        // Gate affordances anywhere in the body disqualify the row — the
+        // adapter must never learn `approve <id>` phrasing.
+        for marker in [
+            "needs your approval", "wants to run", "Gated by",
+            "Reply `approve", "Reply 'approve", "approve `",
+        ] where text.contains(marker) { return true }
         return false
     }
 
@@ -3494,14 +3688,33 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Execute a tool call. Returns the tool output, an approval prompt with an
     /// id, or an error message.
     func executeTool(name: String, args: [String: String]) async -> String {
-        if killed {
+        // `resume` must stay reachable while killed — it is the only way
+        // back up. Everything else stays paused.
+        if killed, name.lowercased() != "resume" {
             return "Bad Apple is paused. Say 'resume bad apple' to start again."
         }
-        if !autopilot, policyEngine.requiresApproval(toolName: name) {
+        // Evaluate policy on every path — approved=true must not skip
+        // `allowed: false`, denied patterns, or arg validation. `evaluate`
+        // returns .approved under autopilot for anything not denied.
+        switch policyEngine.evaluate(toolName: name, args: args) {
+        case .denied(let reason):
+            auditLedger.append(
+                eventType: "tool_denied",
+                data: ["name": name, "arguments": args, "reason": reason, "via": "executeTool"],
+                persona: activePersona
+            )
+            return "Policy: \(reason)"
+        case .needsApproval:
             let id = createApproval(name: name, args: args)
+            auditLedger.append(
+                eventType: "approval_requested",
+                data: ["id": id, "name": name, "arguments": args, "via": "executeTool"],
+                persona: activePersona
+            )
             return "This action needs your approval. Reply with: approve \(id)"
+        case .approved:
+            return await toolExecutor.executeTool(name: name, args: args, approved: true)
         }
-        return await toolExecutor.executeTool(name: name, args: args, approved: true)
     }
 
     /// Parse tool calls from model output.
