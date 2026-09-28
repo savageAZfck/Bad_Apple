@@ -1015,7 +1015,8 @@ final class BadAppleToolRouter: @unchecked Sendable {
             parameters: [
                 .init(name: "to", description: "Recipient email address.", required: true),
                 .init(name: "subject", description: "Subject line.", required: true),
-                .init(name: "body", description: "Email body text.", required: true),
+                .init(name: "body", description: "Email body text. Omit when body_file is given.", required: false),
+                .init(name: "body_file", description: "Path to a text file whose full contents become the email body.", required: false),
             ],
             requiresApproval: false
         ),
@@ -1025,7 +1026,8 @@ final class BadAppleToolRouter: @unchecked Sendable {
             parameters: [
                 .init(name: "to", description: "Recipient email address.", required: true),
                 .init(name: "subject", description: "Subject line.", required: true),
-                .init(name: "body", description: "Email body text.", required: true),
+                .init(name: "body", description: "Email body text. Omit when body_file is given.", required: false),
+                .init(name: "body_file", description: "Path to a text file whose full contents become the email body.", required: false),
             ],
             requiresApproval: true
         ),
@@ -1248,6 +1250,11 @@ final class BadAppleToolRouter: @unchecked Sendable {
         "new conversation about", "new conversation thread", "start a conversation about",
         "switch conversation", "open conversation", "continue conversation",
         "close conversation", "finish conversation",
+        // Communication
+        "send email", "send an email", "send mail", "email to", "mail to",
+        "draft email", "draft an email", "read mail", "read email", "check mail",
+        "check email", "check inbox", "my inbox",
+        "send a text", "send a message", "text message", "imessage", "send imessage",
     ]
 
     /// Maps keyword groups to the tools they suggest.
@@ -1303,6 +1310,9 @@ final class BadAppleToolRouter: @unchecked Sendable {
         (["new conversation about", "new conversation thread", "start a conversation about"], ["new_conversation_thread"]),
         (["switch conversation", "open conversation", "continue conversation"], ["switch_conversation_thread"]),
         (["close conversation", "finish conversation"], ["close_conversation_thread"]),
+        (["send email", "send an email", "send mail", "email to", "email him", "email her", "email them", "mail to", "send a draft", "draft email", "draft an email"], ["send_mail", "draft_mail", "read_file"]),
+        (["read mail", "read email", "check mail", "check email", "check inbox", "my inbox", "my mail", "my email"], ["read_mail"]),
+        (["send a text", "send a message", "text message", "imessage", "iMessage", "send imessage", "text him", "text her", "text them"], ["send_message"]),
     ]
 
     // MARK: - Prompt Routing
@@ -2097,6 +2107,15 @@ final class BadApplePolicyEngine: @unchecked Sendable {
              "index_documents", "read_document":
             let path = args["path"] ?? "~"
             return validatePath(path, policy: policy, tool: toolName)
+
+        case "send_mail", "draft_mail":
+            if let file = args["body_file"], !file.isEmpty {
+                return validatePath(file, policy: policy, tool: toolName)
+            }
+            if (args["body"] ?? "").isEmpty {
+                return "\(toolName) requires 'body' or 'body_file'"
+            }
+            return nil
 
         case "write_file":
             let path = args["path"] ?? ""
@@ -3228,14 +3247,18 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             let res = callAqua(command: "mail_draft", payload: [
                 "to": args["to"] ?? "",
                 "subject": args["subject"] ?? "",
-                "body": args["body"] ?? "",
+                "body": mailBody(from: args),
             ], timeout: 30)
             return aquaReply(res, missing: "Mail is unavailable — is the Bad Apple menu bar app running?")
         case "send_mail":
+            let body = mailBody(from: args)
+            guard !body.isEmpty else {
+                return "Error: empty email body — body_file unreadable or no body given"
+            }
             let res = callAqua(command: "mail_send", payload: [
                 "to": args["to"] ?? "",
                 "subject": args["subject"] ?? "",
-                "body": args["body"] ?? "",
+                "body": body,
             ], timeout: 30)
             return aquaReply(res, missing: "Mail is unavailable — is the Bad Apple menu bar app running?")
         case "send_message":
@@ -3591,6 +3614,51 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return String(text.prefix(limit)) + "\n... (\(text.count) characters total)"
         }
         return text
+    }
+
+    /// Resolve a mail body: `body_file` wins; otherwise inline `body`. Small
+    /// models often substitute an instruction like "the full contents of
+    /// /path/file.md" for the body — resolve that file reference too.
+    private func mailBody(from args: [String: String]) -> String {
+        if let ref = args["body_file"], !ref.isEmpty {
+            return readMailBodyFile(ref) ?? ""
+        }
+        let body = args["body"] ?? ""
+        if let ref = mailFileReference(body) {
+            return readMailBodyFile(ref) ?? ""
+        }
+        return body
+    }
+
+    /// Detect a body that is nothing but a file pointer: a bare path, or a
+    /// phrase like "the full contents of /path" whose tail is a path.
+    private func mailFileReference(_ body: String) -> String? {
+        let t = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+        guard !t.isEmpty else { return nil }
+        if !t.contains(" ") && !t.contains("\n")
+            && (t.hasPrefix("/") || t.hasPrefix("~/")) {
+            return t
+        }
+        let lower = t.lowercased()
+        for marker in ["contents of ", "text of ", "file at ", "body from "] {
+            guard let r = lower.range(of: marker) else { continue }
+            let tail = String(t[r.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+            if tail.hasPrefix("/") || tail.hasPrefix("~/") { return tail }
+        }
+        return nil
+    }
+
+    private func readMailBodyFile(_ raw: String) -> String? {
+        guard let path = jailPath(raw) else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+              !isDir.boolValue,
+              let data = FileManager.default.contents(atPath: path) else { return nil }
+        return String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
     }
 
     /// List the contents of a directory (max 50 entries).

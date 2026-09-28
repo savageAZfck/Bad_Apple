@@ -205,6 +205,41 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         load()
     }
 
+    // MARK: - Cacheability gate
+
+    /// Approval verdicts are one-time state transitions — `approve <id>` /
+    /// `deny <id>` prompts must never consult or enter the cache. A cached
+    /// "Denied." served against a *live* pending id would shadow the real
+    /// decision, and a cached verdict text makes a consumed id look handled.
+    private static func isApprovalCommand(_ prompt: String) -> Bool {
+        let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return p.hasPrefix("approve ") || p.hasPrefix("deny ")
+    }
+
+    /// A response is never cacheable when it carries tool-call markup or gate
+    /// text. Markup that reaches the user is a defect artifact — replaying it
+    /// re-poisons future answers. Approval-shaped text is worse: the model can
+    /// *generate* gate phrasing verbatim (tier stays `main`, so tier filters
+    /// miss it), and a cached approval prompt resurrects a dead approval id.
+    private static func isCacheable(prompt: String, response: String) -> Bool {
+        if isApprovalCommand(prompt) { return false }
+        if response.contains("<tool") { return false }
+        // Tag with attributes (<run_shell command="…"/>), self-closing
+        // (<capabilities/>), or any closing tag (</reply>) — catches the
+        // bare-tag tool dialect that pure attribute matching misses.
+        if response.range(
+            of: #"</?[a-z_][a-z0-9_]*(\s+[a-z_]+\s*=|/>)|</[a-z_][a-z0-9_]*\s*>"#,
+            options: .regularExpression) != nil { return false }
+        if response.contains("Approval required")
+            || response.contains("needs your approval")
+            || response.range(of: #"\bapprove [a-f0-9]{6,}\b"#,
+                              options: .regularExpression) != nil {
+            return false
+        }
+        return true
+    }
+
     // MARK: - Lookup / store
 
     /// Return a cached response for `prompt` if a same-persona entry has cosine
@@ -225,6 +260,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
     func lookup(prompt: String,
                 persona: String,
                 threshold: Float = badAppleCacheDefaultThreshold) async -> String? {
+        guard !Self.isApprovalCommand(prompt) else { return nil }
         guard let provider = embeddingProvider else { return nil }
         let queryEmbedding = await provider.embed(prompt)
         guard !queryEmbedding.isEmpty else { return nil }
@@ -275,6 +311,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
                response: String,
                persona: String,
                embedding: [Float]) {
+        guard Self.isCacheable(prompt: prompt, response: response) else { return }
         let entry = Entry(prompt: prompt,
                           embedding: embedding,
                           response: response,
@@ -293,13 +330,9 @@ final class BadAppleSemanticCache: @unchecked Sendable {
 
     func store(prompt: String, response: String, persona: String) async {
         guard let embeddingProvider else { return }
-        // Never cache responses that still carry tool-call markup — a leaked
-        // <tool …> block is a defect artifact, not an answer worth replaying.
-        // It also poisons recall: identical prompts replay the stale markup.
-        guard !response.contains("<tool"),
-              response.range(of: #"</?[a-z_][a-z0-9_]*\s+[a-z_]+\s*="#,
-                             options: .regularExpression) == nil
-        else { return }
+        // Never cache markup-bearing or gate-shaped responses — see
+        // `isCacheable`. Also refuses approval verdict prompts.
+        guard Self.isCacheable(prompt: prompt, response: response) else { return }
         let embedding = await embeddingProvider.embed(prompt)
         guard !embedding.isEmpty else { return }
         store(prompt: prompt, response: response, persona: persona, embedding: embedding)
