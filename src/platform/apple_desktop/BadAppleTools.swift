@@ -1818,28 +1818,28 @@ final class BadAppleToolRouter: @unchecked Sendable {
             let name = String(text[nameRange])
             guard knownNames.contains(name) else { continue }
             let attrsText = String(text[attrsRange])
-            var args: [String: String] = [:]
-            let attrMatches = regexAllMatches(
-                #"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#,
-                in: attrsText
-            )
-            for attrMatch in attrMatches {
-                guard attrMatch.numberOfRanges >= 4,
-                      let keyRange = Range(attrMatch.range(at: 1), in: attrsText) else { continue }
-                let rawValue: String
-                if let valueRange = Range(attrMatch.range(at: 2), in: attrsText) {
-                    rawValue = String(attrsText[valueRange])
-                } else if let valueRange = Range(attrMatch.range(at: 3), in: attrsText) {
-                    rawValue = String(attrsText[valueRange])
-                } else { continue }
-                args[String(attrsText[keyRange])] = rawValue
-                    .replacingOccurrences(of: "&quot;", with: "\"")
-                    .replacingOccurrences(of: "&apos;", with: "'")
-                    .replacingOccurrences(of: "&lt;", with: "<")
-                    .replacingOccurrences(of: "&gt;", with: ">")
-                    .replacingOccurrences(of: "&amp;", with: "&")
-            }
+            let args = parseQuotedAttrs(attrsText)
             guard !args.isEmpty else { continue }
+            calls.append((name: name, args: args))
+        }
+
+        // Bare `name key="value" key="value"` — no tags at all. Small models
+        // emit this dialect inside prose, including mimicking the approval
+        // gate's "wants to run `name`: name args…" text; parsing it here turns
+        // that mimicry back into a real (re-gated) call. Requiring a known
+        // tool name and ≥2 quoted pairs keeps ordinary prose from matching.
+        let bareCallMatches = regexAllMatches(
+            #"\b([A-Za-z_][A-Za-z0-9_]*)((?:\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:"[^"]*"|'[^']*')){2,})"#,
+            in: text
+        )
+        for match in bareCallMatches {
+            guard match.numberOfRanges >= 3,
+                  let nameRange = Range(match.range(at: 1), in: text),
+                  let attrsRange = Range(match.range(at: 2), in: text) else { continue }
+            let name = String(text[nameRange])
+            guard knownNames.contains(name) else { continue }
+            let args = parseQuotedAttrs(String(text[attrsRange]))
+            guard args.count >= 2 else { continue }
             calls.append((name: name, args: args))
         }
 
@@ -1849,6 +1849,33 @@ final class BadAppleToolRouter: @unchecked Sendable {
                 + call.args.keys.sorted().map { "\($0)=\(call.args[$0] ?? "")" }.joined(separator: "\u{1F}")
             return seen.insert(key).inserted
         }
+    }
+
+    /// Parse `key="value"` / `key='value'` pairs from `attrsText`, unescaping
+    /// XML entities — shared by the `<tag …/>` and bare `name k="v"` dialects.
+    private func parseQuotedAttrs(_ attrsText: String) -> [String: String] {
+        var args: [String: String] = [:]
+        let attrMatches = regexAllMatches(
+            #"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#,
+            in: attrsText
+        )
+        for attrMatch in attrMatches {
+            guard attrMatch.numberOfRanges >= 4,
+                  let keyRange = Range(attrMatch.range(at: 1), in: attrsText) else { continue }
+            let rawValue: String
+            if let valueRange = Range(attrMatch.range(at: 2), in: attrsText) {
+                rawValue = String(attrsText[valueRange])
+            } else if let valueRange = Range(attrMatch.range(at: 3), in: attrsText) {
+                rawValue = String(attrsText[valueRange])
+            } else { continue }
+            args[String(attrsText[keyRange])] = rawValue
+                .replacingOccurrences(of: "&quot;", with: "\"")
+                .replacingOccurrences(of: "&apos;", with: "'")
+                .replacingOccurrences(of: "&lt;", with: "<")
+                .replacingOccurrences(of: "&gt;", with: ">")
+                .replacingOccurrences(of: "&amp;", with: "&")
+        }
+        return args
     }
 
     /// Find balanced top-level JSON objects in `text` by brace counting.

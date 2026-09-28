@@ -286,6 +286,10 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         var bestScore: Float = -1.0
         var bestIndex: Int = -1
         for (index, entry) in entries.enumerated() where entry.persona == persona {
+            // Never serve entries that would not be admitted today — drops
+            // markup-bearing or gate-shaped poison written by older builds.
+            guard Self.isCacheable(prompt: entry.prompt, response: entry.response)
+            else { continue }
             let score = cosineSimilarity(queryEmbedding, entry.embedding)
             if score > bestScore {
                 bestScore = score
