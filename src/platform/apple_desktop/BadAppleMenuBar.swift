@@ -5236,8 +5236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                         prompt: fullPrompt,
                         socketPath: BadAppleBrain.directSocket,
                         maxTokens: 160,
-                        timeout: 900,
-                        extraEnv: ["BADAPPLE_FAST_TIER": "0"]
+                        timeout: 900
                     )
                     var path = self.extractImagePath(from: result)
                     if path == nil {
@@ -6150,17 +6149,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         // Minimal environment for the voice CLI process: do not inherit the
         // full parent environment (which can carry attacker-set overrides) and
         // keep the spawn as lightweight as possible to cut per-query latency.
-        var voiceEnv: [String: String] = [
+        let voiceEnv: [String: String] = [
             "BADAPPLE_SOCKET_PATH": socket,
             "BADAPPLE_SLICKS_KEY_PATH": BadAppleBrain.keyPath,
             "BADAPPLE_STREAM_JSON": "1",
             "BADAPPLE_VOICE": "1",
         ]
-        // Short simple queries skip the cognitive governor for faster response.
+        // BADAPPLE_FAST_TIER/BADAPPLE_COGNITIVE are daemon/gatekeeper env
+        // vars — setting them on this short-lived CLI process was dead code.
+        // Simple-query fast routing lives in the daemon itself (isSimpleQuery).
         if effectivePrompt.count < 60 && isSimpleVoiceQuery(effectivePrompt) {
-            voiceEnv["BADAPPLE_FAST_TIER"] = "1"
-            voiceEnv["BADAPPLE_COGNITIVE"] = "0"
-            badAppleVoiceLog("voice fast path: short prompt, skipping cognitive governor")
+            badAppleVoiceLog("voice fast path: short prompt routed to fast tier by daemon")
         }
 
         Task {

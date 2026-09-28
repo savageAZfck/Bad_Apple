@@ -395,19 +395,40 @@ fn execute_cage_blocks(text: &str, cage: &AutomationCage) -> String {
             let mut reports = Vec::new();
             for action in actions {
                 match cage.execute(&action) {
-                    Ok(report) => reports.push(format!(
-                        "{} {} -> {} ({} ms)",
-                        report.operation,
-                        report
-                            .paths
-                            .iter()
-                            .map(|p| p.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                        report.result,
-                        report.elapsed_ms
-                    )),
-                    Err(e) => reports.push(format!("automation error: {e:#}")),
+                    Ok(report) => {
+                        audit_to_engine(
+                            "cage_action",
+                            serde_json::json!({
+                                "operation": report.operation,
+                                "paths": report
+                                    .paths
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect::<Vec<_>>(),
+                                "result": report.result,
+                                "elapsed_ms": report.elapsed_ms,
+                            }),
+                        );
+                        reports.push(format!(
+                            "{} {} -> {} ({} ms)",
+                            report.operation,
+                            report
+                                .paths
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                            report.result,
+                            report.elapsed_ms
+                        ))
+                    }
+                    Err(e) => {
+                        audit_to_engine(
+                            "cage_action_denied",
+                            serde_json::json!({ "error": format!("{e:#}") }),
+                        );
+                        reports.push(format!("automation error: {e:#}"));
+                    }
                 }
             }
             reports.join("\n")
@@ -459,8 +480,20 @@ fn execute_wasm_blocks(text: &str, cage: &AutomationCage) -> String {
         })();
 
         match result {
-            Ok(out) => outputs.push(format!("[wasm output] {out}")),
-            Err(e) => outputs.push(format!("[wasm error] {e:#}")),
+            Ok(out) => {
+                audit_to_engine(
+                    "wasm_action",
+                    serde_json::json!({ "source_len": body.len(), "output": out }),
+                );
+                outputs.push(format!("[wasm output] {out}"));
+            }
+            Err(e) => {
+                audit_to_engine(
+                    "wasm_action_denied",
+                    serde_json::json!({ "error": format!("{e:#}") }),
+                );
+                outputs.push(format!("[wasm error] {e:#}"));
+            }
         }
         // Remove the block from the display text and append the execution report.
         if let Some(full_match) = cap.get(0) {
@@ -681,6 +714,102 @@ fn forward_v2_to_mlx(
     }
 }
 
+/// Report an executed action to the engine's ledger over the agent RPC
+/// channel — the hash-chained ledger keeps a single writer. Best-effort by
+/// design: an audit-channel failure is logged, never allowed to break the
+/// request being served.
+fn audit_to_engine(event_type: &str, data: serde_json::Value) {
+    if let Err(e) = (|| -> Result<()> {
+        let secret = load_slicks_secret().context("no SLICKS secret for audit channel")?;
+        let mlx_path = PathBuf::from(
+            std::env::var_os("BADAPPLE_MLX_SOCKET_PATH").unwrap_or_else(|| MLX_SOCKET_PATH.into()),
+        );
+        let mut stream = UnixStream::connect(&mlx_path)
+            .with_context(|| format!("cannot connect to MLX at {mlx_path:?}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+
+        let timestamp_ms = now_unix_ms()?;
+        let client_nonce = random_nonce();
+        write_frame(
+            &mut stream,
+            &ClientFrame::Hello {
+                version: SLICKS_VERSION,
+                timestamp_ms,
+                client_nonce: client_nonce.clone(),
+                client_pubkey: None,
+            },
+        )?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let challenge: ServerFrame = read_frame(&mut reader)?;
+        let server_nonce = match challenge {
+            ServerFrame::Challenge {
+                version,
+                server_nonce,
+                ..
+            } if version == SLICKS_VERSION => server_nonce,
+            ServerFrame::Error { message } => bail!("audit handshake rejected: {message}"),
+            _ => bail!("audit handshake: unexpected frame"),
+        };
+
+        let req = serde_json::json!({
+            "id": "gk-audit",
+            "method": "audit_event",
+            "params": { "type": event_type, "data": data },
+        });
+        let prompt = format!("__BADAPPLE_AGENT__ {req}");
+        let proof = client_proof(
+            &secret,
+            timestamp_ms,
+            &client_nonce,
+            &server_nonce,
+            &prompt,
+            0,
+        );
+        write_frame(
+            &mut stream,
+            &ClientFrame::Execute {
+                version: SLICKS_VERSION,
+                timestamp_ms,
+                client_nonce,
+                server_nonce,
+                prompt,
+                max_new_tokens: 0,
+                proof,
+                client_pubkey: None,
+            },
+        )?;
+        loop {
+            let frame: ServerFrame = read_frame(&mut reader)?;
+            match frame {
+                ServerFrame::Accepted => continue,
+                ServerFrame::Done { .. } | ServerFrame::Response { .. } => return Ok(()),
+                ServerFrame::Error { message } => bail!("audit_event error: {message}"),
+                _ => continue,
+            }
+        }
+    })() {
+        eprintln!("[gatekeeper] audit_event '{event_type}' failed: {e:#}");
+    }
+}
+
+/// Short label for a resolved fast action — used for ledger entries.
+fn fast_action_label(action: &FastAction) -> (&'static str, String) {
+    match action {
+        FastAction::Time => ("time", String::new()),
+        FastAction::OpenWorkspace(p) => ("open_workspace", p.clone()),
+        FastAction::OpenApp(p) => ("open_app", p.clone()),
+        FastAction::CreateDirectory(p) => ("create_dir", p.clone()),
+        FastAction::CreateFile(p) => ("create_file", p.clone()),
+        FastAction::ListDirectory(p) => ("list_dir", p.clone()),
+        FastAction::Delete(p) => ("delete_to_trash", p.clone()),
+        FastAction::CopyFile { from, to } => ("copy_file", format!("{from} -> {to}")),
+        FastAction::MoveFile { from, to } => ("move_file", format!("{from} -> {to}")),
+        FastAction::RunWasm(p) => ("run_wasm", p.clone()),
+        FastAction::NewChat => ("new_chat", String::new()),
+    }
+}
+
 fn write_frame<W: Write, T: serde::Serialize>(writer: &mut W, value: &T) -> Result<()> {
     let mut frame = serde_json::to_vec(value)?;
     if frame.len() > MAX_FRAME_BYTES {
@@ -878,11 +1007,21 @@ fn handle_client(
 
     if score < LOW_COMPLEXITY_THRESHOLD {
         if let Some(action) = resolver.resolve(&prompt) {
+            let (action_verb, action_target) = fast_action_label(&action);
             match execute_fast(action, cage) {
                 Ok(reply) if reply == "new chat" => {
                     // The deep core is responsible for clearing state; fall through.
                 }
                 Ok(reply) => {
+                    audit_to_engine(
+                        "fast_action",
+                        serde_json::json!({
+                            "prompt": prompt,
+                            "action": action_verb,
+                            "target": action_target,
+                            "result": reply,
+                        }),
+                    );
                     write_frame(&mut stream, &ServerFrame::Accepted)?;
                     write_frame(
                         &mut stream,

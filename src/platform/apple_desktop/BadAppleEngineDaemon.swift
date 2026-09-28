@@ -475,7 +475,13 @@ private func makeMetrics() -> [String: Any] {
         "peak_memory_gb": Double(BadAppleEngine.shared.memoryUsageGB),
         "speculative": speculativeActive
     ]
-    if BadAppleEngine.shared.lastCacheHit {
+    // Report the tier the last response actually took — the engine records
+    // it at completion. The config-flag fallback (fastTierEnabled) stays only
+    // for paths that predate tier tracking.
+    let actualTier = BadAppleEngine.shared.lastResponseTier
+    if !actualTier.isEmpty {
+        metrics["tier"] = actualTier
+    } else if BadAppleEngine.shared.lastCacheHit {
         metrics["tier"] = "cache"
     } else if BadAppleEngine.shared.lastTokenCount == 0 {
         metrics["tier"] = "deterministic"
@@ -693,6 +699,14 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
                        "consolidate_memory", "workspace_status", "read_document",
                        "search_local_files", "set_session_seed", "get_session_seed"],
         ], error: nil)
+
+    case "audit_event":
+        // Components outside the engine (gatekeeper fast-path, cages) funnel
+        // their actions through here so the ledger keeps a single writer.
+        let eventType = params["type"] as? String ?? "external_action"
+        let data = (params["data"] as? [String: Any] ?? [:]).mapValues { "\($0)" }
+        BadAppleEngine.shared.auditDaemonEvent(type: eventType, data: data)
+        agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: ["ok": true], error: nil)
 
     case "invoke_tool":
         let toolName = params["name"] as? String ?? ""

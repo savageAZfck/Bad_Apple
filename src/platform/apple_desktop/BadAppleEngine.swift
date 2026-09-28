@@ -187,8 +187,8 @@ final class BadAppleEngine: @unchecked Sendable {
     let modelManager = BadAppleModelManager.shared
     private let approvalLock = NSLock()
     private var pendingApprovals: [String: (name: String, args: [String: String], created: Date)] = [:]
-    private var approvalsLoaded = false
     private let approvalsPath = NSHomeDirectory() + "/.bad_apple/pending_approvals.json"
+    private let approvalsLockPath = NSHomeDirectory() + "/.bad_apple/pending_approvals.lock"
     private let approvalTTL: TimeInterval = 24 * 3600
 
     // MARK: - Conversation Pruning
@@ -289,6 +289,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _lastDraftAcceptPct: Float = 0
     private var _lastPrefixCache: String = "off"
     private var _lastCacheHit: Bool = false
+    private var _lastResponseTier: String = ""
     private var _workspacePath: String?
     private var _airgapEnabled = false
     private var _privateModeEnabled = false
@@ -349,6 +350,13 @@ final class BadAppleEngine: @unchecked Sendable {
 
     var lastCacheHit: Bool {
         return stateLock.withLock { _lastCacheHit }
+    }
+
+    /// The tier the last completed response actually took — cache, approval,
+    /// human_tool, fast, main, etc. Metrics must report this, not infer the
+    /// tier from configuration flags.
+    var lastResponseTier: String {
+        return stateLock.withLock { _lastResponseTier }
     }
 
     var workspacePath: String? {
@@ -1008,10 +1016,13 @@ final class BadAppleEngine: @unchecked Sendable {
 
     /// Pending approvals persist to disk so a daemon restart does not strand
     /// an outstanding `approve <id>` — entries expire after approvalTTL.
+    /// The store is shared across processes (daemon + menu-bar engine), so
+    /// every call re-reads the file: a once-per-process load would leave
+    /// approvals created by the other engine invisible here. The file is
+    /// tiny; correctness beats a cached read.
     private func ensureApprovalsLoaded() {
-        // Caller must hold approvalLock.
-        guard !approvalsLoaded else { return }
-        approvalsLoaded = true
+        // Caller must hold approvalLock and the file lock.
+        pendingApprovals.removeAll(keepingCapacity: true)
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: approvalsPath)),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]]
         else { return }
@@ -1026,7 +1037,7 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     private func persistApprovals() {
-        // Caller must hold approvalLock.
+        // Caller must hold approvalLock and the file lock.
         var obj: [String: [String: Any]] = [:]
         let now = Date()
         for (id, call) in pendingApprovals where now.timeIntervalSince(call.created) < approvalTTL {
@@ -1037,12 +1048,28 @@ final class BadAppleEngine: @unchecked Sendable {
         }
     }
 
+    /// Cross-process mutual exclusion for pending_approvals.json — the
+    /// daemon and the in-process menu-bar engine share the file, so the
+    /// process-local approvalLock alone cannot serialize a
+    /// read-modify-write. The flock goes on a stable sidecar file: the data
+    /// file is swapped by atomic rename on every write, so a lock on it
+    /// would order two different inodes and never actually exclude.
+    private func withApprovalsFileLock<T>(_ body: () -> T) -> T {
+        let fd = open(approvalsLockPath, O_RDWR | O_CREAT, 0o600)
+        guard fd >= 0 else { return body() }
+        flock(fd, LOCK_EX)
+        defer { flock(fd, LOCK_UN); close(fd) }
+        return body()
+    }
+
     private func createApproval(name: String, args: [String: String]) -> String {
         let id = String(UUID().uuidString.lowercased().prefix(8))
         approvalLock.lock()
-        ensureApprovalsLoaded()
-        pendingApprovals[id] = (name, args, Date())
-        persistApprovals()
+        withApprovalsFileLock {
+            ensureApprovalsLoaded()
+            pendingApprovals[id] = (name, args, Date())
+            persistApprovals()
+        }
         approvalLock.unlock()
         BadAppleNotify.push(
             kind: "approval:\(name)",
@@ -1061,10 +1088,12 @@ final class BadAppleEngine: @unchecked Sendable {
         let id = String(parts[1])
         approvalLock.lock()
         defer { approvalLock.unlock() }
-        ensureApprovalsLoaded()
-        guard let call = pendingApprovals.removeValue(forKey: id) else { return nil }
-        persistApprovals()
-        return (parts[0] == "approve", id, call.name, call.args)
+        return withApprovalsFileLock {
+            ensureApprovalsLoaded()
+            guard let call = pendingApprovals.removeValue(forKey: id) else { return nil }
+            persistApprovals()
+            return (parts[0] == "approve", id, call.name, call.args)
+        }
     }
 
     /// Journal a council deliberation: verdict, dissent, and every seat's vote.
@@ -1107,7 +1136,7 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Flush the semantic response cache — user-facing clear path so a
     /// poisoned or stale cache can be wiped without a daemon kill.
     func clearSemanticCache() {
-        semanticCache.clear()
+        _ = semanticCache.clear()
         auditLedger.append(
             eventType: "cache_cleared",
             data: [:],
@@ -1352,7 +1381,10 @@ final class BadAppleEngine: @unchecked Sendable {
             }
 
             currentHistory.append(BadAppleInference.ChatMessage(role: "user", content: currentPrompt))
-            currentHistory.append(BadAppleInference.ChatMessage(role: "assistant", content: lastResult.text))
+            // Strip tool markup before the model sees its own output again —
+            // raw <tool_call>/<tool> text in history teaches it to echo tags.
+            currentHistory.append(BadAppleInference.ChatMessage(
+                role: "assistant", content: sanitizeToolMarkup(lastResult.text)))
             currentPrompt = "Tool results:\n\(outputs.joined(separator: "\n"))\n\nAnswer the user's original request using these results."
         }
 
@@ -1379,12 +1411,14 @@ final class BadAppleEngine: @unchecked Sendable {
         let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
             || prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("deny ")
         if killed && !isApproval {
+            stateLock.withLock { _lastResponseTier = "paused" }
             onToken("")
             onComplete("Bad Apple is paused. Say 'resume bad apple' to start again.")
             return
         }
 
         if let approval = takeApproval(from: prompt) {
+            stateLock.withLock { _lastResponseTier = "approval" }
             Task {
                 let output: String
                 if approval.approved {
@@ -1424,6 +1458,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // this reach the model or the cache — the model will just echo a
         // plausible-looking verdict for a dead id.
         if isApproval {
+            stateLock.withLock { _lastResponseTier = "approval" }
             let output = "No pending action matches that id — it may already be resolved or expired. Nothing was run."
             auditLedger.append(
                 eventType: "approval_unmatched",
@@ -1446,7 +1481,7 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         let persona = activePersona
-        stateLock.withLock { _lastCacheHit = false }
+        stateLock.withLock { _lastCacheHit = false; _lastResponseTier = "" }
 
         auditLedger.append(
             eventType: "query",
@@ -1720,6 +1755,7 @@ final class BadAppleEngine: @unchecked Sendable {
                             self._lastTokenCount = result.tokenCount
                             self._lastDraftAcceptPct = result.draftAcceptPct
                             self._lastPrefixCache = result.prefixCache
+                            self._lastResponseTier = "fast"
                         }
                         self.auditLedger.append(
                             eventType: "response",
@@ -1781,7 +1817,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
             let history = inferenceHistory(sessionID: sessionID)
             if !privateMode, let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
-                stateLock.withLock { _lastCacheHit = true }
+                stateLock.withLock { _lastCacheHit = true; _lastResponseTier = "cache" }
                 auditLedger.append(
                     eventType: "cache_hit",
                     data: ["prompt": prompt],
@@ -1845,6 +1881,7 @@ final class BadAppleEngine: @unchecked Sendable {
                             self._lastTokenCount = result.tokenCount
                             self._lastDraftAcceptPct = result.draftAcceptPct
                             self._lastPrefixCache = result.prefixCache
+                            self._lastResponseTier = result.tier
                         }
                         onToken(filtered)
                         onComplete(filtered)
@@ -1888,6 +1925,7 @@ final class BadAppleEngine: @unchecked Sendable {
                         self._lastTokenCount = result.tokenCount
                         self._lastDraftAcceptPct = result.draftAcceptPct
                         self._lastPrefixCache = result.prefixCache
+                        self._lastResponseTier = result.tier
                     }
                     self.auditLedger.append(
                         eventType: "response",
@@ -2037,6 +2075,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Approval-shaped prompt with no matching pending action — answer
         // honestly instead of letting the model invent a verdict.
         if isApproval {
+            stateLock.withLock { _lastResponseTier = "approval" }
             let output = "No pending action matches that id — it may already be resolved or expired. Nothing was run."
             auditLedger.append(
                 eventType: "approval_unmatched",
@@ -2193,7 +2232,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         // Check semantic cache for a matching response.
         if !privateMode, let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
-            stateLock.withLock { _lastCacheHit = true }
+            stateLock.withLock { _lastCacheHit = true; _lastResponseTier = "cache" }
             auditLedger.append(
                 eventType: "cache_hit",
                 data: ["prompt": prompt],
@@ -2250,6 +2289,7 @@ final class BadAppleEngine: @unchecked Sendable {
             _lastTokenCount = result.tokenCount
             _lastDraftAcceptPct = result.draftAcceptPct
             _lastPrefixCache = result.prefixCache
+            _lastResponseTier = result.tier
         }
 
         // Postprocess and filter.
@@ -2979,6 +3019,11 @@ final class BadAppleEngine: @unchecked Sendable {
                 let cooldown = min(self.curiousAutopilotInterval(), 600)
                 guard Date().timeIntervalSince(self.lastCuriousCheck) >= cooldown else { continue }
                 self.lastCuriousCheck = Date()
+                self.auditLedger.append(
+                    eventType: "tool_call",
+                    data: ["name": "curious_self_improve", "via": "curious_autopilot"],
+                    persona: self.activePersona
+                )
                 let result = await self.toolExecutor.executeTool(
                     name: "curious_self_improve",
                     args: ["include": "all"],
@@ -2994,6 +3039,11 @@ final class BadAppleEngine: @unchecked Sendable {
                 // expired approvals — memory accumulates daily, it digests nightly.
                 if self.consolidationDue() {
                     self.markConsolidated()
+                    self.auditLedger.append(
+                        eventType: "tool_call",
+                        data: ["name": "consolidate_memory", "via": "consolidation_pass"],
+                        persona: self.activePersona
+                    )
                     let memResult = await self.toolExecutor.executeTool(
                         name: "consolidate_memory",
                         args: [:],
@@ -3459,14 +3509,16 @@ final class BadAppleEngine: @unchecked Sendable {
     private func sweepExpiredApprovals() -> Int {
         approvalLock.lock()
         defer { approvalLock.unlock() }
-        ensureApprovalsLoaded()
-        let now = Date()
-        let before = pendingApprovals.count
-        pendingApprovals = pendingApprovals.filter {
-            now.timeIntervalSince($0.value.created) < approvalTTL
+        return withApprovalsFileLock {
+            ensureApprovalsLoaded()
+            let now = Date()
+            let before = pendingApprovals.count
+            pendingApprovals = pendingApprovals.filter {
+                now.timeIntervalSince($0.value.created) < approvalTTL
+            }
+            if pendingApprovals.count != before { persistApprovals() }
+            return before - pendingApprovals.count
         }
-        if pendingApprovals.count != before { persistApprovals() }
-        return before - pendingApprovals.count
     }
 
     // MARK: - Fleet beacon

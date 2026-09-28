@@ -51,13 +51,14 @@ const DANGEROUS_TOOLS: &[&str] = &[
     "run_shortcut",
 ];
 
-/// Agent methods that can be exposed directly through MCP.
+/// Agent methods that can be exposed directly through MCP. Governance
+/// mutations (set_workspace, set_autopilot, private_mode) are deliberately
+/// absent — an MCP client must never widen the jail or weaken approvals.
 const DIRECT_AGENT_METHODS: &[&str] = &[
     "runtime_status",
     "invoke_tool",
     "p2p_peers",
     "p2p_sync",
-    "set_workspace",
     "inference",
     "list_models",
     "model_info",
@@ -414,6 +415,16 @@ fn call_tool(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
     let agent_params = if name == "invoke_tool" {
         if let Value::Object(args) = &arguments {
             let inner_name = args.get("name").and_then(Value::as_str).unwrap_or("");
+            // The dangerous check above only sees the outer method name —
+            // invoke_tool{ name: "run_shell" } would bypass it entirely.
+            // Apply the same gate to the resolved inner tool.
+            if DANGEROUS_TOOLS.contains(&inner_name) {
+                return Some(error_response(
+                    req_id,
+                    -32602,
+                    format!("tool {} requires daemon approval", inner_name),
+                ));
+            }
             let inner_args = args
                 .get("args")
                 .cloned()

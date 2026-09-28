@@ -173,6 +173,12 @@ final class BadAppleSemanticCache: @unchecked Sendable {
 
     private var entries: [Entry] = []
 
+    /// Modification time of the cache file at the last load/save. Two engine
+    /// processes share this file (daemon + menu bar), so a stale in-memory
+    /// copy must not serve lookups or clobber entries the other process
+    /// wrote — `reloadIfChangedLocked` keeps the file authoritative.
+    private var lastFileMtime: Date?
+
     /// Create a semantic cache.
     ///
     /// - Parameters:
@@ -291,6 +297,10 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        // The other engine process may have appended entries — reload so
+        // lookups see them and a stale copy can't mask fresh writes.
+        reloadIfChangedLocked()
+
         guard !entries.isEmpty else { return nil }
         var bestScore: Float = -1.0
         var bestIndex: Int = -1
@@ -332,6 +342,9 @@ final class BadAppleSemanticCache: @unchecked Sendable {
                           timestamp: isoTimestamp())
         lock.lock()
         defer { lock.unlock() }
+        // Merge cross-process writes before appending — last-writer-wins on
+        // the shared file would silently drop the other engine's entries.
+        reloadIfChangedLocked()
         entries.append(entry)
         if entries.count > Self.maxCacheSize * 2 {
             // Keep the most-used half: sort ascending by hits, take the suffix.
@@ -377,6 +390,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         defer { lock.unlock() }
         entries = []
         try? fileManager.removeItem(at: cacheURL)
+        lastFileMtime = fileMtime()
         return "Semantic cache cleared."
     }
 
@@ -387,6 +401,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
     func pruneStale(olderThanDays: Double) -> Int {
         lock.lock()
         defer { lock.unlock() }
+        reloadIfChangedLocked()
         let cutoff = Date().addingTimeInterval(-olderThanDays * 86_400)
         let fmt = ISO8601DateFormatter()
         let before = entries.count
@@ -410,10 +425,31 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         return entries.count
     }
 
+    private func fileMtime() -> Date? {
+        (try? fileManager.attributesOfItem(atPath: cacheURL.path))?[.modificationDate] as? Date
+    }
+
+    /// Reload `entries` from disk when another process rewrote the file.
+    /// Caller must hold `lock`.
+    private func reloadIfChangedLocked() {
+        let mtime = fileMtime()
+        guard mtime != lastFileMtime else { return }
+        load()
+    }
+
     private func load() {
-        guard let data = try? Data(contentsOf: cacheURL) else { return }
-        if let parsed = try? JSONDecoder().decode([Entry].self, from: data) {
-            entries = parsed
+        lastFileMtime = fileMtime()
+        guard let data = try? Data(contentsOf: cacheURL),
+              let parsed = try? JSONDecoder().decode([Entry].self, from: data) else {
+            // Deleted or unreadable on disk means gone — a cleared cache in
+            // the other process must empty this one's memory too.
+            entries = []
+            return
+        }
+        // Revalidate on load: entries that fail today's admission rules are
+        // dropped — poison written by older builds never re-enters memory.
+        entries = parsed.filter {
+            Self.isCacheable(prompt: $0.prompt, response: $0.response)
         }
     }
 
@@ -427,6 +463,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(entries) else { return }
         try? data.write(to: cacheURL, options: .atomic)
+        lastFileMtime = fileMtime()
     }
 }
 

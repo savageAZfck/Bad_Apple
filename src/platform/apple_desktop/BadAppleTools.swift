@@ -1848,65 +1848,74 @@ final class BadAppleToolRouter: @unchecked Sendable {
         // mimicry back into a real (re-gated) call. Prose needs a known tool
         // name and ≥2 quoted pairs to match; inside gate-shaped text a single
         // pair is already high-confidence intent (`self_audit include=all`).
-        let gateMarked = text.contains("wants to run")
-            || text.contains("Approval required")
-            || text.contains("Gated by")
-        let minPairs = gateMarked ? 1 : 2
-        // Gate-mimicry drops quotes too (`self_audit include=all`) — under a
-        // gate marker, unquoted `k=v` also forms a candidate pair.
-        let valueForm = gateMarked
-            ? #"(?:"[^"]*"|'[^']*'|[^\s"']+)"#
-            : #"(?:"[^"]*"|'[^']*')"#
-        let bareCallMatches = regexAllMatches(
-            "\\b([A-Za-z_][A-Za-z0-9_]*)((?:\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\(valueForm))+)",
-            in: text
-        )
-        for match in bareCallMatches {
-            guard match.numberOfRanges >= 3,
-                  let nameRange = Range(match.range(at: 1), in: text),
-                  let attrsRange = Range(match.range(at: 2), in: text) else { continue }
-            let name = String(text[nameRange])
-            guard knownNames.contains(name) else { continue }
-            var args = parseQuotedAttrs(String(text[attrsRange]))
-            // Gate-mimicry mixes bare `k=v` (`self_audit include=all`) with
-            // quoted pairs — merge unquoted values only when gate-shaped,
-            // never overwriting an explicitly quoted value.
-            if gateMarked {
-                for (k, v) in parseBareAttrs(String(text[attrsRange]))
-                where args[k] == nil {
-                    args[k] = v
-                }
-            }
-            guard args.count >= minPairs else { continue }
-            calls.append((name: name, args: args))
-        }
+        // The loosened rules apply only to text at or after the first gate
+        // marker — a "wants to run" phrase anywhere must not downgrade
+        // confidence for unrelated tool-looking prose elsewhere in the reply.
+        let gateMarkerIdx = text.range(of: "wants to run")?.lowerBound
+            ?? text.range(of: "Approval required")?.lowerBound
+            ?? text.range(of: "Gated by")?.lowerBound
+        let parseSegments: [(segment: String, gateMarked: Bool)] = gateMarkerIdx.map {
+            [(String(text[..<$0]), false), (String(text[$0...]), true)]
+        } ?? [(text, false)]
 
-        // Gate echo may name the tool with no args at all:
-        // "… wants to run `self_audit`." — a backtick-quoted known tool name
-        // inside gate-shaped text is a zero-arg call.
-        if gateMarked {
-            let tickMatches = regexAllMatches(
-                #"`([A-Za-z_][A-Za-z0-9_]*)`"#,
-                in: text
+        for (segment, gateMarked) in parseSegments where !segment.isEmpty {
+            let minPairs = gateMarked ? 1 : 2
+            // Gate-mimicry drops quotes too (`self_audit include=all`) — under a
+            // gate marker, unquoted `k=v` also forms a candidate pair.
+            let valueForm = gateMarked
+                ? #"(?:"[^"]*"|'[^']*'|[^\s"']+)"#
+                : #"(?:"[^"]*"|'[^']*')"#
+            let bareCallMatches = regexAllMatches(
+                "\\b([A-Za-z_][A-Za-z0-9_]*)((?:\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\(valueForm))+)",
+                in: segment
             )
-            // Gate-echo recovery never dispatches these: kill_switch/resume
-            // bypass policy in the executor entirely, and the rest mutate
-            // state — a mimicked gate must only be able to *read*.
-            let gateEchoExcluded: Set<String> = [
-                "kill_switch", "resume", "resume_bad_apple",
-                "clear_working_memory", "consolidate_memory",
-                "undo_last", "submit_agent_task", "set_autopilot",
-            ]
-            for match in tickMatches {
-                guard match.numberOfRanges >= 2,
-                      let nameRange = Range(match.range(at: 1), in: text) else { continue }
-                let name = String(text[nameRange])
-                // Zero-arg only for tools that genuinely take no args —
-                // backticked `kill_switch`/`run_shell` in gate text must not
-                // become an unargumented dispatch.
-                guard knownNames.contains(name), !toolRequiresArguments(name),
-                      !gateEchoExcluded.contains(name) else { continue }
-                calls.append((name: name, args: [:]))
+            for match in bareCallMatches {
+                guard match.numberOfRanges >= 3,
+                      let nameRange = Range(match.range(at: 1), in: segment),
+                      let attrsRange = Range(match.range(at: 2), in: segment) else { continue }
+                let name = String(segment[nameRange])
+                guard knownNames.contains(name) else { continue }
+                var args = parseQuotedAttrs(String(segment[attrsRange]))
+                // Gate-mimicry mixes bare `k=v` (`self_audit include=all`) with
+                // quoted pairs — merge unquoted values only when gate-shaped,
+                // never overwriting an explicitly quoted value.
+                if gateMarked {
+                    for (k, v) in parseBareAttrs(String(segment[attrsRange]))
+                    where args[k] == nil {
+                        args[k] = v
+                    }
+                }
+                guard args.count >= minPairs else { continue }
+                calls.append((name: name, args: args))
+            }
+
+            // Gate echo may name the tool with no args at all:
+            // "… wants to run `self_audit`." — a backtick-quoted known tool
+            // name inside gate-shaped text is a zero-arg call.
+            if gateMarked {
+                let tickMatches = regexAllMatches(
+                    #"`([A-Za-z_][A-Za-z0-9_]*)`"#,
+                    in: segment
+                )
+                // Gate-echo recovery never dispatches these: kill_switch/resume
+                // bypass policy in the executor entirely, and the rest mutate
+                // state — a mimicked gate must only be able to *read*.
+                let gateEchoExcluded: Set<String> = [
+                    "kill_switch", "resume", "resume_bad_apple",
+                    "clear_working_memory", "consolidate_memory",
+                    "undo_last", "submit_agent_task", "set_autopilot",
+                ]
+                for match in tickMatches {
+                    guard match.numberOfRanges >= 2,
+                          let nameRange = Range(match.range(at: 1), in: segment) else { continue }
+                    let name = String(segment[nameRange])
+                    // Zero-arg only for tools that genuinely take no args —
+                    // backticked `kill_switch`/`run_shell` in gate text must
+                    // not become an unargumented dispatch.
+                    guard knownNames.contains(name), !toolRequiresArguments(name),
+                          !gateEchoExcluded.contains(name) else { continue }
+                    calls.append((name: name, args: [:]))
+                }
             }
         }
 
@@ -3764,19 +3773,34 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return "Error: \(jailed) is a directory, not a file"
         }
 
-        guard let data = FileManager.default.contents(atPath: jailed) else {
+        // Bound the read before slurping — contents(atPath:) loads the entire
+        // file, so a multi-GB target becomes a memory-exhaustion path. Read
+        // only what the char limit could need plus one byte to detect overflow.
+        let limit = max(1, maxChars)
+        let byteCap = limit * 4 + 1
+        guard let handle = FileHandle(forReadingAtPath: jailed) else {
             return "Error: could not read \(jailed)"
         }
+        defer { try? handle.close() }
+        let data = handle.readData(ofLength: byteCap)
 
-        let text = String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .isoLatin1)
+        let truncatedBytes = data.count > byteCap - 1
+        let text = String(data: data.prefix(byteCap - 1), encoding: .utf8)
+            ?? String(data: data.prefix(byteCap - 1), encoding: .isoLatin1)
             ?? ""
 
-        let limit = max(1, maxChars)
-        if text.count > limit {
-            return String(text.prefix(limit)) + "\n... (\(text.count) characters total)"
+        if text.count > limit || truncatedBytes {
+            return String(text.prefix(limit)) + "\n... (truncated at \(limit) characters)"
         }
         return text
+    }
+
+    /// Read at most `maxBytes` of a file — callers that only need a prefix
+    /// must not slurp an arbitrarily large file just to truncate it after.
+    private func readBounded(path: String, maxBytes: Int) -> Data? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        return handle.readData(ofLength: max(1, maxBytes))
     }
 
     /// Resolve a mail body: `body_file` wins; otherwise inline `body`. Small
@@ -4663,14 +4687,14 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         case "rtf":
             text = extractRTFText(path: jailed)
         case "txt", "md", "markdown", "json", "xml", "csv", "yaml", "yml", "log", "swift", "rs", "py", "sh", "js", "ts", "html", "css":
-            guard let data = FileManager.default.contents(atPath: jailed) else {
+            guard let data = readBounded(path: jailed, maxBytes: maxChars * 4 + 1) else {
                 return "Error: could not read \(jailed)"
             }
             text = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1)
                 ?? ""
         default:
-            guard let data = FileManager.default.contents(atPath: jailed) else {
+            guard let data = readBounded(path: jailed, maxBytes: maxChars * 4 + 1) else {
                 return "Error: could not read \(jailed)"
             }
             text = String(data: data, encoding: .utf8)

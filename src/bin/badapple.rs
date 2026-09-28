@@ -2348,11 +2348,11 @@ fn snapshot_learned_state(message: &str) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
-    let store = match respawn::store::Store::open(&dir) {
+    let store = match respawned::store::Store::open(&dir) {
         Ok(s) => s,
-        Err(_) => respawn::store::Store::init(&dir)?,
+        Err(_) => respawned::store::Store::init(&dir)?,
     };
-    respawn::snapshot::create(&store, &dir, message)?;
+    respawned::snapshot::create(&store, &dir, message)?;
     Ok(())
 }
 

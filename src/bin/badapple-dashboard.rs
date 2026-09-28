@@ -2090,38 +2090,19 @@ async fn run_custom_tool_handler(
 async fn run_workshop_tool(tool: &WorkshopTool, args: &[String]) -> Result<String> {
     let kind = tool.kind.as_str();
     match kind {
+        // Shell and AppleScript workshop tools route through the engine's
+        // governed invoke_tool path — policy evaluation, allowed_commands /
+        // denied_patterns enforcement, approval semantics, and the ledger all
+        // apply, instead of a weaker local denylist around /bin/sh -c.
         "shell" => {
             let command = interpolate_args(&tool.command, args);
-            // Validate the command does not contain obvious shell metacharacters except
-            // for the ones a typical safe command needs. This is a defensive boundary,
-            // not a sandbox.
-            if command.contains(';')
-                || command.contains("&&")
-                || command.contains("||")
-                || command.contains('>')
-            {
-                anyhow::bail!("command contains disallowed shell metacharacters");
-            }
-            let out = tokio::process::Command::new("/bin/sh")
-                .args(["-c", &command])
-                .output()
-                .await?;
-            Ok(format!("{}", String::from_utf8_lossy(&out.stdout)))
+            let result = invoke_tool("run_shell", json!({"command": command})).await?;
+            Ok(result.to_string())
         }
         "applescript" => {
             let script = interpolate_args(&tool.command, args);
-            let mut child = tokio::process::Command::new("/usr/bin/osascript")
-                .arg("-")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?;
-            if let Some(ref mut stdin) = child.stdin {
-                use tokio::io::AsyncWriteExt;
-                stdin.write_all(script.as_bytes()).await?;
-            }
-            let out = child.wait_with_output().await?;
-            Ok(format!("{}", String::from_utf8_lossy(&out.stdout)))
+            let result = invoke_tool("run_applescript", json!({"script": script})).await?;
+            Ok(result.to_string())
         }
         "shortcut" => {
             let name = tool.command.clone();
