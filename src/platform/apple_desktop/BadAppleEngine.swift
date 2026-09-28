@@ -913,10 +913,8 @@ final class BadAppleEngine: @unchecked Sendable {
         let stored: String
         if Self.looksLikeGateEcho(response) {
             stored = "[system] a gated action was proposed and is awaiting your decision"
-        } else if response.contains("<tool_call") || response.contains("</tool") {
-            stored = "[system] a tool exchange happened (call markup omitted)"
         } else {
-            stored = response
+            stored = sanitizeToolMarkup(response)
         }
         let trimmedPrompt = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let storedPrompt = trimmedPrompt.hasPrefix("approve ")
@@ -1205,9 +1203,7 @@ final class BadAppleEngine: @unchecked Sendable {
         result = strip(#"</?tool_call>"#, in: result)
         for name in toolRouter.registeredToolNames() {
             let escaped = NSRegularExpression.escapedPattern(for: name)
-            result = strip("<\(escaped)(\\s[^<>]*)?\\s*/>", in: result)
-            result = result.replacingOccurrences(of: "<\(name)>", with: "")
-            result = result.replacingOccurrences(of: "</\(name)>", with: "")
+            result = strip("</?\(escaped)[^<>]*>?", in: result)
             result = strip("\\[\(escaped)\\s[^\\[\\]]*\\]", in: result)
         }
         result = result.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3330,6 +3326,11 @@ final class BadAppleEngine: @unchecked Sendable {
             "needs your approval", "wants to run", "Gated by",
             "Reply `approve", "Reply 'approve", "approve `",
         ] where text.contains(marker) { return true }
+        // Rows bearing tool markup teach the adapter to *emit* markup —
+        // including unterminated fragments that survived output sanitizing.
+        if text.contains("<tool_call") || text.contains("</tool") { return true }
+        for name in toolRouter.registeredToolNames()
+            where text.contains("<\(name)") || text.contains("[\(name) ") { return true }
         return false
     }
 

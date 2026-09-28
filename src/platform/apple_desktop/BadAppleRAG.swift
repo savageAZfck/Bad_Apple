@@ -244,6 +244,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
             "approval required", "needs your approval", "wants to run",
             "gated by", "policy gate:", "no approval was issued",
             "couldn't form a valid call", "nothing is awaiting approval",
+            "[system]",
         ] where lower.contains(marker) {
             return false
         }
@@ -252,6 +253,21 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         // Tool-markup prompts don't produce reusable answers either — the
         // cached response to a call-shaped prompt is markup-shaped.
         if prompt.lowercased().contains("<tool") { return false }
+        // State-dependent prompts are never reusable: the correct answer
+        // lives in mutable memory/time/files, and a semantically adjacent
+        // prompt carrying different values ("remember token A" vs "remember
+        // token B") would silently serve the wrong one.
+        let lowerPrompt = prompt.lowercased()
+        for marker in [
+            "remember", "token", "recall", "working memory", "what did i",
+            "what was the", "earlier", "previously", "my note",
+            "scheduled", "watcher", "approval", "history", "last time",
+        ] where lowerPrompt.contains(marker) { return false }
+        // High-entropy unique values (hex ids, tokens, key fragments) make
+        // two near-identical prompts semantically different.
+        if prompt.range(
+            of: #"\b[A-Za-z0-9_-]*[A-Fa-f0-9]{6,}[A-Za-z0-9_-]*\b"#,
+            options: .regularExpression) != nil { return false }
         return true
     }
 
