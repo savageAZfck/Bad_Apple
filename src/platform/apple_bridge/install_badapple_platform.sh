@@ -151,7 +151,7 @@ if [[ -d "${HF_CACHE}" ]]; then
 fi
 
 DAEMONS=(com.badapple.gatekeeper com.badapple.mlx com.badapple.supervisor)
-AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint com.badapple.ify com.badapple.respawn)
+AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint com.badapple.ify com.badapple.respawn com.badapple.tape)
 AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 for label in "${DAEMONS[@]}"; do
     target="/Library/LaunchDaemons/${label}.plist"
@@ -288,6 +288,12 @@ fi
 # /var/lib/bad_apple).
 if [[ -x "${REPO_ROOT}/target/release/badapple-respawn" ]]; then
     run_user "${REPO_ROOT}/src/platform/apple_desktop/install_respawn_agent.sh"
+fi
+
+# Flight recorder agent (bounded hash-chained tape of ledger + intent events;
+# freezes signed incident bundles on kill/crash/manual triggers).
+if [[ -x "${REPO_ROOT}/target/release/badapple-tape" ]]; then
+    run_user "${REPO_ROOT}/src/platform/apple_desktop/install_tape_agent.sh"
 fi
 
 trap - EXIT INT TERM

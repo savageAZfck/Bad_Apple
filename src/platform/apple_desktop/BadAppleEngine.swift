@@ -1122,6 +1122,10 @@ final class BadAppleEngine: @unchecked Sendable {
             data: ["name": name, "arguments": args, "via": "invoke_tool"],
             persona: activePersona
         )
+        BadAppleTape.drop(kind: "tool_intent", fields: [
+            "name": name, "args": args,
+            "verdict": "invoked", "persona": activePersona, "via": "invoke_tool",
+        ])
     }
 
     /// Ledger a security-relevant daemon RPC (autopilot toggle, workspace
@@ -1287,8 +1291,19 @@ final class BadAppleEngine: @unchecked Sendable {
                     data: ["name": call.name, "arguments": call.args],
                     persona: persona
                 )
+                let decision = policyEngine.evaluate(toolName: call.name, args: call.args)
+                let verdictTag: String
+                switch decision {
+                case .denied(let r): verdictTag = "denied: \(r)"
+                case .needsApproval: verdictTag = "needs_approval"
+                case .approved: verdictTag = "approved"
+                }
+                BadAppleTape.drop(kind: "tool_intent", fields: [
+                    "name": call.name, "args": call.args,
+                    "verdict": verdictTag, "persona": persona, "via": "model",
+                ])
                 let output: String
-                switch policyEngine.evaluate(toolName: call.name, args: call.args) {
+                switch decision {
                 case .denied(let reason):
                     output = "Policy: \(reason)"
                 case .needsApproval:

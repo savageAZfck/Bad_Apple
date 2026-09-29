@@ -270,6 +270,40 @@ target/release/badapple-respawn --status --full    # forged-mtime-safe rehash
 target/release/badapple-respawn --revert head      # restore state root
 ```
 
+## Flight recorder (tape)
+
+`badapple-tape` (built from `src/bin/badapple-tape.rs`) is a thin wrapper over
+the public `flight_tape` crate (crates.io dep). It tails `ledger.jsonl` and
+the engine's intent drop-stream into a bounded, hash-chained ring at
+`/var/lib/bad_apple/tape/ring.jsonl` (50k frames / 256 MiB), then freezes a
+signed incident bundle on:
+
+- `kill_switch` events (ledger or intent stream)
+- `badapple-engine` crash/restart (watched by pid — fast launchd respawns
+  still register)
+- manual request (`badapple tape freeze`, or the `FREEZE` trigger file)
+
+Bundles land in `/var/lib/bad_apple/tape/incidents/<stamp>-<seq>/` with
+verbatim frames, respawned snapshot ids for both state roots, a signed
+manifest, and Ed25519 signature — verify/replay fully offline.
+
+The `com.badapple.tape` LaunchAgent runs the daemon (installed by
+`install_badapple_platform.sh` via `install_tape_agent.sh`; logs to
+`/var/lib/bad_apple/tape.log`). The agent writes `.fabricignore` entries so
+`kv_cache`/`generated_images`/`install_backups`/`tape`/`grounded_index` stay
+out of snapshots.
+
+```bash
+badapple tape status           # frames, head hash, incidents (lock-free)
+badapple tape freeze [reason]  # freeze now (via daemon trigger file)
+badapple tape verify <bundle>  # offline chain+manifest+signature check
+badapple tape replay <bundle>  # render timeline [--kind K] [--around N]
+```
+
+The engine drops `tool_intent` frames (name, args, policy verdict) into the
+intent stream from the tool-dispatch path in `BadAppleEngine.swift` via
+`BadAppleTape.swift` — pre-execution decision context, not just audit events.
+
 ## Ambient hearing (ears)
 
 Opt-in ambient sense organ, off by default. The menu bar app owns the capture
@@ -1088,6 +1122,10 @@ and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.
   responsible IDE process instead of Bad Apple. Use the registered LaunchAgent.
 - A successful native smoke test logs `Native Swift MLX engine loaded` and a
   Swift audit-ledger response with a nonzero `tps` value.
+
+## Standing rules
+
+- **Never turn autopilot off** (`autopilot off`, `set_autopilot:false`, or `autopilot: false` in `/var/lib/bad_apple/policy.yaml`) unless the user explicitly asks. Autopilot-off makes every state-changing tool stall behind the human gate, which silently contaminates conformance batteries and any verification run — the organism's real exam posture is autopilot on with the council deciding. If a test needs gating verified, test the gate and immediately restore `autopilot on`, and prefer persisting `autopilot: true` in policy.yaml since the CLI toggle is runtime-only and lost on engine restart.
 
 ## Latest hardening (this session)
 

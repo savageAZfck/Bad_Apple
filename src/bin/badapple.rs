@@ -145,6 +145,7 @@ fn main() -> Result<()> {
         Some("recall") => {
             return run_recall_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("tape") => return run_tape_subcommand(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("explain") => {
             return run_explain_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
@@ -1779,6 +1780,21 @@ fn run_redteam_subcommand(args: &[String]) -> Result<()> {
             }
         }
         _ => bail!("unknown redteam subcommand: {sub}\nusage: badapple redteam <run|watch|status|category <category>|probe <id>>"),
+    }
+    Ok(())
+}
+
+/// `badapple tape <verb>` — flight recorder. Shells to the sibling
+/// badapple-tape binary (same dir or PATH) so the daemon wrapper stays thin.
+fn run_tape_subcommand(args: &[String]) -> Result<()> {
+    let exe = std::env::current_exe()?
+        .parent()
+        .map(|p| p.join("badapple-tape"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| "badapple-tape".into());
+    let status = std::process::Command::new(exe).args(args).status()?;
+    if !status.success() {
+        bail!("badapple-tape exited with {}", status);
     }
     Ok(())
 }

@@ -60,6 +60,10 @@ path = "src/bin/badapple-ify.rs"
 name = "badapple-respawn"
 path = "src/bin/badapple-respawn.rs"
 
+[[bin]]
+name = "badapple-tape"
+path = "src/bin/badapple-tape.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -113,6 +117,7 @@ urlencoding = "2.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 sovereign_ledger = "0.3.1"
 respawned = "0.3"
+flight_tape = "0.1"
 
 [build-dependencies]
 cbindgen = "0.29"
