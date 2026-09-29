@@ -8,19 +8,22 @@ property of Adam Clark ("the Owner").
 GRANTED TO EVERYONE:
 
 Permission is hereby granted to any person obtaining a copy of this
-software to access, read, study, audit, and privately modify the source
+software to access, read, study, audit, and modify the source
 code for personal, educational, research, and security-review purposes.
 You may build and run Bad Apple on hardware you own for your own
-personal, non-commercial use.
+personal, non-commercial use. You may copy, redistribute, and share
+this software and your modified copies — in source or built form — for
+non-commercial purposes, provided this license text and the copyright
+notice are included unchanged in every copy.
 
 NOT GRANTED WITHOUT WRITTEN CONSENT:
 
-No part of this repository may be republished, redistributed,
-sublicensed, sold, or used in any commercial system, product, service,
-or derivative work without the Owner's explicit prior written consent.
-Hosting Bad Apple as a service for third parties, embedding it in a
-product offered to others, or distributing modified copies are all
-prohibited without a commercial license from the Owner.
+No commercial use of any kind without the Owner's explicit prior
+written consent: selling, sublicensing, hosting Bad Apple as a service
+for third parties, embedding it in a commercial system, product,
+service, or derivative work, or distributing it or modified copies
+within any commercial offering all require a commercial license from
+the Owner.
 
 The Owner retains all rights to Bad Apple, including all rights to
 commercialization, licensing, and future releases. The open-weight

@@ -3153,6 +3153,9 @@ final class BadAppleEngine: @unchecked Sendable {
             data: ["rows": ledger.rows, "skipped": ledger.skipped],
             persona: activePersona
         )
+        BadAppleTape.drop(kind: "dream_start", fields: [
+            "rows": ledger.rows, "skipped": ledger.skipped, "persona": activePersona,
+        ])
         guard ledger.rows >= 12 else {
             auditLedger.append(
                 eventType: "dream_skipped",
@@ -3162,6 +3165,9 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
 
+        BadAppleTape.drop(kind: "dream_train", fields: [
+            "rows": ledger.rows, "iters": dreamIters(), "persona": activePersona,
+        ])
         let result = await toolExecutor.executeTool(
             name: "lora_train",
             args: ["dataset": "dream-candidate", "iters": String(dreamIters())],
@@ -3199,6 +3205,10 @@ final class BadAppleEngine: @unchecked Sendable {
         let verdict = BadAppleCouncil.deliberate(toolName: "dream_adopt", args: adoptArgs)
         auditCouncil(verdict: verdict, name: "dream_adopt", args: adoptArgs,
                      mode: "dream", persona: activePersona)
+        BadAppleTape.drop(kind: "dream_adopt", fields: [
+            "val_loss": adoptArgs["val_loss"]!, "decision": verdict.decision.rawValue,
+            "contested": verdict.contested, "persona": activePersona,
+        ])
         if verdict.contested {
             auditLedger.append(
                 eventType: "dream_held",
@@ -3490,6 +3500,11 @@ final class BadAppleEngine: @unchecked Sendable {
         guard dreamLearningEnabled() else { return }
         let dir = "/var/lib/bad_apple/lora_adapters/dream"
         guard FileManager.default.fileExists(atPath: "\(dir)/adapters.safetensors") else { return }
+        // Intent lands before the weights touch the model — if this adapter
+        // poisons her, the tape holds the record of what she was about to load.
+        BadAppleTape.drop(kind: "dream_apply", fields: [
+            "adapter": dir, "persona": activePersona,
+        ])
         do {
             try await inference.applyAdapter(directory: URL(fileURLWithPath: dir))
             auditLedger.append(

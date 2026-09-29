@@ -2,7 +2,49 @@
 
 All notable changes to Bad Apple are documented in this file.
 
-## [Unreleased]
+## [0.5.0] — 2026-09-28
+
+### Added
+- **Flight recorder** (`badapple-tape`, `flight_tape` crate): a
+  bounded, hash-chained forensic tape that tails the audit ledger plus
+  a pre-execution intent drop-stream from the engine — tool intents
+  (name, args, policy verdict), dream/self-modification decisions
+  (`dream_start`/`dream_train`/`dream_adopt`/`dream_apply`), and ledger
+  events land in one tamper-evident ring. On kill-switch events, engine
+  replacement (PID-identity crash detection), or `badapple tape freeze`
+  the daemon writes a signed incident bundle: verbatim ring frames +
+  respawned state snapshots + Ed25519-signed manifest, independently
+  verifiable offline with `badapple tape verify` / `replay`. At-least-
+  once ingestion — a mid-backfill kill redelivers instead of dropping
+  evidence — and hashing commits to the exact stored body bytes, so a
+  different serde_json build cannot forge or false-fail the chain.
+  Runs as user LaunchAgent `com.badapple.tape` (installed by the
+  platform installer); `badapple tape status` reports the live ring
+  lock-free. Independently verified by Touchstone (`audit.tape_chain`).
+
+### Changed
+- **License**: proprietary → source-available. The full source tree is
+  readable and may be shared or modified for personal, educational,
+  research, and security-review purposes; all commercial use still
+  requires a written license from the Owner. Homebrew install path
+  unchanged.
+- `respawned` dep moved from a git pin to crates.io `0.3`.
+
+### Fixed
+- **Markup echo loop**: tool-call markup replayed back through
+  conversation history, semantic cache, and dream training data —
+  every dialect is now sanitized at all three boundaries. Caught by the
+  Touchstone v0.2 battery (recorded as `badapple-0.4.3-postfix`).
+- Tool-call parser accepts the bare `name k=v` dialect; semantic-cache
+  poisoning of unparsed markup responses filtered at lookup.
+- Mail tool routing and `body_file` support; semantic-cache governance
+  leaks.
+- Governance audit: approval integrity, cache safety, policy
+  enforcement; shared-state locking, gatekeeper ledgering, governed
+  workshop, honest metrics.
+- Speculative-path prefix warm missing batch axis.
+
+## [0.4.3] — 2026-09-20
 
 ### Added
 - **Prompt-prefix KV cache**: the stable persona/identity head of the
