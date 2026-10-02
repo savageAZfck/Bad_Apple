@@ -111,6 +111,7 @@ ciborium = "0.2"
 libc = "0.2"
 memmap2 = "0.9.11"
 half = "2"
+mil_spec = "0.1.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 regex = "1.10"
 dirs = "5"

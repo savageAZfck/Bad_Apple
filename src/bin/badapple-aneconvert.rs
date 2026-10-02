@@ -194,72 +194,7 @@ impl Cfg {
 }
 
 // ======== weight table assembled per layer ========
-
-struct WeightBin {
-    data: Vec<u8>,
-    // name -> (meta_offset, dtype, shape)
-    entries: HashMap<String, (u64, DType, Vec<i64>)>,
-    cursor: u64,
-}
-
-impl WeightBin {
-    fn new() -> Self {
-        let mut data = Vec::with_capacity(64);
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&2u32.to_le_bytes());
-        data.resize(64, 0);
-        WeightBin {
-            data,
-            entries: HashMap::new(),
-            cursor: 64,
-        }
-    }
-
-    /// Append fp16 tensor bytes; returns the blob offset for BlobFileValue.
-    fn put(&mut self, name: &str, dtype: DType, shape: &[i64], bytes: &[u8]) -> u64 {
-        let meta_off = self.cursor;
-        let data_off = meta_off + 64;
-        let mut meta = Vec::with_capacity(64);
-        meta.extend_from_slice(&0xDEADBEEFu32.to_le_bytes());
-        meta.extend_from_slice(&dtype.blob_tag().to_le_bytes());
-        meta.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        meta.extend_from_slice(&data_off.to_le_bytes());
-        meta.extend_from_slice(&0u64.to_le_bytes());
-        meta.resize(64, 0);
-        self.data.extend_from_slice(&meta);
-        self.data.extend_from_slice(bytes);
-        self.cursor = self.data.len() as u64;
-        // pad to 64
-        let pad = (64 - self.cursor % 64) % 64;
-        self.data.resize(self.data.len() + pad as usize, 0);
-        self.cursor += pad;
-        self.entries
-            .insert(name.to_string(), (meta_off, dtype, shape.to_vec()));
-        meta_off
-    }
-
-    fn finish(mut self) -> Vec<u8> {
-        let n = self.entries.len() as u32;
-        self.data[0..4].copy_from_slice(&n.to_le_bytes());
-        self.data
-    }
-}
-
-// expose blob tag
-trait BlobTag {
-    fn blob_tag(self) -> u32;
-}
-impl BlobTag for DType {
-    fn blob_tag(self) -> u32 {
-        match self {
-            DType::Fp16 => 1,
-            DType::Fp32 => 2,
-            DType::Int8 => 4,
-            DType::Int32 => 14,
-            _ => 1,
-        }
-    }
-}
+// WeightBin (in-memory weight.bin v2 builder) comes from mil_spec.
 
 // ======== weight compression ========
 
@@ -789,15 +724,10 @@ fn emit_layer_shard(
         is_state: false,
     }];
 
-    let spec = encode_model(
-        &inputs,
-        &outputs,
-        &states,
-        &blk,
-        &fn_inputs,
-        SPEC_VERSION,
-        OPSET,
-    );
+    let meta = ModelMeta::new(SPEC_VERSION, OPSET)
+        .creator("badapple-aneconvert")
+        .description("Bad Apple native ANE shard");
+    let spec = encode_model(&inputs, &outputs, &states, &blk, &fn_inputs, &meta);
     let weights = wb.finish();
     write_mlpackage(&pkg_dir, &spec, Some(&weights)).map_err(|e| e.to_string())?;
     let mlmodelc = out_dir.join(format!("{name}.mlmodelc"));
@@ -895,15 +825,10 @@ fn emit_head_shard(
         dtype: DType::Fp16,
         is_state: false,
     }];
-    let spec = encode_model(
-        &inputs,
-        &outputs,
-        &[],
-        &blk,
-        &fn_inputs,
-        SPEC_VERSION,
-        OPSET,
-    );
+    let meta = ModelMeta::new(SPEC_VERSION, OPSET)
+        .creator("badapple-aneconvert")
+        .description("Bad Apple native ANE shard");
+    let spec = encode_model(&inputs, &outputs, &[], &blk, &fn_inputs, &meta);
     let weights = wb.finish();
     write_mlpackage(&pkg_dir, &spec, Some(&weights)).map_err(|e| e.to_string())?;
     Ok((pkg_dir, out_dir.join(format!("{name}.mlmodelc"))))
@@ -1283,15 +1208,10 @@ fn emit_probe(
             dtype: DType::Fp16,
             is_state: false,
         }];
-        let spec = encode_model(
-            &inputs,
-            &outputs,
-            &states,
-            &blk,
-            &fn_inputs,
-            SPEC_VERSION,
-            OPSET,
-        );
+        let meta = ModelMeta::new(SPEC_VERSION, OPSET)
+            .creator("badapple-aneconvert")
+            .description("Bad Apple native ANE shard");
+        let spec = encode_model(&inputs, &outputs, &states, &blk, &fn_inputs, &meta);
         let weights = wb.finish();
         write_mlpackage(&pkg_dir, &spec, Some(&weights)).map_err(|e| e.to_string())?;
         return Ok((pkg_dir, out_dir.join(format!("{name}.mlmodelc")), weights));
@@ -1364,7 +1284,10 @@ fn finish_probe(
         dtype: DType::Fp16,
         is_state: false,
     }];
-    let spec = encode_model(&inputs, &outputs, &[], blk, &fn_inputs, SPEC_VERSION, OPSET);
+    let meta = ModelMeta::new(SPEC_VERSION, OPSET)
+        .creator("badapple-aneconvert")
+        .description("Bad Apple native ANE shard");
+    let spec = encode_model(&inputs, &outputs, &[], blk, &fn_inputs, &meta);
     let weights = wb.finish();
     write_mlpackage(pkg_dir, &spec, Some(&weights)).map_err(|e| e.to_string())?;
     Ok((
