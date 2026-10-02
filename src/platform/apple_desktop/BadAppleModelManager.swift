@@ -858,6 +858,55 @@ final class BadAppleModelManager {
         return result
     }
 
+    /// Ensure a manifest exists for a model: resolve its local path and
+    /// record provenance if none is on file. Accepts a profile id or a
+    /// repo id (the engine reports repo ids; the registry keys by slot).
+    /// Returns true when a manifest exists after the call.
+    func ensureProvenanceRecorded(modelId: String) -> Bool {
+        guard let pid = lock.withLock({ () -> String? in
+            if profiles[modelId] != nil { return modelId }
+            return profiles.first(where: { $0.value.repoId == modelId })?.key
+        }) else { return false }
+        if FileManager.default.fileExists(atPath: manifestFilePath(modelId: pid).path) {
+            return true
+        }
+        var path = lock.withLock { state[pid]?.localPath }
+        if path == nil || path!.isEmpty,
+           let profile = lock.withLock({ profiles[pid] }) {
+            path = resolveCachePath(repoId: profile.repoId, allowDownload: false)
+        }
+        guard let localPath = path, !localPath.isEmpty else { return false }
+        return recordProvenance(modelId: pid, localPath: localPath)["status"] as? String == "recorded"
+    }
+
+    /// sha256 over sorted "name:hash" lines of a stored manifest — the
+    /// brain's root fingerprint without re-reading gigabytes.
+    func manifestRootFingerprint(modelId: String) -> String? {
+        let path = manifestFilePath(modelId: modelId)
+        guard let data = try? Data(contentsOf: path),
+              let manifest = try? JSONDecoder().decode(ModelManifest.self, from: data)
+        else { return nil }
+        let lines = manifest.files.keys.sorted()
+            .map { "\($0):\(manifest.files[$0]!.sha256)" }
+        guard !lines.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(lines.joined(separator: "\n").utf8))
+        return digest.map { String(format: "%02x", Int($0)) }.joined()
+    }
+
+    /// Fingerprint for a brain's stored manifest keyed by profile id or
+    /// repo id, auto-recording the manifest on first sighting.
+    func weightsManifestFingerprint(modelIdOrRepoId key: String) -> String? {
+        let pid = lock.withLock { () -> String? in
+            if profiles[key] != nil { return key }
+            return profiles.first(where: { $0.value.repoId == key })?.key
+        } ?? key
+        if !FileManager.default.fileExists(atPath: manifestFilePath(modelId: pid).path) {
+            _ = ensureProvenanceRecorded(modelId: key)
+        }
+        return manifestRootFingerprint(modelId: pid)
+            ?? (pid == key ? nil : manifestRootFingerprint(modelId: key))
+    }
+
     /// Verify a cached model against the stored manifest.
     func verifyProvenance(modelId: String, localPath: String? = nil) -> [String: Any] {
         guard isSafeModelId(modelId) else {

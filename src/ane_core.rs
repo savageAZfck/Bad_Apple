@@ -1,4 +1,4 @@
-use hf_chat_template::{ChatTemplate, Message, TokenizerConfig};
+use hf_chat_template::{ChatTemplate, Message, RenderInput, TokenizerConfig};
 use libloading::Library;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -337,9 +337,19 @@ impl AneCore {
                     messages.push(Message::system(system));
                 }
                 messages.push(Message::user(prompt));
+                // Qwen3 templates honour `enable_thinking`; without it the
+                // model spends its whole token budget inside <think>.
+                let mut extra = serde_json::Map::new();
+                extra.insert("enable_thinking".into(), Value::Bool(false));
+                let input = RenderInput {
+                    messages,
+                    add_generation_prompt: true,
+                    extra,
+                    ..Default::default()
+                };
                 (
                     template
-                        .render_messages(&messages, true)
+                        .render(&input)
                         .map_err(|error| AneCoreError::Tokenizer(error.to_string()))?,
                     false,
                 )

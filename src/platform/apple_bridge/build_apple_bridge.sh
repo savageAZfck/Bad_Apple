@@ -40,6 +40,17 @@ SDK_PATH=$(resolve_sdk)
 FRAMEWORK_SEARCH="${SDK_PATH}/System/Library/Frameworks"
 
 echo "Using SDK: ${SDK_PATH}"
+
+# Compile the C crash-guard shim (SIGSEGV/SIGBUS isolation for CoreML).
+GUARD_SRC="${REPO_ROOT}/src/platform/apple_bridge/coreml_crash_guard.c"
+GUARD_OBJ="${BUILD_DIR}/coreml_crash_guard.o"
+echo "Building coreml_crash_guard.o..."
+xcrun clang -c -O2 \
+    -isysroot "${SDK_PATH}" \
+    -target arm64-apple-macos14.0 \
+    -o "${GUARD_OBJ}" \
+    "${GUARD_SRC}"
+
 echo "Building libBadAppleBridge.dylib..."
 
 swiftc \
@@ -49,6 +60,7 @@ swiftc \
     "${REPO_ROOT}/src/platform/apple_bridge/BadAppleBridge.swift" \
     "${REPO_ROOT}/src/platform/apple_bridge/BadAppleIntent.swift" \
     -module-name BadAppleBridge \
+    -import-objc-header "${REPO_ROOT}/src/platform/apple_bridge/coreml_crash_guard.h" \
     -framework Foundation \
     -F "${FRAMEWORK_SEARCH}" \
     -framework AppIntents \
@@ -60,7 +72,8 @@ swiftc \
     -Xlinker -undefined \
     -Xlinker dynamic_lookup \
     -Xlinker -install_name \
-    -Xlinker "@rpath/libBadAppleBridge.dylib"
+    -Xlinker "@rpath/libBadAppleBridge.dylib" \
+    "${GUARD_OBJ}"
 
 echo "Built: ${BUILD_DIR}/libBadAppleBridge.dylib"
 

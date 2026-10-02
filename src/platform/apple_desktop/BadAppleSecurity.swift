@@ -63,6 +63,12 @@ final class BadAppleAuditLedger: @unchecked Sendable {
     /// When true, no entries are written (private mode).
     var paused = false
 
+    /// Optional provenance provider merged into every entry's `data` payload.
+    /// Wired by the engine to pin policy-at-time-T (policy.yaml SHA-256) —
+    /// fields live inside `data` like `persona`, so the hash body stays
+    /// byte-compatible with the Python ledger format.
+    var extraContextProvider: (() -> [String: Any])?
+
     // MARK: - Public API
 
     /// Append a redacted, hash-chained entry to the ledger.
@@ -88,6 +94,9 @@ final class BadAppleAuditLedger: @unchecked Sendable {
         // Store persona inside data (Python stores it there too).
         if var dict = safeData as? [String: Any] {
             dict["persona"] = persona
+            if let extra = extraContextProvider?() {
+                for (k, v) in extra { dict[k] = v }
+            }
             safeData = dict
         }
         let timestamp = Self.isoFormatter.string(from: Date())

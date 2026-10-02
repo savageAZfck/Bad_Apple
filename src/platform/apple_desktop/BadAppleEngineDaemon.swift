@@ -384,6 +384,26 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
         guard !question.isEmpty else { return "Ask the council something: `council <question>`." }
         return await BadAppleEngine.shared.runCouncilSession(question: question)
     }
+    if lower == "consent" || lower.hasPrefix("consent ") {
+        return BadAppleEngine.shared.consentCommand(prompt)
+    }
+    // Certified erasure owns the forget verb before tool routing sees it —
+    // a purge + signed certificate, not a conversational best-effort delete.
+    // Constitutional amendments — self-modifications as signed artifacts:
+    // list, ratify, reject, revert. Kept off the conversational tool path.
+    if lower == "amendments" || lower.hasPrefix("amendment ") {
+        return BadAppleEngine.shared.amendmentCommand(prompt)
+    }
+    if lower.hasPrefix("forget ") || lower.hasPrefix("erase ") {
+        var subject = lower.hasPrefix("forget ")
+            ? String(prompt.dropFirst(7)) : String(prompt.dropFirst(6))
+        for prefix in ["person ", "user ", "about ", "preference "] {
+            if subject.lowercased().hasPrefix(prefix) {
+                subject = String(subject.dropFirst(prefix.count))
+            }
+        }
+        return BadAppleErasure.shared.purge(subject: subject, persona: "Bad Apple")
+    }
     if lower.hasPrefix("write a note ") {
         let content = String(prompt.dropFirst("write a note ".count))
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -400,11 +420,36 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
     case "enable ears", "ears on", "enable ambient hearing", "start listening":
         let path = NSHomeDirectory() + "/.bad_apple/ears"
         FileManager.default.createFile(atPath: path, contents: Data("on\n".utf8))
-        return "Ambient hearing enabled. I'll transcribe short local mic windows in the background — all on-device, nothing leaves the Mac. Say 'disable ears' to stop."
+        BadAppleConsent.shared.record(
+            action: "attested", subject: "operator",
+            scope: "ambient_hearing", note: "ears enabled via meta command")
+        BadAppleEngine.shared.auditDaemonEvent(
+            type: "consent_attested",
+            data: ["scope": "ambient_hearing", "subject": "operator"])
+        let consented = BadAppleConsent.shared.activeSubjects(scope: "ambient_hearing")
+        let suffix = consented.isEmpty
+            ? " No bystander consent on file — say 'consent grant <name> ambient_hearing' to record it."
+            : " Consent on file: \(consented.joined(separator: ", "))."
+        return "Ambient hearing enabled. I'll transcribe short local mic windows in the background — all on-device, nothing leaves the Mac. Say 'disable ears' to stop." + suffix
     case "disable ears", "ears off", "disable ambient hearing", "stop listening":
         try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.bad_apple/ears")
         try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.bad_apple/ambient_heard.json")
         return "Ambient hearing disabled. The microphone stays off."
+    case "enable eyes", "eyes on", "enable ambient sight", "start watching":
+        let path = NSHomeDirectory() + "/.bad_apple/eyes"
+        FileManager.default.createFile(atPath: path, contents: Data("on\n".utf8))
+        BadAppleConsent.shared.record(
+            action: "attested", subject: "operator",
+            scope: "ambient_vision", note: "eyes enabled via meta command")
+        BadAppleEngine.shared.auditDaemonEvent(
+            type: "consent_attested",
+            data: ["scope": "ambient_vision", "subject": "operator"])
+        return "Ambient sight enabled. I'll sample the screen every few seconds and describe what changes — frames only get described when something moves, nothing leaves the Mac. If macOS asks, allow Screen Recording for Bad Apple in System Settings → Privacy & Security, then quit and reopen the app. Say 'disable eyes' to stop."
+    case "disable eyes", "eyes off", "disable ambient sight", "stop watching":
+        try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.bad_apple/eyes")
+        try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.bad_apple/ambient_seen.json")
+        try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.bad_apple/eyes_frame.png")
+        return "Ambient sight disabled. The screen stays unwatched."
     case "new chat", "clear conversation":
         BadAppleEngine.shared.resetConversation()
         return "Okay, so... fresh start."
@@ -733,7 +778,8 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
                     prompt: inferencePrompt,
                     systemPrompt: systemPrompt,
                     maxTokens: maxTokens,
-                    temperature: temperature
+                    temperature: temperature,
+                    brain: params["brain"] as? String ?? "auto"
                 )
             } else {
                 text = try await BadAppleEngine.shared.generate(

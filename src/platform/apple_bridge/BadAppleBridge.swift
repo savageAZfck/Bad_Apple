@@ -166,20 +166,8 @@ private final class BadAppleANECore {
 
     var smallestAllowedCount: Int { allowedCounts.first ?? 1 }
 
-    private struct Candidate {
-        let core: BadAppleANECore
-        let loadLatency: TimeInterval
-        let prewarmLatency: TimeInterval
-        let decodeLatency: TimeInterval
-
-        var score: TimeInterval {
-            // Optimize for steady-state tok/s; load and prewarm are one-time costs.
-            decodeLatency + prewarmLatency * 0.01 + loadLatency * 0.0001
-        }
-    }
-
-    /// Try each compute unit, benchmark a few decode steps, and pick the one
-    /// with the lowest per-token decode latency while respecting load/prewarm budgets.
+    /// Try compute units in preference order and take the first that loads and
+    /// prewarms within budget. Only one candidate is resident at a time.
     static func load(modelURL: URL) throws -> BadAppleANECore {
         let environment = ProcessInfo.processInfo.environment
         let maxLoadLatency = latencyBudget(
@@ -197,7 +185,6 @@ private final class BadAppleANECore {
         ]
 
         for computeUnitsGroup in candidateGroups {
-            var accepted: [Candidate] = []
             for computeUnits in computeUnitsGroup {
                 let configuration = MLModelConfiguration()
                 configuration.computeUnits = computeUnits
@@ -255,39 +242,22 @@ private final class BadAppleANECore {
                     core.selectedLoadLatency = loadLatency
                     core.selectedPrewarmLatency = prewarmLatency
                     let decodeLatency = benchmarkDecode(core)
-                    let candidate = Candidate(
-                        core: core,
-                        loadLatency: loadLatency,
-                        prewarmLatency: prewarmLatency,
-                        decodeLatency: decodeLatency
-                    )
+                    // First working candidate wins; holding several resident
+                    // copies to compare them can exhaust a 16 GB machine.
+                    core.auditPlacement()
                     NSLog(
-                        "🏴‍☠️  BAD APPLE // ANE candidate rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok, score %.3f",
+                        "🏴‍☠️  BAD APPLE // ANE core selected computeUnits rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok",
                         computeUnits.rawValue,
                         loadLatency,
                         prewarmLatency,
-                        decodeLatency,
-                        candidate.score
+                        decodeLatency
                     )
-                    accepted.append(candidate)
+                    return core
                 } catch {
                     let signature = isCompilerFailure(error) ? " [compiler failure]" : ""
                     NSLog("%@", "🏴‍☠️  BAD APPLE // ANE candidate rawValue \(computeUnits.rawValue) failed\(signature): \(error)")
                     lastError = error
                 }
-            }
-
-            if let selected = accepted.min(by: { $0.score < $1.score }) {
-                selected.core.auditPlacement()
-                NSLog(
-                    "🏴‍☠️  BAD APPLE // ANE core selected computeUnits rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok (score %.3f)",
-                    selected.core.configuration.computeUnits.rawValue,
-                    selected.loadLatency,
-                    selected.prewarmLatency,
-                    selected.decodeLatency,
-                    selected.score
-                )
-                return selected.core
             }
         }
 
@@ -495,7 +465,13 @@ private final class BadAppleANECore {
             }
 
             let provider = try MLDictionaryFeatureProvider(dictionary: features)
-            let prediction = try model.prediction(from: provider, using: state)
+            guard let prediction = try withCoreMLCrashGuard({
+                try self.model.prediction(from: provider, using: self.state)
+            }) else {
+                lastPredictionError = NSError(domain: "BadAppleANE", code: 99,
+                    userInfo: [NSLocalizedDescriptionKey: "SIGSEGV/SIGBUS during monolithic prediction"])
+                return nil
+            }
             guard let logits = prediction.featureValue(for: outputName)?.multiArrayValue else {
                 return nil
             }
@@ -552,6 +528,12 @@ private final class BadAppleANECore {
             var ane = 0
             func visit(_ block: MLModelStructure.Program.Block) {
                 for operation in block.operations {
+                    // const/constexpr ops are compile-time declarations with no
+                    // device preference; counting them distorts the ratio.
+                    let name = operation.operatorName
+                    if name == "const" || name.hasSuffix(".const") || name.contains("constexpr") {
+                        continue
+                    }
                     total += 1
                     if let usage = plan.deviceUsage(for: operation),
                        case .neuralEngine = usage.preferred {
@@ -578,6 +560,79 @@ private final class BadAppleANECore {
     private func auditPlacement() {
         placementRatio = Self.measurePlacement(modelURL: modelURL, configuration: configuration)
     }
+}
+
+/// Debug: per-op-type preferred-device census for a compiled artifact.
+/// Writes "optype\ttotal\tane\tcpu\tgpu\tnone" lines to `outPath`.
+/// Returns the ANE ratio or -1 on failure.
+@_cdecl("bad_apple_coreml_op_placement_report")
+public func badAppleCoreMLOpPlacementReport(
+    _ path: UnsafePointer<CChar>?,
+    _ computeUnitsRawValue: Int32,
+    _ outPath: UnsafePointer<CChar>?
+) -> Double {
+    guard #available(macOS 15.0, *), let path, let outPath,
+          let computeUnits = MLComputeUnits(rawValue: Int(computeUnitsRawValue)) else {
+        return -1.0
+    }
+    let modelURL = URL(fileURLWithPath: String(cString: path))
+    let reportURL = URL(fileURLWithPath: String(cString: outPath))
+    let configuration = MLModelConfiguration()
+    configuration.computeUnits = computeUnits
+    let semaphore = DispatchSemaphore(value: 0)
+    var result = -1.0
+    Task {
+        defer { semaphore.signal() }
+        guard let plan = try? await MLComputePlan.load(
+            contentsOf: modelURL,
+            configuration: configuration
+        ), case .program(let program) = plan.modelStructure else {
+            return
+        }
+        var census: [String: [Int]] = [:] // total, ane, cpu, gpu, none
+        func visit(_ block: MLModelStructure.Program.Block) {
+            for operation in block.operations {
+                var c = census[operation.operatorName, default: [0, 0, 0, 0, 0]]
+                c[0] += 1
+                if let usage = plan.deviceUsage(for: operation) {
+                    switch usage.preferred {
+                    case .neuralEngine: c[1] += 1
+                    case .cpu: c[2] += 1
+                    case .gpu: c[3] += 1
+                    default: c[4] += 1
+                    }
+                } else {
+                    c[4] += 1
+                }
+                census[operation.operatorName] = c
+                for child in operation.blocks { visit(child) }
+            }
+        }
+        for function in program.functions.values { visit(function.block) }
+        var lines = ""
+        var total = 0
+        var ane = 0
+        var runtime = 0
+        var runtimeAne = 0
+        for (ty, c) in census.sorted(by: { $0.value[0] > $1.value[0] }) {
+            lines += "\(ty)\t\(c[0])\t\(c[1])\t\(c[2])\t\(c[3])\t\(c[4])\n"
+            total += c[0]
+            ane += c[1]
+            let compileTime = ty == "const" || ty.hasSuffix(".const") || ty.contains("constexpr")
+            if !compileTime {
+                runtime += c[0]
+                runtimeAne += c[1]
+            }
+        }
+        lines += "TOTAL\t\(total)\t\(ane)\t\t\t\n"
+        lines += "RUNTIME\t\(runtime)\t\(runtimeAne)\t\t\t\n"
+        try? lines.write(to: reportURL, atomically: true, encoding: .utf8)
+        result = runtime > 0 ? Double(runtimeAne) / Double(runtime) : -1.0
+    }
+    guard semaphore.wait(timeout: .now() + .seconds(30)) == .success else {
+        return -1.0
+    }
+    return result
 }
 
 @_cdecl("bad_apple_coreml_placement_ratio")
@@ -649,7 +704,11 @@ public func badAppleANEProbeShard(
         let state = model.makeState()
         let started = ProcessInfo.processInfo.systemUptime
         for _ in 0..<iterations {
-            let prediction = try model.prediction(from: provider, using: state)
+            guard let prediction = try withCoreMLCrashGuard({
+                try model.prediction(from: provider, using: state)
+            }) else {
+                return false
+            }
             guard prediction.featureValue(for: outputName)?.multiArrayValue != nil else {
                 return false
             }
@@ -781,6 +840,49 @@ private struct BadAppleANEShardManifest {
     }
 }
 
+// MARK: - SIGSEGV / SIGBUS crash guard for CoreML prediction
+//
+// CoreML's ANE E5 plan-build path can SIGSEGV or SIGBUS under resource
+// pressure. If that happens while an NSLock is held, the process dies with
+// no recovery. This guard installs a per-thread sigaction handler that
+// siglongjmps back to the call site, allowing the caller to unlock, log,
+// and fail gracefully instead of crashing the whole organism.
+//
+// SAFETY: siglongjmp from a signal handler is POSIX-defined behavior when
+// the jump target is on the same thread's stack and the interrupted code
+// is async-signal-safe or we don't care about its state (CoreML internals
+// are toast after a SIGSEGV anyway — we just want the process alive).
+
+/// Execute `body` with SIGSEGV/SIGBUS protection. Returns the body's
+/// result on success, or `nil` if a crash was caught. The caller is
+/// responsible for unlocking any held locks when `nil` is returned.
+///
+/// Uses the C shim `coreml_crash_guard.c` because Swift rejects
+/// `sigsetjmp`/`siglongjmp` (returns_twice attribute). The C layer
+/// installs per-thread signal handlers and longjmps back on crash.
+private final class CoreMLGuardBody {
+    let run: () -> Void
+    init(_ run: @escaping () -> Void) { self.run = run }
+}
+
+/// Returns nil only when a fault was caught; ordinary errors are rethrown.
+private func withCoreMLCrashGuard<T>(_ body: () throws -> T) throws -> T? {
+    var result: Result<T, Error>?
+    let crashed: Int32 = withoutActuallyEscaping(body) { body in
+        let box = CoreMLGuardBody { result = Result { try body() } }
+        let ctx = Unmanaged.passRetained(box).toOpaque()
+        defer { Unmanaged<CoreMLGuardBody>.fromOpaque(ctx).release() }
+        return coreml_guard_run({ ctx in
+            Unmanaged<CoreMLGuardBody>.fromOpaque(ctx!).takeUnretainedValue().run()
+        }, ctx)
+    }
+    if crashed != 0 {
+        NSLog("%@", "🏴‍☠️  BAD APPLE // CoreML prediction SIGSEGV/SIGBUS caught — failing gracefully")
+        return nil
+    }
+    return try result?.get()
+}
+
 @available(macOS 15.0, *)
 private final class BadAppleANELayerShard {
     let model: MLModel
@@ -822,7 +924,12 @@ private final class BadAppleANELayerShard {
             "attn_mask": MLFeatureValue(multiArray: attentionMask),
             "kv_write_mask": MLFeatureValue(multiArray: writeMask),
         ])
-        let prediction = try model.prediction(from: provider, using: state)
+        guard let prediction = try withCoreMLCrashGuard({
+            try self.model.prediction(from: provider, using: self.state)
+        }) else {
+            throw NSError(domain: "BadAppleANEShard", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "SIGSEGV/SIGBUS during layer prediction"])
+        }
         guard let output = prediction.featureValue(for: outputName)?.multiArrayValue else {
             throw NSError(domain: "BadAppleANEShard", code: 10)
         }
@@ -857,7 +964,12 @@ private final class BadAppleANELMHeadShard {
         let provider = try MLDictionaryFeatureProvider(dictionary: [
             inputName: MLFeatureValue(multiArray: hidden),
         ])
-        let prediction = try model.prediction(from: provider)
+        guard let prediction = try withCoreMLCrashGuard({
+            try self.model.prediction(from: provider)
+        }) else {
+            throw NSError(domain: "BadAppleANEShard", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "SIGSEGV/SIGBUS during head prediction"])
+        }
         guard let output = prediction.featureValue(for: outputName)?.multiArrayValue,
               output.count == vocabEnd - vocabStart else {
             throw NSError(domain: "BadAppleANEShard", code: 12)
@@ -883,31 +995,31 @@ private final class BadAppleANEShardCore {
     var selectedLoadLatency: TimeInterval = 0
     var selectedPrewarmLatency: TimeInterval = 0
 
-    private struct Candidate {
-        let core: BadAppleANEShardCore
-        let loadLatency: TimeInterval
-        let prewarmLatency: TimeInterval
-        let decodeLatency: TimeInterval
-
-        var score: TimeInterval {
-            // Optimize for steady-state tok/s; load and prewarm are one-time costs.
-            decodeLatency + prewarmLatency * 0.01 + loadLatency * 0.0001
+    /// `BADAPPLE_ANE_COMPUTE_UNITS`: `ane` (cpuAndNeuralEngine only), `all`
+    /// (only `.all`), or unset for ANE-first with `.all` as failure fallback.
+    static func candidateComputeUnits() -> [MLComputeUnits] {
+        switch ProcessInfo.processInfo.environment["BADAPPLE_ANE_COMPUTE_UNITS"]?.lowercased() {
+        case "ane": return [.cpuAndNeuralEngine]
+        case "all": return [.all]
+        default: return [.cpuAndNeuralEngine, .all]
         }
     }
 
     static func load(manifestURL: URL) throws -> BadAppleANEShardCore {
         let manifest = try BadAppleANEShardManifest.load(from: manifestURL)
+        // A 36-layer FP16 4B measured 80–236 s cold load and 6–14 s prewarm
+        // on a 16 GB M-series box; budgets reject broken configs, not slow disks.
         let maxPrewarmMilliseconds = ProcessInfo.processInfo.environment["BADAPPLE_ANE_MAX_PREWARM_MS"]
-            .flatMap(Double.init) ?? 5_000
+            .flatMap(Double.init) ?? 60_000
         let maxLoadMilliseconds = ProcessInfo.processInfo.environment["BADAPPLE_ANE_MAX_LOAD_MS"]
-            .flatMap(Double.init) ?? 45_000
-        let fastEnoughDecodeMs = ProcessInfo.processInfo.environment["BADAPPLE_ANE_FAST_DECODE_MS"]
-            .flatMap(Double.init) ?? 250
-        let fastEnoughDecode = fastEnoughDecodeMs / 1_000.0
+            .flatMap(Double.init) ?? 600_000
         var lastError: Error?
-        var accepted: [Candidate] = []
 
-        for (index, computeUnits) in [MLComputeUnits.cpuAndNeuralEngine, .all].enumerated() {
+        // Each candidate is a full resident copy of every shard (~8 GB for the
+        // FP16 4B). Never hold two: a working candidate is taken as-is, even
+        // when slow, and the next compute-unit config is tried only after the
+        // previous one failed and was released.
+        for computeUnits in Self.candidateComputeUnits() {
             let configuration = MLModelConfiguration()
             configuration.computeUnits = computeUnits
             let loadStarted = ProcessInfo.processInfo.systemUptime
@@ -933,43 +1045,18 @@ private final class BadAppleANEShardCore {
                     configuration: configuration
                 )
                 let decodeLatency = benchmarkDecode(core)
-                let candidate = Candidate(
-                    core: core,
-                    loadLatency: loadLatency,
-                    prewarmLatency: prewarmLatency,
-                    decodeLatency: decodeLatency
-                )
                 NSLog(
-                    "🏴‍☠️  BAD APPLE // Sharded ANE candidate rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok, score %.3f",
+                    "🏴‍☠️  BAD APPLE // Sharded ANE core selected rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok",
                     computeUnits.rawValue,
                     loadLatency,
                     prewarmLatency,
-                    decodeLatency,
-                    candidate.score
+                    decodeLatency
                 )
-                // If the first candidate is already fast enough, avoid the long compile
-                // times that GPU/ANE-unrestricted configs can incur on some machines.
-                if index == 0, decodeLatency <= fastEnoughDecode {
-                    NSLog("%@", "🏴‍☠️  BAD APPLE // Sharded ANE primary candidate fast enough; skipping remaining compute units")
-                    return core
-                }
-                accepted.append(candidate)
+                return core
             } catch {
                 NSLog("%@", "🏴‍☠️  BAD APPLE // Sharded ANE candidate rawValue \(computeUnits.rawValue) failed: \(error)")
                 lastError = error
             }
-        }
-
-        if let selected = accepted.min(by: { $0.score < $1.score }) {
-            NSLog(
-                "🏴‍☠️  BAD APPLE // Sharded ANE core selected rawValue %ld: load %.3fs, prewarm %.3fs, decode %.3fs/tok (score %.3f)",
-                selected.core.configuration.computeUnits.rawValue,
-                selected.loadLatency,
-                selected.prewarmLatency,
-                selected.decodeLatency,
-                selected.score
-            )
-            return selected.core
         }
 
         throw lastError ?? NSError(domain: "BadAppleANEShard", code: 14)
@@ -1015,12 +1102,28 @@ private final class BadAppleANEShardCore {
         self.manifest = manifest
         self.configuration = configuration
         embeddingData = try Data(contentsOf: manifest.embeddingPath, options: .mappedIfSafe)
-        layers = try manifest.layers.map {
-            try BadAppleANELayerShard(spec: $0, configuration: configuration)
+        // Load each shard inside an autorelease pool so the ANE E5
+        // compiler's intermediate allocations are freed between shards.
+        // On memory-constrained machines (16 GB) this prevents the
+        // plan-build from exhausting working memory partway through.
+        var loadedLayers: [BadAppleANELayerShard] = []
+        loadedLayers.reserveCapacity(manifest.layers.count)
+        for spec in manifest.layers {
+            try autoreleasepool {
+                let shard = try BadAppleANELayerShard(spec: spec, configuration: configuration)
+                loadedLayers.append(shard)
+            }
         }
-        heads = try manifest.heads.map {
-            try BadAppleANELMHeadShard(spec: $0, configuration: configuration)
+        layers = loadedLayers
+        var loadedHeads: [BadAppleANELMHeadShard] = []
+        loadedHeads.reserveCapacity(manifest.heads.count)
+        for spec in manifest.heads {
+            try autoreleasepool {
+                let head = try BadAppleANELMHeadShard(spec: spec, configuration: configuration)
+                loadedHeads.append(head)
+            }
         }
+        heads = loadedHeads
         let ropeHalf = manifest.ropeDimension / 2
         ropeCos = try MLMultiArray(
             shape: [1, NSNumber(value: ropeHalf)],
@@ -1183,10 +1286,25 @@ private final class BadAppleANEShardCore {
             logits.withUnsafeMutableBytes { rawBuffer, strides in
                 guard let base = rawBuffer.baseAddress else { return }
                 let count = logits.count
-                // strides from withUnsafeMutableBytes are BYTE strides, not
-                // element indices. Use load(fromByteOffset:as:) to read
-                // correctly without OOB access.
-                let byteStride = strides.last ?? 2
+                // The strides from withUnsafeMutableBytes are ELEMENT strides
+                // (NOT byte strides) — multiply by element size to get the
+                // real byte offset. For (1,V,1,1) the vocab dim is dim 1;
+                // on ANE the channel stride can be 32 (= 32 fp16 elements
+                // = 64 bytes per tile).
+                let elemSize: Int
+                switch logits.dataType {
+                case .float16: elemSize = 2
+                case .float32: elemSize = 4
+                default: elemSize = 2
+                }
+                var elemStride = strides.last ?? 1
+                let dims = logits.shape
+                for d in 0..<dims.count {
+                    if dims[d].intValue == count, d < strides.count {
+                        elemStride = strides[d]
+                    }
+                }
+                let byteStride = elemStride * elemSize
                 if logits.dataType == .float16 {
                     var localBest = -Float16.infinity
                     var localToken = -1
@@ -1219,6 +1337,7 @@ private final class BadAppleANEShardCore {
                         bestToken = localToken
                     }
                 } else {
+                    // Safe fallback: use indexed accessor which handles strides
                     for i in 0..<count {
                         let v = Float(logits[i].doubleValue)
                         if v > bestValue {
@@ -1305,28 +1424,14 @@ private final class BadAppleANEFixedCore {
     var selectedLoadLatency: TimeInterval = 0
     var selectedPrewarmLatency: TimeInterval = 0
 
-    private struct Candidate {
-        let core: BadAppleANEFixedCore
-        let loadLatency: TimeInterval
-        let prewarmLatency: TimeInterval
-        let decodeLatency: TimeInterval
-
-        var score: TimeInterval {
-            decodeLatency + prewarmLatency * 0.01 + loadLatency * 0.0001
-        }
-    }
-
     static func load(manifestURL: URL) throws -> BadAppleANEFixedCore {
         let manifest = try Manifest.load(from: manifestURL)
-        let fastEnoughDecodeMs = ProcessInfo.processInfo.environment["BADAPPLE_ANE_FAST_DECODE_MS"]
-            .flatMap(Double.init) ?? 60
-        let fastEnoughDecode = fastEnoughDecodeMs / 1_000.0
         let maxPrewarmMilliseconds = ProcessInfo.processInfo.environment["BADAPPLE_ANE_MAX_PREWARM_MS"]
-            .flatMap(Double.init) ?? 5_000
+            .flatMap(Double.init) ?? 60_000
         var lastError: Error?
-        var accepted: [Candidate] = []
 
-        for (index, computeUnits) in [MLComputeUnits.all, .cpuAndNeuralEngine].enumerated() {
+        // One resident copy at a time — see BadAppleANEShardCore.load.
+        for computeUnits in BadAppleANEShardCore.candidateComputeUnits() {
             let configuration = MLModelConfiguration()
             configuration.computeUnits = computeUnits
             do {
@@ -1355,28 +1460,11 @@ private final class BadAppleANEFixedCore {
                     prewarmLatency,
                     decodeLatency
                 )
-                if index == 0, decodeLatency <= fastEnoughDecode {
-                    return core
-                }
-                accepted.append(Candidate(
-                    core: core,
-                    loadLatency: loadLatency,
-                    prewarmLatency: prewarmLatency,
-                    decodeLatency: decodeLatency
-                ))
+                return core
             } catch {
                 NSLog("%@", "🏴‍☠️  BAD APPLE // Fixed-shape ANE candidate rawValue \(computeUnits.rawValue) failed: \(error)")
                 lastError = error
             }
-        }
-
-        if let selected = accepted.min(by: { $0.score < $1.score }) {
-            NSLog(
-                "🏴‍☠️  BAD APPLE // Fixed-shape ANE core selected rawValue %ld: decode %.3fs/tok",
-                selected.core.configuration.computeUnits.rawValue,
-                selected.decodeLatency
-            )
-            return selected.core
         }
 
         throw lastError ?? NSError(domain: "BadAppleANEFixed", code: 4)
@@ -1529,7 +1617,12 @@ private final class BadAppleANEFixedCore {
             features["v_cache_\(index)"] = MLFeatureValue(multiArray: valueCaches[index])
         }
         let provider = try MLDictionaryFeatureProvider(dictionary: features)
-        let prediction = try model.prediction(from: provider)
+        guard let prediction = try withCoreMLCrashGuard({
+            try self.model.prediction(from: provider)
+        }) else {
+            throw NSError(domain: "BadAppleANEFixed", code: 99,
+                          userInfo: [NSLocalizedDescriptionKey: "SIGSEGV/SIGBUS during fixed-core prediction"])
+        }
         // The model emits only the new (1, nkv, 1, dh) KV entry per layer;
         // scatter it into the resident fixed cache at the current position.
         for index in 0..<manifest.totalLayers {
@@ -1599,8 +1692,16 @@ private final class BadAppleANEFixedCore {
         logits.withUnsafeMutableBytes { rawBuffer, strides in
             guard let base = rawBuffer.baseAddress else { return }
             let count = logits.count
-            // strides are BYTE strides, not element indices.
-            let byteStride = strides.last ?? 2
+            // strides from withUnsafeMutableBytes are ELEMENT strides —
+            // multiply by element size to get byte offsets.
+            let elemSize: Int
+            switch logits.dataType {
+            case .float16: elemSize = 2
+            case .float32: elemSize = 4
+            default: elemSize = 2
+            }
+            let elemStride = strides.last ?? 1
+            let byteStride = elemStride * elemSize
             if logits.dataType == .float16 {
                 var localBest = -Float16.infinity
                 for i in 0..<count {

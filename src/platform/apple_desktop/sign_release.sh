@@ -147,7 +147,7 @@ main() {
 
     [[ -f "${PUBKEY}" ]] || fail "no cosign.pub; run --init first"
     if [[ ${#files[@]} -eq 0 ]]; then
-        for f in "${DIST_DIR}"/*.zip "${DIST_DIR}"/checksums.txt; do
+        for f in "${DIST_DIR}"/*.zip "${DIST_DIR}"/checksums.txt "${DIST_DIR}"/sbom*.json; do
             [[ -f "${f}" ]] && files+=("${f}")
         done
     fi

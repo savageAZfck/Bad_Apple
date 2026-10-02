@@ -106,6 +106,50 @@ struct BadApplePerson: Codable, Equatable, Sendable {
     let createdAt: Date
     var updatedAt: Date
     var lastNotifiedAt: Date?
+    // PII is sealed under a per-person DEK at the persistence boundary;
+    // on disk name/relationship/notes are empty and `sealed` carries them.
+    var sealed: BadAppleSealedBox? = nil
+    var shredded: Bool = false
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, relationship, notes, lastContactAt, nextContactAt
+        case status, createdAt, updatedAt, lastNotifiedAt, sealed, shredded
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        relationship = try c.decodeIfPresent(String.self, forKey: .relationship) ?? ""
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        lastContactAt = try c.decodeIfPresent(Date.self, forKey: .lastContactAt)
+        nextContactAt = try c.decodeIfPresent(Date.self, forKey: .nextContactAt)
+        status = try c.decode(BadAppleHumanStatus.self, forKey: .status)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        lastNotifiedAt = try c.decodeIfPresent(Date.self, forKey: .lastNotifiedAt)
+        sealed = try c.decodeIfPresent(BadAppleSealedBox.self, forKey: .sealed)
+        shredded = try c.decodeIfPresent(Bool.self, forKey: .shredded) ?? false
+    }
+
+    init(
+        id: String, name: String, relationship: String, notes: String,
+        lastContactAt: Date?, nextContactAt: Date?, status: BadAppleHumanStatus,
+        createdAt: Date, updatedAt: Date, lastNotifiedAt: Date?
+    ) {
+        self.id = id
+        self.name = name
+        self.relationship = relationship
+        self.notes = notes
+        self.lastContactAt = lastContactAt
+        self.nextContactAt = nextContactAt
+        self.status = status
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.lastNotifiedAt = lastNotifiedAt
+        self.sealed = nil
+        self.shredded = false
+    }
 }
 
 struct BadAppleConversationThread: Codable, Equatable, Sendable {
@@ -216,6 +260,26 @@ final class BadAppleHumanLayer: @unchecked Sendable {
             [.posixPermissions: 0o700],
             ofItemAtPath: self.directory.path
         )
+        // Re-purge incidental mentions of destroyed subjects — respawns of
+        // state before the erasure resurrect plaintext, but the destroyed
+        // tombstones live outside the snapshot roots so the replay always
+        // finds them again.
+        BadAppleErasure.shared.replayForgotten()
+        // Seal-on-write migration: any person still without a DEK gets one
+        // and is persisted in sealed form exactly once.
+        migrateToSealedStorage()
+    }
+
+    private func migrateToSealedStorage() {
+        let vault = BadAppleSubjectVault.shared
+        try? withWriteLock {
+            let state = loadStateUnlocked()
+            let needsMigration = state.people.contains {
+                !$0.shredded && !vault.hasKey($0.id)
+            }
+            guard needsMigration else { return }
+            try persistUnlocked(state)
+        }
     }
 
     private static func emptyState() -> BadAppleHumanState {
@@ -238,17 +302,34 @@ final class BadAppleHumanLayer: @unchecked Sendable {
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let state = try? decoder.decode(BadAppleHumanState.self, from: data) else {
+        guard var state = try? decoder.decode(BadAppleHumanState.self, from: data) else {
             return Self.emptyState()
         }
+        // Unseal person PII; destroyed-DEK records tombstone on sight, and a
+        // reverted plaintext record for a destroyed subject is caught too.
+        let vault = BadAppleSubjectVault.shared
+        state.people = state.people.map { vault.unsealPerson($0) }
         return state
     }
 
     private func persistUnlocked(_ state: BadAppleHumanState) throws {
+        // Seal every live person's PII under their DEK before encoding. If a
+        // person already has a DEK but sealing fails, refuse to write —
+        // never regress a sealed record back to plaintext.
+        let vault = BadAppleSubjectVault.shared
+        var diskState = state
+        diskState.people = state.people.map { vault.sealPersonForDisk($0) }
+        for (i, person) in diskState.people.enumerated() {
+            if person.sealed == nil && !person.shredded
+                && vault.hasKey(state.people[i].id) {
+                throw BadAppleHumanLayerError.persistence(
+                    "refusing to write plaintext for a previously sealed person")
+            }
+        }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(state)
+        let data = try encoder.encode(diskState)
         let tempURL = directory.appendingPathComponent(
             ".state.json.tmp.\(ProcessInfo.processInfo.processIdentifier).\(UUID().uuidString)"
         )

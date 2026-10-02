@@ -61,6 +61,7 @@ fn usage() -> ! {
     eprintln!("  freeze [reason]     Freeze the tape into a signed incident bundle now");
     eprintln!("  verify <bundle>     Verify an incident bundle (offline)");
     eprintln!("  replay <bundle>     Render the incident timeline");
+    eprintln!("  report <bundle>     Emit a structured incident disclosure (JSON)");
     eprintln!("       [--kind K]     Filter to event kinds (repeatable)");
     eprintln!("       [--around N]   Center on seq N (with --context C, default 20)");
     eprintln!("  status              Ring stats, chain head, incident list");
@@ -215,6 +216,115 @@ fn daemon_running() -> bool {
         .unwrap_or(false)
 }
 
+/// `badapple tape report <bundle>` — render a frozen incident bundle as a
+/// structured disclosure document: trigger, integrity verification, an
+/// authority-classified action summary, condensed timeline, and the state
+/// snapshot ids an auditor can materialize to reconstruct exact state.
+/// Deliberately factual — severity labels are hints, not legal conclusions.
+fn report(bundle_dir: &PathBuf) -> Result<(), Box<dyn Error>> {
+    use sha2::{Digest, Sha256};
+
+    let manifest_text = std::fs::read_to_string(bundle_dir.join("manifest.json"))?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text)?;
+    let manifest_sha = hex::encode(Sha256::digest(manifest_text.trim_end().as_bytes()));
+
+    let verified = verify_bundle(bundle_dir).ok();
+    let frames = replay::load_frames(bundle_dir)?;
+
+    // Authority classification over the frozen window.
+    let mut intent_verdicts = std::collections::BTreeMap::<String, u64>::new();
+    let mut kind_counts = std::collections::BTreeMap::<String, u64>::new();
+    let mut kill_events = 0u64;
+    let mut escalations = 0u64;
+    for f in &frames {
+        *kind_counts.entry(f.kind.clone()).or_default() += 1;
+        if f.kind == "kill_switch" {
+            kill_events += 1;
+        }
+        if f.kind == "tool_intent" {
+            let verdict = f.body["verdict"].as_str().unwrap_or("unknown");
+            *intent_verdicts.entry(verdict.to_string()).or_default() += 1;
+        }
+        if f.kind == "ledger" && f.body["type"].as_str() == Some("council_escalated") {
+            escalations += 1;
+        }
+    }
+
+    let trigger_kind = manifest["trigger"]["kind"].as_str().unwrap_or("unknown");
+    let severity_hint = match trigger_kind {
+        "kill_switch" => "operator_brake",
+        "process_death" | "crash" => "engine_fault",
+        "manual" => "manual_freeze",
+        _ => "unclassified",
+    };
+    // An operator brake or unexpected engine death is what an auditor wants
+    // to see disclosed; a manual freeze is routine evidence capture.
+    let statutory_candidate = matches!(severity_hint, "operator_brake" | "engine_fault");
+
+    let trigger_ts = manifest["trigger"]["ts"].as_u64().unwrap_or(0);
+    let trigger_iso = chrono::DateTime::from_timestamp(trigger_ts as i64, 0)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| trigger_ts.to_string());
+
+    let timeline: Vec<serde_json::Value> = frames
+        .iter()
+        .map(|f| {
+            let mut body = serde_json::to_string(&f.body).unwrap_or_else(|_| "{}".into());
+            if body.len() > 200 {
+                let mut end = 197;
+                while !body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                body.truncate(end);
+                body.push_str("...");
+            }
+            serde_json::json!({
+                "seq": f.seq, "ts": f.ts, "kind": f.kind, "src": f.src, "body": body,
+            })
+        })
+        .collect();
+
+    let report = serde_json::json!({
+        "kind": "badapple.incident_report",
+        "version": 1,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "incident": {
+            "id": bundle_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            "bundle": bundle_dir.display().to_string(),
+            "trigger": {"kind": trigger_kind, "detail": manifest["trigger"]["detail"], "detected_at": trigger_iso},
+            "subject": manifest["subject"],
+            "window": manifest["window"],
+        },
+        "classification": {
+            "severity_hint": severity_hint,
+            "disclosure_candidate": statutory_candidate,
+            "note": "severity_hint is mechanical; statutory classification requires human assessment",
+        },
+        "integrity": {
+            "manifest_sha256": manifest_sha,
+            "head_hash": manifest["head_hash"],
+            "verification": verified.map(|r| serde_json::json!({
+                "frames_checked": r.frames_checked,
+                "chain_ok": r.chain_ok,
+                "manifest_ok": r.manifest_ok,
+                "signature_ok": r.signature_ok,
+            })),
+            "manifest_pubkey": manifest["pubkey"],
+        },
+        "authority": {
+            "tool_intent_verdicts": intent_verdicts,
+            "kill_switch_events": kill_events,
+            "council_escalations": escalations,
+            "frame_kind_counts": kind_counts,
+        },
+        "state_snapshots": manifest["snapshots"],
+        "prior_incidents": manifest["prior_incidents"],
+        "timeline": timeline,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = match args.next() {
@@ -292,6 +402,13 @@ fn main() {
                 }
                 Err(e) => Err(e.into()),
             }
+        }
+        "report" => {
+            let target = match rest.first().map(PathBuf::from) {
+                Some(t) => t,
+                None => usage(),
+            };
+            report(&target)
         }
         "status" => status(),
         "incidents" => {

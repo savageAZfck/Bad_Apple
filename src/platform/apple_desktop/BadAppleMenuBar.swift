@@ -4769,6 +4769,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var timer: Timer?
     private var earsTimer: Timer?
     private var earsCaptureInFlight = false
+    private var eyesTimer: Timer?
+    private var eyesCaptureInFlight = false
     private var meetingTimer: Timer?
     private let meetingRecorder = BadAppleMeetingRecorder()
     private var clipboardTimer: Timer?
@@ -4981,6 +4983,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
         voiceHUD.attach(statusButton: statusItem?.button)
         startEarsLoop()
+        startEyesLoop()
         startMeetingLoop()
         startClipboardLoop()
         voiceHost.onStateChange = { [weak self] state in
@@ -5810,6 +5813,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 }
             }
             self?.earsCaptureInFlight = false
+        }
+    }
+
+    // MARK: - Ambient sight (eyes)
+
+    /// Seconds between retinal samples. Cheap capture+diff every tick; the
+    /// expensive VLM describe is paid by the engine only when the scene
+    /// actually changed. ~/.bad_apple/eyes is the opt-in switch.
+    private var eyesInterval: TimeInterval {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_EYES_INTERVAL"] ?? "4"
+        return max(TimeInterval(env) ?? 4, 1)
+    }
+
+    private var lastEyesSample: Date?
+
+    /// Poll the eyes control file on the same slow cadence as ears; while
+    /// enabled, sample a downsampled frame and stage it for the engine's
+    /// perception loop only when the scene changed beyond the diff floor.
+    private func startEyesLoop() {
+        eyesTimer?.invalidate()
+        eyesTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.eyesTick()
+        }
+    }
+
+    private func eyesTick() {
+        guard BadAppleEyes.enabled, !eyesCaptureInFlight else { return }
+        if let last = lastEyesSample, Date().timeIntervalSince(last) < eyesInterval { return }
+        lastEyesSample = Date()
+        eyesCaptureInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            _ = BadAppleEyes.sampleOnce()
+            self?.eyesCaptureInFlight = false
         }
     }
 
@@ -7344,7 +7380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         restartDaemonItem.toolTip = "Unload and reload the Bad Apple system LaunchDaemons."
         helpMenu.addItem(restartDaemonItem)
         let openLogItem = NSMenuItem(title: "Open Debug Log", action: #selector(openLog), keyEquivalent: "")
-        openLogItem.toolTip = "Open /var/log/bad_apple_mlx_server.log in the default editor."
+        openLogItem.toolTip = "Open the engine debug log in the default editor."
         helpMenu.addItem(openLogItem)
         if let mcpSocket = runtime["mcp_socket"] as? String, !mcpSocket.isEmpty {
             let copyMCPItem = NSMenuItem(title: "Copy Connection Info", action: #selector(copyMCPSocket), keyEquivalent: "")
@@ -7777,7 +7813,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @objc private func terminate() { NSApp.terminate(nil) }
 
     @objc private func openLog() {
-        let logURL = URL(fileURLWithPath: "/var/log/bad_apple_mlx_server.log")
+        let durable = URL(fileURLWithPath: "/var/lib/bad_apple/mlx_server.log")
+        let legacy = URL(fileURLWithPath: "/var/log/bad_apple_mlx_server.log")
+        let logURL = FileManager.default.fileExists(atPath: durable.path) ? durable : legacy
         NSWorkspace.shared.open(logURL)
     }
 

@@ -251,7 +251,7 @@ if [[ $ready -eq 1 ]]; then
 else
   ko "daemon did not become ready"
   note "mlx log tail:"
-  tail -n 50 /var/log/bad_apple_mlx_server.log 2>/dev/null | while IFS= read -r line; do note "$line"; done || true
+  tail -n 50 /var/lib/bad_apple/mlx_server.log 2>/dev/null | while IFS= read -r line; do note "$line"; done || true
   exit 1
 fi
 
@@ -261,7 +261,7 @@ if [[ -n "$BADAPPLE_ALLOW_DOWNLOADS" && -f "$PLIST_TARGET" ]]; then
   echo "Waiting for model weights to cache (this may take several minutes)..."
   model_cached=0
   for i in {1..180}; do
-    if tail -n 20 /var/log/bad_apple_mlx_server.log 2>/dev/null | grep -qi "model loaded\|loaded.*model"; then
+    if tail -n 20 /var/lib/bad_apple/mlx_server.log 2>/dev/null | grep -qi "model loaded\|loaded.*model"; then
       model_cached=1
       break
     fi

@@ -146,6 +146,12 @@ fn main() -> Result<()> {
             return run_recall_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
         Some("tape") => return run_tape_subcommand(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("bulletin") => {
+            return run_sidecar_subcommand(
+                "badapple-bulletin",
+                &std::env::args().skip(2).collect::<Vec<_>>(),
+            )
+        }
         Some("explain") => {
             return run_explain_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
@@ -951,7 +957,7 @@ fn run_doctor() -> Result<()> {
         );
     }
     for log in [
-        "/var/log/bad_apple_mlx_server.log",
+        "/var/lib/bad_apple/mlx_server.log",
         "/var/log/bad_apple_supervisor.log",
     ] {
         let p = std::path::PathBuf::from(log);
@@ -1081,7 +1087,7 @@ fn run_crash_report() -> Result<()> {
     // Recent MLX server log (last 50 lines)
     let _ = writeln!(report, "\n[mlx server log — last 50 lines]");
     if let Ok(out) = Command::new("tail")
-        .args(["-50", "/var/log/bad_apple_mlx_server.log"])
+        .args(["-50", "/var/lib/bad_apple/mlx_server.log"])
         .output()
     {
         let _ = writeln!(report, "{}", String::from_utf8_lossy(&out.stdout));
@@ -1787,14 +1793,20 @@ fn run_redteam_subcommand(args: &[String]) -> Result<()> {
 /// `badapple tape <verb>` — flight recorder. Shells to the sibling
 /// badapple-tape binary (same dir or PATH) so the daemon wrapper stays thin.
 fn run_tape_subcommand(args: &[String]) -> Result<()> {
+    run_sidecar_subcommand("badapple-tape", args)
+}
+
+/// Forward a subcommand to a sibling binary in the same release dir,
+/// falling back to PATH lookup when running from an uninstalled checkout.
+fn run_sidecar_subcommand(name: &str, args: &[String]) -> Result<()> {
     let exe = std::env::current_exe()?
         .parent()
-        .map(|p| p.join("badapple-tape"))
+        .map(|p| p.join(name))
         .filter(|p| p.exists())
-        .unwrap_or_else(|| "badapple-tape".into());
+        .unwrap_or_else(|| name.into());
     let status = std::process::Command::new(exe).args(args).status()?;
     if !status.success() {
-        bail!("badapple-tape exited with {}", status);
+        bail!("{name} exited with {status}");
     }
     Ok(())
 }

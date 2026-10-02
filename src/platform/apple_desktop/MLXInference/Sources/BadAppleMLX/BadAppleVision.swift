@@ -102,10 +102,19 @@ public actor BadAppleVisionEngine {
     ///
     /// The returned stream terminates after at most `maxTokens` tokens. A consumer
     /// cancelling iteration also cancels its forwarding task.
+    /// Default pixel budget per image (1280 × 28 × 28 ≈ 1 MP, Qwen2-VL's
+    /// recommended document setting). The model config allows 12.8 MP, which
+    /// lets a full Retina frame through as ~28k vision patches under full
+    /// attention — multiple GB of activations per describe.
+    public static var defaultMaxPixels: Int {
+        ProcessInfo.processInfo.environment["BADAPPLE_VISION_MAX_PIXELS"].flatMap(Int.init) ?? 1_003_520
+    }
+
     public func describe(
         imageURL: URL,
         prompt: String? = nil,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        maxPixels: Int? = nil
     ) async throws -> AsyncThrowingStream<String, Error> {
         guard let container else { throw VisionError.modelNotLoaded }
         try Self.validateImage(imageURL)
@@ -125,7 +134,8 @@ public actor BadAppleVisionEngine {
         }
 
         do {
-            let userInput = UserInput(prompt: finalPrompt, images: [.url(imageURL)])
+            var userInput = UserInput(prompt: finalPrompt, images: [.url(imageURL)])
+            userInput.processing.maxPixels = maxPixels ?? Self.defaultMaxPixels
             let input = try await container.prepare(input: userInput)
             let upstream = try await container.generate(
                 input: input,

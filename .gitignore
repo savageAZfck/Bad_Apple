@@ -16,6 +16,7 @@ __pycache__/
 *.pyc
 /tests/ane_brain_perf/artifacts
 /tools/artifacts
+/ane_artifacts
 src/platform/apple_desktop/.build
 src/platform/apple_bridge/.build
 

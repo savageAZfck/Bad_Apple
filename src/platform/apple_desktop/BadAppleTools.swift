@@ -2088,6 +2088,27 @@ final class BadApplePolicyEngine: @unchecked Sendable {
         return _orgPolicyViolation
     }
 
+    /// SHA-256 (hex) of the policy.yaml bytes last loaded — the "policy in
+    /// force" fingerprint pinned into every ledger line so an auditor can
+    /// reconstruct which rules were active at event time. nil = builtin
+    /// defaults (no policy file present).
+    private var _policyHash: String?
+    var policyHash: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _policyHash
+    }
+
+    /// Provenance fields merged into every audit-ledger entry. "builtin"
+    /// distinguishes "defaults in force" from "hash unavailable".
+    func ledgerContext() -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        var ctx: [String: Any] = ["policy_hash": _policyHash ?? "builtin"]
+        if _orgPolicyViolation { ctx["org_policy_ok"] = false }
+        return ctx
+    }
+
     // MARK: - Init
 
     init() {
@@ -2448,8 +2469,23 @@ final class BadApplePolicyEngine: @unchecked Sendable {
     }
 
     private func loadPolicy() {
+        // Pin "no policy file" first: a removed file must reset the stamp to
+        // builtin defaults rather than leave a stale hash pinned.
+        lock.lock()
+        _policyHash = nil
+        lock.unlock()
+
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)),
               let content = String(data: data, encoding: .utf8) else { return }
+
+        // Fingerprint the exact bytes in force before signature evaluation —
+        // even a rejected (org-violation) policy gets its hash pinned so the
+        // ledger can prove which bytes were refused.
+        let policyBytesHash = SHA256.hash(data: data)
+            .map { String(format: "%02x", Int($0)) }.joined()
+        lock.lock()
+        _policyHash = policyBytesHash
+        lock.unlock()
 
         if !verifyOrgPolicySignature(data) {
             lock.lock()
@@ -3476,7 +3512,17 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             }
             try? "{\"ts\": \(Date().timeIntervalSince1970)}"
                 .write(toFile: home + "/meeting_record", atomically: true, encoding: .utf8)
-            return "Recording the meeting — everything stays on this Mac. Say 'stop the meeting' or ask me to run meeting_stop when you're done; the transcript lands a few seconds later."
+            BadAppleConsent.shared.record(
+                action: "attested", subject: "operator",
+                scope: "meeting", note: "meeting_start")
+            BadAppleEngine.shared.auditDaemonEvent(
+                type: "consent_attested",
+                data: ["scope": "meeting", "subject": "operator"])
+            let consented = BadAppleConsent.shared.activeSubjects(scope: "meeting")
+            let suffix = consented.isEmpty
+                ? " No bystander consent on file — 'consent grant <name> meeting' records it."
+                : " Consent on file: \(consented.joined(separator: ", "))."
+            return "Recording the meeting — everything stays on this Mac. Say 'stop the meeting' or ask me to run meeting_stop when you're done; the transcript lands a few seconds later." + suffix
         case "meeting_stop":
             let controlPath = NSHomeDirectory() + "/.bad_apple/meeting_record"
             guard FileManager.default.fileExists(atPath: controlPath) else {

@@ -90,6 +90,11 @@ fi
 echo "Using BadAppleMLX dylib: ${MLX_DYLIB}"
 echo "Using MLX Metal shaders: ${MLX_METAL_CACHE}"
 
+GUARD_OBJ="${SCRATCH_DIR}/native/coreml_crash_guard.o"
+xcrun clang -c -O2 -isysroot "${SDK_PATH}" -target "${TARGET}" \
+    -o "${GUARD_OBJ}" \
+    "${REPO_ROOT}/src/platform/apple_bridge/coreml_crash_guard.c"
+
 "${SWIFTC}" \
     -parse-as-library -swift-version 5 -O \
     -target "${TARGET}" -sdk "${SDK_PATH}" \
@@ -97,6 +102,8 @@ echo "Using MLX Metal shaders: ${MLX_METAL_CACHE}"
     -module-name BadAppleBridge \
     -emit-module-path "${SCRATCH_DIR}/native/BadAppleBridge.swiftmodule" \
     -o "${BUILD_DIR}/libBadAppleBridge.dylib" \
+    -import-objc-header "${REPO_ROOT}/src/platform/apple_bridge/coreml_crash_guard.h" \
+    "${GUARD_OBJ}" \
     "${REPO_ROOT}/src/platform/apple_bridge/BadAppleBridge.swift" \
     "${REPO_ROOT}/src/platform/apple_bridge/BadAppleIntent.swift" \
     -F "${FRAMEWORK_SEARCH}" \
@@ -139,7 +146,7 @@ plutil -lint "${EMBED_PLIST}"
 # are pure Foundation and always included. BadAppleEngine requires the MLX
 # dylib, so it's only included when MLX is available.
 LOGIC_SOURCES=""
-for src in BadAppleSecurity.swift BadAppleIdentityClient.swift BadAppleHumanLayer.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift BadAppleModelManager.swift BadAppleWorkspaceWatcher.swift BadAppleCouncil.swift BadAppleSentinel.swift BadAppleScheduler.swift BadAppleLookahead.swift BadAppleWatcher.swift BadAppleTape.swift; do
+for src in BadAppleSecurity.swift BadAppleIdentityClient.swift BadAppleHumanLayer.swift BadAppleTools.swift BadAppleConversation.swift BadAppleRAG.swift BadAppleNativeRuntime.swift BadAppleAgent.swift BadAppleModelManager.swift BadAppleWorkspaceWatcher.swift BadAppleCouncil.swift BadAppleSentinel.swift BadAppleScheduler.swift BadAppleLookahead.swift BadAppleWatcher.swift BadAppleTape.swift BadAppleProvenance.swift BadAppleConsent.swift BadAppleErasure.swift BadAppleSubjectVault.swift BadAppleAmendment.swift; do
     [[ -f "${REPO_ROOT}/src/platform/apple_desktop/${src}" ]] && LOGIC_SOURCES="${LOGIC_SOURCES} ${REPO_ROOT}/src/platform/apple_desktop/${src}"
 done
 
@@ -189,6 +196,7 @@ fi
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleTasksWindow.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleEars.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleEyes.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleASR.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMeeting.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleClipboard.swift" \
@@ -443,8 +451,17 @@ plutil -lint "${CONTENTS_DIR}/Info.plist"
 
 SIGN_SCRIPT="${REPO_ROOT}/src/platform/apple_desktop/sign_bad_apple.sh"
 if [[ "${BADAPPLE_NO_SIGN:-0}" == "1" ]]; then
-    codesign --force --deep --sign - "${APP_DIR}"
-    echo "Applied local ad-hoc signature (BADAPPLE_NO_SIGN=1)."
+    # Stable local identity when available: an ad-hoc signature changes the
+    # cdhash on every rebuild, which invalidates every TCC grant keyed to the
+    # previous binary (screen recording, mic, accessibility). A stable cert
+    # keeps the designated requirement constant so user grants survive builds.
+    if security find-identity -v -p codesigning | grep -q "Bad Apple Dev"; then
+        codesign --force --deep --sign "Bad Apple Dev (savag3)" "${APP_DIR}"
+        echo "Applied stable local signature (Bad Apple Dev) — TCC grants persist across rebuilds."
+    else
+        codesign --force --deep --sign - "${APP_DIR}"
+        echo "Applied local ad-hoc signature (BADAPPLE_NO_SIGN=1). Note: ad-hoc changes cdhash per build, breaking TCC grants."
+    fi
 elif [[ -x "${SIGN_SCRIPT}" ]]; then
     if "${SIGN_SCRIPT}"; then
         echo "Signed: ${APP_DIR}"

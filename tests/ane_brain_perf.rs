@@ -216,10 +216,19 @@ fn ane_brain_perf() {
             report.avg_token_latency_us
         );
     }
-    assert!(
-        report.mastery_score >= 0.0,
-        "mastery score must be non-negative"
-    );
+    // A brain that runs fast but decodes nonsense must fail here: the stride
+    // bug once shipped 4.8 tok/s of fluent gibberish at mastery 0/3 and passed.
+    if report.mastery_attempts > 0 {
+        let min_mastery: f64 = std::env::var("BADAPPLE_ANE_MIN_MASTERY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.66);
+        assert!(
+            report.mastery_score >= min_mastery,
+            "mastery {:.2} below required {min_mastery:.2} — the brain decodes but does not answer",
+            report.mastery_score
+        );
+    }
 }
 
 #[test]

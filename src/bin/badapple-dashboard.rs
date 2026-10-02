@@ -1227,6 +1227,7 @@ async fn tail_handler(
 ) -> impl IntoResponse {
     let n: usize = query.get("n").and_then(|s| s.parse().ok()).unwrap_or(50);
     let paths = [
+        "/var/lib/bad_apple/mlx_server.log",
         "/var/log/bad_apple_mlx_server.log",
         "/var/log/bad_apple_supervisor.log",
     ];

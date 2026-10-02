@@ -139,9 +139,13 @@ install -d -o root -g wheel -m 750 "${BACKUP_ROOT}"
 BACKUP_DIR="$(mktemp -d "${BACKUP_ROOT}/${RELEASE_ID}.XXXXXX")"
 chmod 750 "${BACKUP_DIR}"
 launchctl print "gui/${CONSOLE_UID}" >/dev/null || fail "no GUI session for ${CONSOLE_USER}"
-touch /var/log/bad_apple_mlx_server.log
-chown "${CONSOLE_USER}":"${CONSOLE_GROUP}" /var/log/bad_apple_mlx_server.log
-chmod 644 /var/log/bad_apple_mlx_server.log
+# The daemon log lives in the state dir the service user owns — /var/log is
+# root-writable only, so a wiped log file (OS updates do this) would leave
+# xpcproxy unable to open stdout and the daemon dead on spawn (exit 78).
+touch /var/lib/bad_apple/mlx_server.log
+chown "${CONSOLE_USER}":"${CONSOLE_GROUP}" /var/lib/bad_apple/mlx_server.log
+chmod 644 /var/lib/bad_apple/mlx_server.log
+ln -sfn /var/lib/bad_apple/mlx_server.log /var/log/bad_apple_mlx_server.log
 USER_DATA="${CONSOLE_HOME}/.bad_apple"
 install -d -o "${CONSOLE_USER}" -g "${CONSOLE_GROUP}" -m 755 "${USER_DATA}"
 chown -R "${CONSOLE_USER}":"${CONSOLE_GROUP}" "${USER_DATA}"
@@ -151,7 +155,7 @@ if [[ -d "${HF_CACHE}" ]]; then
 fi
 
 DAEMONS=(com.badapple.gatekeeper com.badapple.mlx com.badapple.supervisor)
-AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint com.badapple.ify com.badapple.respawn com.badapple.tape)
+AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint com.badapple.ify com.badapple.respawn com.badapple.tape com.badapple.bulletin)
 AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 for label in "${DAEMONS[@]}"; do
     target="/Library/LaunchDaemons/${label}.plist"
@@ -294,6 +298,13 @@ fi
 # freezes signed incident bundles on kill/crash/manual triggers).
 if [[ -x "${REPO_ROOT}/target/release/badapple-tape" ]]; then
     run_user "${REPO_ROOT}/src/platform/apple_desktop/install_tape_agent.sh"
+fi
+
+# Daily oversight-bulletin agent (signed artifact classifying actions by
+# authority, summarizing council dissent + IFY findings; the regulator-facing
+# "who authorized what" record).
+if [[ -x "${REPO_ROOT}/target/release/badapple-bulletin" ]]; then
+    run_user "${REPO_ROOT}/src/platform/apple_desktop/install_bulletin_agent.sh"
 fi
 
 trap - EXIT INT TERM

@@ -30,6 +30,7 @@ BINS=(
     badapple-ify
     badapple-respawn
     badapple-tape
+    badapple-bulletin
     gatekeeper
 )
 
@@ -59,6 +60,7 @@ DESKTOP_FILES=(
     src/platform/apple_desktop/com.badapple.ify.plist
     src/platform/apple_desktop/com.badapple.respawn.plist
     src/platform/apple_desktop/com.badapple.tape.plist
+    src/platform/apple_desktop/com.badapple.bulletin.plist
     src/platform/apple_desktop/install_menu_bar_agent.sh
     src/platform/apple_desktop/install_tts_agent.sh
     src/platform/apple_desktop/install_dashboard_agent.sh
@@ -66,6 +68,7 @@ DESKTOP_FILES=(
     src/platform/apple_desktop/install_ify_agent.sh
     src/platform/apple_desktop/install_respawn_agent.sh
     src/platform/apple_desktop/install_tape_agent.sh
+    src/platform/apple_desktop/install_bulletin_agent.sh
     src/platform/apple_desktop/strip_quarantine.sh
 )
 
@@ -357,11 +360,26 @@ if [[ -n "$(find "${PKG_DIR}/bad_apple/src" -type f ! -name '*.sh' ! -name '*.pl
     fail "unexpected file in public runtime src directory"
 fi
 [[ ! -e "${ZIP_PATH}" && ! -L "${ZIP_PATH}" ]] || fail "refusing to replace existing ZIP: ${ZIP_PATH}"
+# CycloneDX SBOM: every resolved crate (with registry sha256) plus the
+# staged payload binaries/libs hashed as they ship. Emitted before the zips
+# so the SBOM covers final artifact bytes, then dropped into the package
+# root and target/release/ for the cosign pass.
+"${REPO_ROOT}/src/platform/apple_desktop/gen_sbom.sh" \
+    "${VERSION}" "${REPO_ROOT}/Cargo.lock" "${PKG_DIR}/sbom.json" \
+    "${PKG_DIR}/bad_apple/target/release/"* 2>/dev/null || \
+    echo "warning: SBOM generation skipped (python3 unavailable)"
+
 ( cd "${BUILD_DIR}" && zip -r -y -9 "${ZIP_PATH}" "Bad_Apple-${VERSION}-unsigned" )
 
 cp -R "${PKG_DIR}" "${COMPAT_DIR}"
 ( cd "${BUILD_DIR}" && zip -r -y -9 "${COMPAT_ZIP}" "Bad_Apple-${VERSION}-full" )
 ( cd "${BUILD_DIR}" && shasum -a 256 "$(basename "${ZIP_PATH}")" "$(basename "${COMPAT_ZIP}")" ) > "${CHECKSUMS}"
+
+# Per-artifact SBOM next to the zips so sign_release.sh picks it up for the
+# cosign pass alongside checksums.txt.
+if [[ -f "${PKG_DIR}/sbom.json" ]]; then
+    install -m 644 "${PKG_DIR}/sbom.json" "${BUILD_DIR}/sbom-${VERSION}.json"
+fi
 
 echo "Packaged: ${ZIP_PATH}"
 echo "Legacy updater compatibility package: ${COMPAT_ZIP}"

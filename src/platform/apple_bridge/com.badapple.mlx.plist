@@ -67,15 +67,15 @@
         <key>BADAPPLE_LAZY_MAIN_MODEL</key>
         <string>1</string>
         <key>BADAPPLE_FAST_MODEL</key>
-        <string></string>
+        <string>mlx-community/Qwen2.5-0.5B-Instruct-4bit</string>
         <key>HOME</key>
         <string>__CONSOLE_HOME__</string>
         <key>HF_HUB_OFFLINE</key>
         <string>1</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>/var/log/bad_apple_mlx_server.log</string>
+    <string>/var/lib/bad_apple/mlx_server.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/bad_apple_mlx_server.log</string>
+    <string>/var/lib/bad_apple/mlx_server.log</string>
 </dict>
 </plist>

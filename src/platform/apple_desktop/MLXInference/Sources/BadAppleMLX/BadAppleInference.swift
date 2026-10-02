@@ -1217,6 +1217,18 @@ public final class BadAppleInference: @unchecked Sendable {
         Memory.clearCache()
     }
 
+    /// Bound MLX's process-wide free-buffer cache. MLX defaults the cache
+    /// limit to the memory limit, so freed Metal buffers from every model in
+    /// the process (VLM, embedder, main) pile up until the machine swaps.
+    public static func limitBufferCache(bytes: Int) {
+        Memory.cacheLimit = max(0, bytes)
+    }
+
+    /// Drop all cached (free) Metal buffers. Live arrays are untouched.
+    public static func releaseBufferCache() {
+        Memory.clearCache()
+    }
+
     /// Inject a saved LoRA adapter (`adapters.safetensors` + `adapter_config.json`)
     /// into the loaded model. The container mutates the module in place, so the
     /// adapter stays applied for subsequent generations until unload or replace.

@@ -298,11 +298,142 @@ badapple tape status           # frames, head hash, incidents (lock-free)
 badapple tape freeze [reason]  # freeze now (via daemon trigger file)
 badapple tape verify <bundle>  # offline chain+manifest+signature check
 badapple tape replay <bundle>  # render timeline [--kind K] [--around N]
+badapple tape report <bundle>  # structured incident disclosure (JSON)
 ```
 
 The engine drops `tool_intent` frames (name, args, policy verdict) into the
 intent stream from the tool-dispatch path in `BadAppleEngine.swift` via
 `BadAppleTape.swift` — pre-execution decision context, not just audit events.
+
+`badapple tape report` renders a bundle as a disclosure document: trigger,
+integrity verification (chain/manifest/signature), authority-classified
+action summary (tool-intent verdicts, kill events, council escalations),
+condensed timeline, and the respawned snapshot ids needed to materialize
+exact state at freeze time.
+
+## Oversight bulletins and key ceremony
+
+`badapple-bulletin` (built from `src/bin/badapple-bulletin.rs`) emits the
+periodic signed oversight artifact. Each run scans ledger entries appended
+since the last bulletin, classifies dispatches by authority class
+(autonomous / human-approved / human-denied / policy-denied /
+council-escalated), summarizes dissent stats and IFY findings, pins the
+policy hashes seen and the ledger tip, signs the canonical body through the
+identity agent (Secure Enclave), and writes
+`/var/lib/bad_apple/bulletins/oversight-<stamp>.json`. Cursor state:
+`bulletins/.cursor` (line count — append-only ledger). It also runs the
+key-ceremony check: every bulletin run records `observed`/`rotated` events
+to the hash-chained, self-signed `/var/lib/bad_apple/key_ceremony.jsonl`.
+
+The `com.badapple.bulletin` LaunchAgent runs it daily (installed by
+`install_badapple_platform.sh` via `install_bulletin_agent.sh`; logs to
+`/var/lib/bad_apple/bulletin.log`).
+
+```bash
+badapple bulletin                 # emit for entries since last run
+badapple bulletin -- --all        # rebuild over full ledger
+badapple-bulletin --verify <path>       # verify a bulletin signature
+badapple-bulletin --keys                # attestation-key ceremony history
+badapple-bulletin --revoke-key <id>     # signed revocation record
+```
+
+Env overrides: `BADAPPLE_LEDGER`, `BADAPPLE_BULLETIN_DIR`,
+`BADAPPLE_CEREMONY_LOG`, `BADAPPLE_IFY_DIR`, `BADAPPLE_IDENTITY_AGENT_SOCKET`.
+
+## Policy-at-time-T and brain provenance
+
+Every ledger line's `data` payload carries `policy_hash` — SHA-256 of the
+policy.yaml bytes in force at write time (`"builtin"` when running on
+compiled-in defaults, `org_policy_ok:false` appended when an org trust root
+exists but the policy signature fails). The engine wires it through
+`BadAppleAuditLedger.extraContextProvider`; the hash body stays
+byte-compatible with the historical format since the field lives in `data`.
+
+`BadAppleProvenance` appends a signed `brain_manifest` record to
+`/var/lib/bad_apple/provenance.jsonl` on every successful model load or
+swap — model id, revision, source path, reserved bytes, dream-adapter
+presence, policy hash, and the file-manifest fingerprint when the model
+manager has one on file. Each record's SHA-256 is anchored into the ledger
+as a `model_provenance` event.
+
+## Consent registry and certified erasure
+
+`BadAppleConsent` keeps an operator-attested consent log at
+`/var/lib/bad_apple/consent.jsonl` (grants/revokes/attestations by subject
+and scope: `ambient_hearing`, `meeting`, `voice`). Enabling ears or starting
+a meeting writes an `attested` record plus a `consent_attested` ledger
+event, and reports whether bystander grants exist for that scope.
+
+`forget <name>` / `erase <name>` is owned by certified erasure, not the
+conversational tool path: `BadAppleErasure` purges the person record,
+working-memory lines, subject-named notes, conversation lines, and
+redacts ambient-hearing/meeting captures; revokes their consent grants;
+destroys the subject's DEK; then writes a signed certificate to
+`/var/lib/bad_apple/erasure/` and anchors its SHA-256 as an
+`erasure_certified` ledger event (plus `dek_destroyed`). The ledger
+records `subject_ref` — SHA-256 of the name — never the forgotten
+name itself.
+
+Crypto-shredding (`BadAppleSubjectVault`): person PII is sealed under a
+per-person AES-256-GCM DEK at the human-layer persistence boundary — the
+on-disk `state.json` always holds ciphertext. DEKs and destroyed-subject
+tombstones live in `~/.bad_apple_keys` (`BADAPPLE_KEY_VAULT` overrides) —
+deliberately outside both respawn roots — so `badapple-respawn --revert`
+can resurrect sealed ciphertext but never the key, and reverted plaintext
+records for destroyed subjects tombstone on load. Tombstone names are
+sealed under a `household` DEK and replayed at human-layer init to
+re-purge incidental mentions a revert resurrected; destroying the
+household key forfeits that replay memory. Certificates carry
+`dek_destroyed` + `decrypt_verified` (a decrypt is attempted after key
+destruction and must fail).
+
+```bash
+badapple "consent grant alice ambient_hearing"
+badapple "consent revoke alice ambient_hearing"
+badapple "consent list"
+badapple "forget alice"          # crypto-shred + purge + signed certificate
+```
+
+## Constitutional amendments (self-modification layer)
+
+`BadAppleAmendment.swift` — every change to behavior-bearing state lands as
+a signed amendment artifact under `/var/lib/bad_apple/amendments/<id>.json`
+with a hash-chained transition journal at `amendments.jsonl` and anchors in
+the main ledger (`amendment_<transition>` events).
+
+Lifecycle: `proposed → deliberated → ratified|held → applied → measured`,
+with `rejected` and `reverted` terminal/rollback states. Two tiers:
+
+- **statutory** (`dream_adapter`, `strategy_update`, `prompt_patch`,
+  `ify_proposal`) — council *unanimity* auto-ratifies; anything less holds
+  for the human. Note this is stricter than the old dream-adopt path, which
+  adopted on any uncontested approve.
+- **constitutional** (`policy_patch`, `council_change`, `gate_change`) —
+  human ratification only, always. The council cannot amend the rules that
+  bind it.
+
+The dream LoRA graft is the first amendment citizen: `maybeRunDream`
+proposes, the council deliberates, a unanimous vote ratifies + signs via
+Secure Enclave, `dreamAdoptCandidate` applies (live→`dream-prev`,
+candidate→`dream`), and the val-loss transition is recorded as the
+measurement. Held candidates stay staged until `amendment ratify <id>`.
+
+```bash
+badapple "amendments"                     # list artifacts
+badapple "amendment show <id>"            # full signed artifact
+badapple "amendment ratify <id>"          # human-ratify a held amendment (applies dream_adapter immediately)
+badapple "amendment reject <id>"          # kill a held amendment
+badapple "amendment revert <id>"          # restore dream-prev, mark reverted
+```
+
+## Release SBOM
+
+`package_minimal_release.sh` emits a CycloneDX 1.5 SBOM via
+`gen_sbom.sh`: every resolved crate from `Cargo.lock` (with its registry
+sha256 as a `pkg:cargo` purl component) plus each staged payload binary/lib
+hashed as-shipped. It lands inside the package (`sbom.json`) and as
+`target/release/sbom-<version>.json`, which `sign_release.sh` picks up for
+the cosign pass.
 
 ## Ambient hearing (ears)
 
@@ -567,6 +698,50 @@ target/release/badapple "leave safe mode"       # exit supervisor-induced safe m
 target/release/badapple "enable private mode"   # pause persistence
 target/release/badapple "disable private mode"
 ```
+
+## Neural Engine brain (second brain on separate silicon)
+
+A Qwen3-4B converted natively (Rust → MIL protobuf → `xcrun coremlc`, no
+Python/coremltools) into 36 stateful layer shards + 4 vocab-head shards,
+resident on the ANE beside the MLX/GPU 7B. Background work routes to it;
+chat stays on the GPU.
+
+```bash
+# convert (int8 weights, per-output-channel scale; ~3.75 GiB shards, ~6.7 tok/s)
+target/release/badapple-aneconvert --model ~/models/qwen3-4b-src \
+  --out ane_artifacts/qwen3b_ane_shards_q8 --seq-len 2048 \
+  --layers-per-shard 1 --lm-head-shards 4 --weight-bits 8
+# omit --weight-bits for FP16 (7.49 GiB, ~4.9 tok/s, same mastery)
+
+# enable in the daemon: the control file holds the manifest path
+echo "$PWD/ane_artifacts/qwen3b_ane_shards_q8/conversion_manifest.json" > ~/.bad_apple/ane_brain
+
+# benchmark + mastery gate (fails below BADAPPLE_ANE_MIN_MASTERY, default 0.66)
+BADAPPLE_ANE_MODEL=$PWD/ane_artifacts/qwen3b_ane_shards_q8/conversion_manifest.json \
+BADAPPLE_ANE_TOKENIZER=$PWD/ane_artifacts/qwen3b_ane_shards_q8/tokenizer.json \
+BADAPPLE_ANE_COMPUTE_UNITS=ane cargo test --test ane_brain_perf --release -- --nocapture
+```
+
+- Daemon `inference` with `system_prompt` routes by `brain`: `gpu`, `ane`
+  (falls back to GPU when not ready), `auto` (GPU when loaded, else ANE).
+  ANE answers land in the ledger as `brain_route`. `runtime_status` → `ane_brain`.
+- Admission: shard weights + `BADAPPLE_ANE_RESERVE_MB` (512) must be
+  reclaimable; until the 7B loads it also holds 4.5 GiB for it (chat brain
+  first). A 7B load failure drops that hold so the ANE becomes the fallback.
+  Critical memory pressure unloads it. Only `badapple-engine` loads it.
+- The bridge keeps exactly one resident copy: a slow-but-working compute-unit
+  candidate is taken as-is. Holding two ~8 GB candidates OOM'd a 16 GB Mac.
+- int8 on the ANE overflows on Qwen3's massive activation (~8e3 at layer 6)
+  entering `down_proj`; the converter pre-scales that input by 1/α and the
+  output by α (`BADAPPLE_Q8_DOWN_PRESCALE`, default 64). Exact: cos 0.99997
+  vs CPU FP16 over 12 layers.
+- Probe gotcha: `MLMultiArray(shape:dataType:)` is NOT zero-initialized.
+  Set every element of `kv_write_mask`/`attn_mask` or the cache fills with
+  garbage and the ANE looks numerically broken when it isn't.
+- `withUnsafeMutableBytes` strides are ELEMENT strides; multiply by the
+  element size for byte offsets (ANE channel stride is 32 elements).
+- Qwen3 chat template: render with `enable_thinking: false` or the answer
+  budget is spent inside `<think>`.
 
 ## Mesh-brain (pipeline-parallel distributed inference)
 

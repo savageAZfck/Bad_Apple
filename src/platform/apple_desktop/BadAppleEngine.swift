@@ -284,6 +284,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _mainModelBytes: UInt64 = 0
     private var _fastModelBytes: UInt64 = 0
     private var _modelId: String = ""
+    private var _modelRevision: String = "main"
     private var _lastTokensPerSecond: Float = 0
     private var _lastTokenCount: Int = 0
     private var _lastDraftAcceptPct: Float = 0
@@ -464,6 +465,33 @@ final class BadAppleEngine: @unchecked Sendable {
 
     private var lastAuralUpdate: Date?
 
+    /// Ambient sight — the eyes organ's cortex side. The menu bar retina
+    /// stages changed frames at ~/.bad_apple/eyes_frame.png; the perception
+    /// loop describes them against the previous scene and lands `Saw:`
+    /// percepts via ~/.bad_apple/ambient_seen.json.
+    private var lastVisualUpdate: Date?
+    private var eyesPerceptionTask: Task<Void, Never>?
+    private var lastSeenFrameMod: Date?
+    private var lastSceneDescription = ""
+    private var lastEyesDescribe = Date.distantPast
+
+    /// Minimum seconds between ambient-sight percept reads.
+    private let visualRefreshInterval: TimeInterval = {
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_EYES_INTERVAL"] ?? "30"
+        return max(TimeInterval(env) ?? 30, 5)
+    }()
+
+    /// Whether ambient sight is allowed. Off by default — the control file
+    /// at ~/.bad_apple/eyes is the opt-in switch (mirrors ears), and the
+    /// BADAPPLE_EYES env var forces it on for headless runs.
+    var eyesEnabled: Bool {
+        if FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.bad_apple/eyes") {
+            return true
+        }
+        let env = ProcessInfo.processInfo.environment["BADAPPLE_EYES"] ?? "0"
+        return env == "1" || env.lowercased() == "true" || env.lowercased() == "on"
+    }
+
     /// Thermodynamic governor verdict — set from the thermal percept file
     /// written by the supervisor (`/var/lib/bad_apple/thermal.json`).
     private var thermalThrottle = false
@@ -607,7 +635,7 @@ final class BadAppleEngine: @unchecked Sendable {
         // Reuse any existing ocular description or ambient transcript without losing it.
         if let existing = ambientContext {
             for line in existing.components(separatedBy: .newlines) {
-                if line.starts(with: "Screen:") || line.starts(with: "Heard:") || line.starts(with: "Thermal:") || line.starts(with: "Up next:") {
+                if line.starts(with: "Screen:") || line.starts(with: "Heard:") || line.starts(with: "Saw:") || line.starts(with: "Thermal:") || line.starts(with: "Up next:") {
                     parts.append(line)
                 }
             }
@@ -618,12 +646,161 @@ final class BadAppleEngine: @unchecked Sendable {
         }
     }
 
-    /// Refresh both ambient and ocular context for the next prompt.
+    /// Refresh ambient, ocular, aural, and visual context for the next prompt.
     func refreshAmbientContext() async {
         updateAmbientContext()
         await updateOcularContext()
         updateAuralContext()
+        updateVisualContext()
         updateThermalContext()
+    }
+
+    /// The eyes organ's continuous perception loop — the cortex half. While
+    /// the eyes control file exists, watch the retina's frame handoff
+    /// (~/.bad_apple/eyes_frame.png); on mtime change, describe the frame
+    /// against the previous scene description so the percept carries
+    /// *change* — "switched to Slack" — not a stateless caption. That is the
+    /// difference between a screenshot feature and vision: temporal
+    /// continuity. Describes are rate-limited; when the scene churns faster
+    /// than the VLM can narrate, the newest frame wins and old ones drop.
+    /// Only one process may run the VLM over the retina frame. When the
+    /// daemon is up it owns the eyes; an in-process engine (menu bar) would
+    /// otherwise load a second Qwen2-VL and describe the same frames.
+    /// Ambient sight only needs "what app / what changed", not OCR-grade
+    /// detail: 768 × 28 × 28 ≈ 0.6 MP (~770 vision tokens).
+    static var eyesMaxPixels: Int {
+        ProcessInfo.processInfo.environment["BADAPPLE_EYES_MAX_PIXELS"].flatMap(Int.init) ?? 602_112
+    }
+
+    static var ownsEyesOrgan: Bool {
+        ProcessInfo.processInfo.processName == "badapple-engine"
+            || !FileManager.default.fileExists(atPath: "/var/run/badapple/substrate_mlx.sock")
+    }
+
+    /// The Neural Engine brain is ~8 GB resident; only the daemon may hold it.
+    /// Delay the cold load so the daemon's socket and main model settle first.
+    func startANEBrainIfOwner(delaySeconds: UInt64? = nil) {
+        guard ProcessInfo.processInfo.processName == "badapple-engine" else { return }
+        let delay = delaySeconds
+            ?? ProcessInfo.processInfo.environment["BADAPPLE_ANE_START_DELAY_S"].flatMap(UInt64.init) ?? 30
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            await BadAppleANEBrain.shared.startIfEnabled()
+        }
+    }
+
+    func startEyesPerceptionLoop() {
+        guard eyesPerceptionTask == nil else { return }
+        eyesPerceptionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                guard self.eyesEnabled, Self.ownsEyesOrgan else {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    continue
+                }
+                let framePath = NSHomeDirectory() + "/.bad_apple/eyes_frame.png"
+                let attrs = try? FileManager.default.attributesOfItem(atPath: framePath)
+                if let mod = attrs?[.modificationDate] as? Date,
+                   self.lastSeenFrameMod != mod {
+                    self.lastSeenFrameMod = mod
+                    // Describe-rate floor: scene churn faster than the VLM
+                    // drops intermediate frames — newest context wins.
+                    if Date().timeIntervalSince(self.lastEyesDescribe) >= 8 {
+                        self.lastEyesDescribe = Date()
+                        let prev = self.lastSceneDescription
+                        let prompt = prev.isEmpty
+                            ? "Describe what is on this computer screen in one concise sentence."
+                            : "Scene before: \(prev). What changed? Answer in one short sentence."
+                        var desc = await self.describeImageInternal(
+                            at: framePath, prompt: prompt, maxPixels: Self.eyesMaxPixels)
+                        // Small VLMs parrot instruction scaffolding — cut any
+                        // echoed prompt tail from the percept.
+                        for marker in ["In one concise", "describe what", "Scene before:", "Answer in one", "What changed?"] {
+                            if let r = desc.range(of: marker, options: .caseInsensitive) {
+                                desc = String(desc[..<r.lowerBound])
+                            }
+                        }
+                        desc = Self.truncateDegenerateRepetition(desc)
+                        desc = desc.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !desc.isEmpty, !desc.hasPrefix("Error describing") {
+                            self.lastSceneDescription = desc
+                            let payload: [String: Any] = [
+                                "seen": desc,
+                                "ts": Date().timeIntervalSince1970,
+                            ]
+                            if let data = try? JSONSerialization.data(withJSONObject: payload) {
+                                let seenPath = NSHomeDirectory() + "/.bad_apple/ambient_seen.json"
+                                try? data.write(to: URL(fileURLWithPath: seenPath), options: .atomic)
+                            }
+                        }
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    /// Small VLMs degenerate into repetition loops ("The The The …", or a
+    /// phrase cycling endlessly). Cut the description at the first repeated
+    /// block: a word repeated ≥4 times consecutively, or a ≥2-word phrase
+    /// appearing for the third time.
+    static func truncateDegenerateRepetition(_ text: String) -> String {
+        var words: [String] = text.lowercased().split(separator: " ").map(String.init)
+        // consecutive single-word run ("the the the the")
+        var run = 1
+        for i in 1..<words.count {
+            run = words[i] == words[i - 1] ? run + 1 : 1
+            if run >= 4 {
+                words = Array(words[..<(i - run + 2)])
+                break
+            }
+        }
+        // recurring multi-word phrase (n = 2...6), third sighting wins the cut
+        let n = words.count
+        outer: for k in 2...min(6, n / 3) {
+            var seen: [Array<String>: Int] = [:]
+            var i = 0
+            while i + k <= n {
+                let gram = Array(words[i..<(i + k)])
+                seen[gram, default: 0] += 1
+                if seen[gram] == 3 {
+                    words = Array(words[..<i])
+                    break outer
+                }
+                i += 1
+            }
+        }
+        return words.joined(separator: " ")
+    }
+
+    /// Read the latest ambient-sight percept written by the perception loop
+    /// and expose it to the prompt as a `Saw:` line — parallel to `Heard:`.
+    /// Stale percepts expire: ambient sight describes now, not minutes ago.
+    func updateVisualContext() {
+        guard eyesEnabled else { return }
+        if let last = lastVisualUpdate, Date().timeIntervalSince(last) < visualRefreshInterval { return }
+        lastVisualUpdate = Date()
+
+        let seenPath = NSHomeDirectory() + "/.bad_apple/ambient_seen.json"
+        var seen = ""
+        var seenAge = TimeInterval.greatestFiniteMagnitude
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: seenPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            seen = (json["seen"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let ts = json["ts"] as? TimeInterval {
+                seenAge = Date().timeIntervalSince1970 - ts
+            }
+        }
+        if seenAge > visualRefreshInterval * 3 { seen = "" }
+
+        var parts = ambientContext?.components(separatedBy: .newlines) ?? []
+        parts.removeAll { $0.starts(with: "Saw:") }
+        if !seen.isEmpty {
+            parts.append("Saw: \(seen)")
+            ambientContext = parts.joined(separator: "\n")
+        } else if ambientContext != nil {
+            ambientContext = parts.isEmpty ? nil : parts.joined(separator: "\n")
+        }
     }
 
     /// Read the latest ambient-hearing percept written by the menu bar app —
@@ -641,7 +818,9 @@ final class BadAppleEngine: @unchecked Sendable {
         var heardAge = TimeInterval.greatestFiniteMagnitude
         if let data = try? Data(contentsOf: heardURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            heard = (json["heard"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            heard = (json["heard"] as? String)
+                .map(Self.truncateDegenerateRepetition)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if let ts = json["ts"] as? TimeInterval {
                 heardAge = Date().timeIntervalSince1970 - ts
             }
@@ -713,6 +892,9 @@ final class BadAppleEngine: @unchecked Sendable {
     // MARK: - Init
 
     private init() {
+        auditLedger.extraContextProvider = { [policyEngine] in
+            policyEngine.ledgerContext()
+        }
         inference = BadAppleInference.createDefault()
         let defaultModelId = BadAppleInference.defaultConfig.modelId
         stateLock.withLock { _modelId = defaultModelId }
@@ -722,7 +904,11 @@ final class BadAppleEngine: @unchecked Sendable {
             withIntermediateDirectories: true,
             attributes: nil
         )
+        let cacheMB = ProcessInfo.processInfo.environment["BADAPPLE_MLX_CACHE_MB"].flatMap(Int.init) ?? 512
+        BadAppleInference.limitBufferCache(bytes: cacheMB * 1_048_576)
         updateCuriousAutopilotLoop()
+        startEyesPerceptionLoop()
+        startANEBrainIfOwner()
 
         // Defer an initial Curious check after the engine has had time to settle.
         Task { [weak self] in
@@ -748,7 +934,10 @@ final class BadAppleEngine: @unchecked Sendable {
             topP: BadAppleInference.defaultConfig.topP
         )
         inference = BadAppleInference(config: config)
-        stateLock.withLock { _modelId = modelId }
+        stateLock.withLock {
+            _modelId = modelId
+            _modelRevision = rev
+        }
         personaManager.setCurrentModel(repoId: modelId)
     }
 
@@ -842,8 +1031,17 @@ final class BadAppleEngine: @unchecked Sendable {
             }
             guard await inference.ready else { throw BadAppleInference.InferenceError.modelNotLoaded }
             stateLock.withLock { _isLoaded = true }
+            await BadAppleANEBrain.shared.setMainBrainReserve(bytes: 0)
+            startANEBrainIfOwner(delaySeconds: 5)
             await applyDreamAdapterIfPresent()
             await runtime.markModelReady(mid)
+            BadAppleProvenance.shared.recordLoad(
+                modelId: mid,
+                revision: stateLock.withLock { _modelRevision },
+                directory: directory?.path,
+                modelBytes: stateLock.withLock { _mainModelBytes },
+                policyContext: policyEngine.ledgerContext()
+            )
             Task {
                 await runtime.markModelLoading(embeddingEngine.configuration.modelId)
                 do {
@@ -867,6 +1065,9 @@ final class BadAppleEngine: @unchecked Sendable {
             }
             await runtime.releaseModelMemory(reserved)
             await runtime.markModelFailed(mid, error: error.localizedDescription)
+            // GPU brain unavailable — the Neural Engine brain becomes the fallback.
+            await BadAppleANEBrain.shared.setMainBrainReserve(bytes: 0)
+            startANEBrainIfOwner(delaySeconds: 0)
             triggerCuriousAutopilot(reason: "model load failed: \(error.localizedDescription)")
         }
         stateLock.withLock { _isLoading = false }
@@ -1113,6 +1314,21 @@ final class BadAppleEngine: @unchecked Sendable {
         )
     }
 
+    /// Anchor a provenance record for the loaded brain into the audit chain.
+    /// The record itself lives in provenance.jsonl; this entry binds its
+    /// SHA-256 so the artifact cannot be rewritten without breaking the chain.
+    func auditProvenanceRecord(modelId: String, recordSHA256: String, signed: Bool) {
+        auditLedger.append(
+            eventType: "model_provenance",
+            data: [
+                "model_id": modelId,
+                "record_sha256": recordSHA256,
+                "signed": signed,
+            ],
+            persona: activePersona
+        )
+    }
+
     /// Ledger a tool call that arrived over the `invoke_tool` IPC path.
     /// Model-emitted calls are audited by the generation loop; this covers
     /// the direct-invocation path so every execution is attested.
@@ -1133,6 +1349,141 @@ final class BadAppleEngine: @unchecked Sendable {
     /// outside the query path and were previously unaudited.
     func auditDaemonEvent(type: String, data: [String: String]) {
         auditLedger.append(eventType: type, data: data, persona: activePersona)
+    }
+
+    /// consent <grant|revoke|list> — operator-attested consent registry for
+    /// capture surfaces (ambient ears, meetings). Grants and revokes append
+    /// to consent.jsonl and mirror into the audit ledger.
+    func consentCommand(_ prompt: String) -> String {
+        let parts = prompt.split(separator: " ").map(String.init)
+        guard parts.count >= 2 else {
+            return "Consent registry — usage: consent grant <name> <scope> [note] · consent revoke <name> <scope> · consent list"
+        }
+        let verb = parts[1].lowercased()
+        switch verb {
+        case "grant", "revoke":
+            guard parts.count >= 4 else {
+                return "Usage: consent \(verb) <name> <scope> [note] — scopes: ambient_hearing, meeting, voice"
+            }
+            let subject = parts[2]
+            let scope = parts[3]
+            let note = parts.count > 4 ? parts[4...].joined(separator: " ") : ""
+            let action = verb == "grant" ? "granted" : "revoked"
+            guard BadAppleConsent.shared.record(
+                action: action, subject: subject, scope: scope, note: note
+            ) else {
+                return "Consent record failed to write — check /var/lib/bad_apple permissions."
+            }
+            auditDaemonEvent(type: "consent_\(action)", data: [
+                "subject": subject, "scope": scope, "note": note,
+            ])
+            let subjects = BadAppleConsent.shared.activeSubjects(scope: scope)
+            let roster = subjects.isEmpty ? "none" : subjects.joined(separator: ", ")
+            return "Consent \(action): \(subject) → \(scope). Active for that scope: \(roster)."
+        case "list", "status":
+            let active = BadAppleConsent.shared.current()
+            guard !active.isEmpty else {
+                return "No active consent records. Capture surfaces (ears, meetings) run without recorded bystander consent."
+            }
+            let lines = active.map { "- \($0.subject): \($0.scope)" }.sorted()
+            return "Active consent records:\n" + lines.joined(separator: "\n")
+        default:
+            return "Unknown consent verb '\(verb)'. Use grant, revoke, or list."
+        }
+    }
+
+    /// amendment <ratify|reject|revert|show> <id> · amendments — the
+    /// constitutional layer: self-modifications land as signed amendment
+    /// artifacts, held ones wait for human ratification, and applied
+    /// dream-adapter amendments carry a live revert path (dream-prev).
+    func amendmentCommand(_ prompt: String) -> String {
+        let parts = prompt.split(separator: " ").map(String.init)
+        if parts.isEmpty || parts[0].lowercased() == "amendments" {
+            return BadAppleAmendment.shared.list()
+        }
+        guard parts.count >= 2 else {
+            return "Amendments — usage: amendments · amendment show|ratify|reject|revert <id>"
+        }
+        let verb = parts[1].lowercased()
+        switch verb {
+        case "list":
+            return BadAppleAmendment.shared.list()
+        case "show":
+            guard parts.count >= 3 else { return "Usage: amendment show <id>" }
+            return BadAppleAmendment.shared.show(id: parts[2])
+        case "ratify":
+            guard parts.count >= 3 else { return "Usage: amendment ratify <id>" }
+            let id = parts[2]
+            let res = BadAppleAmendment.shared.ratify(id: id)
+            guard res == "ratified" else { return res }
+            // Ratified held amendments apply immediately when the surface
+            // has a live apply path.
+            if let a = BadAppleAmendment.shared.load(id: id),
+               a["surface"] as? String == "dream_adapter" {
+                guard dreamAdoptCandidate() else {
+                    return "Amendment \(id) ratified but adopt failed — candidate may be gone."
+                }
+                let evidence = a["evidence"] as? [String: Any] ?? [:]
+                BadAppleAmendment.shared.markApplied(id: id, postState: [
+                    "adapter_sha256": evidence["candidate_sha256"] ?? "unknown",
+                    "prev_adapter_sha256": evidence["prev_adapter_sha256"] ?? "unknown",
+                    "revert_ref": "lora_adapters/dream-prev",
+                ])
+                BadAppleAmendment.shared.markMeasured(id: id, metrics: [
+                    "val_loss": evidence["val_loss"] ?? "",
+                    "applied_via": "human-ratify",
+                ])
+                auditDaemonEvent(type: "amendment_applied", data: [
+                    "amendment_id": id, "surface": "dream_adapter", "via": "human-ratify"])
+                return "Amendment \(id) ratified and applied — dream adapter grafted, takes effect on next model load. Revert: `amendment revert \(id)`."
+            }
+            return "Amendment \(id) ratified by human signature."
+        case "reject":
+            guard parts.count >= 3 else { return "Usage: amendment reject <id>" }
+            return "Amendment \(parts[2]): " + BadAppleAmendment.shared.reject(id: parts[2])
+        case "revert":
+            guard parts.count >= 3 else { return "Usage: amendment revert <id>" }
+            let id = parts[2]
+            guard let a = BadAppleAmendment.shared.load(id: id) else {
+                return "no amendment \(id)"
+            }
+            guard a["status"] as? String == "applied" else {
+                return "amendment \(id) is \(a["status"] ?? "?") — only applied amendments can revert"
+            }
+            guard a["surface"] as? String == "dream_adapter" else {
+                return "amendment \(id) surface '\(a["surface"] ?? "?")' has no live revert path yet"
+            }
+            guard dreamRevertAdapter() else {
+                return "Revert failed — no dream-prev backup exists to restore."
+            }
+            BadAppleAmendment.shared.markReverted(id: id)
+            auditDaemonEvent(type: "amendment_reverted", data: [
+                "amendment_id": id, "surface": "dream_adapter"])
+            return "Amendment \(id) reverted — previous dream weights restored, effective on next model load."
+        default:
+            return "Amendments — usage: amendments · amendment show|ratify|reject|revert <id>"
+        }
+    }
+
+    /// Roll the live dream adapter back to the staged backup (`dream-prev`),
+    /// keeping the reverted weights aside for forensics.
+    private func dreamRevertAdapter() -> Bool {
+        let root = "/var/lib/bad_apple/lora_adapters"
+        let live = "\(root)/dream"
+        let prev = "\(root)/dream-prev"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: "\(prev)/adapters.safetensors") else { return false }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        if fm.fileExists(atPath: live) {
+            try? fm.moveItem(atPath: live, toPath: "\(root)/dream-reverted-\(stamp)")
+        }
+        do {
+            try fm.moveItem(atPath: prev, toPath: live)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Flush the semantic response cache — user-facing clear path so a
@@ -2494,17 +2845,44 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Generate a response with a caller-supplied system prompt, no persona,
     /// no semantic cache, and no ambient context. Used by the dashboard for
     /// deterministic structured outputs such as fact extraction.
+    ///
+    /// `brain` routes the request across silicon: `"gpu"` is the MLX main
+    /// model, `"ane"` the Neural Engine brain (falls back to the GPU when it
+    /// is not ready), and `"auto"` uses the GPU when loaded and the Neural
+    /// Engine otherwise — so raw work still runs when MLX admission denies
+    /// the main model.
     func generateRaw(
         prompt: String,
         systemPrompt: String,
         maxTokens: Int = 500,
-        temperature: Float = 0
+        temperature: Float = 0,
+        brain: String = "auto"
     ) async -> String {
-        guard isLoaded else {
-            return "The AI model is not loaded yet. Please wait a moment and try again."
-        }
         if killed {
             return "Bad Apple is paused. Say 'resume bad apple' to start again."
+        }
+        let wantsANE = brain == "ane" || (brain == "auto" && !isLoaded)
+        if wantsANE {
+            do {
+                let started = Date()
+                let text = try await BadAppleANEBrain.shared.generate(
+                    prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens)
+                auditLedger.append(
+                    eventType: "brain_route",
+                    data: ["brain": "ane", "requested": brain,
+                           "seconds": String(format: "%.2f", Date().timeIntervalSince(started))],
+                    persona: activePersona
+                )
+                return outputFirewall.check(postprocessOutput(self.sanitizeToolMarkup(text)))
+            } catch {
+                if !isLoaded {
+                    return "Error: no brain available — Neural Engine: \(error.localizedDescription); main model not loaded."
+                }
+                NSLog("[BadAppleEngine] ANE route failed, falling back to GPU: \(error.localizedDescription)")
+            }
+        }
+        guard isLoaded else {
+            return "The AI model is not loaded yet. Please wait a moment and try again."
         }
 
         do {
@@ -2940,7 +3318,8 @@ final class BadAppleEngine: @unchecked Sendable {
         }
     }
 
-    private func describeImageInternal(at path: String, prompt: String) async -> String {
+    private func describeImageInternal(at path: String, prompt: String, maxPixels: Int? = nil) async -> String {
+        defer { BadAppleInference.releaseBufferCache() }
         do {
             if !(await visionEngine.ready) {
                 try await visionEngine.loadModel()
@@ -2948,7 +3327,8 @@ final class BadAppleEngine: @unchecked Sendable {
             let stream = try await visionEngine.describe(
                 imageURL: URL(fileURLWithPath: path),
                 prompt: prompt,
-                maxTokens: 256
+                maxTokens: 256,
+                maxPixels: maxPixels
             )
             var result = ""
             for try await chunk in stream {
@@ -3194,35 +3574,55 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
         // The eval gate passed, but adopting new weights is self-modification —
-        // the council still weighs the decision. A contested vote holds the
-        // staged candidate for human review instead of letting an unattended
-        // night pass rewrite the weights on its own.
+        // it proceeds only as a constitutional amendment: proposed as a signed
+        // artifact, deliberated by the council, auto-ratified on unanimity
+        // (statutory tier), and held for the human on anything less. A
+        // non-unanimous council cannot install new weights on its own.
         let adoptArgs: [String: String] = [
             "rows": String(ledger.rows),
             "iters": String(dreamIters()),
             "val_loss": "\(valLosses.first!) → \(valLosses.last!)",
         ]
+        let candidatePath = "/var/lib/bad_apple/lora_adapters/dream-candidate/adapters.safetensors"
+        let livePath = "/var/lib/bad_apple/lora_adapters/dream/adapters.safetensors"
+        let candidateSHA = (try? Data(contentsOf: URL(fileURLWithPath: candidatePath)))
+            .map { BadAppleSecurity.sha256($0) } ?? "missing"
+        let prevSHA = (try? Data(contentsOf: URL(fileURLWithPath: livePath)))
+            .map { BadAppleSecurity.sha256($0) } ?? "none"
+        let amendmentID = BadAppleAmendment.shared.propose(
+            surface: "dream_adapter",
+            evidence: [
+                "rows": ledger.rows, "iters": dreamIters(),
+                "val_loss": adoptArgs["val_loss"]!,
+                "dataset": "dream-candidate",
+                "candidate_sha256": candidateSHA,
+                "prev_adapter_sha256": prevSHA,
+            ],
+            persona: activePersona)
         let verdict = BadAppleCouncil.deliberate(toolName: "dream_adopt", args: adoptArgs)
         auditCouncil(verdict: verdict, name: "dream_adopt", args: adoptArgs,
                      mode: "dream", persona: activePersona)
+        let amendStatus = BadAppleAmendment.shared.recordCouncil(id: amendmentID, verdict: verdict)
         BadAppleTape.drop(kind: "dream_adopt", fields: [
             "val_loss": adoptArgs["val_loss"]!, "decision": verdict.decision.rawValue,
-            "contested": verdict.contested, "persona": activePersona,
+            "contested": verdict.contested, "amendment": amendmentID,
+            "amend_status": amendStatus, "persona": activePersona,
         ])
-        if verdict.contested {
+        if amendStatus != "ratified" {
             auditLedger.append(
                 eventType: "dream_held",
                 data: [
                     "decision": verdict.decision.rawValue,
                     "dissent": String(format: "%.3f", verdict.dissent),
                     "val_loss": adoptArgs["val_loss"]!,
+                    "amendment": amendmentID,
                 ],
                 persona: activePersona
             )
             BadAppleNotify.push(
                 kind: "dream_held",
                 title: "Dream adapter held for review",
-                body: "Council contested tonight's adapter (val \(adoptArgs["val_loss"]!)). The candidate stays staged under lora_adapters/dream-candidate.",
+                body: "Council could not unanimously ratify amendment \(amendmentID) (val \(adoptArgs["val_loss"]!)). `badapple \"amendment ratify \(amendmentID)\"` installs it; `amendment reject` kills it.",
                 voice: false,
                 debounceSeconds: 0
             )
@@ -3231,11 +3631,23 @@ final class BadAppleEngine: @unchecked Sendable {
         guard dreamAdoptCandidate() else {
             auditLedger.append(
                 eventType: "dream_rejected",
-                data: ["stage": "adopt", "reason": "candidate move failed"],
+                data: ["stage": "adopt", "reason": "candidate move failed",
+                       "amendment": amendmentID],
                 persona: activePersona
             )
             return
         }
+        BadAppleAmendment.shared.markApplied(id: amendmentID, postState: [
+            "adapter_sha256": candidateSHA,
+            "prev_adapter_sha256": prevSHA,
+            "revert_ref": "lora_adapters/dream-prev",
+        ])
+        BadAppleAmendment.shared.markMeasured(id: amendmentID, metrics: [
+            "val_loss_baseline": valLosses.first!,
+            "val_loss_final": valLosses.last!,
+            "train_rows": ledger.rows,
+            "note": "behavioral A/B eval is a followup; measurements are training-side",
+        ])
         auditLedger.append(
             eventType: "dream_adopted",
             data: [
@@ -3243,6 +3655,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 "iters": dreamIters(),
                 "val_loss": adoptArgs["val_loss"]!,
                 "council": verdict.summaryLine,
+                "amendment": amendmentID,
                 "result": String(result.suffix(200)),
             ],
             persona: activePersona
@@ -3901,6 +4314,7 @@ final class BadAppleEngine: @unchecked Sendable {
         status["autopilot"] = autopilot
         status["killed"] = killed
         status["vram"] = await runtime.vramStatus()
+        status["ane_brain"] = (await BadAppleANEBrain.shared.status()).mapValues { $0 as Any }
         // Read safe-mode reason from the supervisor's runtime state if present.
         let statePath = "/var/lib/bad_apple/runtime_state.json"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
