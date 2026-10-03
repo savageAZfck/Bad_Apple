@@ -909,15 +909,20 @@ private final class BadAppleANELayerShard {
     var state: MLState
     let outputName: String
     let attentionMaskRows: Int
+    /// Packed-KV shards declare a `pos` i32 input and drive slice_update
+    /// begin/end in-graph; legacy shards take `kv_write_mask` instead.
+    let usesPosInput: Bool
+    let posArray: MLMultiArray?
 
     init(spec: BadAppleANEShardManifest.Layer, configuration: MLModelConfiguration) throws {
         model = try MLModel(contentsOf: spec.path, configuration: configuration)
         let inputs = model.modelDescription.inputDescriptionsByName
+        usesPosInput = inputs["pos"] != nil
         guard inputs["x"] != nil,
               inputs["rope_cos"] != nil,
               inputs["rope_sin"] != nil,
               let maskShape = inputs["attn_mask"]?.multiArrayConstraint?.shape,
-              inputs["kv_write_mask"] != nil,
+              usesPosInput || inputs["kv_write_mask"] != nil,
               let output = model.modelDescription.outputDescriptionsByName.first(where: {
                   $0.value.type == .multiArray
               }) else {
@@ -925,6 +930,7 @@ private final class BadAppleANELayerShard {
         }
         outputName = output.key
         attentionMaskRows = maskShape.count == 4 ? maskShape[2].intValue : 1
+        posArray = usesPosInput ? try MLMultiArray(shape: [1], dataType: .int32) : nil
         state = model.makeState()
         zeroStateBuffers()
     }
@@ -950,15 +956,22 @@ private final class BadAppleANELayerShard {
         ropeCos: MLMultiArray,
         ropeSin: MLMultiArray,
         attentionMask: MLMultiArray,
-        writeMask: MLMultiArray
+        writeMask: MLMultiArray?,
+        pos: Int
     ) throws -> MLMultiArray {
-        let provider = try MLDictionaryFeatureProvider(dictionary: [
+        var dict: [String: MLFeatureValue] = [
             "x": MLFeatureValue(multiArray: hidden),
             "rope_cos": MLFeatureValue(multiArray: ropeCos),
             "rope_sin": MLFeatureValue(multiArray: ropeSin),
             "attn_mask": MLFeatureValue(multiArray: attentionMask),
-            "kv_write_mask": MLFeatureValue(multiArray: writeMask),
-        ])
+        ]
+        if usesPosInput, let posArray {
+            posArray[0] = NSNumber(value: pos)
+            dict["pos"] = MLFeatureValue(multiArray: posArray)
+        } else if let writeMask {
+            dict["kv_write_mask"] = MLFeatureValue(multiArray: writeMask)
+        }
+        let provider = try MLDictionaryFeatureProvider(dictionary: dict)
         guard let prediction = try withCoreMLCrashGuard({
             try self.model.prediction(from: provider, using: self.state)
         }) else {
@@ -982,14 +995,17 @@ private final class BadAppleANEPrefillShard {
     let model: MLModel
     let outputName: String
     let headsPerKV: Int
+    let usesPosInput: Bool
+    let posArray: MLMultiArray?
 
     init(path: URL, chunk: Int, configuration: MLModelConfiguration) throws {
         model = try MLModel(contentsOf: path, configuration: configuration)
         let inputs = model.modelDescription.inputDescriptionsByName
+        usesPosInput = inputs["pos"] != nil
         guard inputs["x"] != nil,
               inputs["rope_cos"] != nil,
               inputs["rope_sin"] != nil,
-              inputs["kv_write_mask"] != nil,
+              usesPosInput || inputs["kv_write_mask"] != nil,
               let maskShape = inputs["attn_mask"]?.multiArrayConstraint?.shape,
               maskShape.count == 4,
               let output = model.modelDescription.outputDescriptionsByName.first(where: {
@@ -999,6 +1015,7 @@ private final class BadAppleANEPrefillShard {
         }
         outputName = output.key
         headsPerKV = maskShape[2].intValue / chunk
+        posArray = usesPosInput ? try MLMultiArray(shape: [1], dataType: .int32) : nil
     }
 
     func predict(
@@ -1006,16 +1023,23 @@ private final class BadAppleANEPrefillShard {
         ropeCos: MLMultiArray,
         ropeSin: MLMultiArray,
         attentionMask: MLMultiArray,
-        writeMask: MLMultiArray,
+        writeMask: MLMultiArray?,
+        pos: Int,
         state: MLState
     ) throws -> MLMultiArray {
-        let provider = try MLDictionaryFeatureProvider(dictionary: [
+        var dict: [String: MLFeatureValue] = [
             "x": MLFeatureValue(multiArray: hidden),
             "rope_cos": MLFeatureValue(multiArray: ropeCos),
             "rope_sin": MLFeatureValue(multiArray: ropeSin),
             "attn_mask": MLFeatureValue(multiArray: attentionMask),
-            "kv_write_mask": MLFeatureValue(multiArray: writeMask),
-        ])
+        ]
+        if usesPosInput, let posArray {
+            posArray[0] = NSNumber(value: pos)
+            dict["pos"] = MLFeatureValue(multiArray: posArray)
+        } else if let writeMask {
+            dict["kv_write_mask"] = MLFeatureValue(multiArray: writeMask)
+        }
+        let provider = try MLDictionaryFeatureProvider(dictionary: dict)
         guard let prediction = try withCoreMLCrashGuard({
             try self.model.prediction(from: provider, using: state)
         }) else {
@@ -1081,7 +1105,8 @@ private final class BadAppleANEShardCore {
     let ropeCos: MLMultiArray
     let ropeSin: MLMultiArray
     let attentionMask: MLMultiArray
-    let writeMask: MLMultiArray
+    /// Legacy shards only — packed-KV shards take `pos` and have no mask.
+    let writeMask: MLMultiArray?
     var prefillX: MLMultiArray?
     var prefillRopeCos: MLMultiArray?
     var prefillRopeSin: MLMultiArray?
@@ -1224,6 +1249,13 @@ private final class BadAppleANEShardCore {
         heads = loadedHeads
         // Prefill shards mirror the decode layer grouping; a mismatch in
         // count or layer range silently disables the batched path.
+        // Prefill runs on GPU: the s>1 slice_update graph plan-builds on
+        // the ANE but its program cancels at processRequest (ios19
+        // lowering defect — the same math runs correctly on GPU and
+        // shares the decode shards' MLState across compute units).
+        // A batched 64-token forward is cheap on GPU regardless.
+        let prefillConfiguration = MLModelConfiguration()
+        prefillConfiguration.computeUnits = .cpuAndGPU
         var loadedPrefill: [BadAppleANEPrefillShard] = []
         if manifest.prefillLayers.count == manifest.layers.count {
             var aligned = true
@@ -1240,7 +1272,7 @@ private final class BadAppleANEShardCore {
                         try loadedPrefill.append(BadAppleANEPrefillShard(
                             path: spec.path,
                             chunk: manifest.prefillChunk,
-                            configuration: configuration
+                            configuration: prefillConfiguration
                         ))
                     }
                 }
@@ -1266,7 +1298,7 @@ private final class BadAppleANEShardCore {
                 shape: [1, 1, NSNumber(value: headsPerKV * chunk), NSNumber(value: manifest.sequenceLength)],
                 dataType: .float16
             )
-            prefillWriteMask = try MLMultiArray(
+            prefillWriteMask = prefillShards[0].usesPosInput ? nil : try MLMultiArray(
                 shape: [1, 1, NSNumber(value: manifest.sequenceLength), NSNumber(value: chunk)],
                 dataType: .float16
             )
@@ -1288,7 +1320,7 @@ private final class BadAppleANEShardCore {
             shape: [1, 1, NSNumber(value: maskRows), NSNumber(value: manifest.sequenceLength)],
             dataType: .float16
         )
-        writeMask = try MLMultiArray(
+        writeMask = layers[0].usesPosInput ? nil : try MLMultiArray(
             shape: [1, 1, NSNumber(value: manifest.sequenceLength), 1],
             dataType: .float16
         )
@@ -1378,9 +1410,10 @@ private final class BadAppleANEShardCore {
 
     private func runPrefillChunk(tokens: UnsafePointer<Int32>, realCount: Int) throws {
         guard let x = prefillX, let cosArr = prefillRopeCos, let sinArr = prefillRopeSin,
-              let pMask = prefillAttnMask, let pWrite = prefillWriteMask else {
+              let pMask = prefillAttnMask else {
             throw NSError(domain: "BadAppleANEShard", code: 19)
         }
+        let pWrite = prefillWriteMask
         let chunk = manifest.prefillChunk
         let seq = manifest.sequenceLength
         let d = manifest.hiddenSize
@@ -1450,13 +1483,15 @@ private final class BadAppleANEShardCore {
             }
         }
 
-        // kv_write_mask [1,1,seq,P]: column slot one-hot at pos+slot for
-        // real slots; all-zero for pads (matmul writes nothing there).
-        pWrite.withUnsafeMutableBytes { wbuf, _ in
-            guard let wp = wbuf.baseAddress?.bindMemory(to: Float16.self, capacity: seq * chunk) else { return }
-            memset(wp, 0, seq * chunk * MemoryLayout<Float16>.size)
-            for slot in 0..<realCount {
-                wp[(pos + slot) * chunk + slot] = 1
+        // kv_write_mask [1,1,seq,P] (legacy shards only): column slot
+        // one-hot at pos+slot for real slots; all-zero for pads.
+        if let pWrite {
+            pWrite.withUnsafeMutableBytes { wbuf, _ in
+                guard let wp = wbuf.baseAddress?.bindMemory(to: Float16.self, capacity: seq * chunk) else { return }
+                memset(wp, 0, seq * chunk * MemoryLayout<Float16>.size)
+                for slot in 0..<realCount {
+                    wp[(pos + slot) * chunk + slot] = 1
+                }
             }
         }
 
@@ -1469,6 +1504,7 @@ private final class BadAppleANEShardCore {
                     ropeSin: sinArr,
                     attentionMask: pMask,
                     writeMask: pWrite,
+                    pos: pos,
                     state: layers[index].state
                 )
             }
@@ -1481,8 +1517,10 @@ private final class BadAppleANEShardCore {
         // Decode writeMask must stay all-zero: the next token's
         // updatePositionInputs clears [position-1] (already 0) and sets
         // [position] — bookkeeping identical to the token loop.
-        for index in 0..<seq {
-            writeMask[index] = 0
+        if let writeMask {
+            for index in 0..<seq {
+                writeMask[index] = 0
+            }
         }
     }
 
@@ -1522,7 +1560,7 @@ private final class BadAppleANEShardCore {
         }
         for index in 0..<manifest.sequenceLength {
             setAttentionMask(at: index, to: NSNumber(value: Float(-10_000)))
-            writeMask[index] = 0
+            writeMask?[index] = 0
         }
     }
 
@@ -1536,8 +1574,8 @@ private final class BadAppleANEShardCore {
         defer { lock.unlock() }
         let target = Int(newPosition)
         guard target >= 0, target <= position else { return false }
-        if position > 0 { writeMask[position - 1] = 0 }
-        if target > 0 { writeMask[target - 1] = 1 }
+        if position > 0 { writeMask?[position - 1] = 0 }
+        if target > 0 { writeMask?[target - 1] = 1 }
         for index in target..<position {
             setAttentionMask(at: index, to: NSNumber(value: Float(-10_000)))
         }
@@ -1581,7 +1619,8 @@ private final class BadAppleANEShardCore {
                     ropeCos: ropeCos,
                     ropeSin: ropeSin,
                     attentionMask: attentionMask,
-                    writeMask: writeMask
+                    writeMask: writeMask,
+                    pos: position
                 )
             }
             position += 1
@@ -1602,10 +1641,10 @@ private final class BadAppleANEShardCore {
             ropeSin[index] = NSNumber(value: sin(angle))
         }
         if position > 0 {
-            writeMask[position - 1] = 0
+            writeMask?[position - 1] = 0
         }
         setAttentionMask(at: position, to: 0)
-        writeMask[position] = 1
+        writeMask?[position] = 1
     }
 
     private func argmax(hidden: MLMultiArray) throws -> Int32 {

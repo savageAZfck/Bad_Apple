@@ -272,8 +272,11 @@ fn weight_const(
 
 // iOS19/macOS26 opset (CoreML9 / spec v10): unlocked scaled_dot_product_attention
 // and newer op registrations; CoreML8/v9 remains as fallback via env.
-const SPEC_VERSION: i32 = 10;
-const OPSET: &str = "CoreML9";
+// slice_update (the packed-KV write op) fails ANE plan-build -14
+// under the ios19/CoreML9 lowering; ios18 plans it correctly — mil_kvpack
+// verified identical MIL passes at ios18 and fails at ios19.
+const SPEC_VERSION: i32 = 9;
+const OPSET: &str = "CoreML8";
 const WEIGHTS_NAME: &str = "@model_path/weights/weight.bin";
 
 /// tile a (dh,) weight to (n*dh) elements for conv-broadcast use
@@ -370,12 +373,19 @@ fn emit_layer_shard(
 
     let mut cur = "x".to_string();
     let shape_x = vec![1, d, 1, s];
+    let n_state = le - ls;
+    // Packed KV state: ONE buffer per shard [2*nl, nkv, seq, dh], rows
+    // 2l (K) and 2l+1 (V), chained through every layer's slice_update and
+    // committed once per call. One state object total (the documented
+    // recipe) — and K^T for attention comes from matmul's fused
+    // transpose_y, because a standalone transpose of a
+    // slice_update-derived state slice fails ANE plan-build -14
+    // (verified by mil_kvpack).
+    let kvshape: Vec<i64> = vec![2 * n_state as i64, nkv, seq, dh];
+    let mut cur_kv = blk.read_state("kv_cache", &kvshape, "kv_init");
 
     for i in ls..le {
         let p = format!("model.layers.{i}");
-        let local = i - ls;
-        let k_state = format!("k_cache_{local}");
-        let v_state = format!("v_cache_{local}");
 
         // ---- attn_norm ----
         let w = st.get_f16(&format!("{p}.input_layernorm.weight"))?;
@@ -622,13 +632,125 @@ fn emit_layer_shard(
             (kt, vt2)
         };
 
-        // ---- masked KV state update ----
-        // k_full = k_state*(1-wmask) + new_k*wmask; write_state; read_state
-        let one = blk.konst_f16(&format!("l{i}_one"), 1.0);
-        let one_m = if s == 1 {
-            blk.sub(&one, "kv_write_mask", &[1, 1, seq, 1], &format!("l{i}_om"))
+        // ---- packed-KV state update ----
+        // `kv_cache` [2*nl,nkv,seq,dh]; layer l owns rows 2l (K) and
+        // 2l+1 (V). Two write paths, one per token width — each is the
+        // only variant that plan-builds for its s (verified by bisect):
+        //   s==1 (decode): pure recipe — runtime `pos` drives begin/end;
+        //     slice_update writes ONLY the new KV [1,nkv,s,dh]; attention
+        //     re-slices the full row from the chained buffer.
+        //   s>1 (prefill): hybrid — the row is masked-merged in-graph
+        //     (kv_write_mask encodes the write position), then written
+        //     back with a STATIC-bounds slice_update; attention reads the
+        //     in-graph merged row.
+        // Runtime-pos updates at s>1 and static full-row write-backs at
+        // s==1 each fail plan-build -14 under every spec version.
+        let local = i - ls;
+        let krow = 2 * local as i32;
+        let (k_attn, v_attn) = if true {
+            let pos_i32 = "pos".to_string();
+            let pos_s = {
+                let c = blk.konst_i32(&format!("l{i}_psc"), &[s as i32]);
+                blk.o1(
+                    "add",
+                    vec![
+                        ("x".into(), bind(&pos_i32).1),
+                        ("y".into(), bind(&c).1),
+                    ],
+                    &format!("l{i}_ps"),
+                    ValueType::Tensor(TensorType::i32v(1)),
+                )
+            };
+            let concat4 = |blk: &mut Block, pfx: &str, vals: &[&str]| -> String {
+                let ax = blk.konst_scalar_i32(&format!("{pfx}_ax"), 0);
+                let il = blk.konst_bool(&format!("{pfx}_il"), false);
+                blk.o1(
+                    "concat",
+                    vec![
+                        ("values".into(), bind_many(vals)),
+                        ("axis".into(), bind(&ax).1),
+                        ("interleave".into(), bind(&il).1),
+                    ],
+                    pfx,
+                    ValueType::Tensor(TensorType::i32v(4)),
+                )
+            };
+            let c0 = blk.konst_i32(&format!("l{i}_c0"), &[0]);
+            let ck = blk.konst_i32(&format!("l{i}_ck"), &[krow]);
+            let ck1 = blk.konst_i32(&format!("l{i}_ck1"), &[krow + 1]);
+            let cv = blk.konst_i32(&format!("l{i}_cv"), &[krow + 2]);
+            let cnkv = blk.konst_i32(&format!("l{i}_cnkv"), &[nkv as i32]);
+            let cdh = blk.konst_i32(&format!("l{i}_cdh"), &[dh as i32]);
+            let st4 = blk.konst_i32(&format!("l{i}_st4"), &[1, 1, 1, 1]);
+            let bm4 = blk.op(
+                "const",
+                vec![],
+                vec![(
+                    &format!("l{i}_bm4"),
+                    ValueType::Tensor(TensorType {
+                        dtype: DType::Bool,
+                        shape: vec![4],
+                    }),
+                )],
+                vec![("val".into(), mil_spec::Value::bools(&[false, false, false, false]))],
+            )[0]
+            .clone();
+            // K row: write [1,nkv,s,dh] at [2l,0,pos,0]..[2l+1,nkv,pos+s,dh]
+            let kb = concat4(&mut blk, &format!("l{i}_kb"), &[ck.as_str(), c0.as_str(), pos_i32.as_str(), c0.as_str()]);
+            let ke = concat4(&mut blk, &format!("l{i}_ke"), &[ck1.as_str(), cnkv.as_str(), pos_s.as_str(), cdh.as_str()]);
+            cur_kv = blk.o1(
+                "slice_update",
+                vec![
+                    ("x".into(), bind(&cur_kv).1),
+                    ("update".into(), bind(&new_k).1),
+                    ("begin".into(), bind(&kb).1),
+                    ("end".into(), bind(&ke).1),
+                    ("stride".into(), bind(&st4).1),
+                    ("begin_mask".into(), bind(&bm4).1),
+                    ("end_mask".into(), bind(&bm4).1),
+                    ("squeeze_mask".into(), bind(&bm4).1),
+                ],
+                &format!("l{i}_kup"),
+                ValueType::Tensor(TensorType::f16(&kvshape)),
+            );
+            // V row: write [1,nkv,s,dh] at [2l+1,0,pos,0]..[2l+2,nkv,pos+s,dh]
+            let vb = concat4(&mut blk, &format!("l{i}_vb"), &[ck1.as_str(), c0.as_str(), pos_i32.as_str(), c0.as_str()]);
+            let ve = concat4(&mut blk, &format!("l{i}_ve"), &[cv.as_str(), cnkv.as_str(), pos_s.as_str(), cdh.as_str()]);
+            cur_kv = blk.o1(
+                "slice_update",
+                vec![
+                    ("x".into(), bind(&cur_kv).1),
+                    ("update".into(), bind(&new_v).1),
+                    ("begin".into(), bind(&vb).1),
+                    ("end".into(), bind(&ve).1),
+                    ("stride".into(), bind(&st4).1),
+                    ("begin_mask".into(), bind(&bm4).1),
+                    ("end_mask".into(), bind(&bm4).1),
+                    ("squeeze_mask".into(), bind(&bm4).1),
+                ],
+                &format!("l{i}_vup"),
+                ValueType::Tensor(TensorType::f16(&kvshape)),
+            );
+            let k_attn = blk.slice(
+                &cur_kv,
+                &[krow, 0, 0, 0],
+                &[krow + 1, nkv as i32, seq as i32, dh as i32],
+                &[1, nkv, seq, dh],
+                &format!("l{i}_kfull"),
+            );
+            let v_attn = blk.slice(
+                &cur_kv,
+                &[krow + 1, 0, 0, 0],
+                &[krow + 2, nkv as i32, seq as i32, dh as i32],
+                &[1, nkv, seq, dh],
+                &format!("l{i}_vfull"),
+            );
+            (k_attn, v_attn)
         } else {
-            // P column one-hots: keep = 1 - sum over the column axis.
+            // Prefill hybrid: kv_write_mask [1,1,seq,s] encodes the write
+            // position; merge the new KV into the sliced row in-graph,
+            // then write the full row back with static bounds.
+            let one = blk.konst_f16(&format!("l{i}_one"), 1.0);
             let ax = blk.konst_i32(&format!("l{i}_wax"), &[3]);
             let kd = blk.konst_bool(&format!("l{i}_wkd"), true);
             let wsum = blk.o1(
@@ -641,37 +763,79 @@ fn emit_layer_shard(
                 &format!("l{i}_wsum"),
                 ValueType::Tensor(TensorType::f16(&[1, 1, seq, 1])),
             );
-            blk.sub(&one, &wsum, &[1, 1, seq, 1], &format!("l{i}_om"))
+            let one_m = blk.sub(&one, &wsum, &[1, 1, seq, 1], &format!("l{i}_om"));
+            let kshape = vec![1, nkv, seq, dh];
+            let k_old = blk.slice(
+                &cur_kv,
+                &[krow, 0, 0, 0],
+                &[krow + 1, nkv as i32, seq as i32, dh as i32],
+                &kshape,
+                &format!("l{i}_kold"),
+            );
+            let k_keep = blk.mul(&k_old, &one_m, &kshape, &format!("l{i}_kkeep"));
+            // [1,1,seq,P] x [1,nkv,P,dh] -> [1,nkv,seq,dh] (batch broadcast).
+            let k_new = blk.matmul("kv_write_mask", &new_k, false, &kshape, &format!("l{i}_knew"));
+            let k_full = blk.add(&k_keep, &k_new, &kshape, &format!("l{i}_kfull"));
+            let v_old = blk.slice(
+                &cur_kv,
+                &[krow + 1, 0, 0, 0],
+                &[krow + 2, nkv as i32, seq as i32, dh as i32],
+                &kshape,
+                &format!("l{i}_vold"),
+            );
+            let v_keep = blk.mul(&v_old, &one_m, &kshape, &format!("l{i}_vkeep"));
+            let v_new = blk.matmul("kv_write_mask", &new_v, false, &kshape, &format!("l{i}_vnew"));
+            let v_full = blk.add(&v_keep, &v_new, &kshape, &format!("l{i}_vfull"));
+            let st4 = blk.konst_i32(&format!("l{i}_st4"), &[1, 1, 1, 1]);
+            let bm4 = blk.op(
+                "const",
+                vec![],
+                vec![(
+                    &format!("l{i}_bm4"),
+                    ValueType::Tensor(TensorType {
+                        dtype: DType::Bool,
+                        shape: vec![4],
+                    }),
+                )],
+                vec![("val".into(), mil_spec::Value::bools(&[false, false, false, false]))],
+            )[0]
+            .clone();
+            let kb4 = blk.konst_i32(&format!("l{i}_kb4"), &[krow, 0, 0, 0]);
+            let ke4 = blk.konst_i32(&format!("l{i}_ke4"), &[krow + 1, nkv as i32, seq as i32, dh as i32]);
+            cur_kv = blk.o1(
+                "slice_update",
+                vec![
+                    ("x".into(), bind(&cur_kv).1),
+                    ("update".into(), bind(&k_full).1),
+                    ("begin".into(), bind(&kb4).1),
+                    ("end".into(), bind(&ke4).1),
+                    ("stride".into(), bind(&st4).1),
+                    ("begin_mask".into(), bind(&bm4).1),
+                    ("end_mask".into(), bind(&bm4).1),
+                    ("squeeze_mask".into(), bind(&bm4).1),
+                ],
+                &format!("l{i}_kup"),
+                ValueType::Tensor(TensorType::f16(&kvshape)),
+            );
+            let vb4 = blk.konst_i32(&format!("l{i}_vb4"), &[krow + 1, 0, 0, 0]);
+            let ve4 = blk.konst_i32(&format!("l{i}_ve4"), &[krow + 2, nkv as i32, seq as i32, dh as i32]);
+            cur_kv = blk.o1(
+                "slice_update",
+                vec![
+                    ("x".into(), bind(&cur_kv).1),
+                    ("update".into(), bind(&v_full).1),
+                    ("begin".into(), bind(&vb4).1),
+                    ("end".into(), bind(&ve4).1),
+                    ("stride".into(), bind(&st4).1),
+                    ("begin_mask".into(), bind(&bm4).1),
+                    ("end_mask".into(), bind(&bm4).1),
+                    ("squeeze_mask".into(), bind(&bm4).1),
+                ],
+                &format!("l{i}_vup"),
+                ValueType::Tensor(TensorType::f16(&kvshape)),
+            );
+            (k_full, v_full)
         };
-        let kshape = vec![1, nkv, seq, dh];
-        let k_old = blk.read_state(&k_state, &kshape, &format!("l{i}_kold"));
-        let k_keep = blk.mul(&k_old, &one_m, &kshape, &format!("l{i}_kkeep"));
-        // [1,1,seq,P] x [1,nkv,P,dh] -> [1,nkv,seq,dh] (batch broadcast).
-        // s==1 uses the same matmul — the elementwise broadcast-mul
-        // [1,nkv,1,dh]*[1,1,seq,1] emits garbage at masked positions
-        // (verified: state buffer maxAbs=14712 at unwritten slots).
-        let k_new = blk.matmul("kv_write_mask", &new_k, false, &kshape, &format!("l{i}_knew"));
-        let k_full = blk.add(&k_keep, &k_new, &kshape, &format!("l{i}_kfull"));
-        blk.write_state(&k_state, &k_full);
-        // Attention reads the in-graph k_full/v_full rather than a
-        // post-write read_state: read_state on the s==1 model returns
-        // corrupted values (softmax rows sum to 1.0 while probs·v_upd
-        // yields ~600) AND fails plan-build -14 when feeding the padded
-        // attention shape. The read_state ops must STAY LIVE (dead state
-        // reads also fail plan-build -14), so a zero-weighted mean is
-        // folded into the mask add below.
-        let direct_kv = s == 1;
-        let k_upd = blk.read_state(&k_state, &kshape, &format!("l{i}_kupd"));
-        let k_attn = if direct_kv { k_full.clone() } else { k_upd.clone() };
-
-        let v_old = blk.read_state(&v_state, &kshape, &format!("l{i}_vold"));
-        let v_keep = blk.mul(&v_old, &one_m, &kshape, &format!("l{i}_vkeep"));
-        let v_new = blk.matmul("kv_write_mask", &new_v, false, &kshape, &format!("l{i}_vnew"));
-        let v_full = blk.add(&v_keep, &v_new, &kshape, &format!("l{i}_vfull"));
-        blk.write_state(&v_state, &v_full);
-        let v_upd = blk.read_state(&v_state, &kshape, &format!("l{i}_vupd"));
-        let v_attn = if direct_kv { v_full.clone() } else { v_upd.clone() };
-
         // ---- explicit attention (matmul·scale·+mask·softmax·matmul) ----
         // The fused scaled_dot_product_attention op is numerically unstable
         // on the folded GQA multi-query shape q [1,nkv,hpk,dh]: across model
@@ -708,42 +872,13 @@ fn emit_layer_shard(
             // Fused SDPA silently DROPS a non-broadcast mask for multi-query
             // shapes (verified: hidden identical under an all -10000 mask).
             // Materialize scores + softmax explicitly so the mask is real.
-            let k_t = blk.transpose(&k_attn, &[0, 1, 3, 2], &[1, nkv, dh, seq], &format!("l{i}_kT"));
-            let scores = blk.matmul(&qf, &k_t, false, &[1, nkv, rows, seq], &format!("l{i}_sc"));
+            // K^T comes from matmul's fused transpose_y — a standalone
+            // transpose of a slice_update-derived slice fails plan-build
+            // -14 (mil_kvpack verified the fused variant loads clean).
+            let scores = blk.matmul(&qf, &k_attn, true, &[1, nkv, rows, seq], &format!("l{i}_sc"));
             let scl = blk.konst_f16(&format!("l{i}_scl"), 1.0 / (dh as f32).sqrt());
             let sc = blk.mul(&scores, &scl, &[1, nkv, rows, seq], &format!("l{i}_scm"));
-            let masked0 = blk.add(&sc, "attn_mask", &[1, nkv, rows, seq], &format!("l{i}_msk0"));
-            let masked = if direct_kv {
-                // keep the read_state ops live with a zero-weighted term
-                let dax = blk.konst_i32(&format!("l{i}_dax"), &[1, 2, 3]);
-                let dkd = blk.konst_bool(&format!("l{i}_dkd"), true);
-                let dmk = blk.o1(
-                    "reduce_mean",
-                    vec![
-                        ("x".into(), bind(&k_upd).1),
-                        ("axes".into(), bind(&dax).1),
-                        ("keep_dims".into(), bind(&dkd).1),
-                    ],
-                    &format!("l{i}_dmk"),
-                    ValueType::Tensor(TensorType::f16(&[1, 1, 1, 1])),
-                );
-                let dmv = blk.o1(
-                    "reduce_mean",
-                    vec![
-                        ("x".into(), bind(&v_upd).1),
-                        ("axes".into(), bind(&dax).1),
-                        ("keep_dims".into(), bind(&dkd).1),
-                    ],
-                    &format!("l{i}_dmv"),
-                    ValueType::Tensor(TensorType::f16(&[1, 1, 1, 1])),
-                );
-                let ds = blk.add(&dmk, &dmv, &[1, 1, 1, 1], &format!("l{i}_dms"));
-                let dz = blk.konst_f16(&format!("l{i}_dz"), 0.0);
-                let dzz = blk.mul(&ds, &dz, &[1, 1, 1, 1], &format!("l{i}_dzz"));
-                blk.add(&masked0, &dzz, &[1, nkv, rows, seq], &format!("l{i}_msk"))
-            } else {
-                masked0
-            };
+            let masked = blk.add(&sc, "attn_mask", &[1, nkv, rows, seq], &format!("l{i}_msk"));
             let probs = blk.softmax(&masked, 3, &[1, nkv, rows, seq], &format!("l{i}_pb"), false);
             // BADAPPLE_ONES_ATTN=1 (debug): swap the V operand for all-ones
             // (v_attn*0+1 keeps it live) so attn4 emits the softmax ROW SUMS
@@ -860,6 +995,8 @@ fn emit_layer_shard(
         };
         cur = blk.add(&x1, &ffn, &shape_x, &out_nm);
     }
+    // Commit the chained packed-KV updates once per call.
+    blk.write_state("kv_cache", &cur_kv);
 
     // BADAPPLE_STOP_AT=l0_<stage> emits a debug package whose single output is
     // an intermediate: a trailing `add(x, 0)` named `hidden` re-binds the
@@ -929,8 +1066,6 @@ fn emit_layer_shard(
     // (garbage) KV slots instead of staying one-hot. dim0/dim1 broadcast
     // is proven fine (shared with the s>1 path).
     let mask_shape: Vec<i64> = if s == 1 { vec![1, 1, 2 * hpk, seq] } else { vec![1, 1, hpk * s, seq] };
-    let wmask_shape: Vec<i64> = vec![1, 1, seq, s];
-    let n_state = le - ls;
     let mut fn_inputs: Vec<NVT> = vec![
         NVT {
             name: "x".into(),
@@ -949,26 +1084,20 @@ fn emit_layer_shard(
             ty: ValueType::Tensor(TensorType::f16(&mask_shape)),
         },
         NVT {
-            name: "kv_write_mask".into(),
-            ty: ValueType::Tensor(TensorType::f16(&wmask_shape)),
+            name: "pos".into(),
+            ty: ValueType::Tensor(TensorType::i32v(1)),
+        },
+        NVT {
+            name: "kv_cache".into(),
+            ty: ValueType::State(TensorType::f16(&kvshape)),
         },
     ];
-    let mut states: Vec<Feature> = vec![];
-    for i in 0..n_state {
-        for kv in ["k", "v"] {
-            let nm = format!("{kv}_cache_{i}");
-            fn_inputs.push(NVT {
-                name: nm.clone(),
-                ty: ValueType::State(TensorType::f16(&[1, nkv, seq, dh])),
-            });
-            states.push(Feature {
-                name: nm,
-                shape: vec![1, nkv, seq, dh],
-                dtype: DType::Fp16,
-                is_state: true,
-            });
-        }
-    }
+    let states: Vec<Feature> = vec![Feature {
+        name: "kv_cache".into(),
+        shape: kvshape.clone(),
+        dtype: DType::Fp16,
+        is_state: true,
+    }];
     let inputs: Vec<Feature> = vec![
         Feature {
             name: "x".into(),
@@ -995,9 +1124,9 @@ fn emit_layer_shard(
             is_state: false,
         },
         Feature {
-            name: "kv_write_mask".into(),
-            shape: wmask_shape.clone(),
-            dtype: DType::Fp16,
+            name: "pos".into(),
+            shape: vec![1],
+            dtype: DType::Int32,
             is_state: false,
         },
     ];
@@ -1008,7 +1137,14 @@ fn emit_layer_shard(
         is_state: false,
     }];
 
-    let meta = ModelMeta::new(SPEC_VERSION, OPSET)
+    // The ANE plan-build coverage of the slice_update graph is
+    // spec-dependent: the s==1 (decode) graph only plans under ios18/
+    // CoreML8, while the s>1 (prefill) graph only plans under ios19/
+    // CoreML9 — each fails -14 under the other spec (verified across
+    // every shard and bisected to the spec flag itself). Emit each shard
+    // at the spec its graph plans under; deployment target is per-model.
+    let (sv, ops) = if s == 1 { (9, "CoreML8") } else { (10, "CoreML9") };
+    let meta = ModelMeta::new(sv, ops)
         .creator("badapple-aneconvert")
         .description("Bad Apple native ANE shard");
     let spec = encode_model(&inputs, &outputs, &states, &blk, &fn_inputs, &meta);
