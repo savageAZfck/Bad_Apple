@@ -403,7 +403,19 @@ fn check_once(repair: bool) -> serde_json::Value {
 
     // Keep runtime_state.json current so the menu bar doesn't show a stale
     // safe-mode message after the supervisor has recovered.
-    let all_healthy = state.services.values().all(|e| e.healthy);
+    // Only services evaluated this pass count — a stale entry in
+    // state.services (e.g. a service removed from the check list) would
+    // veto READY forever with its frozen health flag.
+    let all_healthy = report
+        .get("services")
+        .and_then(|s| s.as_object())
+        .map(|svcs| {
+            !svcs.is_empty()
+                && svcs
+                    .values()
+                    .all(|v| v.get("healthy").and_then(|h| h.as_bool()).unwrap_or(false))
+        })
+        .unwrap_or(false);
     let in_safe_mode = report
         .get("safe_mode")
         .and_then(|v| v.as_bool())
