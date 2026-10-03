@@ -285,7 +285,49 @@ fn tile_head_w(bytes: &[u8], n: i64) -> Vec<u8> {
     out
 }
 
+/// 1x1 conv whose output spatial width is `s`. `conv1x1` hardcodes width 1;
+/// prefill shards (s>1) declare the real shape so MIL type-checks.
+fn conv1x1_w(blk: &mut Block, x: &str, w: &str, cout: i64, s: i64, name: &str) -> String {
+    if s == 1 {
+        return blk.conv1x1(x, w, None, cout, name);
+    }
+    let strides = blk.konst_i32(&format!("{name}_cstrides"), &[1, 1]);
+    let pad_type = {
+        let vt = ValueType::Tensor(TensorType {
+            dtype: DType::Str,
+            shape: vec![],
+        });
+        blk.op(
+            "const",
+            vec![],
+            vec![(&format!("{name}_cpadtype"), vt)],
+            vec![("val".into(), bad_apple::mil_spec::Value::Str("valid".into()))],
+        )[0]
+        .clone()
+    };
+    let pads = blk.konst_i32(&format!("{name}_cpad"), &[0, 0, 0, 0]);
+    let dil = blk.konst_i32(&format!("{name}_cdil"), &[1, 1]);
+    let grp = blk.konst_scalar_i32(&format!("{name}_cgrp"), 1);
+    let vt = ValueType::Tensor(TensorType::f16(&[1, cout, 1, s]));
+    blk.o1(
+        "conv",
+        vec![
+            ("x".into(), bind(x).1),
+            ("weight".into(), bind(w).1),
+            ("strides".into(), bind(&strides).1),
+            ("pad_type".into(), bind(&pad_type).1),
+            ("pad".into(), bind(&pads).1),
+            ("dilations".into(), bind(&dil).1),
+            ("groups".into(), bind(&grp).1),
+        ],
+        name,
+        vt,
+    )
+}
+
 /// Emit one stateful transformer-layer shard covering layers [ls, le).
+/// `s` is the token width per forward: 1 = decode shard, >1 = prefill shard
+/// (same state names/shapes so it shares MLState with the decode shards).
 fn emit_layer_shard(
     st: &StIndex,
     cfg: &Cfg,
@@ -293,8 +335,17 @@ fn emit_layer_shard(
     le: i64,
     seq: i64,
     out_dir: &Path,
+    s: i64,
+    is_prefill: bool,
 ) -> Result<(PathBuf, PathBuf, Vec<u8>), String> {
-    let name = format!("layer_s{:02}-{:02}", ls, le);
+    // Shard names are role-based, not width-based: a --decode-width >1
+    // decode shard is still `layer_s..` (the bridge's decode lookup),
+    // while a bulk-priming shard is always `prefill_s..`.
+    let name = if is_prefill {
+        format!("prefill_s{:02}-{:02}", ls, le)
+    } else {
+        format!("layer_s{:02}-{:02}", ls, le)
+    };
     let pkg_dir = out_dir.join(format!("{name}.mlpackage"));
 
     let mut blk = Block::new();
@@ -318,7 +369,7 @@ fn emit_layer_shard(
         };
 
     let mut cur = "x".to_string();
-    let shape_x = vec![1, d, 1, 1];
+    let shape_x = vec![1, d, 1, s];
 
     for i in ls..le {
         let p = format!("model.layers.{i}");
@@ -351,33 +402,34 @@ fn emit_layer_shard(
             &qkv_w,
             &[q_dim + 2 * kv_dim, d, 1, 1],
         );
-        let qkv = blk.conv1x1(
+        let qkv = conv1x1_w(
+            &mut blk,
             &normed,
             &wqkv,
-            None,
             q_dim + 2 * kv_dim,
+            s,
             &format!("l{i}_qkv"),
         );
 
         let q = blk.slice(
             &qkv,
             &[0, 0, 0, 0],
-            &[1, q_dim as i32, 1, 1],
-            &[1, q_dim, 1, 1],
+            &[1, q_dim as i32, 1, s as i32],
+            &[1, q_dim, 1, s],
             &format!("l{i}_q"),
         );
         let k = blk.slice(
             &qkv,
             &[0, q_dim as i32, 0, 0],
-            &[1, (q_dim + kv_dim) as i32, 1, 1],
-            &[1, kv_dim, 1, 1],
+            &[1, (q_dim + kv_dim) as i32, 1, s as i32],
+            &[1, kv_dim, 1, s],
             &format!("l{i}_k"),
         );
         let v = blk.slice(
             &qkv,
             &[0, (q_dim + kv_dim) as i32, 0, 0],
-            &[1, (q_dim + 2 * kv_dim) as i32, 1, 1],
-            &[1, kv_dim, 1, 1],
+            &[1, (q_dim + 2 * kv_dim) as i32, 1, s as i32],
+            &[1, kv_dim, 1, s],
             &format!("l{i}_v"),
         );
 
@@ -401,19 +453,19 @@ fn emit_layer_shard(
                 &kn_tiled,
                 &[kv_dim, 1, 1],
             );
-            // reshape (1,nh*dh,1,1) -> (nh,dh,1,1); rms over axis1; back; mul w
-            let qr = blk.reshape(&q, &[nh, dh, 1, 1], &format!("l{i}_qh"));
-            let qshape = vec![nh, dh, 1, 1];
+            // reshape (1,nh*dh,1,s) -> (nh,dh,1,s); rms over axis1; back; mul w
+            let qr = blk.reshape(&q, &[nh, dh, 1, s], &format!("l{i}_qh"));
+            let qshape = vec![nh, dh, 1, s];
             // safe-norm per head over dh (axis 1)
             let qn_out = head_rms(&mut blk, &qr, dh, cfg.eps, &qshape, &format!("l{i}_qn"));
-            let qb = blk.reshape(&qn_out, &[1, q_dim, 1, 1], &format!("l{i}_qnb"));
-            let qo = blk.mul(&qb, &qn, &[1, q_dim, 1, 1], &format!("l{i}_qo"));
+            let qb = blk.reshape(&qn_out, &[1, q_dim, 1, s], &format!("l{i}_qnb"));
+            let qo = blk.mul(&qb, &qn, &[1, q_dim, 1, s], &format!("l{i}_qo"));
 
-            let kr = blk.reshape(&k, &[nkv, dh, 1, 1], &format!("l{i}_kh"));
-            let kshape = vec![nkv, dh, 1, 1];
+            let kr = blk.reshape(&k, &[nkv, dh, 1, s], &format!("l{i}_kh"));
+            let kshape = vec![nkv, dh, 1, s];
             let kn_out = head_rms(&mut blk, &kr, dh, cfg.eps, &kshape, &format!("l{i}_kn"));
-            let kb = blk.reshape(&kn_out, &[1, kv_dim, 1, 1], &format!("l{i}_knb"));
-            let ko = blk.mul(&kb, &kn, &[1, kv_dim, 1, 1], &format!("l{i}_ko"));
+            let kb = blk.reshape(&kn_out, &[1, kv_dim, 1, s], &format!("l{i}_knb"));
+            let ko = blk.mul(&kb, &kn, &[1, kv_dim, 1, s], &format!("l{i}_ko"));
             (qo, ko)
         } else {
             (q, k)
@@ -483,50 +535,245 @@ fn emit_layer_shard(
                 };
                 blk.reshape(&cat, &[1, total, 1, 1], &format!("{tag}_flat"))
             };
-        let q_r = rope(&mut blk, &qn, nh, dh, q_dim, &format!("l{i}_rq"));
-        let k_r = rope(&mut blk, &kn, nkv, dh, kv_dim, &format!("l{i}_rk"));
+        // RoPE for s>1: rank-4 layout, x [1,n_h,dim,P], cos/sin already
+        // [1,1,rope_half,P]; slice rot/pass/lo/hi along axis 2.
+        let rope_p =
+            |blk: &mut Block, xf: &str, n_h: i64, dim: i64, total: i64, tag: &str| -> String {
+                let xr = blk.reshape(xf, &[1, n_h, dim, s], &format!("{tag}_r"));
+                let rot_end = rope_dim as i32;
+                let has_pass = rope_dim < dim;
+                let x_rot = if has_pass {
+                    blk.slice(
+                        &xr,
+                        &[0, 0, 0, 0],
+                        &[1, n_h as i32, rot_end, s as i32],
+                        &[1, n_h, rope_dim, s],
+                        &format!("{tag}_rot"),
+                    )
+                } else {
+                    xr.clone()
+                };
+                let x_pass = if has_pass {
+                    blk.slice(
+                        &xr,
+                        &[0, 0, rot_end, 0],
+                        &[1, n_h as i32, dim as i32, s as i32],
+                        &[1, n_h, dim - rope_dim, s],
+                        &format!("{tag}_pass"),
+                    )
+                } else {
+                    String::new()
+                };
+                let x_lo = blk.slice(
+                    &x_rot,
+                    &[0, 0, 0, 0],
+                    &[1, n_h as i32, rope_half as i32, s as i32],
+                    &[1, n_h, rope_half, s],
+                    &format!("{tag}_lo"),
+                );
+                let x_hi = blk.slice(
+                    &x_rot,
+                    &[0, 0, rope_half as i32, 0],
+                    &[1, n_h as i32, rot_end, s as i32],
+                    &[1, n_h, rope_half, s],
+                    &format!("{tag}_hi"),
+                );
+                let a = blk.mul(&x_lo, "rope_cos", &[1, n_h, rope_half, s], &format!("{tag}_a"));
+                let b = blk.mul(&x_hi, "rope_sin", &[1, n_h, rope_half, s], &format!("{tag}_b"));
+                let r_lo = blk.sub(&a, &b, &[1, n_h, rope_half, s], &format!("{tag}_rlo"));
+                let c = blk.mul(&x_lo, "rope_sin", &[1, n_h, rope_half, s], &format!("{tag}_c"));
+                let d2 = blk.mul(&x_hi, "rope_cos", &[1, n_h, rope_half, s], &format!("{tag}_d"));
+                let r_hi = blk.add(&c, &d2, &[1, n_h, rope_half, s], &format!("{tag}_rhi"));
+                let cat = if has_pass {
+                    blk.concat(
+                        &[r_lo, r_hi, x_pass],
+                        2,
+                        &[1, n_h, dim, s],
+                        &format!("{tag}_cat"),
+                    )
+                } else {
+                    blk.concat(&[r_lo, r_hi], 2, &[1, n_h, dim, s], &format!("{tag}_cat"))
+                };
+                blk.reshape(&cat, &[1, total, 1, s], &format!("{tag}_flat"))
+            };
+        let (q_r, k_r) = if s == 1 {
+            (
+                rope(&mut blk, &qn, nh, dh, q_dim, &format!("l{i}_rq")),
+                rope(&mut blk, &kn, nkv, dh, kv_dim, &format!("l{i}_rk")),
+            )
+        } else {
+            (
+                rope_p(&mut blk, &qn, nh, dh, q_dim, &format!("l{i}_rq")),
+                rope_p(&mut blk, &kn, nkv, dh, kv_dim, &format!("l{i}_rk")),
+            )
+        };
 
-        let new_k = blk.reshape(&k_r, &[1, nkv, 1, dh], &format!("l{i}_nk"));
-        let new_v = blk.reshape(&v, &[1, nkv, 1, dh], &format!("l{i}_nv"));
+        let (new_k, new_v) = if s == 1 {
+            (
+                blk.reshape(&k_r, &[1, nkv, 1, dh], &format!("l{i}_nk")),
+                blk.reshape(&v, &[1, nkv, 1, dh], &format!("l{i}_nv")),
+            )
+        } else {
+            // [1,kv_dim,1,P] -> [1,nkv,dh,P] -> transpose [0,1,3,2] -> [1,nkv,P,dh]
+            let kr = blk.reshape(&k_r, &[1, nkv, dh, s], &format!("l{i}_nkr"));
+            let kt = blk.transpose(&kr, &[0, 1, 3, 2], &[1, nkv, s, dh], &format!("l{i}_nk"));
+            let vr = blk.reshape(&v, &[1, nkv, dh, s], &format!("l{i}_nvr"));
+            let vt2 = blk.transpose(&vr, &[0, 1, 3, 2], &[1, nkv, s, dh], &format!("l{i}_nv"));
+            (kt, vt2)
+        };
 
         // ---- masked KV state update ----
         // k_full = k_state*(1-wmask) + new_k*wmask; write_state; read_state
         let one = blk.konst_f16(&format!("l{i}_one"), 1.0);
-        let one_m = blk.sub(&one, "kv_write_mask", &[1, 1, seq, 1], &format!("l{i}_om"));
+        let one_m = if s == 1 {
+            blk.sub(&one, "kv_write_mask", &[1, 1, seq, 1], &format!("l{i}_om"))
+        } else {
+            // P column one-hots: keep = 1 - sum over the column axis.
+            let ax = blk.konst_i32(&format!("l{i}_wax"), &[3]);
+            let kd = blk.konst_bool(&format!("l{i}_wkd"), true);
+            let wsum = blk.o1(
+                "reduce_sum",
+                vec![
+                    ("x".into(), bind("kv_write_mask").1),
+                    ("axes".into(), bind(&ax).1),
+                    ("keep_dims".into(), bind(&kd).1),
+                ],
+                &format!("l{i}_wsum"),
+                ValueType::Tensor(TensorType::f16(&[1, 1, seq, 1])),
+            );
+            blk.sub(&one, &wsum, &[1, 1, seq, 1], &format!("l{i}_om"))
+        };
         let kshape = vec![1, nkv, seq, dh];
         let k_old = blk.read_state(&k_state, &kshape, &format!("l{i}_kold"));
         let k_keep = blk.mul(&k_old, &one_m, &kshape, &format!("l{i}_kkeep"));
-        let k_new = blk.mul(&new_k, "kv_write_mask", &kshape, &format!("l{i}_knew"));
+        // [1,1,seq,P] x [1,nkv,P,dh] -> [1,nkv,seq,dh] (batch broadcast).
+        // s==1 uses the same matmul — the elementwise broadcast-mul
+        // [1,nkv,1,dh]*[1,1,seq,1] emits garbage at masked positions
+        // (verified: state buffer maxAbs=14712 at unwritten slots).
+        let k_new = blk.matmul("kv_write_mask", &new_k, false, &kshape, &format!("l{i}_knew"));
         let k_full = blk.add(&k_keep, &k_new, &kshape, &format!("l{i}_kfull"));
         blk.write_state(&k_state, &k_full);
+        // Attention reads the in-graph k_full/v_full rather than a
+        // post-write read_state: read_state on the s==1 model returns
+        // corrupted values (softmax rows sum to 1.0 while probs·v_upd
+        // yields ~600) AND fails plan-build -14 when feeding the padded
+        // attention shape. The read_state ops must STAY LIVE (dead state
+        // reads also fail plan-build -14), so a zero-weighted mean is
+        // folded into the mask add below.
+        let direct_kv = s == 1;
         let k_upd = blk.read_state(&k_state, &kshape, &format!("l{i}_kupd"));
+        let k_attn = if direct_kv { k_full.clone() } else { k_upd.clone() };
 
         let v_old = blk.read_state(&v_state, &kshape, &format!("l{i}_vold"));
         let v_keep = blk.mul(&v_old, &one_m, &kshape, &format!("l{i}_vkeep"));
-        let v_new = blk.mul(&new_v, "kv_write_mask", &kshape, &format!("l{i}_vnew"));
+        let v_new = blk.matmul("kv_write_mask", &new_v, false, &kshape, &format!("l{i}_vnew"));
         let v_full = blk.add(&v_keep, &v_new, &kshape, &format!("l{i}_vfull"));
         blk.write_state(&v_state, &v_full);
         let v_upd = blk.read_state(&v_state, &kshape, &format!("l{i}_vupd"));
+        let v_attn = if direct_kv { v_full.clone() } else { v_upd.clone() };
 
-        // ---- fused SDPA attention (CoreML9 / iOS19 opset) ----
-        // SDPA requires matching head counts, so GQA is folded into the query
-        // seq axis: q [1,nkv,hpk,dh] vs k/v [1,nkv,seq,dh]. Each (kv_head, hpk)
-        // pair is one real query head attending to its kv group; the additive
-        // mask [1,1,1,seq] broadcasts over both. Verified against coremlc:
-        // 32v8 heads rejected, 8v8 with seq 4v2048 accepted.
-        let q4 = blk.reshape(&q_r, &[1, nkv, hpk, dh], &format!("l{i}_qheads"));
-        let attn = blk.o1(
-            "scaled_dot_product_attention",
-            vec![
-                ("query".into(), bind(&q4).1),
-                ("key".into(), bind(&k_upd).1),
-                ("value".into(), bind(&v_upd).1),
-                ("attn_mask".into(), bind("attn_mask").1),
-            ],
-            &format!("l{i}_sdpa"),
-            ValueType::Tensor(TensorType::f16(&[1, nkv, hpk, dh])),
-        );
-        let attn4 = blk.reshape(&attn, &[1, q_dim, 1, 1], &format!("l{i}_attn4"));
+        // ---- explicit attention (matmul·scale·+mask·softmax·matmul) ----
+        // The fused scaled_dot_product_attention op is numerically unstable
+        // on the folded GQA multi-query shape q [1,nkv,hpk,dh]: across model
+        // instances the ANE plan alternately produces correct output,
+        // suppressed activations, or outright inf channels (verified against
+        // MLX ground truth — the prefill/explicit shard reproduces the 6144
+        // slot-0 massive activation at channel 35, fused SDPA does not).
+        // It also silently DROPS a non-broadcast mask for multi-query shapes
+        // (verified: hidden identical under an all -10000 mask). Materialize
+        // scores + softmax explicitly for every token width s.
+        let attn4 = {
+            // P queries folded into the query axis: row r = s_idx*hpk + j.
+            // q [1,q_dim,1,P] -> [nkv,hpk*dh,1,P] -> [nkv,P,1,hpk*dh]
+            //   -> [1,nkv,P*hpk,dh]; mask [1,1,hpk*P,seq] broadcasts.
+            // For s==1 the fold is a single reshape — the transpose chain
+            // degenerates to permuting size-1 axes, which the ANE compiler
+            // miscompiles (produces amplified/inf attention outputs while
+            // the identical math at s>=2 is exact).
+            // For s==1 the [1,nkv,hpk,dh] attention shape (dim2=hpk=2) is
+            // numerically miscompiled — identical MIL math produces correct
+            // output at s>=2 (dim2>=4) but amplified/inf results at s==1
+            // across three softmax formulations. Pad dim2 to 4 rows by
+            // duplicating the queries (harmless extra compute), attend at
+            // the proven s=2 shape, and slice the real rows back out.
+            let rows = if s == 1 { 2 * hpk } else { s * hpk };
+            let qf = if s == 1 {
+                let q2 = blk.reshape(&q_r, &[1, nkv, hpk, dh], &format!("l{i}_qfold2"));
+                blk.concat(&[q2.clone(), q2], 2, &[1, nkv, 2 * hpk, dh], &format!("l{i}_qfold"))
+            } else {
+                let q4 = blk.reshape(&q_r, &[nkv, hpk * dh, 1, s], &format!("l{i}_qheads"));
+                let qt = blk.transpose(&q4, &[0, 3, 2, 1], &[nkv, s, 1, hpk * dh], &format!("l{i}_qt"));
+                blk.reshape(&qt, &[1, nkv, s * hpk, dh], &format!("l{i}_qfold"))
+            };
+            // Fused SDPA silently DROPS a non-broadcast mask for multi-query
+            // shapes (verified: hidden identical under an all -10000 mask).
+            // Materialize scores + softmax explicitly so the mask is real.
+            let k_t = blk.transpose(&k_attn, &[0, 1, 3, 2], &[1, nkv, dh, seq], &format!("l{i}_kT"));
+            let scores = blk.matmul(&qf, &k_t, false, &[1, nkv, rows, seq], &format!("l{i}_sc"));
+            let scl = blk.konst_f16(&format!("l{i}_scl"), 1.0 / (dh as f32).sqrt());
+            let sc = blk.mul(&scores, &scl, &[1, nkv, rows, seq], &format!("l{i}_scm"));
+            let masked0 = blk.add(&sc, "attn_mask", &[1, nkv, rows, seq], &format!("l{i}_msk0"));
+            let masked = if direct_kv {
+                // keep the read_state ops live with a zero-weighted term
+                let dax = blk.konst_i32(&format!("l{i}_dax"), &[1, 2, 3]);
+                let dkd = blk.konst_bool(&format!("l{i}_dkd"), true);
+                let dmk = blk.o1(
+                    "reduce_mean",
+                    vec![
+                        ("x".into(), bind(&k_upd).1),
+                        ("axes".into(), bind(&dax).1),
+                        ("keep_dims".into(), bind(&dkd).1),
+                    ],
+                    &format!("l{i}_dmk"),
+                    ValueType::Tensor(TensorType::f16(&[1, 1, 1, 1])),
+                );
+                let dmv = blk.o1(
+                    "reduce_mean",
+                    vec![
+                        ("x".into(), bind(&v_upd).1),
+                        ("axes".into(), bind(&dax).1),
+                        ("keep_dims".into(), bind(&dkd).1),
+                    ],
+                    &format!("l{i}_dmv"),
+                    ValueType::Tensor(TensorType::f16(&[1, 1, 1, 1])),
+                );
+                let ds = blk.add(&dmk, &dmv, &[1, 1, 1, 1], &format!("l{i}_dms"));
+                let dz = blk.konst_f16(&format!("l{i}_dz"), 0.0);
+                let dzz = blk.mul(&ds, &dz, &[1, 1, 1, 1], &format!("l{i}_dzz"));
+                blk.add(&masked0, &dzz, &[1, nkv, rows, seq], &format!("l{i}_msk"))
+            } else {
+                masked0
+            };
+            let probs = blk.softmax(&masked, 3, &[1, nkv, rows, seq], &format!("l{i}_pb"), false);
+            // BADAPPLE_ONES_ATTN=1 (debug): swap the V operand for all-ones
+            // (v_attn*0+1 keeps it live) so attn4 emits the softmax ROW SUMS
+            // — a normalized softmax yields exactly 1.0.
+            let v_op = if s == 1 && std::env::var("BADAPPLE_ONES_ATTN").is_ok() {
+                let vzc = blk.konst_f16(&format!("l{i}_vzc"), 0.0);
+                let vz = blk.mul(&v_attn, &vzc, &[1, nkv, seq, dh], &format!("l{i}_vz"));
+                let voc = blk.konst_f16(&format!("l{i}_voc"), 1.0);
+                blk.add(&vz, &voc, &[1, nkv, seq, dh], &format!("l{i}_vones"))
+            } else {
+                v_attn.clone()
+            };
+            let attn = blk.matmul(&probs, &v_op, false, &[1, nkv, rows, dh], &format!("l{i}_sdpa"));
+            if s == 1 {
+                // slice the real hpk rows out of the padded result, then
+                // unfold [1,nkv,hpk,dh] -> [1,q_dim,1,1] with one reshape.
+                let slim = blk.slice(
+                    &attn,
+                    &[0, 0, 0, 0],
+                    &[1, nkv as i32, hpk as i32, dh as i32],
+                    &[1, nkv, hpk, dh],
+                    &format!("l{i}_aslice"),
+                );
+                blk.reshape(&slim, &[1, q_dim, 1, 1], &format!("l{i}_attn4"))
+            } else {
+                let ar = blk.reshape(&attn, &[nkv, s, hpk * dh, 1], &format!("l{i}_ar"));
+                let at = blk.transpose(&ar, &[0, 2, 3, 1], &[nkv, hpk * dh, 1, s], &format!("l{i}_at"));
+                blk.reshape(&at, &[1, q_dim, 1, s], &format!("l{i}_attn4"))
+            }
+        };
         let ow = st.get_f16(&format!("{p}.self_attn.o_proj.weight"))?;
         let wo = weight_const(
             &mut wb,
@@ -535,7 +782,7 @@ fn emit_layer_shard(
             &ow,
             &[d, q_dim, 1, 1],
         );
-        let o = blk.conv1x1(&attn4, &wo, None, d, &format!("l{i}_o"));
+        let o = conv1x1_w(&mut blk, &attn4, &wo, d, s, &format!("l{i}_o"));
         let x1 = blk.add(&cur, &o, &shape_x, &format!("l{i}_res1"));
 
         // ---- FFN ----
@@ -559,28 +806,28 @@ fn emit_layer_shard(
             &gu_w,
             &[2 * cfg.d_ff, d, 1, 1],
         );
-        let gu = blk.conv1x1(&n2, &wgu, None, 2 * cfg.d_ff, &format!("l{i}_gu"));
+        let gu = conv1x1_w(&mut blk, &n2, &wgu, 2 * cfg.d_ff, s, &format!("l{i}_gu"));
         let gate = blk.slice(
             &gu,
             &[0, 0, 0, 0],
-            &[1, cfg.d_ff as i32, 1, 1],
-            &[1, cfg.d_ff, 1, 1],
+            &[1, cfg.d_ff as i32, 1, s as i32],
+            &[1, cfg.d_ff, 1, s],
             &format!("l{i}_gate"),
         );
         let up = blk.slice(
             &gu,
             &[0, cfg.d_ff as i32, 0, 0],
-            &[1, (2 * cfg.d_ff) as i32, 1, 1],
-            &[1, cfg.d_ff, 1, 1],
+            &[1, (2 * cfg.d_ff) as i32, 1, s as i32],
+            &[1, cfg.d_ff, 1, s],
             &format!("l{i}_up"),
         );
         let silu = blk.o1(
             "silu",
             vec![("x".into(), bind(&gate).1)],
             &format!("l{i}_silu"),
-            ValueType::Tensor(TensorType::f16(&[1, cfg.d_ff, 1, 1])),
+            ValueType::Tensor(TensorType::f16(&[1, cfg.d_ff, 1, s])),
         );
-        let hidden = blk.mul(&silu, &up, &[1, cfg.d_ff, 1, 1], &format!("l{i}_hid"));
+        let hidden = blk.mul(&silu, &up, &[1, cfg.d_ff, 1, s], &format!("l{i}_hid"));
         let dw = st.get_f16(&format!("{p}.mlp.down_proj.weight"))?;
         let wd = weight_const(
             &mut wb,
@@ -596,17 +843,17 @@ fn emit_layer_shard(
         let alpha = down_prescale();
         let ffn = if alpha > 1.0 {
             let inv = blk.konst_f16(&format!("l{i}_dinv"), 1.0 / alpha);
-            let hs = blk.mul(&hidden, &inv, &[1, cfg.d_ff, 1, 1], &format!("l{i}_hids"));
-            let raw = blk.conv1x1(&hs, &wd, None, d, &format!("l{i}_down_s"));
+            let hs = blk.mul(&hidden, &inv, &[1, cfg.d_ff, 1, s], &format!("l{i}_hids"));
+            let raw = conv1x1_w(&mut blk, &hs, &wd, d, s, &format!("l{i}_down_s"));
             let a = blk.konst_f16(&format!("l{i}_dalpha"), alpha);
             blk.mul(&raw, &a, &shape_x, &format!("l{i}_down"))
         } else {
-            blk.conv1x1(&hidden, &wd, None, d, &format!("l{i}_down"))
+            conv1x1_w(&mut blk, &hidden, &wd, d, s, &format!("l{i}_down"))
         };
         // the last layer's output must be named `hidden` to match the declared
         // model output feature (CoreML binds program outputs by name).
         let stop_at = std::env::var("BADAPPLE_STOP_AT").ok();
-        let out_nm = if i == le - 1 && stop_at.is_none() {
+        let out_nm = if i == le - 1 && (stop_at.is_none() || s != 1) {
             "hidden".to_string()
         } else {
             format!("l{i}_res2")
@@ -620,7 +867,7 @@ fn emit_layer_shard(
     // (E5 rejects outputs bound to mid-block intermediates).
     let stop_at = std::env::var("BADAPPLE_STOP_AT").ok();
     let mut stop_shape: Option<Vec<i64>> = None;
-    if stop_at.is_some() && le - ls == 1 {
+    if stop_at.is_some() && le - ls == 1 && s == 1 {
         let i = ls;
         for (suffix, shape) in [
             ("an_out", vec![1, d, 1, 1]),       // post attn_norm
@@ -629,6 +876,10 @@ fn emit_layer_shard(
             ("rq_flat", vec![1, q_dim, 1, 1]),  // q post-rope
             ("rk_flat", vec![1, kv_dim, 1, 1]), // k post-rope
             ("attn4", vec![1, q_dim, 1, 1]),    // attention out pre-o_proj
+            ("v", vec![1, kv_dim, 1, 1]),       // v slice of qkv (pre-norm/rope)
+            ("sc", vec![1, nkv, 2 * hpk, seq]), // attention scores pre-mask (padded)
+            ("msk", vec![1, nkv, 2 * hpk, seq]),// scores post-mask (padded)
+            ("pb", vec![1, nkv, 2 * hpk, seq]), // attention probs (padded)
             ("o", vec![1, d, 1, 1]),            // o_proj out
             ("res1", vec![1, d, 1, 1]),         // post-attn residual
             ("fn_out", vec![1, d, 1, 1]),       // post ffn_norm
@@ -636,37 +887,70 @@ fn emit_layer_shard(
         ] {
             let n = format!("l{i}_{suffix}");
             if stop_at.as_deref() == Some(n.as_str()) {
+                // Flatten to [1,N,1,1]; skip the reshape when already flat —
+                // an identical-shape reshape op breaks plan-build (-14).
+                // Stopping before the state writes makes them dead code
+                // (also -14), so fold a zero-weighted single-axis
+                // reduce_mean of the block tail into the output to keep the
+                // full graph live.
+                let flat: i64 = shape.iter().product();
+                let src = if shape == [1, flat, 1, 1] {
+                    n.clone()
+                } else {
+                    blk.reshape(&n, &[1, flat, 1, 1], &format!("l{i}_{suffix}_flat"))
+                };
+                let kax = blk.konst_i32("stop_ax", &[1]);
+                let kkd = blk.konst_bool("stop_kd", true);
+                let tail = blk.o1(
+                    "reduce_mean",
+                    vec![
+                        ("x".into(), bind(&cur).1),
+                        ("axes".into(), bind(&kax).1),
+                        ("keep_dims".into(), bind(&kkd).1),
+                    ],
+                    "stop_tail",
+                    ValueType::Tensor(TensorType::f16(&[1, 1, 1, 1])),
+                );
                 let z = blk.konst_f16("stop_zero", 0.0);
-                cur = blk.add(&n, &z, &shape, "hidden");
-                stop_shape = Some(shape);
+                let keep = blk.mul(&tail, &z, &[1, 1, 1, 1], "stop_keep");
+                cur = blk.add(&src, &keep, &[1, flat, 1, 1], "hidden");
+                stop_shape = Some(vec![1, flat, 1, 1]);
             }
         }
     }
     blk.outputs = vec![cur.clone()];
-    let out_shape_decl = stop_shape.unwrap_or_else(|| vec![1, d, 1, 1]);
+    let out_shape_decl = stop_shape.unwrap_or_else(|| vec![1, d, 1, s]);
 
     // ---- serialize ----
+    let rope_shape: Vec<i64> = if s == 1 { vec![1, rope_half] } else { vec![1, 1, rope_half, s] };
+    // s==1 declares a real dim2 on attn_mask ([1,1,rows,seq] where rows is
+    // the padded query count): a [1,1,1,seq] mask broadcasts dim2 1->rows,
+    // which the s==1 plan misaligns — probs then spread onto unwritten
+    // (garbage) KV slots instead of staying one-hot. dim0/dim1 broadcast
+    // is proven fine (shared with the s>1 path).
+    let mask_shape: Vec<i64> = if s == 1 { vec![1, 1, 2 * hpk, seq] } else { vec![1, 1, hpk * s, seq] };
+    let wmask_shape: Vec<i64> = vec![1, 1, seq, s];
     let n_state = le - ls;
     let mut fn_inputs: Vec<NVT> = vec![
         NVT {
             name: "x".into(),
-            ty: ValueType::Tensor(TensorType::f16(&[1, d, 1, 1])),
+            ty: ValueType::Tensor(TensorType::f16(&[1, d, 1, s])),
         },
         NVT {
             name: "rope_cos".into(),
-            ty: ValueType::Tensor(TensorType::f16(&[1, rope_half])),
+            ty: ValueType::Tensor(TensorType::f16(&rope_shape)),
         },
         NVT {
             name: "rope_sin".into(),
-            ty: ValueType::Tensor(TensorType::f16(&[1, rope_half])),
+            ty: ValueType::Tensor(TensorType::f16(&rope_shape)),
         },
         NVT {
             name: "attn_mask".into(),
-            ty: ValueType::Tensor(TensorType::f16(&[1, 1, 1, seq])),
+            ty: ValueType::Tensor(TensorType::f16(&mask_shape)),
         },
         NVT {
             name: "kv_write_mask".into(),
-            ty: ValueType::Tensor(TensorType::f16(&[1, 1, seq, 1])),
+            ty: ValueType::Tensor(TensorType::f16(&wmask_shape)),
         },
     ];
     let mut states: Vec<Feature> = vec![];
@@ -688,31 +972,31 @@ fn emit_layer_shard(
     let inputs: Vec<Feature> = vec![
         Feature {
             name: "x".into(),
-            shape: vec![1, d, 1, 1],
+            shape: vec![1, d, 1, s],
             dtype: DType::Fp16,
             is_state: false,
         },
         Feature {
             name: "rope_cos".into(),
-            shape: vec![1, rope_half],
+            shape: rope_shape.clone(),
             dtype: DType::Fp16,
             is_state: false,
         },
         Feature {
             name: "rope_sin".into(),
-            shape: vec![1, rope_half],
+            shape: rope_shape.clone(),
             dtype: DType::Fp16,
             is_state: false,
         },
         Feature {
             name: "attn_mask".into(),
-            shape: vec![1, 1, 1, seq],
+            shape: mask_shape.clone(),
             dtype: DType::Fp16,
             is_state: false,
         },
         Feature {
             name: "kv_write_mask".into(),
-            shape: vec![1, 1, seq, 1],
+            shape: wmask_shape.clone(),
             dtype: DType::Fp16,
             is_state: false,
         },
@@ -742,7 +1026,7 @@ fn head_rms(blk: &mut Block, x: &str, d: i64, eps: f32, shape4: &[i64], pfx: &st
     let sq = blk.mul(&xs, &xs, shape4, &format!("{pfx}_sq"));
     let axes = blk.konst_i32(&format!("{pfx}_ax"), &[1]);
     let kd = blk.konst_bool(&format!("{pfx}_kd"), true);
-    let mshape = vec![shape4[0], 1, 1, 1];
+    let mshape = vec![shape4[0], 1, 1, shape4[3]];
     let mean = blk.o1(
         "reduce_mean",
         vec![
@@ -1348,6 +1632,12 @@ fn main() {
     let mut no_compile = false;
     let mut keep_packages = false;
     let mut probe_stage: Option<String> = None;
+    let mut prefill_chunk: i64 = 0;
+    // Decode shard token width. s=1 emits degenerate dims that the ANE
+    // compiler miscompiles (broadcast write masks produce garbage at
+    // unwritten KV slots; dim2=1 attention masks misalign). s=2 routes a
+    // real token + dummy slot through the proven s>1 path.
+    let mut decode_width: i64 = 1;
 
     let mut i = 1;
     while i < args.len() {
@@ -1395,6 +1685,14 @@ fn main() {
             "--keep-packages" => keep_packages = true,
             "--probe" => {
                 probe_stage = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--prefill-chunk" => {
+                prefill_chunk = args[i + 1].parse().unwrap_or(0);
+                i += 1;
+            }
+            "--decode-width" => {
+                decode_width = args[i + 1].parse().unwrap_or(1);
                 i += 1;
             }
             _ => {}
@@ -1470,6 +1768,7 @@ fn main() {
             "quant_bits": if weight_bits() == 8 { 8 } else { 0 },
             "compute_units": "all",
             "layers_per_shard": lps,
+            "decode_width": decode_width,
             "stateful": true,
             "rope_dim": cfg.rope_dim,
             "rope_freq_base": cfg.rope_theta,
@@ -1509,7 +1808,7 @@ fn main() {
         let le = (ls + lps).min(le0);
         eprint!("  shard [{ls},{le}) ... ");
         std::io::stderr().flush().ok();
-        match emit_layer_shard(&st, &cfg, ls, le, seq, &out_dir) {
+        match emit_layer_shard(&st, &cfg, ls, le, seq, &out_dir, decode_width, false) {
             Ok((pkg, mlmodelc, _w)) => {
                 let mut ent = Map::new();
                 ent.insert(
@@ -1564,6 +1863,72 @@ fn main() {
         )
         .ok();
         ls = le;
+    }
+
+    // prefill shards: same layer groupings and state names as the decode
+    // shards, emitted at token width `prefill_chunk`. They write into the
+    // same MLState buffers, so a decode session can be primed in bulk.
+    if prefill_chunk > 0 {
+        manifest["model"]["prefill_chunk"] = json!(prefill_chunk);
+        let mut prefill_entries = vec![];
+        let mut pls = ls0;
+        while pls < le0 {
+            let ple = (pls + lps).min(le0);
+            eprint!("  prefill shard [{pls},{ple}) ... ");
+            std::io::stderr().flush().ok();
+            match emit_layer_shard(&st, &cfg, pls, ple, seq, &out_dir, prefill_chunk, true) {
+                Ok((pkg, mlmodelc, _w)) => {
+                    let mut ent = Map::new();
+                    ent.insert(
+                        "name".into(),
+                        json!(pkg.file_stem().unwrap().to_string_lossy()),
+                    );
+                    ent.insert("layer_start".into(), json!(pls));
+                    ent.insert("layer_end".into(), json!(ple));
+                    if no_compile {
+                        ent.insert("status".into(), json!("packaged"));
+                        eprintln!("packaged (compile skipped)");
+                    } else {
+                        match compile_pkg(&pkg, &out_dir) {
+                            Ok(c) => {
+                                ent.insert("status".into(), json!("compiled"));
+                                ent.insert("compiled_path".into(), json!(rel(&c, &out_dir)));
+                                let sz = dir_size(&c);
+                                ent.insert("compiled_size_bytes".into(), json!(sz));
+                                eprintln!("compiled ({:.1} MB)", sz as f64 / 1e6);
+                                if !keep_packages {
+                                    let _ = std::fs::remove_dir_all(&pkg);
+                                }
+                            }
+                            Err(e) => {
+                                ent.insert("status".into(), json!("compile_failed"));
+                                ent.insert("last_error".into(), json!(e));
+                                eprintln!("FAILED: {e}");
+                            }
+                        }
+                        let _ = mlmodelc;
+                    }
+                    ent.insert("package_path".into(), json!(rel(&pkg, &out_dir)));
+                    prefill_entries.push(Value::Object(ent));
+                }
+                Err(e) => {
+                    eprintln!("emit failed: {e}");
+                    let mut ent = Map::new();
+                    ent.insert("layer_start".into(), json!(pls));
+                    ent.insert("layer_end".into(), json!(ple));
+                    ent.insert("status".into(), json!("emit_failed"));
+                    ent.insert("last_error".into(), json!(e));
+                    prefill_entries.push(Value::Object(ent));
+                }
+            }
+            manifest["shards_prefill"] = json!(prefill_entries);
+            std::fs::write(
+                out_dir.join("conversion_manifest.json"),
+                serde_json::to_string_pretty(&manifest).unwrap(),
+            )
+            .ok();
+            pls = ple;
+        }
     }
 
     // head shards

@@ -453,6 +453,9 @@ private func handleMetaRequest(_ prompt: String) async -> String? {
     case "new chat", "clear conversation":
         BadAppleEngine.shared.resetConversation()
         return "Okay, so... fresh start."
+    case "__badapple_new_chat__":
+        BadAppleEngine.shared.resetConversation()
+        return "Fresh start."
     case "clear cache", "clear response cache", "forget cached answers":
         BadAppleEngine.shared.clearSemanticCache()
         return "Response cache cleared — fresh answers from here."

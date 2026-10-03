@@ -1211,6 +1211,269 @@ public final class BadAppleInference: @unchecked Sendable {
         }
     }
 
+    // MARK: - Cross-Silicon Speculative Decoding (ANE draft → GPU verify)
+
+    private struct ANESpecOutcome: Sendable {
+        var emitted: [Int32] = []
+        var proposed = 0
+        var accepted = 0
+        var rounds = 0
+        var draftNs: UInt64 = 0
+        var verifyNs: UInt64 = 0
+        var prefillNs: UInt64 = 0
+        var anePrefillNs: UInt64 = 0
+        var stoppedOnEOS = false
+        var draftingSurvived = true
+    }
+
+    /// ANE-drafted generation. The 0.6B on the Neural Engine proposes
+    /// `numDraftTokens` candidates per round; the GPU target verifies
+    /// them in one forward pass and commits the longest matching prefix
+    /// plus its own correction/bonus token. Rejected state is rewound
+    /// on both sides: `trimPromptCache` for GPU KV, the bridge's
+    /// position-indexed rewind for the ANE KV.
+    ///
+    /// GREEDY ONLY: the bridge emits argmax, so verification compares
+    /// argmax-vs-argmax. `temperature` is deliberately ignored — mixing
+    /// a sampled verifier with argmax drafts would corrupt the
+    /// acceptance measurement.
+    ///
+    /// If the ANE side faults mid-generation the loop degrades to plain
+    /// greedy decode on the already-warmed GPU cache — the generation
+    /// completes rather than dying with the drafter.
+    public func generateWithANEDrafting(
+        prompt: String,
+        systemPrompt: String? = nil,
+        history: [ChatMessage] = [],
+        session: BadAppleANEDrafter.Session,
+        numDraftTokens: Int = 4,
+        maxTokens: Int? = nil,
+        onToken: @escaping @Sendable (String) -> Void,
+        onComplete: @escaping @Sendable (GenerationResult) -> Void,
+        onError: @escaping @Sendable (Error) -> Void
+    ) {
+        Task {
+            defer { Task { await BadAppleANEDrafter.shared.release() } }
+            do {
+                guard let container = await state.getContainer() else {
+                    onError(InferenceError.modelNotLoaded)
+                    return
+                }
+
+                var messages: [Chat.Message] = []
+                if let systemPrompt = systemPrompt {
+                    messages.append(.system(systemPrompt))
+                }
+                for message in history.suffix(12) {
+                    switch message.role.lowercased() {
+                    case "assistant": messages.append(.assistant(message.content))
+                    case "system": messages.append(.system(message.content))
+                    default: messages.append(.user(message.content))
+                    }
+                }
+                messages.append(.user(prompt))
+
+                let userInput = UserInput(
+                    chat: messages,
+                    additionalContext: ["enable_thinking": false]
+                )
+                let lmInput = try await container.prepare(input: userInput)
+                let promptIds = lmInput.text.tokens.asType(.int32).asArray(Int32.self)
+
+                let maxTok = maxTokens ?? config.maxTokens
+                // ANE sees a tail window of the prompt: drafts only need
+                // recent context, the verifier holds the truth. Budget
+                // leaves room for the whole generation.
+                let aneBudget = session.contextLimit - maxTok - numDraftTokens - 8
+                let minWindow = 128
+                guard aneBudget >= minWindow else {
+                    NSLog("[BadAppleSpecANE] no ANE window (context %d, maxTokens %d) — falling back to plain GPU",
+                          session.contextLimit, maxTok)
+                    self.generateStreamingTokens(
+                        prompt: prompt,
+                        systemPrompt: systemPrompt,
+                        history: history,
+                        maxTokens: maxTok,
+                        temperature: 0.6,
+                        onToken: onToken,
+                        onComplete: onComplete,
+                        onError: onError
+                    )
+                    return
+                }
+                let anePromptIds = Array(promptIds.suffix(aneBudget))
+                if anePromptIds.count < promptIds.count {
+                    NSLog("[BadAppleSpecANE] ANE prefill windowed: %d of %d prompt tokens",
+                          anePromptIds.count, promptIds.count)
+                }
+
+                let outcome = try await container.perform(
+                    nonSendable: (session, promptIds, anePromptIds, maxTok, numDraftTokens)
+                ) { ctx, payload -> ANESpecOutcome in
+                    let (drafter, promptIds, anePromptIds, maxTok, numDraft) = payload
+                    var outcome = ANESpecOutcome()
+
+                    var cache = makePromptCache(model: ctx.model, parameters: nil)
+                    guard canTrimPromptCache(cache) else {
+                        outcome.draftingSurvived = false
+                        return outcome
+                    }
+                    var eosIds = Set(ctx.configuration.eosTokenIds.map(Int32.init))
+                    eosIds.formUnion(
+                        [ctx.tokenizer.eosToken, "<|im_end|>", "<|endoftext|>"]
+                            .compactMap { $0 }
+                            .compactMap { ctx.tokenizer.convertTokenToId($0) }
+                            .map { Int32($0) })
+
+                    func forward(_ ids: [Int32], _ state: inout LMOutput.State?) -> MLXArray {
+                        let text = LMInput.Text(tokens: MLXArray(ids))
+                        let out = ctx.model(text[text: .newAxis], cache: cache, state: state)
+                        state = out.state
+                        return out.logits
+                    }
+
+                    var emittedSoFar = ""
+                    func emitDelta() {
+                        let text = ctx.tokenizer.decode(
+                            tokenIds: outcome.emitted.map(Int.init), skipSpecialTokens: true)
+                        if text.count > emittedSoFar.count {
+                            onToken(String(text.dropFirst(emittedSoFar.count)))
+                            emittedSoFar = text
+                        }
+                    }
+
+                    // GPU prefill — one forward over the whole prompt.
+                    var t0 = DispatchTime.now()
+                    var mstate: LMOutput.State? = nil
+                    let plogits = forward(promptIds, &mstate)
+                    eval(plogits)
+                    var y = argMax(plogits[0..., -1, 0...]).item(Int32.self)
+                    outcome.prefillNs = DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds
+                    outcome.emitted.append(y)
+                    emitDelta()
+                    var stop = eosIds.contains(y)
+
+                    // ANE prime: commit the windowed prompt in batched
+                    // chunks (discard its proposal for y's slot — the
+                    // GPU's argmax won), then commit y itself — its
+                    // return is the first draft proposal.
+                    t0 = DispatchTime.now()
+                    _ = drafter.reset()
+                    let anePrimed = drafter.prefill(anePromptIds)
+                    outcome.anePrefillNs = DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds
+                    var pending = anePrimed ? drafter.predictNext([y]) : -1
+                    var draftingAlive = pending >= 0
+                    outcome.draftNs = DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds
+                        - outcome.anePrefillNs
+                    outcome.draftingSurvived = draftingAlive
+
+                    while outcome.emitted.count < maxTok && !stop {
+                        if draftingAlive {
+                            // Collect k drafts: each predict commits the
+                            // previous draft and proposes the next slot.
+                            let F = drafter.position   // pending proposes slot F
+                            t0 = DispatchTime.now()
+                            var drafts: [Int32] = [pending]
+                            while drafts.count < numDraft {
+                                let nxt = drafter.predictNext([drafts.last!])
+                                if nxt < 0 { draftingAlive = false; break }
+                                drafts.append(nxt)
+                            }
+                            outcome.draftNs += DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds
+                            guard draftingAlive else {
+                                _ = drafter.reset()
+                                continue
+                            }
+
+                            // Verify: [y] + drafts in ONE GPU forward.
+                            t0 = DispatchTime.now()
+                            let vlogits = forward([y] + drafts, &mstate)
+                            eval(vlogits)
+                            let k = drafts.count
+                            let vstart = vlogits.dim(1) - (k + 1)
+                            let mts = argMax(vlogits[0..., vstart..., 0...]
+                                .squeezed(axis: 0), axis: -1).asArray(Int32.self)
+                            outcome.verifyNs += DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds
+
+                            var n = 0
+                            while n < k && mts[n] == drafts[n] { n += 1 }
+                            outcome.proposed += k
+                            outcome.accepted += n
+                            outcome.rounds += 1
+
+                            // GPU keeps the anchor + n accepted positions.
+                            _ = trimPromptCache(cache, numTokens: k - n)
+
+                            let remaining = maxTok - outcome.emitted.count
+                            let roundTokens = Array(mts[0 ... Swift.min(n, k)]).prefix(remaining)
+                            outcome.emitted.append(contentsOf: roundTokens)
+                            emitDelta()
+                            y = mts[n]
+                            stop = roundTokens.contains(where: { eosIds.contains($0) })
+                                || outcome.emitted.count >= maxTok
+                            if stop { break }
+
+                            // ANE resync: rewind over rejected commits,
+                            // then feed the verifier's token so the next
+                            // pending proposes the new frontier.
+                            t0 = DispatchTime.now()
+                            if n == k {
+                                pending = drafter.predictNext([drafts[k - 1], mts[k]])
+                            } else {
+                                _ = drafter.rewind(to: F + Int32(n))
+                                pending = drafter.predictNext([mts[n]])
+                            }
+                            outcome.draftNs += DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds
+                            if pending < 0 {
+                                draftingAlive = false
+                                outcome.draftingSurvived = false
+                                _ = drafter.reset()
+                            }
+                        } else {
+                            // ANE died mid-generation: finish greedy on
+                            // the warmed GPU cache rather than erroring.
+                            let lg = forward([y], &mstate)
+                            eval(lg)
+                            y = argMax(lg[0..., -1, 0...]).item(Int32.self)
+                            outcome.emitted.append(y)
+                            emitDelta()
+                            stop = eosIds.contains(y)
+                        }
+                    }
+                    outcome.stoppedOnEOS = stop && eosIds.contains(y)
+                    Memory.clearCache()
+                    return outcome
+                }
+
+                await BadAppleANEDrafter.shared.record(
+                    proposed: outcome.proposed, accepted: outcome.accepted, rounds: outcome.rounds)
+
+                let tokenizer = await container.tokenizer
+                let fullText = tokenizer.decode(
+                    tokenIds: outcome.emitted.map(Int.init), skipSpecialTokens: true)
+                let elapsedS = Double(outcome.prefillNs + outcome.anePrefillNs + outcome.draftNs + outcome.verifyNs) / 1e9
+                NSLog(
+                    "[BadAppleSpecANE] %d tok | %d rounds | proposed %d accepted %d (%.0f%%) | gpuPrefill %.0fms anePrefill %.0fms draft %.0fms verify %.0fms | drafting survived: %d",
+                    outcome.emitted.count, outcome.rounds, outcome.proposed, outcome.accepted,
+                    outcome.proposed > 0 ? 100.0 * Double(outcome.accepted) / Double(outcome.proposed) : 0,
+                    Double(outcome.prefillNs) / 1e6, Double(outcome.anePrefillNs) / 1e6,
+                    Double(outcome.draftNs) / 1e6,
+                    Double(outcome.verifyNs) / 1e6, outcome.draftingSurvived)
+                onComplete(GenerationResult(
+                    text: fullText,
+                    tokensPerSecond: elapsedS > 0 ? Float(Double(outcome.emitted.count) / elapsedS) : 0,
+                    tokenCount: outcome.emitted.count,
+                    tier: "main+ane-draft",
+                    draftProposedTokens: outcome.proposed,
+                    draftAcceptedTokens: outcome.accepted,
+                    prefixCache: "ane:\(outcome.rounds)r"
+                ))
+            } catch {
+                onError(InferenceError.generationFailed(error.localizedDescription))
+            }
+        }
+    }
+
     // MARK: - Memory Management
 
     public func clearCache() {

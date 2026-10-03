@@ -692,6 +692,9 @@ final class BadAppleEngine: @unchecked Sendable {
             // The deliberating council co-resides on the ANE — LLM
             // judges above the deterministic seats' fast pre-filter.
             await BadAppleANECouncil.shared.startIfEnabled()
+            // Tier-4 cross-silicon speculative decoding: the 0.6B
+            // drafts on the ANE, the 7B verifies on the GPU.
+            await BadAppleANEDrafter.shared.startIfEnabled()
         }
     }
 
@@ -2212,7 +2215,7 @@ final class BadAppleEngine: @unchecked Sendable {
         }
 
         // Fast tier: route simple queries to the 0.5B model when enabled and configured.
-        if fastTierEnabled, let fastInf = fastInference, isSimpleQuery(prompt), toolRouter.toolSchemasForPrompt(text: prompt) == nil {
+        if fastTierEnabled, let fastInf = fastInference, isSimpleQuery(prompt), !isSelfReferential(prompt), toolRouter.toolSchemasForPrompt(text: prompt) == nil {
             Task {
                 await ensureFastModelLoaded()
                 guard fastModelLoaded else {
@@ -2314,6 +2317,7 @@ final class BadAppleEngine: @unchecked Sendable {
         stateLock.withLock { _lastCacheHit = false }
 
         Task {
+            NSLog("[BadAppleEngine] mainModel task entered")
             await refreshAmbientContext()
 
             let history = inferenceHistory(sessionID: sessionID)
@@ -2354,7 +2358,9 @@ final class BadAppleEngine: @unchecked Sendable {
             }
 
             let effectiveMaxTokens = thermalThrottle ? min(maxTokens, 128) : maxTokens
-            if let toolsText = toolRouter.toolsForPrompt(text: prompt) {
+            let toolsTextProbe = toolRouter.toolsForPrompt(text: prompt)
+            NSLog("[BadAppleEngine] mainModel route: tools=%@ prompt=%@", toolsTextProbe == nil ? "nil" : "MATCHED", String(prompt.prefix(60)))
+            if let toolsText = toolsTextProbe {
                 let example = "<tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>"
                 sysPrompt += "\n\nThe user is asking for a local action. You MUST use one of the available tools below. Do not answer from memory or in prose. Output ONLY one block like this: \(example). Do not wrap arguments inside a \"properties\" object. Put the actual arguments directly inside \"arguments\". Never invent a tool result.\n\n\(toolsText)"
                 do {
@@ -2447,8 +2453,27 @@ final class BadAppleEngine: @unchecked Sendable {
                 }
             }
 
+            // Cross-silicon speculative decoding takes precedence when
+            // the ANE drafter holds a session — the draft lives on the
+            // Neural Engine, costing the memory budget ~nothing. This
+            // path is greedy-decode; if the session can't be acquired
+            // (unready, busy, disabled) we fall through to the normal
+            // sampled paths.
+            NSLog("[BadAppleEngine] generation dispatch: probing ANE drafter")
+            if let aneSession = await BadAppleANEDrafter.shared.acquire() {
+                inference.generateWithANEDrafting(
+                    prompt: prompt,
+                    systemPrompt: sysPrompt,
+                    history: history,
+                    session: aneSession,
+                    numDraftTokens: BadAppleInference.envNumDraftTokens,
+                    maxTokens: effectiveMaxTokens,
+                    onToken: onTokenCb,
+                    onComplete: onCompleteCb,
+                    onError: onErrorCb
+                )
             // Speculative decoding: use the draft model if configured.
-            if let draftModelId = BadAppleInference.envSpeculativeDraftModel {
+            } else if let draftModelId = BadAppleInference.envSpeculativeDraftModel {
                 inference.generateWithSpeculativeDecoding(
                     prompt: prompt,
                     systemPrompt: sysPrompt,
@@ -3469,6 +3494,20 @@ final class BadAppleEngine: @unchecked Sendable {
         // Very short prompts are likely simple.
         if prompt.count < 30 { return true }
         return false
+    }
+
+    /// Identity and self-description prompts must never reach the 0.5B fast
+    /// tier — the main model holds the identity contract in prompt.txt, and
+    /// protocol tokens are handled by the deterministic meta paths.
+    private func isSelfReferential(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        if lower.hasPrefix("__badapple_") { return true }
+        let patterns = [
+            "who are you", "what are you", "your name", "yourself",
+            "are you a", "are you an", "what can you do", "about you",
+            "introduce yourself", "describe yourself",
+        ]
+        return patterns.contains(where: { lower.contains($0) })
     }
 
     // MARK: - Vision
@@ -4508,6 +4547,7 @@ final class BadAppleEngine: @unchecked Sendable {
         status["ane_brain"] = (await BadAppleANEBrain.shared.status()).mapValues { $0 as Any }
         status["ane_sentinel"] = (await BadAppleANESentinel.shared.status()).mapValues { $0 as Any }
         status["ane_council"] = (await BadAppleANECouncil.shared.status()).mapValues { $0 as Any }
+        status["ane_drafter"] = (await BadAppleANEDrafter.shared.status()).mapValues { $0 as Any }
         // Read safe-mode reason from the supervisor's runtime state if present.
         let statePath = "/var/lib/bad_apple/runtime_state.json"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
