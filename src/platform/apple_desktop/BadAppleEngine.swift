@@ -689,6 +689,9 @@ final class BadAppleEngine: @unchecked Sendable {
             // The watchdog starts with the brain it watches — separate
             // artifact, separate handle, same dedicated silicon.
             await BadAppleANESentinel.shared.startIfEnabled()
+            // The deliberating council co-resides on the ANE — LLM
+            // judges above the deterministic seats' fast pre-filter.
+            await BadAppleANECouncil.shared.startIfEnabled()
         }
     }
 
@@ -1336,6 +1339,29 @@ final class BadAppleEngine: @unchecked Sendable {
         )
     }
 
+    /// Journal a deliberating-council panel: every seat's vote and
+    /// rationale, so a post-hoc review sees the dissent, not just the
+    /// count.
+    private func auditANECouncil(verdict: BadAppleANECouncil.Verdict, name: String,
+                                 args: [String: String], persona: String) {
+        let seats: [[String: String]] = verdict.rulings.map {
+            ["seat": $0.seat, "vote": $0.vote.rawValue,
+             "rationale": $0.rationale, "latency_us": String($0.latencyUs)]
+        }
+        auditLedger.append(
+            eventType: "council_llm",
+            data: [
+                "tool": name, "arguments": args,
+                "contested": verdict.contested,
+                "summary": verdict.summaryLine,
+                "unavailable": verdict.unavailable,
+                "seats": seats,
+                "silicon": "ane",
+            ],
+            persona: persona
+        )
+    }
+
     /// Serialize tool args for the sentinel's intent prompt. A payload
     /// that can't serialize is itself worth flagging — return an
     /// honest placeholder rather than skipping the vet.
@@ -1704,14 +1730,27 @@ final class BadAppleEngine: @unchecked Sendable {
                         toolName: call.name, argsJson: intentArgsJson(call.args),
                         policyVerdict: "needs_approval")
                     auditSentinel(ruling: ruling, name: call.name, args: call.args, persona: persona)
+                    // The deliberating council adds its counsel too —
+                    // persona judges on ANE, dissent preserved for the
+                    // human reading the prompt.
+                    let panel = await BadAppleANECouncil.shared.deliberate(
+                        toolName: call.name, argsJson: intentArgsJson(call.args),
+                        policyVerdict: "needs_approval")
+                    auditANECouncil(verdict: panel, name: call.name, args: call.args, persona: persona)
                     let id = createApproval(name: call.name, args: call.args)
                     auditLedger.append(
                         eventType: "approval_requested",
                         data: ["id": id, "name": call.name, "arguments": call.args],
                         persona: persona
                     )
-                    let counsel = ruling.verdict == .unavailable ? ""
+                    var counsel = ruling.verdict == .unavailable ? ""
                         : "\n[sentinel: \(ruling.verdict.rawValue.uppercased()) — \(ruling.reason)]"
+                    if !panel.unavailable {
+                        counsel += "\n[panel: \(panel.summaryLine)]"
+                        for r in panel.rulings where r.vote != .allow {
+                            counsel += "\n  \(r.seat): \(r.vote.rawValue) — \(r.rationale)"
+                        }
+                    }
                     return BadAppleInference.GenerationResult(
                         text: approvalPromptText(id: id, name: call.name, args: call.args)
                             + "\n\n" + verdict.summaryLine + counsel,
@@ -1736,9 +1775,18 @@ final class BadAppleEngine: @unchecked Sendable {
                             toolName: call.name, argsJson: intentArgsJson(call.args),
                             policyVerdict: "approved")
                         auditSentinel(ruling: ruling, name: call.name, args: call.args, persona: persona)
+                        // The deliberating council votes on the same
+                        // intent — a contested panel routes to the
+                        // human under the same contract as a contested
+                        // deterministic vote.
+                        let panel = await BadAppleANECouncil.shared.deliberate(
+                            toolName: call.name, argsJson: intentArgsJson(call.args),
+                            policyVerdict: "approved")
+                        auditANECouncil(verdict: panel, name: call.name, args: call.args, persona: persona)
                         if policyEngine.autopilot {
                             let sentinelVeto = ruling.verdict == .deny || ruling.verdict == .escalate
-                            if verdict.contested || sentinelVeto {
+                            let panelVeto = !panel.unavailable && panel.contested
+                            if verdict.contested || sentinelVeto || panelVeto {
                                 let id = createApproval(name: call.name, args: call.args)
                                 auditLedger.append(
                                     eventType: "council_escalated",
@@ -1749,9 +1797,14 @@ final class BadAppleEngine: @unchecked Sendable {
                                            "sentinel_reason": ruling.reason],
                                     persona: persona
                                 )
-                                let vetoLine = sentinelVeto
-                                    ? "Sentinel \(ruling.verdict.rawValue.uppercased())ed `\(call.name)` — \(ruling.reason). Sending it to you.\n"
-                                    : "Council vote failed `\(call.name)` — sending it to you.\n"
+                                let vetoLine: String
+                                if sentinelVeto {
+                                    vetoLine = "Sentinel \(ruling.verdict.rawValue.uppercased())ed `\(call.name)` — \(ruling.reason). Sending it to you.\n"
+                                } else if panelVeto {
+                                    vetoLine = "Panel contested `\(call.name)` — \(panel.summaryLine). Sending it to you.\n"
+                                } else {
+                                    vetoLine = "Council vote failed `\(call.name)` — sending it to you.\n"
+                                }
                                 return BadAppleInference.GenerationResult(
                                     text: vetoLine + verdict.summaryLine + "\n\n"
                                         + approvalPromptText(id: id, name: call.name, args: call.args),
@@ -4397,6 +4450,7 @@ final class BadAppleEngine: @unchecked Sendable {
         status["vram"] = await runtime.vramStatus()
         status["ane_brain"] = (await BadAppleANEBrain.shared.status()).mapValues { $0 as Any }
         status["ane_sentinel"] = (await BadAppleANESentinel.shared.status()).mapValues { $0 as Any }
+        status["ane_council"] = (await BadAppleANECouncil.shared.status()).mapValues { $0 as Any }
         // Read safe-mode reason from the supervisor's runtime state if present.
         let statePath = "/var/lib/bad_apple/runtime_state.json"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
