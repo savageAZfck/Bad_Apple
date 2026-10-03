@@ -135,7 +135,9 @@ public actor BadAppleANECouncil {
     }
 
     /// The panel. Each seat gets the same intent, a different lens —
-    /// dissent between lenses is the signal, not noise.
+    /// dissent between lenses is the signal, not noise. Personas are
+    /// prose because the council runs on the 4B ANE brain — real
+    /// reasoning, not a 0.6B pattern-match.
     private static var seats: [Seat] {
         let common = """
             You are one seat on a hardware-isolated oversight council. Judge \
@@ -278,7 +280,9 @@ public actor BadAppleANECouncil {
         guard promptTokens.count < contextLimit else {
             return SeatRuling(seat: seat.name, vote: .abstain, rationale: "prompt over context", latencyUs: 0)
         }
-        let budget = max(1, min(24, contextLimit - promptTokens.count))
+        // The 4B needs room for the vote word plus a one-line reason —
+        // a truncated rationale reads as noise, not judgement.
+        let budget = max(1, min(48, contextLimit - promptTokens.count))
         let stops = stopTokens
         let started = DispatchTime.now()
         let output: [Int32]? = await withCheckedContinuation { cont in
