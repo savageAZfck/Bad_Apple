@@ -330,7 +330,12 @@ impl AneCore {
     where
         F: FnMut(&str) -> bool,
     {
-        let (rendered, add_special_tokens) = match &self.chat_template {
+        let (rendered, add_special_tokens) = if std::env::var_os("BADAPPLE_ANE_RAW_PROMPT")
+            .is_some_and(|v| v != "0")
+        {
+            (prompt.to_string(), false)
+        } else {
+            match &self.chat_template {
             Some(template) => {
                 let mut messages = Vec::with_capacity(2);
                 if let Some(system) = system {
@@ -362,6 +367,7 @@ impl AneCore {
                 },
                 true,
             ),
+            }
         };
         let encoding = self
             .tokenizer

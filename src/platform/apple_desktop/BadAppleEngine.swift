@@ -1334,6 +1334,7 @@ final class BadAppleEngine: @unchecked Sendable {
                 "tool": name, "arguments": args,
                 "verdict": ruling.verdict.rawValue,
                 "reason": ruling.reason,
+                "raw": String(ruling.raw.prefix(300)),
                 "latency_us": ruling.latencyUs,
                 "silicon": "ane",
             ],
@@ -2534,10 +2535,25 @@ final class BadAppleEngine: @unchecked Sendable {
         maxTokens: Int = 300,
         temperature: Float = 0.6
     ) async throws -> String {
+        let requestSessionID = conversationSessionID()
+
+        // Governed task submission runs before the model guard — policy,
+        // the deterministic council, the sentinel, and the ANE panel need
+        // no GPU brain. Oversight doesn't wait for the mind to load.
+        if let goal = wantsTaskSubmission(prompt) {
+            let taskOutput = await governedAgentSubmit(goal: goal, persona: activePersona)
+            auditLedger.append(
+                eventType: "tool_result",
+                data: ["name": "submit_agent_task", "result": taskOutput],
+                persona: activePersona
+            )
+            saveTurn(prompt: prompt, response: taskOutput, sessionID: requestSessionID)
+            return taskOutput
+        }
+
         guard isLoaded else {
             return "The AI model is not loaded yet. Please wait a moment and try again."
         }
-        let requestSessionID = conversationSessionID()
 
         let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
             || prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("deny ")
