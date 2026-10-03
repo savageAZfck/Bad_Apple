@@ -39,6 +39,7 @@ pub mod protocol;
 pub mod red_team;
 pub mod redb_kv;
 pub mod scavenger;
+pub mod sentinel;
 pub mod simd;
 pub mod strategy_library;
 pub mod tensor_brain;
@@ -198,6 +199,50 @@ fn bad_apple_cstring(s: &str) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn bad_apple_get_apple_latency_us() -> u64 {
     apple_intelligence::last_latency_us()
+}
+
+/// Nonzero when the ANE-resident sentinel model is loaded and vetting.
+/// Zero means "no dedicated watchdog" — callers fall back to the
+/// deterministic council rather than treating silence as a verdict.
+#[no_mangle]
+pub extern "C" fn bad_apple_sentinel_available() -> i32 {
+    if sentinel::is_available() { 1 } else { 0 }
+}
+
+/// Vet one proposed tool call through the dedicated ANE sentinel.
+/// `name`, `args_json`, and `policy` must be valid NUL-terminated UTF-8
+/// C strings. Returns a JSON C string —
+/// `{"verdict":"allow|deny|escalate|unavailable","reason":"...","latency_us":N}`
+/// — which the caller must free with `bad_apple_free_string`.
+///
+/// # Safety
+///
+/// Pointers must be valid for the duration of the call. This is a
+/// blocking, synchronous call — it runs an ANE inference bounded to a
+/// short verdict window.
+#[no_mangle]
+pub unsafe extern "C" fn bad_apple_sentinel_vet(
+    name: *const c_char,
+    args_json: *const c_char,
+    policy: *const c_char,
+) -> *mut c_char {
+    if name.is_null() || args_json.is_null() || policy.is_null() {
+        return bad_apple_cstring("{\"verdict\":\"escalate\",\"reason\":\"null intent fields\"}");
+    }
+    let (Ok(name), Ok(args), Ok(pol)) = (
+        CStr::from_ptr(name).to_str(),
+        CStr::from_ptr(args_json).to_str(),
+        CStr::from_ptr(policy).to_str(),
+    ) else {
+        return bad_apple_cstring("{\"verdict\":\"escalate\",\"reason\":\"invalid intent encoding\"}");
+    };
+    let v = sentinel::vet(name, args, pol);
+    bad_apple_cstring(&format!(
+        "{{\"verdict\":\"{}\",\"reason\":{},\"latency_us\":{}}}",
+        v.verdict.as_str(),
+        serde_json::to_string(&v.reason).unwrap_or_else(|_| "\"?\"".into()),
+        v.latency_us
+    ))
 }
 
 /// Return the active pursuits for a context as a JSON array C string.

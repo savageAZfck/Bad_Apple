@@ -686,6 +686,9 @@ final class BadAppleEngine: @unchecked Sendable {
         Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
             await BadAppleANEBrain.shared.startIfEnabled()
+            // The watchdog starts with the brain it watches — separate
+            // artifact, separate handle, same dedicated silicon.
+            await BadAppleANESentinel.shared.startIfEnabled()
         }
     }
 
@@ -1314,6 +1317,36 @@ final class BadAppleEngine: @unchecked Sendable {
         )
     }
 
+    /// Journal a sentinel ruling: the dedicated-silicon watchdog's
+    /// verdict rides the same audit chain as council deliberations so a
+    /// post-hoc review sees who judged what — including the cases where
+    /// the sentinel wasn't there to judge.
+    private func auditSentinel(ruling: BadAppleANESentinel.Ruling, name: String,
+                               args: [String: String], persona: String) {
+        auditLedger.append(
+            eventType: "sentinel_vet",
+            data: [
+                "tool": name, "arguments": args,
+                "verdict": ruling.verdict.rawValue,
+                "reason": ruling.reason,
+                "latency_us": ruling.latencyUs,
+                "silicon": "ane",
+            ],
+            persona: persona
+        )
+    }
+
+    /// Serialize tool args for the sentinel's intent prompt. A payload
+    /// that can't serialize is itself worth flagging — return an
+    /// honest placeholder rather than skipping the vet.
+    private func intentArgsJson(_ args: [String: String]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: args),
+              let s = String(data: data, encoding: .utf8) else {
+            return "{\"unserializable\":true}"
+        }
+        return s
+    }
+
     /// Anchor a provenance record for the loaded brain into the audit chain.
     /// The record itself lives in provenance.jsonl; this entry binds its
     /// SHA-256 so the artifact cannot be rewritten without breaking the chain.
@@ -1663,15 +1696,25 @@ final class BadAppleEngine: @unchecked Sendable {
                     let verdict = BadAppleCouncil.deliberate(toolName: call.name, args: call.args)
                     auditCouncil(verdict: verdict, name: call.name, args: call.args,
                                  mode: "advisory", persona: persona)
+                    // The sentinel advises too — dedicated silicon's
+                    // read, appended alongside the council's so the
+                    // human sees both judges. Unavailable rulings are
+                    // configuration, not counsel, and stay off the prompt.
+                    let ruling = await BadAppleANESentinel.shared.vet(
+                        toolName: call.name, argsJson: intentArgsJson(call.args),
+                        policyVerdict: "needs_approval")
+                    auditSentinel(ruling: ruling, name: call.name, args: call.args, persona: persona)
                     let id = createApproval(name: call.name, args: call.args)
                     auditLedger.append(
                         eventType: "approval_requested",
                         data: ["id": id, "name": call.name, "arguments": call.args],
                         persona: persona
                     )
+                    let counsel = ruling.verdict == .unavailable ? ""
+                        : "\n[sentinel: \(ruling.verdict.rawValue.uppercased()) — \(ruling.reason)]"
                     return BadAppleInference.GenerationResult(
                         text: approvalPromptText(id: id, name: call.name, args: call.args)
-                            + "\n\n" + verdict.summaryLine,
+                            + "\n\n" + verdict.summaryLine + counsel,
                         tier: "approval"
                     )
                 case .approved:
@@ -1684,26 +1727,42 @@ final class BadAppleEngine: @unchecked Sendable {
                         auditCouncil(verdict: verdict, name: call.name, args: call.args,
                                      mode: policyEngine.autopilot ? "autopilot" : "pre-approval",
                                      persona: persona)
+                        // The dedicated-silicon watchdog judges the same
+                        // intent. A DENY or ESCALATE routes to the human
+                        // exactly like a contested council vote — the
+                        // sentinel can veto what policy approved, but
+                        // only the human can override a veto.
+                        let ruling = await BadAppleANESentinel.shared.vet(
+                            toolName: call.name, argsJson: intentArgsJson(call.args),
+                            policyVerdict: "approved")
+                        auditSentinel(ruling: ruling, name: call.name, args: call.args, persona: persona)
                         if policyEngine.autopilot {
-                            if verdict.contested {
+                            let sentinelVeto = ruling.verdict == .deny || ruling.verdict == .escalate
+                            if verdict.contested || sentinelVeto {
                                 let id = createApproval(name: call.name, args: call.args)
                                 auditLedger.append(
                                     eventType: "council_escalated",
                                     data: ["id": id, "name": call.name,
                                            "decision": verdict.decision.rawValue,
-                                           "dissent": verdict.dissent],
+                                           "dissent": verdict.dissent,
+                                           "sentinel": ruling.verdict.rawValue,
+                                           "sentinel_reason": ruling.reason],
                                     persona: persona
                                 )
+                                let vetoLine = sentinelVeto
+                                    ? "Sentinel \(ruling.verdict.rawValue.uppercased())ed `\(call.name)` — \(ruling.reason). Sending it to you.\n"
+                                    : "Council vote failed `\(call.name)` — sending it to you.\n"
                                 return BadAppleInference.GenerationResult(
-                                    text: "Council vote failed `\(call.name)` — sending it to you.\n"
-                                        + verdict.summaryLine + "\n\n"
+                                    text: vetoLine + verdict.summaryLine + "\n\n"
                                         + approvalPromptText(id: id, name: call.name, args: call.args),
                                     tier: "approval"
                                 )
                             }
                             let result = await toolExecutor.executeTool(
                                 name: call.name, args: call.args, approved: true)
-                            output = result + "\n\n[council: " + verdict.summaryLine + "]"
+                            let sentinelNote = ruling.verdict == .unavailable ? ""
+                                : " sentinel:\(ruling.verdict.rawValue)"
+                            output = result + "\n\n[council: " + verdict.summaryLine + sentinelNote + "]"
                             auditLedger.append(
                                 eventType: "tool_result",
                                 data: ["name": call.name, "result": output],
@@ -1711,6 +1770,28 @@ final class BadAppleEngine: @unchecked Sendable {
                             )
                             outputs.append("\(call.name): \(output)")
                             continue
+                        }
+                    }
+                    // Ungated calls skip the synchronous gate entirely —
+                    // the sentinel still judges them, after the fact and
+                    // for free, so a "policy-approved" path can't bypass
+                    // oversight by never asking for approval.
+                    if !policyEngine.requiresApproval(toolName: call.name) {
+                        let name = call.name
+                        let argsJson = intentArgsJson(call.args)
+                        let personaNow = persona
+                        BadAppleANESentinel.shared.shadowVet(
+                            toolName: name, argsJson: argsJson,
+                            policyVerdict: "approved") { [weak self] ruling in
+                            guard let self else { return }
+                            BadAppleTape.drop(kind: "sentinel_shadow", fields: [
+                                "name": name,
+                                "verdict": ruling.verdict.rawValue,
+                                "reason": ruling.reason,
+                                "latency_us": ruling.latencyUs,
+                            ])
+                            self.auditSentinel(
+                                ruling: ruling, name: name, args: [:], persona: personaNow)
                         }
                     }
                     output = await toolExecutor.executeTool(name: call.name, args: call.args, approved: true)
@@ -4315,6 +4396,7 @@ final class BadAppleEngine: @unchecked Sendable {
         status["killed"] = killed
         status["vram"] = await runtime.vramStatus()
         status["ane_brain"] = (await BadAppleANEBrain.shared.status()).mapValues { $0 as Any }
+        status["ane_sentinel"] = (await BadAppleANESentinel.shared.status()).mapValues { $0 as Any }
         // Read safe-mode reason from the supervisor's runtime state if present.
         let statePath = "/var/lib/bad_apple/runtime_state.json"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
