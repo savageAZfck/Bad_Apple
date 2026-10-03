@@ -1,7 +1,7 @@
 cask "bad-apple" do
-  version "0.6.0"
+  version "0.7.0"
   # Update this sha256 for each release. package_minimal_release.sh prints the final hash.
-  sha256 "a2070f48b5a2127ae5f338933ed324097e6a75ad1e14252eedbaf085e053cf3b"
+  sha256 "65dc480a05b160c185d383d6c211b24031cf1087e603917d4c13ec9eda0b1454"
 
   url "https://github.com/savageAZfck/bad-apple-releases/releases/download/v#{version}/Bad_Apple-#{version}-unsigned.zip"
   name "Bad Apple"
