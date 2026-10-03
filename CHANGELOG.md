@@ -2,6 +2,44 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.7.0] — 2026-10-03
+
+### Added
+- **Cross-silicon speculative decoding**: the ANE 0.6B drafter proposes
+  token runs that the GPU 7B verifies, with batched prefill shards
+  (64 tokens/call) sharing the decode shards' KV state — verified
+  byte-identical to the token-loop path, ledger tier `main+ane-draft`.
+- **Packed-KV ANE state**: one `kv_cache` state per shard
+  `[2*nl,nkv,seq,dh]` written by `slice_update` at runtime `pos` and
+  re-sliced for attention, replacing per-layer masked-write states.
+  `examples/mil_kvpack` bisected the toolchain: `slice_update` plans
+  under ios18/CoreML8 only for the s==1 graph (decode shards emit
+  spec 9); a standalone transpose of a state slice fails -14 (K^T now
+  fused via matmul `transpose_y`); the s>1 graph plans under ios19 but
+  its program cancels at runtime, so prefill shards run on `.cpuAndGPU`
+  sharing the decode `MLState`.
+- **Dual-mode bridge**: shard predict feature-detects `pos` vs legacy
+  `kv_write_mask`; state buffers are zeroed on init (uninitialized
+  `MLState` contains Inf that poisons masked attention).
+- **Explicit attention everywhere**: fused SDPA dropped non-broadcast
+  masks and miscompiled the folded GQA shape — replaced with
+  matmul·scale·mask·softmax·matmul, verified 15/16 greedy vs bf16
+  ground truth.
+
+### Fixed
+- The 0.6B's glyph-noise output — five separate ANE miscompiles
+  (mask drop, read_state corruption, scatter write garbage, s==1
+  attention shape, uninitialized state), not model weakness.
+- `__badapple_new_chat__` leaking to the fast tier as a prompt
+  (identity mangling) — now a meta command with no response row.
+- Meta command reset path + fast tier barred from self-referential
+  prompts; drafter enabled-check bug.
+
+## [0.6.0] — 2026-10-02
+
+### Added
+- Neural Engine second brain, eyes organ, governance layer.
+
 ## [0.5.0] — 2026-09-28
 
 ### Added
