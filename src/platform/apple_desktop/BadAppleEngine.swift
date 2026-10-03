@@ -1900,12 +1900,9 @@ final class BadAppleEngine: @unchecked Sendable {
         onComplete: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
     ) {
-        guard isLoaded else {
-            onError("The AI model is not loaded yet. Please wait a moment and try again.")
-            return
-        }
         let startedAt = Date()
         let requestSessionID = conversationSessionID()
+        let persona = activePersona
 
         let isApproval = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("approve ")
             || prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("deny ")
@@ -1979,7 +1976,6 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
 
-        let persona = activePersona
         stateLock.withLock { _lastCacheHit = false; _lastResponseTier = "" }
 
         auditLedger.append(
@@ -1987,6 +1983,36 @@ final class BadAppleEngine: @unchecked Sendable {
             data: ["prompt": prompt, "voice": voiceMode],
             persona: persona
         )
+
+        // Model-free dispatches: governed task submission needs policy,
+        // the sentinel and the council — not the GPU brain. A down model
+        // must never block oversight from answering.
+        if let goal = wantsTaskSubmission(prompt) {
+            Task {
+                let output = await governedAgentSubmit(goal: goal, persona: persona)
+                auditLedger.append(
+                    eventType: "tool_result",
+                    data: ["name": "submit_agent_task", "result": output],
+                    persona: persona
+                )
+                saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
+                await runtime.recordQuery(
+                    latencySeconds: Date().timeIntervalSince(startedAt),
+                    tokenCount: 0,
+                    succeeded: true
+                )
+                DispatchQueue.main.async {
+                    onToken(output)
+                    onComplete(output)
+                }
+            }
+            return
+        }
+
+        guard isLoaded else {
+            onError("The AI model is not loaded yet. Please wait a moment and try again.")
+            return
+        }
 
         // Check prompt hot-reload before generation.
         checkPromptReload()
@@ -2180,30 +2206,6 @@ final class BadAppleEngine: @unchecked Sendable {
                     DispatchQueue.main.async {
                         onError("Introspection ran, but the model could not voice it: \(error.localizedDescription)")
                     }
-                }
-            }
-            return
-        }
-
-        // User-initiated task submission: "task: ..." files a real goal onto
-        // the native agent queue — governed by policy, council and approval.
-        if let goal = wantsTaskSubmission(prompt) {
-            Task {
-                let output = await governedAgentSubmit(goal: goal, persona: persona)
-                auditLedger.append(
-                    eventType: "tool_result",
-                    data: ["name": "submit_agent_task", "result": output],
-                    persona: persona
-                )
-                saveTurn(prompt: prompt, response: output, sessionID: requestSessionID)
-                await runtime.recordQuery(
-                    latencySeconds: Date().timeIntervalSince(startedAt),
-                    tokenCount: 0,
-                    succeeded: true
-                )
-                DispatchQueue.main.async {
-                    onToken(output)
-                    onComplete(output)
                 }
             }
             return
@@ -3176,6 +3178,15 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Detect explicit user task assignments: "task: do X", "add task X".
     /// Returns the goal text. Human-initiated commands — policy, council and
     /// approval still gate the submission like any privileged tool.
+    /// True for prompts the engine answers without the main model —
+    /// approvals, task submissions. Lets the daemon skip the load gate
+    /// for requests oversight can settle on its own.
+    func isModelFreePrompt(_ prompt: String) -> Bool {
+        let t = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("approve ") || t.hasPrefix("deny ")
+            || wantsTaskSubmission(prompt) != nil
+    }
+
     private func wantsTaskSubmission(_ prompt: String) -> String? {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()

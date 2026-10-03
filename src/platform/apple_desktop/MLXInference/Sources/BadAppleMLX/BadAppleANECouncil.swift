@@ -346,10 +346,13 @@ public actor BadAppleANECouncil {
         let denies = rulings.filter { $0.vote == .deny }.count
         let escalates = rulings.filter { $0.vote == .escalate || $0.vote == .abstain }.count
         let allows = rulings.filter { $0.vote == .allow }.count
-        // Contested = any outright denial, or doubt outnumbering
-        // confidence. A single escalate beside three allows is noted,
-        // not blocking — the human sees the dissent in the summary.
-        let contested = denies > 0 || escalates > allows
+        // Contested = doubt holds a strict majority of the panel. A
+        // single dissenting seat is recorded in the summary for the
+        // human, not allowed to veto alone — the skeptic's job is to
+        // speak, not to rule. Autopilot stays usable; real splits
+        // (≥3 of 4 seats in doubt) still reach the human.
+        let doubt = denies + escalates
+        let contested = doubt * 2 > rulings.count
         let summary = "\(allows) allow / \(denies) deny / \(escalates) escalate"
             + (rulings.contains { $0.vote == .abstain } ? " (abstentions counted as doubt)" : "")
         return Verdict(contested: contested, rulings: rulings, summaryLine: summary, unavailable: false)

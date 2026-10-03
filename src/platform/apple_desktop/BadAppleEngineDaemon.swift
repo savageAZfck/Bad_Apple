@@ -1147,14 +1147,13 @@ private func handleConnection(_ fd: Int32, secret: Data?) async {
         return
     }
 
-    // 7) Load model if needed, then generate.
-    let loaded = await ensureModelLoaded()
-    guard loaded else {
-        let message = await BadAppleEngine.shared.modelLoadError() ?? "The AI model could not be loaded. Please try again."
-        writeQueue.sync {
-            _ = writeJSON(fd, ["type": "error", "message": message])
-        }
-        return
+    // 7) Load model if needed, then generate. Model-free prompts —
+    // approvals, task submissions — never wait on or fail over the
+    // main model: oversight must answer even when the brain is down.
+    // The engine's own guard reports not-loaded for requests that do
+    // need weights, so a failed load is no longer fatal here.
+    if !BadAppleEngine.shared.isModelFreePrompt(userPrompt) {
+        _ = await ensureModelLoaded()
     }
 
     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
