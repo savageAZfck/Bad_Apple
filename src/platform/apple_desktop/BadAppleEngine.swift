@@ -3188,27 +3188,55 @@ final class BadAppleEngine: @unchecked Sendable {
             let verdict = BadAppleCouncil.deliberate(toolName: "submit_agent_task", args: args)
             auditCouncil(verdict: verdict, name: "submit_agent_task", args: args,
                          mode: "advisory", persona: persona)
+            // Same counsel as the dispatch path — the sentinel and the
+            // ANE panel judge the submission too, their read rides on the
+            // approval prompt for the human.
+            let ruling = await BadAppleANESentinel.shared.vet(
+                toolName: "submit_agent_task", argsJson: intentArgsJson(args),
+                policyVerdict: "needs_approval")
+            auditSentinel(ruling: ruling, name: "submit_agent_task", args: args, persona: persona)
+            let panel = await BadAppleANECouncil.shared.deliberate(
+                toolName: "submit_agent_task", argsJson: intentArgsJson(args),
+                policyVerdict: "needs_approval")
+            auditANECouncil(verdict: panel, name: "submit_agent_task", args: args, persona: persona)
             let id = createApproval(name: "submit_agent_task", args: args)
             auditLedger.append(
                 eventType: "approval_requested",
                 data: ["id": id, "name": "submit_agent_task", "arguments": args],
                 persona: persona
             )
+            var counsel = ruling.verdict == .unavailable ? ""
+                : "\n[sentinel: \(ruling.verdict.rawValue.uppercased()) — \(ruling.reason)]"
+            if !panel.unavailable {
+                counsel += "\n[panel: \(panel.summaryLine)]"
+            }
             return approvalPromptText(id: id, name: "submit_agent_task", args: args)
-                + "\n\n" + verdict.summaryLine
+                + "\n\n" + verdict.summaryLine + counsel
         case .approved:
             if policyEngine.requiresApproval(toolName: "submit_agent_task") {
                 let verdict = BadAppleCouncil.deliberate(toolName: "submit_agent_task", args: args)
                 auditCouncil(verdict: verdict, name: "submit_agent_task", args: args,
                              mode: policyEngine.autopilot ? "autopilot" : "pre-approval",
                              persona: persona)
-                if policyEngine.autopilot && verdict.contested {
+                let ruling = await BadAppleANESentinel.shared.vet(
+                    toolName: "submit_agent_task", argsJson: intentArgsJson(args),
+                    policyVerdict: "approved")
+                auditSentinel(ruling: ruling, name: "submit_agent_task", args: args, persona: persona)
+                let panel = await BadAppleANECouncil.shared.deliberate(
+                    toolName: "submit_agent_task", argsJson: intentArgsJson(args),
+                    policyVerdict: "approved")
+                auditANECouncil(verdict: panel, name: "submit_agent_task", args: args, persona: persona)
+                let sentinelVeto = ruling.verdict == .deny || ruling.verdict == .escalate
+                let panelVeto = !panel.unavailable && panel.contested
+                if policyEngine.autopilot && (verdict.contested || sentinelVeto || panelVeto) {
                     let id = createApproval(name: "submit_agent_task", args: args)
                     auditLedger.append(
                         eventType: "council_escalated",
                         data: ["id": id, "name": "submit_agent_task",
                                "decision": verdict.decision.rawValue,
-                               "dissent": verdict.dissent],
+                               "dissent": verdict.dissent,
+                               "sentinel": ruling.verdict.rawValue,
+                               "sentinel_reason": ruling.reason],
                         persona: persona
                     )
                     return "Council vote failed `submit_agent_task` — sending it to you.\n"
