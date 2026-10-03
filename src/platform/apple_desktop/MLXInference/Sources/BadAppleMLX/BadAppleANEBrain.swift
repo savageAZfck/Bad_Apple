@@ -198,6 +198,7 @@ public actor BadAppleANEBrain {
         }
 
         let path = manifest.path
+        let footprintBefore = Self.physFootprintBytes()
         let raw: UnsafeMutableRawPointer? = await withCheckedContinuation { cont in
             queue.async { cont.resume(returning: path.withCString { bridge.create($0) }) }
         }
@@ -210,7 +211,10 @@ public actor BadAppleANEBrain {
         consecutiveFaults = 0
         lastError = nil
         state = .ready
-        NSLog("[BadAppleANEBrain] ready in %.1fs (context %d)", loadSeconds, contextLimit)
+        let footprintDelta = Int64(Self.physFootprintBytes()) - Int64(footprintBefore)
+        NSLog("[BadAppleANEBrain] ready in %.1fs (context %d) — real footprint delta %+.2f GiB%s",
+              loadSeconds, contextLimit, Double(footprintDelta) / 1_073_741_824,
+              Self.bestEffortEnabled ? " [best-effort]" : "")
     }
 
     private func fail(_ message: String) {
@@ -359,11 +363,42 @@ public actor BadAppleANEBrain {
         return pages * UInt64(getpagesize())
     }
 
+    /// True when the operator has opted into best-effort admission:
+    /// `~/.bad_apple/ane_brain_best_effort` exists, or the env override is
+    /// set. Best-effort still records what the gate *would* have decided so
+    /// the ledger/log stays honest about the margin.
+    nonisolated static var bestEffortEnabled: Bool {
+        if ProcessInfo.processInfo.environment["BADAPPLE_ANE_ADMISSION"] == "0" { return true }
+        return FileManager.default.fileExists(
+            atPath: NSHomeDirectory() + "/.bad_apple/ane_brain_best_effort")
+    }
+
+    /// Real resident cost of this process, matching the kernel's jetsam
+    /// basis — used to measure what an ANE load actually costs rather than
+    /// trusting the artifact-size estimate.
+    nonisolated static func physFootprintBytes() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        return UInt64(info.phys_footprint)
+    }
+
     /// nil = admitted; otherwise the reason the load is refused.
     nonisolated static func admissionRefusal(artifactDir: URL, extraReserve: UInt64 = 0) -> String? {
-        if ProcessInfo.processInfo.environment["BADAPPLE_ANE_ADMISSION"] == "0" { return nil }
         let need = residentBytes(artifactDir: artifactDir) + reserveBytes + extraReserve
         let have = reclaimableBytes()
+        if bestEffortEnabled {
+            if have < need {
+                NSLog("[BadAppleANEBrain] best-effort override: gate would refuse (needs %.2f GiB, %.2f GiB reclaimable) — attempting load and measuring real footprint",
+                      Double(need) / 1_073_741_824, Double(have) / 1_073_741_824)
+            }
+            return nil
+        }
         guard have >= need else {
             return String(format: "memory admission: needs %.2f GiB (shards + reserve%@), %.2f GiB reclaimable",
                           Double(need) / 1_073_741_824,
