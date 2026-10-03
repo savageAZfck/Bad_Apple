@@ -754,16 +754,18 @@ final class BadAppleEngine: @unchecked Sendable {
         var words: [String] = text.lowercased().split(separator: " ").map(String.init)
         // consecutive single-word run ("the the the the")
         var run = 1
-        for i in 1..<words.count {
-            run = words[i] == words[i - 1] ? run + 1 : 1
-            if run >= 4 {
-                words = Array(words[..<(i - run + 2)])
-                break
+        if words.count > 1 {
+            for i in 1..<words.count {
+                run = words[i] == words[i - 1] ? run + 1 : 1
+                if run >= 4 {
+                    words = Array(words[..<(i - run + 2)])
+                    break
+                }
             }
         }
         // recurring multi-word phrase (n = 2...6), third sighting wins the cut
         let n = words.count
-        outer: for k in 2...min(6, n / 3) {
+        outer: for k in 2...max(2, min(6, n / 3)) {
             var seen: [Array<String>: Int] = [:]
             var i = 0
             while i + k <= n {
