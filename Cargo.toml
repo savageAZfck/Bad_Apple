@@ -127,7 +127,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 sovereign_ledger = "0.3.1"
 respawned = "0.3"
 flight_tape = "0.1"
-nagi = { path = "../nagi" }
+nagi = { path = "../nagi", package = "nagi-escrow" }
 wolakota = { path = "../wolakota" }
 
 [build-dependencies]

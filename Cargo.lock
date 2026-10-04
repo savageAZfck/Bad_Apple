@@ -259,7 +259,7 @@ dependencies = [
  "memmap2",
  "metal",
  "mil_spec",
- "nagi",
+ "nagi-escrow",
  "ndarray",
  "notify",
  "objc2-metal",
@@ -2340,7 +2340,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 
 [[package]]
-name = "nagi"
+name = "nagi-escrow"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
