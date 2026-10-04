@@ -72,7 +72,11 @@ fn load_entries(path: &PathBuf, from: Option<usize>, to: Option<usize>) -> Resul
 /// hash field, falling back to hashing the last line itself.
 fn chain_tip(path: &PathBuf) -> Result<String> {
     let text = fs::read_to_string(path)?;
-    let last = text.lines().filter(|l| !l.trim().is_empty()).last().context("empty chain")?;
+    let last = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .context("empty chain")?;
     let v: Value = serde_json::from_str(last)?;
     if let Some(h) = v.get("hash").and_then(|x| x.as_str()) {
         return Ok(h.to_string());
@@ -83,7 +87,11 @@ fn chain_tip(path: &PathBuf) -> Result<String> {
 
 fn alt_policy(denies: Vec<String>) -> Box<ReplayFn> {
     Box::new(move |e| {
-        let hay = format!("{} {}", e["tool"].as_str().unwrap_or(""), e["cmd"].as_str().unwrap_or(""));
+        let hay = format!(
+            "{} {}",
+            e["tool"].as_str().unwrap_or(""),
+            e["cmd"].as_str().unwrap_or("")
+        );
         let denied = denies.iter().any(|d| {
             if let Some(prefix) = d.strip_suffix('*') {
                 hay.contains(prefix)
@@ -101,7 +109,9 @@ fn alt_policy(denies: Vec<String>) -> Box<ReplayFn> {
 
 fn actual_outcome() -> Box<ReplayFn> {
     Box::new(|e| {
-        e.get("outcome").cloned().unwrap_or_else(|| json!({"allowed": true}))
+        e.get("outcome")
+            .cloned()
+            .unwrap_or_else(|| json!({"allowed": true}))
     })
 }
 

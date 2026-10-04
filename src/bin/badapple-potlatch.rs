@@ -75,7 +75,10 @@ fn load_book() -> Result<Book> {
 
 fn save_book(book: &Book) -> Result<()> {
     fs::create_dir_all(&root())?;
-    fs::write(root().join("book.json"), serde_json::to_string_pretty(book)?)?;
+    fs::write(
+        root().join("book.json"),
+        serde_json::to_string_pretty(book)?,
+    )?;
     Ok(())
 }
 
@@ -104,9 +107,7 @@ fn main() -> Result<()> {
             let debtor = named("--debtor").context("--debtor required")?;
             let treaty = named("--treaty").context("--treaty required")?;
             let resource = named("--resource").context("--resource required")?;
-            let amount: u64 = named("--amount")
-                .context("--amount required")?
-                .parse()?;
+            let amount: u64 = named("--amount").context("--amount required")?.parse()?;
             let due = named("--due").and_then(|d| d.parse().ok());
             let id = load_identity()?;
             let mut book = load_book()?;
@@ -186,10 +187,7 @@ fn main() -> Result<()> {
             let id = load_identity()?;
             let who = args.get(1).cloned().unwrap_or_else(|| id.public_key());
             let book = load_book()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&book.obligations(&who))?
-            );
+            println!("{}", serde_json::to_string_pretty(&book.obligations(&who))?);
         }
         "defaults" => {
             let id = load_identity()?;

@@ -136,8 +136,12 @@ fn main() -> Result<()> {
             );
         }
         "vote" => {
-            let chamber = args.get(1).context("vote <chamber> <motion-id> <aye|nay|abstain>")?;
-            let motion_id = args.get(2).context("vote <chamber> <motion-id> <aye|nay|abstain>")?;
+            let chamber = args
+                .get(1)
+                .context("vote <chamber> <motion-id> <aye|nay|abstain>")?;
+            let motion_id = args
+                .get(2)
+                .context("vote <chamber> <motion-id> <aye|nay|abstain>")?;
             let vote = match args.get(3).map(|s| s.as_str()) {
                 Some("aye") => Vote::Aye,
                 Some("nay") => Vote::Nay,
@@ -179,7 +183,9 @@ fn main() -> Result<()> {
                 .filter(|e| match (&e.entry, &filter) {
                     (bicameral::HansardEntry::MotionTabled(m), Some(f)) => m.id == *f,
                     (bicameral::HansardEntry::VoteCast(b), Some(f)) => b.motion_id == *f,
-                    (bicameral::HansardEntry::Resolved { motion_id, .. }, Some(f)) => motion_id == f,
+                    (bicameral::HansardEntry::Resolved { motion_id, .. }, Some(f)) => {
+                        motion_id == f
+                    }
                     (bicameral::HansardEntry::DissentRecorded(d), Some(f)) => d.motion_id == *f,
                     (_, None) => true,
                 })

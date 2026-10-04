@@ -124,8 +124,7 @@ fn main() -> Result<()> {
             let generation = my_generation(&tree, &id.public_key()) + 1;
             // Parent signs its half over the real child pubkey; the
             // child countersigns via `accept` on its own machine.
-            let genesis =
-                GenesisBlock::issue_for(&id, &child_pk, generation, &tip, bequests)?;
+            let genesis = GenesisBlock::issue_for(&id, &child_pk, generation, &tip, bequests)?;
             let dir = root().join("children");
             fs::create_dir_all(&dir)?;
             let path = dir.join(format!("{}.json", &genesis.id[..16]));
@@ -142,8 +141,7 @@ fn main() -> Result<()> {
         }
         "accept" => {
             let path = args.get(1).context("accept <genesis.json>")?;
-            let mut genesis: GenesisBlock =
-                serde_json::from_str(&fs::read_to_string(path)?)?;
+            let mut genesis: GenesisBlock = serde_json::from_str(&fs::read_to_string(path)?)?;
             let id = load_identity()?;
             genesis.accept(&id)?;
             fs::write(path, serde_json::to_string_pretty(&genesis)?)?;
@@ -154,8 +152,7 @@ fn main() -> Result<()> {
         }
         "record" => {
             let path = args.get(1).context("record <genesis.json>")?;
-            let genesis: GenesisBlock =
-                serde_json::from_str(&fs::read_to_string(path)?)?;
+            let genesis: GenesisBlock = serde_json::from_str(&fs::read_to_string(path)?)?;
             let mut tree = load_lineage().unwrap_or_default();
             tree.add_genesis(&genesis)?;
             save_lineage(&tree)?;
@@ -186,10 +183,7 @@ fn main() -> Result<()> {
         "ancestry" => {
             let pk = args.get(1).context("ancestry <pubkey>")?;
             let tree = load_lineage()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tree.ancestry(pk))?
-            );
+            println!("{}", serde_json::to_string_pretty(&tree.ancestry(pk))?);
         }
         "descends" => {
             let desc = args.get(1).context("descends <descendant> <ancestor>")?;
@@ -224,4 +218,3 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
-

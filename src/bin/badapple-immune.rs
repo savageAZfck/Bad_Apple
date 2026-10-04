@@ -173,10 +173,7 @@ fn main() -> Result<()> {
             let reg = load_registry()?;
             reg.verify()?;
             let (seq, _) = reg.head();
-            println!(
-                "{}",
-                serde_json::json!({"status":"verified","entries":seq})
-            );
+            println!("{}", serde_json::json!({"status":"verified","entries":seq}));
         }
         other => bail!("unknown command: {other}"),
     }

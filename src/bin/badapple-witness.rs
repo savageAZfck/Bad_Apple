@@ -122,8 +122,7 @@ fn main() -> Result<()> {
         "attest" => {
             let subject = args.get(1).context("attest <subject-pubkey> <head.json>")?;
             let head_path = args.get(2).context("attest <subject-pubkey> <head.json>")?;
-            let head: ChainHead =
-                serde_json::from_str(&fs::read_to_string(head_path)?)?;
+            let head: ChainHead = serde_json::from_str(&fs::read_to_string(head_path)?)?;
             let id = load_identity()?;
             let mut journal = load_journal()?;
             let att = journal.attest(&id, subject, &head)?;
@@ -142,7 +141,9 @@ fn main() -> Result<()> {
             );
         }
         "audit" => {
-            let subject = args.get(1).context("audit <subject-pubkey> --chain <id> --history <map.json>")?;
+            let subject = args
+                .get(1)
+                .context("audit <subject-pubkey> --chain <id> --history <map.json>")?;
             let chain = named("--chain").unwrap_or_else(|| "ledger".into());
             let hist_path = named("--history").context("--history <map.json> required")?;
             let history: BTreeMap<u64, String> =

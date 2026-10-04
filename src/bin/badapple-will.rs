@@ -108,7 +108,10 @@ fn main() -> Result<()> {
             let quorum: usize = named("--quorum").and_then(|s| s.parse().ok()).unwrap_or(1);
             let owner = load_owner()?;
             if will_path().exists() {
-                println!("{}", serde_json::json!({"status":"exists","owner":owner.public_key()}));
+                println!(
+                    "{}",
+                    serde_json::json!({"status":"exists","owner":owner.public_key()})
+                );
             } else {
                 let will = Will::sign(&owner, vec![], silence, quorum);
                 save_will(&will)?;
@@ -151,8 +154,7 @@ fn main() -> Result<()> {
         }
         "attest" => {
             let path = args.get(1).context("attest <file.json>")?;
-            let att: UnreachableAttestation =
-                serde_json::from_str(&fs::read_to_string(path)?)?;
+            let att: UnreachableAttestation = serde_json::from_str(&fs::read_to_string(path)?)?;
             att.verify()?;
             let will = load_will()?;
             if att.owner != will.owner {
@@ -160,7 +162,10 @@ fn main() -> Result<()> {
             }
             let dir = root().join("attestations");
             fs::create_dir_all(&dir)?;
-            fs::write(dir.join(format!("{}.json", &att.custodian[..16])), fs::read_to_string(path)?)?;
+            fs::write(
+                dir.join(format!("{}.json", &att.custodian[..16])),
+                fs::read_to_string(path)?,
+            )?;
             println!(
                 "{}",
                 serde_json::json!({"status":"recorded","custodian":att.custodian})

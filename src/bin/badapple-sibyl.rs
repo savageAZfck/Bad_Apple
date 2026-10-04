@@ -57,17 +57,13 @@ fn gate_path(id: &str) -> PathBuf {
 }
 
 fn load_gate(id: &str) -> Result<Gate> {
-    let text = fs::read_to_string(gate_path(id))
-        .with_context(|| format!("no gate {id}"))?;
+    let text = fs::read_to_string(gate_path(id)).with_context(|| format!("no gate {id}"))?;
     Ok(serde_json::from_str(&text)?)
 }
 
 fn save_gate(gate: &Gate) -> Result<()> {
     fs::create_dir_all(root().join("gates"))?;
-    fs::write(
-        gate_path(&gate.id),
-        serde_json::to_string_pretty(gate)?,
-    )?;
+    fs::write(gate_path(&gate.id), serde_json::to_string_pretty(gate)?)?;
     Ok(())
 }
 
@@ -78,8 +74,7 @@ fn share_path(gate_id: &str) -> PathBuf {
 fn load_log() -> GateLog {
     let path = root().join("gatelog.json");
     if path.exists() {
-        serde_json::from_str(&fs::read_to_string(&path).unwrap_or_default())
-            .unwrap_or_default()
+        serde_json::from_str(&fs::read_to_string(&path).unwrap_or_default()).unwrap_or_default()
     } else {
         GateLog::new()
     }
@@ -174,19 +169,21 @@ fn main() -> Result<()> {
             let mut log = load_log();
             log.record("opened", &gate.id, "payload disclosed");
             save_log(&log)?;
-            println!("{}", serde_json::json!({
-                "status": "opened",
-                "gate": gate.id,
-                "payload_utf8": String::from_utf8_lossy(&payload),
-            }));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "opened",
+                    "gate": gate.id,
+                    "payload_utf8": String::from_utf8_lossy(&payload),
+                })
+            );
         }
         "gates" => {
             let dir = root().join("gates");
             let mut out = Vec::new();
             if dir.exists() {
                 for entry in fs::read_dir(&dir)? {
-                    let gate: Gate =
-                        serde_json::from_str(&fs::read_to_string(entry?.path())?)?;
+                    let gate: Gate = serde_json::from_str(&fs::read_to_string(entry?.path())?)?;
                     out.push(serde_json::json!({
                         "id": gate.id,
                         "condition": gate.condition,

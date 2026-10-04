@@ -162,8 +162,7 @@ fn main() -> Result<()> {
         }
         "verify" => {
             let path = args.get(1).context("verify <proof.json>")?;
-            let proof: NonKnowledgeProof =
-                serde_json::from_str(&fs::read_to_string(path)?)?;
+            let proof: NonKnowledgeProof = serde_json::from_str(&fs::read_to_string(path)?)?;
             let chain = load_chain()?;
             match proof.check(&chain) {
                 Ok(true) => println!(
@@ -172,7 +171,10 @@ fn main() -> Result<()> {
                 ),
                 Ok(false) => bail!("proof checked but reported false"),
                 Err(e) => {
-                    println!("{}", serde_json::json!({"status":"invalid","reason":e.to_string()}));
+                    println!(
+                        "{}",
+                        serde_json::json!({"status":"invalid","reason":e.to_string()})
+                    );
                     std::process::exit(2);
                 }
             }

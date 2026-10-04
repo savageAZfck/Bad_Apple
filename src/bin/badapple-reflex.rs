@@ -52,9 +52,9 @@ fn save_arc(arc: &ReflexArc) -> Result<()> {
 }
 
 fn parse_trigger(spec: &str) -> Result<Trigger> {
-    let (kind, rest) = spec
-        .split_once(':')
-        .context("trigger spec must be kind:<glob> | field:<name>=<glob> | gt|lt|ge|le:<field>=<n>")?;
+    let (kind, rest) = spec.split_once(':').context(
+        "trigger spec must be kind:<glob> | field:<name>=<glob> | gt|lt|ge|le:<field>=<n>",
+    )?;
     Ok(match kind {
         "kind" => Trigger::KindIs(rest.to_string()),
         "field" => {
@@ -84,7 +84,9 @@ fn parse_trigger(spec: &str) -> Result<Trigger> {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        bail!("usage: badapple-reflex <install|remove|list|sense|clear-freeze|rearm|status|verify>");
+        bail!(
+            "usage: badapple-reflex <install|remove|list|sense|clear-freeze|rearm|status|verify>"
+        );
     }
     let named = |flag: &str| -> Option<String> {
         args.iter()
@@ -103,13 +105,14 @@ fn main() -> Result<()> {
                 Some("quarantine") => ReflexAction::Quarantine,
                 Some(other) => bail!("unknown action: {other}"),
             };
-            let cooldown = named("--cooldown-ms").and_then(|s| s.parse().ok()).unwrap_or(0);
-            let max = named("--max-firings").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let cooldown = named("--cooldown-ms")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let max = named("--max-firings")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             let mut arc = load_arc()?;
-            arc.install(
-                Reflex::new(id, parse_trigger(&spec)?, action)
-                    .with_bounds(cooldown, max),
-            )?;
+            arc.install(Reflex::new(id, parse_trigger(&spec)?, action).with_bounds(cooldown, max))?;
             save_arc(&arc)?;
             println!("{}", serde_json::json!({"status":"installed","reflex":id}));
         }
@@ -146,7 +149,10 @@ fn main() -> Result<()> {
             let mut arc = load_arc()?;
             let was = arc.clear_freeze();
             save_arc(&arc)?;
-            println!("{}", serde_json::json!({"status":"cleared","was_frozen":was}));
+            println!(
+                "{}",
+                serde_json::json!({"status":"cleared","was_frozen":was})
+            );
         }
         "rearm" => {
             let id = args.get(1).context("rearm <id>")?;
