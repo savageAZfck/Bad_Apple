@@ -129,6 +129,7 @@ respawned = "0.3"
 flight_tape = "0.1"
 nagi = { path = "../nagi", package = "nagi-escrow" }
 wolakota = { path = "../wolakota" }
+kola = { path = "../kola" }
 
 [build-dependencies]
 cbindgen = "0.29"

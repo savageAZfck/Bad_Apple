@@ -253,6 +253,7 @@ dependencies = [
  "hex",
  "hf-chat-template",
  "hmac 0.13.0",
+ "kola",
  "libc",
  "libloading",
  "md-5",
@@ -2036,6 +2037,18 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kola"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
