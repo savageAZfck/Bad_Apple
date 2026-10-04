@@ -259,6 +259,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "ed25519-dalek",
+ "eidolon",
  "flight_tape",
  "futures-util",
  "half",
@@ -1165,6 +1166,18 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "eidolon"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -133,6 +133,7 @@ kola = { path = "../kola" }
 bicameral = { path = "../bicameral" }
 axon = { path = "../axon" }
 nagual = { path = "../nagual" }
+eidolon = { path = "../eidolon" }
 
 [build-dependencies]
 cbindgen = "0.29"
