@@ -293,6 +293,7 @@ dependencies = [
  "sovereign_ledger",
  "starship-battery",
  "sysinfo",
+ "tabula",
  "tokenizers",
  "tokio",
  "tokio-stream",
@@ -3735,6 +3736,17 @@ dependencies = [
  "once_cell",
  "rayon",
  "windows",
+]
+
+[[package]]
+name = "tabula"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
