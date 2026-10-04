@@ -206,7 +206,11 @@ pub extern "C" fn bad_apple_get_apple_latency_us() -> u64 {
 /// deterministic council rather than treating silence as a verdict.
 #[no_mangle]
 pub extern "C" fn bad_apple_sentinel_available() -> i32 {
-    if sentinel::is_available() { 1 } else { 0 }
+    if sentinel::is_available() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Vet one proposed tool call through the dedicated ANE sentinel.
@@ -234,7 +238,9 @@ pub unsafe extern "C" fn bad_apple_sentinel_vet(
         CStr::from_ptr(args_json).to_str(),
         CStr::from_ptr(policy).to_str(),
     ) else {
-        return bad_apple_cstring("{\"verdict\":\"escalate\",\"reason\":\"invalid intent encoding\"}");
+        return bad_apple_cstring(
+            "{\"verdict\":\"escalate\",\"reason\":\"invalid intent encoding\"}",
+        );
     };
     let v = sentinel::vet(name, args, pol);
     bad_apple_cstring(&format!(

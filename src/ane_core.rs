@@ -330,45 +330,44 @@ impl AneCore {
     where
         F: FnMut(&str) -> bool,
     {
-        let (rendered, add_special_tokens) = if std::env::var_os("BADAPPLE_ANE_RAW_PROMPT")
-            .is_some_and(|v| v != "0")
-        {
-            (prompt.to_string(), false)
-        } else {
-            match &self.chat_template {
-            Some(template) => {
-                let mut messages = Vec::with_capacity(2);
-                if let Some(system) = system {
-                    messages.push(Message::system(system));
+        let (rendered, add_special_tokens) =
+            if std::env::var_os("BADAPPLE_ANE_RAW_PROMPT").is_some_and(|v| v != "0") {
+                (prompt.to_string(), false)
+            } else {
+                match &self.chat_template {
+                    Some(template) => {
+                        let mut messages = Vec::with_capacity(2);
+                        if let Some(system) = system {
+                            messages.push(Message::system(system));
+                        }
+                        messages.push(Message::user(prompt));
+                        // Qwen3 templates honour `enable_thinking`; without it the
+                        // model spends its whole token budget inside <think>.
+                        let mut extra = serde_json::Map::new();
+                        extra.insert("enable_thinking".into(), Value::Bool(false));
+                        let input = RenderInput {
+                            messages,
+                            add_generation_prompt: true,
+                            extra,
+                            ..Default::default()
+                        };
+                        (
+                            template
+                                .render(&input)
+                                .map_err(|error| AneCoreError::Tokenizer(error.to_string()))?,
+                            false,
+                        )
+                    }
+                    None if self.qwen_chat_fallback => (render_qwen_chat(prompt, system), false),
+                    None => (
+                        match system {
+                            Some(system) => format!("{system}\n\n{prompt}"),
+                            None => prompt.to_string(),
+                        },
+                        true,
+                    ),
                 }
-                messages.push(Message::user(prompt));
-                // Qwen3 templates honour `enable_thinking`; without it the
-                // model spends its whole token budget inside <think>.
-                let mut extra = serde_json::Map::new();
-                extra.insert("enable_thinking".into(), Value::Bool(false));
-                let input = RenderInput {
-                    messages,
-                    add_generation_prompt: true,
-                    extra,
-                    ..Default::default()
-                };
-                (
-                    template
-                        .render(&input)
-                        .map_err(|error| AneCoreError::Tokenizer(error.to_string()))?,
-                    false,
-                )
-            }
-            None if self.qwen_chat_fallback => (render_qwen_chat(prompt, system), false),
-            None => (
-                match system {
-                    Some(system) => format!("{system}\n\n{prompt}"),
-                    None => prompt.to_string(),
-                },
-                true,
-            ),
-            }
-        };
+            };
         let encoding = self
             .tokenizer
             .encode(rendered.as_str(), add_special_tokens)

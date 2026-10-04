@@ -58,7 +58,10 @@ fn load_book() -> Result<TreatyBook> {
 
 fn save_book(book: &TreatyBook) -> Result<()> {
     fs::create_dir_all(&root())?;
-    fs::write(root().join("book.json"), serde_json::to_string_pretty(book)?)?;
+    fs::write(
+        root().join("book.json"),
+        serde_json::to_string_pretty(book)?,
+    )?;
     Ok(())
 }
 
@@ -88,9 +91,7 @@ fn parse_scope(s: &str) -> Result<Scope> {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        bail!(
-            "usage: badapple-treaty <init|propose|ratify|state|invoke|revoke|verify|export>"
-        );
+        bail!("usage: badapple-treaty <init|propose|ratify|state|invoke|revoke|verify|export>");
     }
     let named = |flag: &str| -> Option<String> {
         args.iter()
@@ -142,8 +143,7 @@ fn main() -> Result<()> {
             let id = load_identity()?;
             let mut book = load_book()?;
             let file = args.get(1).context("ratify <treaty-file>")?;
-            let mut treaty: Treaty =
-                serde_json::from_str(&fs::read_to_string(file)?)?;
+            let mut treaty: Treaty = serde_json::from_str(&fs::read_to_string(file)?)?;
             treaty.ratify(&id)?;
             if book.treaties.iter().any(|t| t.id == treaty.id) {
                 book.apply_ratification(treaty.clone())?;

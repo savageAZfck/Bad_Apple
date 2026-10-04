@@ -351,7 +351,14 @@ fn main() -> Result<(), String> {
         other => return Err(format!("unknown probe op {other}")),
     }
 
-    let spec_bytes = encode_model(&inputs, &outputs, &[], &blk, &fn_inputs, spec, &opset);
+    let spec_bytes = encode_model(
+        &inputs,
+        &outputs,
+        &[],
+        &blk,
+        &fn_inputs,
+        &ModelMeta::new(spec, &opset),
+    );
     let pkg = out_dir.join(format!("{which}_{opset}_v{spec}.mlpackage"));
     write_mlpackage(&pkg, &spec_bytes, None).map_err(|e| e.to_string())?;
     println!("wrote {}", pkg.display());

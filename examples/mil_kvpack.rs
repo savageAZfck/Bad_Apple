@@ -129,8 +129,20 @@ fn main() -> Result<(), String> {
     // attention-side read: re-slice the K row after the write, then feed
     // it into the real attention compute chain (the -14 cell the shard
     // hits): q [1,nkv,4,dh] @ k^T -> +mask -> softmax -> @ v [1,nkv,4,dh]
-    let k_full = blk.slice(&kv2, &[0, 0, 0, 0], &[1, 2, 2048, 128], &[1, 2, 2048, 128], "k_full");
-    let v_full = blk.slice(&kv2, &[1, 0, 0, 0], &[2, 2, 2048, 128], &[1, 2, 2048, 128], "v_full");
+    let k_full = blk.slice(
+        &kv2,
+        &[0, 0, 0, 0],
+        &[1, 2, 2048, 128],
+        &[1, 2, 2048, 128],
+        "k_full",
+    );
+    let v_full = blk.slice(
+        &kv2,
+        &[1, 0, 0, 0],
+        &[2, 2, 2048, 128],
+        &[1, 2, 2048, 128],
+        "v_full",
+    );
     let scores = blk.matmul("q", &k_full, true, &[1, 2, 4, 2048], "scores");
     blk.outputs = vec![scores, k_full, kv2.clone()];
 

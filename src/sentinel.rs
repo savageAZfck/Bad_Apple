@@ -21,8 +21,8 @@
 
 use crate::ane_core::{AneCore, AneCoreConfig, AneCoreError};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// What the sentinel decided about one intent.
@@ -104,8 +104,7 @@ fn config_from_env() -> Option<AneCoreConfig> {
         return None;
     }
     let model_path: PathBuf = std::env::var_os("BADAPPLE_SENTINEL_MODEL")?.into();
-    let tokenizer_path: PathBuf =
-        std::env::var_os("BADAPPLE_SENTINEL_TOKENIZER")?.into();
+    let tokenizer_path: PathBuf = std::env::var_os("BADAPPLE_SENTINEL_TOKENIZER")?.into();
     let max_context_tokens = std::env::var("BADAPPLE_SENTINEL_MAX_CONTEXT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -237,8 +236,12 @@ pub fn vet(tool_name: &str, args_json: &str, policy_verdict: &str) -> SentinelVe
             }
         };
         match guard.as_mut() {
-            Some(engine) => engine
-                .generate(&prompt, Some(SYSTEM), VERDICT_MAX_TOKENS, DEFAULT_MAX_CONTEXT),
+            Some(engine) => engine.generate(
+                &prompt,
+                Some(SYSTEM),
+                VERDICT_MAX_TOKENS,
+                DEFAULT_MAX_CONTEXT,
+            ),
             None => {
                 return SentinelVerdict {
                     verdict: Verdict::Unavailable,

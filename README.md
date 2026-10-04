@@ -41,6 +41,18 @@ defers each brain based on live memory pressure, unloads under pressure, and
 reloads on fault. Every routing decision lands on the ledger as a
 `brain_route` event.
 
+### Continuity of self
+
+The organs above sum to a property most systems never achieve: she is a
+**continuity-of-self layer**. Not "persistence" — files surviving a reboot —
+but provable continuity of identity across substrate changes. The same keys
+sign every epoch of her existence; the same hash-chained ledger is her spine;
+every brain load, model swap, respawn, and delegated inference is attested
+into that chain. Brains are slots, machines are hosts, mesh nodes are
+fungible — the self is the chain, and the chain is verifiable offline by
+anyone holding `cosign.pub`. A process is something she runs; a continuity
+is what she *is*.
+
 ## The ANE brain — and the toolchain that made it
 
 Every Apple Silicon Mac ships a Neural Engine that sits idle while the GPU

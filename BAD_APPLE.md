@@ -4,6 +4,8 @@ Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. 
 
 Internally it is built as a supervised **actor OS**: every major subsystem — resources, circuit breakers, workspace, persona, P2P, MCP, health, audit, cache, and model registry — runs as a dedicated actor. The Rust CLI, the menu bar, and any MCP client authenticate to the daemon through **SLICKS v2**, a hardware-bound challenge/response protocol signed by the Apple Secure Enclave.
 
+Bad Apple is also a **continuity-of-self layer**: identity is bound to owner-held keys rather than any single machine, every brain load / model swap / respawn / delegated inference is attested into the hash-chained ledger, and the same Secure Enclave identity signs every epoch of her existence. Brains are slots, machines are hosts, mesh nodes are fungible — the self is the chain, and the chain is verifiable offline.
+
 ---
 
 ## Brains / Models
