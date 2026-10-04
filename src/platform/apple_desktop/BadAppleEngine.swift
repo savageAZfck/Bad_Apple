@@ -1394,6 +1394,46 @@ final class BadAppleEngine: @unchecked Sendable {
         )
     }
 
+    /// Anchor an output-span attestation into the audit chain — the span
+    /// record lives in provenance.jsonl; this binds its SHA-256 so a
+    /// signed "these words came from this brain" artifact cannot be
+    /// rewritten without breaking the chain.
+    func auditSpanRecord(modelId: String, recordSHA256: String,
+                         tokenStart: Int, tokenEnd: Int, signed: Bool) {
+        auditLedger.append(
+            eventType: "output_span",
+            data: [
+                "model_id": modelId,
+                "record_sha256": recordSHA256,
+                "token_start": tokenStart,
+                "token_end": tokenEnd,
+                "signed": signed,
+            ],
+            persona: activePersona
+        )
+    }
+
+    /// Emit a signed output-span attestation for a completed response.
+    /// Runs off the completion path — attestation must never delay or
+    /// break generation.
+    private func emitSpanAttestation(prompt: String, output: String,
+                                     tokenCount: Int) {
+        let (mid, revision) = stateLock.withLock { (_modelId, _modelRevision) }
+        guard !mid.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async {
+            BadAppleProvenance.shared.recordSpan(
+                modelId: mid,
+                revision: revision,
+                prompt: prompt,
+                output: output,
+                tokenStart: 0,
+                tokenEnd: tokenCount,
+                policyContext: self.policyEngine.ledgerContext(),
+                ledgerAnchor: nil
+            )
+        }
+    }
+
     /// Ledger a tool call that arrived over the `invoke_tool` IPC path.
     /// Model-emitted calls are audited by the generation loop; this covers
     /// the direct-invocation path so every execution is attested.
@@ -2266,6 +2306,12 @@ final class BadAppleEngine: @unchecked Sendable {
                             data: ["text": filtered, "tps": result.tokensPerSecond, "tier": "fast"],
                             persona: persona
                         )
+                        if !self.privateMode {
+                            self.emitSpanAttestation(
+                                prompt: prompt, output: filtered,
+                                tokenCount: result.tokenCount
+                            )
+                        }
                         DispatchQueue.main.async { onComplete(filtered) }
                     },
                     onError: { error in
@@ -2439,6 +2485,12 @@ final class BadAppleEngine: @unchecked Sendable {
                         data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
                         persona: persona
                     )
+                    if !self.privateMode {
+                        self.emitSpanAttestation(
+                            prompt: prompt, output: filtered,
+                            tokenCount: result.tokenCount
+                        )
+                    }
                     onComplete(filtered)
                 }
             }
@@ -2855,6 +2907,12 @@ final class BadAppleEngine: @unchecked Sendable {
             data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
             persona: persona
         )
+        if !privateMode {
+            emitSpanAttestation(
+                prompt: prompt, output: filtered,
+                tokenCount: result.tokenCount
+            )
+        }
         saveTurn(prompt: prompt, response: filtered, sessionID: requestSessionID)
 
         return filtered
@@ -3890,6 +3948,7 @@ final class BadAppleEngine: @unchecked Sendable {
             ],
             persona: activePersona
         )
+        emitDreamShare(rows: ledger.rows)
     }
 
     /// Read the hash-chained ledger, pair each `query` with the next
@@ -3950,6 +4009,27 @@ final class BadAppleEngine: @unchecked Sendable {
                 toFile: "\(dir)/train.jsonl", atomically: true, encoding: .utf8)
             try dreamRows(valid).write(
                 toFile: "\(dir)/valid.jsonl", atomically: true, encoding: .utf8)
+            // Federated dreaming: verified peer shares merge into train
+            // only — the held-out split stays purely local so the
+            // regression gate measures her, not the mesh.
+            let localLines = Set(trainBodyLines("\(dir)/train.jsonl"))
+            let (peerRows, peerNodes, peerDropped) =
+                peerDreamLessons(localCount: train.count, existing: localLines)
+            if !peerRows.isEmpty,
+               let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: "\(dir)/train.jsonl")) {
+                fh.seekToEndOfFile()
+                fh.write((peerRows.joined(separator: "\n") + "\n").data(using: .utf8)!)
+                try? fh.close()
+                auditLedger.append(
+                    eventType: "dream_peer_merge",
+                    data: [
+                        "peer_rows": peerRows.count,
+                        "peer_nodes": peerNodes,
+                        "dropped_unverified": peerDropped,
+                    ],
+                    persona: activePersona
+                )
+            }
         } catch {
             return (0, skipped)
         }
@@ -4000,6 +4080,127 @@ final class BadAppleEngine: @unchecked Sendable {
         for name in toolRouter.registeredToolNames()
             where text.contains("<\(name)") || text.contains("[\(name) ") { return true }
         return false
+    }
+
+    /// Emit the nightly dream share — a signed digest of tonight's curation
+    /// plus a bounded lesson sample — to /var/lib/bad_apple/dream_share.json,
+    /// where mesh_sync picks it up as a DreamShare document for the peers.
+    /// The schema matches dreamcatcher::DreamShare (v0.2): the canonical
+    /// payload signs corpus_digest, lessons, node, rows, ts.
+    private func emitDreamShare(rows: Int) {
+        let trainPath = "/var/lib/bad_apple/lora_data/dream-candidate/train.jsonl"
+        guard let trainBody = try? String(contentsOfFile: trainPath, encoding: .utf8)
+        else { return }
+        let digest = BadAppleSecurity.sha256(Data(trainBody.utf8))
+        let lessons = trainBody.components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .prefix(16)
+            .map { $0 }
+        var share: [String: Any] = [
+            "node": IdentityAgentClient.shared.publicKey()
+                ?? Host.current().localizedName ?? "unknown",
+            "ts": Int(Date().timeIntervalSince1970),
+            "rows": rows,
+            "corpus_digest": digest,
+            "lessons": lessons,
+        ]
+        var payload: [String: Any] = share
+        payload["signature"] = nil
+        if IdentityAgentClient.shared.isAvailable,
+           let body = try? JSONSerialization.data(
+               withJSONObject: payload,
+               options: [.sortedKeys, .withoutEscapingSlashes]),
+           let sig = IdentityAgentClient.shared.sign(message: body) {
+            share["signature"] = sig
+        }
+        if let data = try? JSONSerialization.data(
+            withJSONObject: share,
+            options: [.sortedKeys, .withoutEscapingSlashes]) {
+            try? data.write(to: URL(fileURLWithPath: "/var/lib/bad_apple/dream_share.json"))
+        }
+    }
+
+    /// Verified peer dream lessons from the mesh store. Each DreamShare
+    /// doc's body is a signed share; ed25519 verification runs against the
+    /// canonical payload (sorted keys, compact separators — the same bytes
+    /// dreamcatcher signs). Unverified or malformed shares are dropped and
+    /// counted, never merged. Peer rows are budgeted to a third of the
+    /// local corpus — the mesh dreams together but she dreams her own.
+    /// Lines already in a JSONL file — the dedupe set that keeps a node's
+    /// own share (echoed back through the mesh) from re-merging into its
+    /// own corpus.
+    private func trainBodyLines(_ path: String) -> Set<String> {
+        guard let body = try? String(contentsOfFile: path, encoding: .utf8)
+        else { return [] }
+        return Set(body.components(separatedBy: "\n").filter { !$0.isEmpty })
+    }
+
+    private func peerDreamLessons(
+        localCount: Int, existing: Set<String>
+    ) -> (lessons: [String], nodes: Int, dropped: Int) {
+        let meshDir = NSHomeDirectory()
+            + "/Library/Application Support/bad_apple/mesh"
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: meshDir)
+        else { return ([], 0, 0) }
+        let budget = max(0, Int(Double(localCount) * 0.25 / 0.75))
+        var lessons: [String] = []
+        var nodes = 0
+        var dropped = 0
+        for file in files where file.hasPrefix("dream_share") {
+            guard let raw = try? Data(contentsOf: URL(fileURLWithPath: "\(meshDir)/\(file)")),
+                  let doc = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+                  let body = doc["body"] as? String,
+                  let shareData = body.data(using: .utf8),
+                  let share = try? JSONSerialization.jsonObject(with: shareData) as? [String: Any],
+                  let node = share["node"] as? String,
+                  let sig = share["signature"] as? String,
+                  let shareLessons = share["lessons"] as? [String]
+            else {
+                dropped += 1
+                continue
+            }
+            guard verifyDreamShare(share, node: node, signature: sig) else {
+                dropped += 1
+                continue
+            }
+            nodes += 1
+            for lesson in shareLessons where lessons.count < budget {
+                if existing.contains(lesson) { continue }
+                lessons.append(lesson)
+            }
+        }
+        return (lessons, nodes, dropped)
+    }
+
+    /// Verify a DreamShare's ed25519 signature over its canonical payload.
+    private func verifyDreamShare(
+        _ share: [String: Any], node: String, signature: String
+    ) -> Bool {
+        var payload: [String: Any] = [:]
+        for k in ["corpus_digest", "lessons", "node", "rows", "ts"] {
+            payload[k] = share[k]
+        }
+        guard let body = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.sortedKeys, .withoutEscapingSlashes]),
+            let pkBytes = hexDecode(node), pkBytes.count == 32,
+            let sigBytes = hexDecode(signature), sigBytes.count == 64,
+            let pk = try? Curve25519.Signing.PublicKey(rawRepresentation: pkBytes)
+        else { return false }
+        return pk.isValidSignature(sigBytes, for: body)
+    }
+
+    private func hexDecode(_ s: String) -> Data? {
+        guard s.count % 2 == 0, !s.isEmpty else { return nil }
+        var data = Data(capacity: s.count / 2)
+        var idx = s.startIndex
+        while idx < s.endIndex {
+            let byte = s[idx...s.index(idx, offsetBy: 1)]
+            guard let b = UInt8(byte, radix: 16) else { return nil }
+            data.append(b)
+            idx = s.index(idx, offsetBy: 2)
+        }
+        return data
     }
 
     /// Promote `dream-candidate` to the live `dream` adapter, keeping the

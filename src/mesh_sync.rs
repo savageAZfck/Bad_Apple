@@ -31,6 +31,11 @@ pub enum MeshDocKind {
     SovereignCheckpoint,
     /// Primary ledger checkpoint (source chain tip + Merkle root).
     LedgerCheckpoint,
+    /// Signed dream digest — a node's nightly curation summary plus a
+    /// bounded set of curated lesson rows, so peers dream a share of
+    /// each other's experience. Federated consolidation rides the same
+    /// encrypted doc mesh as everything else.
+    DreamShare,
 }
 
 impl std::fmt::Display for MeshDocKind {
@@ -42,6 +47,7 @@ impl std::fmt::Display for MeshDocKind {
             MeshDocKind::ModelManifests => write!(f, "model_manifests"),
             MeshDocKind::SovereignCheckpoint => write!(f, "sovereign_checkpoint"),
             MeshDocKind::LedgerCheckpoint => write!(f, "ledger_checkpoint"),
+            MeshDocKind::DreamShare => write!(f, "dream_share"),
         }
     }
 }
@@ -58,6 +64,7 @@ impl std::str::FromStr for MeshDocKind {
                 Ok(MeshDocKind::SovereignCheckpoint)
             }
             "ledger_checkpoint" => Ok(MeshDocKind::LedgerCheckpoint),
+            "dream_share" | "dream" | "dreams" => Ok(MeshDocKind::DreamShare),
             _ => Err(anyhow::anyhow!("unknown mesh document kind: {s}")),
         }
     }
@@ -73,6 +80,7 @@ impl MeshDocKind {
             MeshDocKind::ModelManifests => "model_manifests.json",
             MeshDocKind::SovereignCheckpoint => "sovereign_checkpoint.json",
             MeshDocKind::LedgerCheckpoint => "ledger_checkpoint.json",
+            MeshDocKind::DreamShare => "dream_share.json",
         }
     }
 
@@ -93,6 +101,8 @@ impl MeshDocKind {
             MeshDocKind::LedgerCheckpoint => {
                 PathBuf::from("/var/lib/bad_apple/ledger_checkpoint.json")
             }
+            // The dream share the engine writes after each nightly pass.
+            MeshDocKind::DreamShare => PathBuf::from("/var/lib/bad_apple/dream_share.json"),
         }
     }
 }

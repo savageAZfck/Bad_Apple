@@ -93,6 +93,80 @@ final class BadAppleProvenance: @unchecked Sendable {
         )
     }
 
+    /// Attest a single output span: a signed record binding which brain
+    /// produced which output under which governance. Prompt and output
+    /// are recorded as SHA-256 hashes — the attestation is shareable
+    /// without disclosing content; a holder of the plaintext can prove
+    /// correspondence with `covers_output` semantics off the crate.
+    ///
+    /// - Parameters:
+    ///   - modelId / revision: the brain that emitted the span
+    ///   - prompt / output: plaintext, hashed into the record
+    ///   - tokenStart / tokenEnd: range covered in the response stream
+    ///   - policyContext: ledgerContext() from the policy engine
+    ///   - ledgerAnchor: hash of the ledger entry the emission attached to
+    func recordSpan(
+        modelId: String,
+        revision: String,
+        prompt: String,
+        output: String,
+        tokenStart: Int,
+        tokenEnd: Int,
+        policyContext: [String: Any],
+        ledgerAnchor: String?
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var record: [String: Any] = [
+            "ts": Int(Date().timeIntervalSince1970),
+            "kind": "output_span",
+            "model_id": modelId,
+            "revision": revision,
+            "prompt_sha256": sha256Hex(prompt),
+            "output_sha256": sha256Hex(output),
+            "token_start": tokenStart,
+            "token_end": tokenEnd,
+        ]
+        if let manifestRoot = BadAppleModelManager.shared
+            .weightsManifestFingerprint(modelIdOrRepoId: modelId) {
+            record["weights_manifest_sha256"] = manifestRoot
+        }
+        let dreamDir = "/var/lib/bad_apple/lora_adapters/dream"
+        if FileManager.default.fileExists(atPath: "\(dreamDir)/adapters.safetensors") {
+            record["dream_adapter"] = sha256Hex(dreamDir)
+        }
+        for (k, v) in policyContext { record[k] = v }
+        if let ledgerAnchor { record["ledger_anchor"] = ledgerAnchor }
+
+        guard let bodyData = canonicalJSONData(record) else { return }
+        let signed = IdentityAgentClient.shared.isAvailable
+        if signed, let sigB64 = IdentityAgentClient.shared.sign(message: bodyData) {
+            record["signature"] = sigB64
+            record["signature_scheme"] = "secure-enclave"
+            if let pub = IdentityAgentClient.shared.publicKey() {
+                record["public_key"] = pub
+            }
+        }
+        record["signed"] = signed && record["signature"] != nil
+
+        guard let lineData = canonicalJSONData(record) else { return }
+        let recordHash = SHA256.hash(data: lineData)
+            .map { String(format: "%02x", Int($0)) }.joined()
+        appendLine(lineData + Data([0x0A]))
+
+        BadAppleEngine.shared.auditSpanRecord(
+            modelId: modelId, recordSHA256: recordHash,
+            tokenStart: tokenStart, tokenEnd: tokenEnd,
+            signed: record["signed"] as? Bool == true
+        )
+    }
+
+    private func sha256Hex(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", Int($0)) }.joined()
+    }
+
     private func canonicalJSONData(_ object: [String: Any]) -> Data? {
         guard JSONSerialization.isValidJSONObject(object) else { return nil }
         return try? JSONSerialization.data(

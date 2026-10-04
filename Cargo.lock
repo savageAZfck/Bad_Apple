@@ -259,6 +259,7 @@ dependencies = [
  "memmap2",
  "metal",
  "mil_spec",
+ "nagi",
  "ndarray",
  "notify",
  "objc2-metal",
@@ -285,6 +286,7 @@ dependencies = [
  "urlencoding",
  "wasmi",
  "wasmparser-nostd",
+ "wolakota",
  "zip 8.6.0",
 ]
 
@@ -2336,6 +2338,18 @@ name = "multi-stash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
+
+[[package]]
+name = "nagi"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "ndarray"
@@ -4578,6 +4592,18 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wolakota"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "yoke"
