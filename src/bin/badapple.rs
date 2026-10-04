@@ -1970,6 +1970,8 @@ fn run_export_proof(args: &[String]) -> Result<()> {
         "ledger.sovereign.jsonl",
         "ledger.sovereign.checkpoint.json",
         "ledger_checkpoint.json",
+        "provenance.jsonl",
+        "key_ceremony.jsonl",
     ] {
         let src = data_dir.join(name);
         if src.exists() {
@@ -1980,10 +1982,55 @@ fn run_export_proof(args: &[String]) -> Result<()> {
 
     let text = std::fs::read_to_string(&sovereign)?;
     let entries = text.lines().count();
+
+    // Continuity statement: every signed brain manifest carries the identity
+    // key that signed it. One key across every epoch means the same self
+    // signed each brain load, swap, and respawn — the chain of custody for
+    // identity, not just for events.
+    let mut continuity = serde_json::json!({ "status": "no provenance records" });
+    let prov_path = data_dir.join("provenance.jsonl");
+    if prov_path.exists() {
+        let mut manifests = 0usize;
+        let mut keys = std::collections::BTreeSet::new();
+        let mut first_ts: Option<String> = None;
+        let mut last_ts: Option<String> = None;
+        if let Ok(raw) = std::fs::read_to_string(&prov_path) {
+            for line in raw.lines() {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                if v["kind"].as_str() != Some("brain_manifest") {
+                    continue;
+                }
+                manifests += 1;
+                if let Some(pk) = v["public_key"].as_str() {
+                    keys.insert(pk.to_string());
+                }
+                if let Some(ts) = v["ts"].as_str() {
+                    if first_ts.is_none() {
+                        first_ts = Some(ts.to_string());
+                    }
+                    last_ts = Some(ts.to_string());
+                }
+            }
+        }
+        continuity = serde_json::json!({
+            "claim": "same identity key signed every brain epoch — brain swaps, respawns, and model loads all trace to one Secure Enclave key",
+            "brain_manifests": manifests,
+            "distinct_identity_keys": keys.len(),
+            "keys": keys,
+            "first_epoch": first_ts,
+            "last_epoch": last_ts,
+            "single_continuous_identity": keys.len() == 1 && manifests > 0,
+            "file": "provenance.jsonl",
+        });
+    }
+
     let manifest = serde_json::json!({
         "exported_by": format!("Bad Apple v{}", env!("CARGO_PKG_VERSION")),
         "exported_at": chrono::Utc::now().to_rfc3339(),
         "sovereign_entries": entries,
+        "continuity": continuity,
         "format": "sovereign_ledger v1 JSONL (see SPEC.md in the sovereign_ledger repo)",
         "verify": "sovereign_ledger::seal::verify_public — no secrets required",
         "files": copied,
@@ -2015,7 +2062,14 @@ fn run_export_proof(args: &[String]) -> Result<()> {
          SPEC.md in https://github.com/savageAZfck/sovereign_ledger documents every\n\
          byte: MAC preimages, segment keys, seals, Merkle construction, anchors.\n\n\
          `ledger.sovereign.checkpoint.json` is a Secure Enclave-signed checkpoint\n\
-         (scheme `secure-enclave`) binding the chain tip and Merkle root.\n",
+         (scheme `secure-enclave`) binding the chain tip and Merkle root.\n\n\
+         ## Continuity of self\n\n\
+         `provenance.jsonl` holds one signed `brain_manifest` per model load or\n\
+         swap — each signed by the Secure Enclave identity key. If every manifest\n\
+         carries the same `public_key`, one continuous self signed every epoch,\n\
+         across brain swaps and respawns. `manifest.json` > `continuity` states\n\
+         the claim and the evidence; `key_ceremony.jsonl` is the hash-chained\n\
+         history of that key's observed lifecycle.\n",
     )?;
 
     println!("proof bundle written to {}", out.display());
