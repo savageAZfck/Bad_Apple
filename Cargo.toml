@@ -136,6 +136,7 @@ nagual = { path = "../nagual" }
 eidolon = { path = "../eidolon" }
 sibyl = { path = "../sibyl" }
 mictlan = { path = "../mictlan" }
+germline = { path = "../germline" }
 
 [build-dependencies]
 cbindgen = "0.29"
