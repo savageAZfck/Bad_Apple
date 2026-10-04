@@ -272,6 +272,7 @@ dependencies = [
  "md-5",
  "memmap2",
  "metal",
+ "mictlan",
  "mil_spec",
  "nagi-escrow",
  "nagual",
@@ -2275,6 +2276,18 @@ dependencies = [
  "log",
  "objc",
  "paste",
+]
+
+[[package]]
+name = "mictlan"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

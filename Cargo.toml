@@ -135,6 +135,7 @@ axon = { path = "../axon" }
 nagual = { path = "../nagual" }
 eidolon = { path = "../eidolon" }
 sibyl = { path = "../sibyl" }
+mictlan = { path = "../mictlan" }
 
 [build-dependencies]
 cbindgen = "0.29"
