@@ -131,6 +131,7 @@ nagi = { path = "../nagi", package = "nagi-escrow" }
 wolakota = { path = "../wolakota" }
 kola = { path = "../kola" }
 bicameral = { path = "../bicameral" }
+axon = { path = "../axon" }
 
 [build-dependencies]
 cbindgen = "0.29"
