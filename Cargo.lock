@@ -273,6 +273,7 @@ dependencies = [
  "metal",
  "mil_spec",
  "nagi-escrow",
+ "nagual",
  "ndarray",
  "notify",
  "objc2-metal",
@@ -2378,6 +2379,18 @@ checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 
 [[package]]
 name = "nagi-escrow"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "nagual"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",

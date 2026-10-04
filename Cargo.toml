@@ -132,6 +132,7 @@ wolakota = { path = "../wolakota" }
 kola = { path = "../kola" }
 bicameral = { path = "../bicameral" }
 axon = { path = "../axon" }
+nagual = { path = "../nagual" }
 
 [build-dependencies]
 cbindgen = "0.29"
