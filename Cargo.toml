@@ -138,6 +138,7 @@ sibyl = { path = "../sibyl" }
 mictlan = { path = "../mictlan" }
 germline = { path = "../germline" }
 tabula = { path = "../tabula" }
+potlatch = { path = "../potlatch" }
 
 [build-dependencies]
 cbindgen = "0.29"

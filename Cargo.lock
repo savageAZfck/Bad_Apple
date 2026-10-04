@@ -280,6 +280,7 @@ dependencies = [
  "ndarray",
  "notify",
  "objc2-metal",
+ "potlatch",
  "rand 0.8.8",
  "redb",
  "regex",
@@ -2864,6 +2865,17 @@ name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "potlatch"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "powerfmt"
