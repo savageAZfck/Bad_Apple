@@ -286,6 +286,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sibyl",
  "signal-hook",
  "sovereign_ledger",
  "starship-battery",
@@ -3439,6 +3440,19 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "sibyl"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "signal-hook"

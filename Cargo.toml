@@ -134,6 +134,7 @@ bicameral = { path = "../bicameral" }
 axon = { path = "../axon" }
 nagual = { path = "../nagual" }
 eidolon = { path = "../eidolon" }
+sibyl = { path = "../sibyl" }
 
 [build-dependencies]
 cbindgen = "0.29"
