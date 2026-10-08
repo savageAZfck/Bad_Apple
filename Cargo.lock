@@ -276,7 +276,7 @@ dependencies = [
  "mictlan",
  "mil_compile",
  "mil_machines",
- "mil_spec 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mil_spec",
  "nagi-escrow",
  "nagual",
  "ndarray",
@@ -2310,22 +2310,19 @@ dependencies = [
 [[package]]
 name = "mil_compile"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69972da1d0f567c3fe4be5dde123665641d0bb3994c100ec635f05288fddfa9e"
 dependencies = [
- "mil_spec 0.3.0",
+ "mil_spec",
 ]
 
 [[package]]
 name = "mil_machines"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c10aa4906380f0baf936d843783b4c23d4fc08fd35f6177af03886fe1efd33cf"
 dependencies = [
- "mil_spec 0.3.0",
-]
-
-[[package]]
-name = "mil_spec"
-version = "0.3.0"
-dependencies = [
- "half",
+ "mil_spec",
 ]
 
 [[package]]
