@@ -173,8 +173,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "axon"
-version = "0.1.0"
+name = "axon-reflex"
+version = "0.1.1"
 dependencies = [
  "hex",
  "serde",
@@ -239,11 +239,11 @@ dependencies = [
 
 [[package]]
 name = "bad_apple"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "axon",
+ "axon-reflex",
  "axum",
  "base64 0.22.1",
  "bicameral",
@@ -259,7 +259,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "ed25519-dalek",
- "eidolon",
+ "eidolon-replay",
  "flight_tape",
  "futures-util",
  "germline",
@@ -267,7 +267,7 @@ dependencies = [
  "hex",
  "hf-chat-template",
  "hmac 0.13.0",
- "kola",
+ "kola-witness",
  "libc",
  "libloading",
  "md-5",
@@ -289,12 +289,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sibyl",
+ "sibyl-gate",
  "signal-hook",
  "sovereign_ledger",
  "starship-battery",
  "sysinfo",
- "tabula",
+ "tabula-rasa",
  "tokenizers",
  "tokio",
  "tokio-stream",
@@ -342,7 +342,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bicameral"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -1174,8 +1174,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "eidolon"
-version = "0.1.0"
+name = "eidolon-replay"
+version = "0.1.1"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2095,7 +2095,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kola"
+name = "kola-witness"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
@@ -2307,9 +2307,9 @@ dependencies = [
 
 [[package]]
 name = "mil_spec"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57f26f9a532002c1763cae192a5e824b440aa7053ce2bf429349fa265a9837b7"
+checksum = "78c7295ff8ec81779717a0f3352d486dfb9683a49be76eafaafaf97afdc68ed0"
 dependencies = [
  "half",
 ]
@@ -2421,7 +2421,7 @@ checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 
 [[package]]
 name = "nagi-escrow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3481,7 +3481,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "sibyl"
+name = "sibyl-gate"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
@@ -3751,7 +3751,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tabula"
+name = "tabula-rasa"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
@@ -4722,7 +4722,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wolakota"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ed25519-dalek",
  "hex",

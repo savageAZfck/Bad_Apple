@@ -2,6 +2,36 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.8.0] — 2026-10-07
+
+### Added
+- **Ten new organs, fully integrated**: the prompt and meta-response
+  capability surface knows all ten; each ships as its own binary.
+  - `badapple-witness` (kola) — attestation/witness organ.
+  - `badapple-hansard` (bicameral) — two-chamber council: GPU and ANE
+    chambers, motions, signed votes, recorded dissent.
+  - `badapple-reflex` (axon) — install/sense/freeze/verify reflexes over
+    organism events.
+  - `badapple-immune` (nagual) — detect/develop/export/adopt/check/verify
+    immune responses.
+  - `badapple-eidolon` — replay/verify over the audit ledger.
+  - `badapple-sibyl` — seal/release/unlock with custody shares.
+  - `badapple-will` (mictlan) — orders, heartbeats, certify, scoped
+    execution.
+  - `badapple-germline` — bear/accept/record/revoke/ancestry lineage.
+  - `badapple-tabula` — scan the ledger, prove/verify certified absence.
+  - `badapple-potlatch` — issue/accept/invoke/settle/default over the
+    organism's economic book.
+- `badapple-escrow` — dead-man memory escrow organ.
+- `badapple-treaty` — inter-organism consent contracts.
+- Federated dreaming + output span attestations; `export-proof`
+  continuity attestation.
+
+### Changed
+- `mil_spec` dependency 0.1.0 → 0.3.0 (public `wire_bytes`/`fresh`/
+  streaming package writer API).
+- `nagi` crate renamed `nagi-escrow` on crates.io (lib name unchanged).
+
 ## [0.7.0] — 2026-10-03
 
 ### Added

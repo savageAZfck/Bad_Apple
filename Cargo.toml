@@ -1,6 +1,6 @@
 [package]
 name = "bad_apple"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["Adam Clark <savagetism@icloud.com>"]
 repository = "https://github.com/savageAZfck/Bad_Apple"
@@ -111,7 +111,7 @@ ciborium = "0.2"
 libc = "0.2"
 memmap2 = "0.9.11"
 half = "2"
-mil_spec = "0.1.0"
+mil_spec = "0.3.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 regex = "1.10"
 dirs = "5"
@@ -129,15 +129,15 @@ respawned = "0.3"
 flight_tape = "0.1"
 nagi = { path = "../nagi", package = "nagi-escrow" }
 wolakota = { path = "../wolakota" }
-kola = { path = "../kola" }
+kola = { path = "../kola", package = "kola-witness" }
 bicameral = { path = "../bicameral" }
-axon = { path = "../axon" }
+axon = { path = "../axon", package = "axon-reflex" }
 nagual = { path = "../nagual" }
-eidolon = { path = "../eidolon" }
-sibyl = { path = "../sibyl" }
+eidolon = { path = "../eidolon", package = "eidolon-replay" }
+sibyl = { path = "../sibyl", package = "sibyl-gate" }
 mictlan = { path = "../mictlan" }
 germline = { path = "../germline" }
-tabula = { path = "../tabula" }
+tabula = { path = "../tabula", package = "tabula-rasa" }
 potlatch = { path = "../potlatch" }
 
 [build-dependencies]
