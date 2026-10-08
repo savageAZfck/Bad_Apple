@@ -146,6 +146,9 @@ fn main() -> Result<()> {
             return run_recall_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
         Some("tape") => return run_tape_subcommand(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("firewall") => {
+            return run_firewall_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         Some("bulletin") => {
             return run_sidecar_subcommand(
                 "badapple-bulletin",
@@ -2944,8 +2947,39 @@ fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
 fn print_help() {
     println!(
         "badapple — authenticated local client for the Bad Apple daemon\n\n\
-         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>>\n  badapple status          Is Bad Apple working? Three-line human check\n  badapple cert            Machine-readable air-gap certification\n\n\
+         Usage:\n  badapple [OPTIONS] \"query\"\n  badapple model <list|scan|info|use|verify|add|remove|recommend> [args]\n  badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n  badapple vault <get|set|remove|list|import> [args]\n  badapple workspace <get|set <path>|index|watch [path]>\n  badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>|init>\n  badapple redteam <run|watch|status|category <category>|probe <id>|generated|propose [--focus <x>] [--dry-run]|findings>\n  badapple status          Is Bad Apple working? Three-line human check\n  badapple cert            Machine-readable air-gap certification\n\n\
          Options:\n  -n, --max-tokens N  Maximum generated tokens (default: 500)\n  --speak             Stream each sentence to local TTS and play with afplay\n  --persona NAME      Switch persona for this query (cali, curious, drill, genz, midwest, wicket, ...)\n  --roast             Alias for --persona drill\n  --benchmark         Benchmark a single prompt or a default suite\n  --doctor            Print a local support diagnostic report (--diagnostics alias)\n  --crash-report      Collect crash logs and daemon state for debugging\n  --json              Output token stream as JSON\n  -h, --help          Show this help\n\n\
          Environment:\n  BADAPPLE_SOCKET_PATH       Unix socket path\n  BADAPPLE_SLICKS_KEY_PATH   SLICKS key file path\n  BADAPPLE_SLICKS_SECRET     In-memory SLICKS secret override\n  BADAPPLE_TTS_VOICE         Voice name for --speak (default: Best; Piper voices in voices/ take priority, then AVFoundation voices)\n  BADAPPLE_VAULT_KEY         Master key for the local secret vault\n  BADAPPLE_MCP_CATALOG_PATH  Path to the MCP marketplace catalog"
     );
+}
+
+fn run_firewall_subcommand(args: &[String]) -> Result<()> {
+    use bad_apple::firewall_machine as fw;
+    use std::path::Path;
+
+    match args.first().map(String::as_str).unwrap_or("status") {
+        "compile" => {
+            let dir = Path::new(fw::FIREWALL_DIR);
+            std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
+            let report = fw::compile_to(dir)?;
+            println!(
+                "{{\"status\": \"compiled\", \"states\": {}, \"patterns\": {}, \"model\": \"{}\"}}",
+                report.states,
+                report.patterns,
+                report.compiled.display()
+            );
+        }
+        "status" => {
+            let dir = Path::new(fw::FIREWALL_DIR);
+            let compiled = dir.join(fw::COMPILED_NAME).is_dir();
+            let fresh = fw::is_fresh(dir);
+            println!(
+                "{{\"status\": \"ok\", \"patterns\": {}, \"compiled\": {compiled}, \"fresh\": {fresh}, \"model\": \"{}\"}}",
+                fw::merged_patterns().len(),
+                dir.join(fw::COMPILED_NAME).display()
+            );
+        }
+        other => bail!("firewall: unknown subcommand {other} (compile|status)"),
+    }
+    Ok(())
 }

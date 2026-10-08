@@ -5022,6 +5022,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             do {
                 try existing.write(toFile: path, atomically: true, encoding: .utf8)
                 outputFirewall?.reload()
+                recompileOutputFirewall()
                 return "Added pattern '\(pattern)' to the output firewall blocklist."
             } catch {
                 return "Error: cannot write blocklist: \(error.localizedDescription)"
@@ -5040,6 +5041,7 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             do {
                 try lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
                 outputFirewall?.reload()
+                recompileOutputFirewall()
                 return "Removed pattern '\(pattern)' from the output firewall blocklist."
             } catch {
                 return "Error: cannot write blocklist: \(error.localizedDescription)"
@@ -5047,6 +5049,29 @@ final class BadAppleToolExecutor: @unchecked Sendable {
         }
 
         return "Error: unknown action '\(action)'"
+    }
+
+    /// Rebuild the compiled ANE output-firewall automaton after a
+    /// blocklist change. Async and best-effort — until the artifact's
+    /// fingerprint matches the live pattern set the firewall uses its
+    /// software automaton, so a missing binary never opens a gap.
+    private func recompileOutputFirewall() {
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            let candidates = [
+                "/usr/local/bin/badapple",
+                "/opt/homebrew/bin/badapple",
+                fm.homeDirectoryForCurrentUser
+                    .appendingPathComponent("bad_apple/target/release/badapple").path,
+            ]
+            guard let bin = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) else {
+                return
+            }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: bin)
+            proc.arguments = ["firewall", "compile"]
+            try? proc.run()
+        }
     }
 
     /// Undo the most recent note or image generation.

@@ -112,6 +112,8 @@ libc = "0.2"
 memmap2 = "0.9.11"
 half = "2"
 mil_spec = "0.3.0"
+mil_machines = { path = "../mil_spec/crates/mil_machines" }
+mil_compile = { path = "../mil_spec/crates/mil_compile" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 regex = "1.10"
 dirs = "5"

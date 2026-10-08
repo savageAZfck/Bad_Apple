@@ -22,6 +22,7 @@ pub mod bad_apple_ipc;
 pub mod benchmark;
 pub mod cert;
 pub mod config;
+pub mod firewall_machine;
 pub use mil_spec;
 
 pub mod ify;

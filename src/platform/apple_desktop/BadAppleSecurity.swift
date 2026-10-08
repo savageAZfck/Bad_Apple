@@ -12,6 +12,7 @@
 
 import Foundation
 import CryptoKit
+import CoreML
 
 // MARK: - Audit Ledger
 
@@ -273,10 +274,33 @@ final class BadAppleAuditLedger: @unchecked Sendable {
 
     /// Hash of the current chain tip, or the genesis hash if the ledger is
     /// empty / missing / corrupt. Reads the last line's "hash" field.
+    /// Tail-reads the file — the ledger grows unboundedly, so a full
+    /// read+split would be O(n) on every append under the ledger lock.
     private func lastHash() -> String {
-        guard let lines = readLines(),
-              let last = lines.last,
-              let data = last.data(using: .utf8),
+        var last: Substring?
+        if let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: Self.ledgerPath)) {
+            defer { try? handle.close() }
+            if let size = try? handle.seekToEnd(), size > 0 {
+                let window = min(size, 1 << 20)
+                try? handle.seek(toOffset: size - window)
+                if let tail = try? handle.readToEnd(),
+                   let content = String(data: tail, encoding: .utf8) {
+                    last = content
+                        .split(separator: "\n", omittingEmptySubsequences: true)
+                        .last
+                }
+            }
+        }
+        // If the tail window cut a line (single entry > window), fall back to
+        // a full read so we never chain off a partial/corrupt tip.
+        if let last,
+           let data = String(last).data(using: .utf8),
+           let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let hash = entry["hash"] as? String {
+            return hash
+        }
+        guard let line = readLines()?.last,
+              let data = line.data(using: .utf8),
               let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let hash = entry["hash"] as? String else {
             return genesisHash()
@@ -529,6 +553,125 @@ private final class AhoCorasickAutomaton {
     }
 }
 
+// MARK: - ANE Output Automaton
+
+/// Aho-Corasick output firewall compiled to a stateful CoreML program by
+/// `badapple firewall compile` (mil_machines) and executed on the ANE.
+///
+/// The artifact lives at `/var/lib/bad_apple/firewall.mlmodelc` with a
+/// SHA-256 fingerprint of the pattern set at `firewall.patterns.sha`.
+/// The automaton answers "did any pattern end here" per byte — detection
+/// only — so verdicts are hardware; range replacement stays in software.
+/// Every failure mode returns nil and the caller falls back to the Swift
+/// automaton, so a missing/stale/corrupt model never weakens the firewall.
+final class ANEOutputAutomaton {
+    /// Why the last init attempt bailed — diagnostics for the fallback path.
+    static var lastInitFailure = ""
+    static let modelPath = "/var/lib/bad_apple/firewall.mlmodelc"
+    static let fingerprintPath = "/var/lib/bad_apple/firewall.patterns.sha"
+
+    private var model: MLModel?
+    private var state: MLState?
+    private var fingerprint = ""
+
+    /// Every byte pushed through `state` — used to detect whether a
+    /// caller's `accumulated` continues this stream or begins a new one
+    /// (interleaved responses share the firewall object).
+    private(set) var consumed = Data()
+    /// Latched "any hit seen in this stream" flag.
+    private(set) var hit = false
+    /// A predict failure poisons the automaton — callers must fall back to
+    /// the software path for the remainder of the scan (fail closed).
+    private(set) var broken = false
+
+    /// Load the compiled model if its fingerprint matches `snapshot`.
+    /// Returns nil — i.e. caller must use the software path — when the
+    /// artifact is absent, was built from a different pattern set, or the
+    /// model/state machinery fails to initialize.
+    init?(snapshot: [String]) {
+        guard #available(macOS 15.0, *) else {
+            Self.lastInitFailure = "macOS<15"
+            return nil
+        }
+        let onDisk = (try? String(contentsOfFile: Self.fingerprintPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fp = Self.fingerprint(for: snapshot)
+        guard !onDisk.isEmpty, onDisk == fp else {
+            Self.lastInitFailure = "fingerprint mismatch (disk='\(onDisk.prefix(8))' live='\(fp.prefix(8))')"
+            return nil
+        }
+        let url = URL(fileURLWithPath: Self.modelPath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            Self.lastInitFailure = "no artifact"
+            return nil
+        }
+        guard let m = try? MLModel(contentsOf: url) else {
+            Self.lastInitFailure = "MLModel load failed"
+            return nil
+        }
+        model = m
+        fingerprint = fp
+        reset()
+        guard state != nil else {
+            Self.lastInitFailure = "newState failed"
+            return nil
+        }
+        Self.lastInitFailure = ""
+    }
+
+    /// SHA-256 of the lowercased patterns joined by '\n' — identical to
+    /// `firewall_machine::fingerprint` on the Rust side.
+    static func fingerprint(for patterns: [String]) -> String {
+        BadAppleSecurity.sha256(
+            patterns.map { $0.lowercased() }.joined(separator: "\n")
+        )
+    }
+
+    /// Fresh MLState — start of a new output stream.
+    func reset() {
+        guard #available(macOS 15.0, *), let model else {
+            broken = true
+            return
+        }
+        state = model.__newState()
+        consumed = Data()
+        hit = false
+        broken = false
+    }
+
+    /// Feed UTF-8 bytes (ASCII case-folded — patterns compile lowercase);
+    /// returns true the moment any pattern completes and stays true.
+    func feed(_ bytes: some Sequence<UInt8>) -> Bool {
+        guard !broken, let model, let state else { return false }
+        var chunk = Data()
+        for byte in bytes {
+            chunk.append(byte)
+            let b: Int32 = byte >= 65 && byte <= 90 ? Int32(byte) + 32 : Int32(byte)
+            autoreleasepool {
+                do {
+                    let arr = try MLMultiArray(shape: [1], dataType: .int32)
+                    arr[0] = NSNumber(value: b)
+                    let provider = try MLDictionaryFeatureProvider(
+                        dictionary: ["byte": MLFeatureValue(multiArray: arr)]
+                    )
+                    let out = try model.prediction(from: provider, using: state)
+                    if let hits = out.featureValue(for: "hit")?.multiArrayValue,
+                       hits.count > 0, hits[0].int32Value != 0 {
+                        hit = true
+                    }
+                } catch {
+                    broken = true
+                }
+            }
+            if broken || hit { break }
+        }
+        if !broken, !chunk.isEmpty {
+            consumed.append(chunk)
+        }
+        return hit
+    }
+}
+
 // MARK: - Output Firewall
 
 /// Blocklist-driven output firewall.
@@ -559,6 +702,28 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
 
     private let lock = NSLock()
     private(set) var patterns: [String]
+
+    /// Compiled ANE automaton (nil until loaded / after failure) and the
+    /// snapshot fingerprint it was last attempted against — one init
+    /// attempt per distinct pattern set, so a missing or stale artifact
+    /// never costs more than one cheap bail per blocklist change.
+    private var aneAuto: ANEOutputAutomaton?
+    private var aneCheckedFP = ""
+    /// Scans whose verdict came from the ANE automaton (vs software).
+    private(set) var hardwareScans = 0
+    /// Scans that fell back to the software automaton.
+    private(set) var softwareScans = 0
+
+    /// The hardware automaton for `snapshot`, or nil when unavailable —
+    /// callers must always keep the software path as the fallback.
+    private func ane(for snapshot: [String]) -> ANEOutputAutomaton? {
+        let fp = ANEOutputAutomaton.fingerprint(for: snapshot)
+        if fp != aneCheckedFP {
+            aneCheckedFP = fp
+            aneAuto = ANEOutputAutomaton(snapshot: snapshot)
+        }
+        return aneAuto
+    }
 
     // MARK: - Init
 
@@ -620,6 +785,20 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
             return marker
         }
 
+        // Hardware fast-path: when the ANE automaton sees no pattern
+        // boundary the text is clean and the software scan is skipped.
+        if let auto = ane(for: snapshot) {
+            auto.reset()
+            _ = auto.feed(text.utf8)
+            if !auto.broken, !auto.hit {
+                hardwareScans += 1
+                return text
+            }
+            // hit → software scan produces the exact replacement ranges;
+            // broken → fail closed into software.
+        }
+        softwareScans += 1
+
         // Aho-Corasick single-pass scan for exact (case-insensitive) patterns.
         let automaton = AhoCorasickAutomaton(patterns: snapshot.map { $0.lowercased() })
         var matches = automaton.search(text)
@@ -657,6 +836,27 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
         }) {
             return (Self.blockedMarker, true)
         }
+
+        // Hardware automaton: the DFA's MLState is the accumulated scan —
+        // steady-state cost is one predict per new byte. A caller whose
+        // `accumulated` doesn't continue this stream triggers a reset and
+        // replay, which keeps interleaved responses correct.
+        if let auto = ane(for: snapshot) {
+            let acc = Data(accumulated.utf8)
+            if auto.consumed != acc {
+                auto.reset()
+                _ = auto.feed(acc)
+            }
+            if !auto.broken {
+                _ = auto.feed(chunk.utf8)
+                if !auto.broken {
+                    hardwareScans += 1
+                    return auto.hit ? (Self.blockedMarker, true) : (chunk, false)
+                }
+            }
+            // broken → fail closed into software below
+        }
+        softwareScans += 1
 
         // Aho-Corasick single-pass scan of accumulated + chunk.
         let automaton = AhoCorasickAutomaton(patterns: snapshot.map { $0.lowercased() })

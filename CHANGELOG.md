@@ -5,6 +5,17 @@ All notable changes to Bad Apple are documented in this file.
 ## [0.8.0] — 2026-10-07
 
 ### Added
+- **ANE output firewall**: the blocklist now compiles to a stateful
+  Aho-Corasick DFA CoreML program (`badapple firewall compile`, backed by
+  the new `mil_machines` crate) and `BadAppleOutputFirewall` streams
+  generated text through it on the Neural Engine — a non-neural workload
+  running on ANE silicon. Verified byte-exact against the software
+  automaton on the real artifact. Hardware verdicts with fail-closed
+  software fallback: a missing, stale, or broken artifact (checked via a
+  SHA-256 pattern fingerprint) silently reverts to the Swift automaton.
+  `badapple firewall status` reports artifact freshness; the
+  `update_output_firewall` tool triggers an async recompile after every
+  blocklist change.
 - **Ten new organs, fully integrated**: the prompt and meta-response
   capability surface knows all ten; each ships as its own binary.
   - `badapple-witness` (kola) — attestation/witness organ.

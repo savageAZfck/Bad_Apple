@@ -183,6 +183,19 @@ Add patterns (one per line) to `/var/lib/bad_apple/blocklist.txt` or set
 Aho-Corasick automaton.  When the model is about to emit a match, the response
 is replaced with `[Output firewall: ...]`.
 
+The automaton also runs on the ANE: `badapple firewall compile` builds the
+pattern set into `/var/lib/bad_apple/firewall.mlmodelc` (a stateful CoreML
+DFA emitted by the `mil_machines` crate) plus a `firewall.patterns.sha`
+fingerprint.  The engine streams output through the compiled automaton for
+verdicts (range replacement still happens in software on a hit); a missing,
+stale, or broken artifact falls back to the Swift automaton.  Blocklist
+edits via `update_output_firewall` recompile asynchronously.
+
+```bash
+target/release/badapple firewall compile   # build/refresh the ANE automaton
+target/release/badapple firewall status    # patterns, artifact, freshness
+```
+
 ## Hash-chained audit ledger
 
 Every query, tool call, cache hit, and response is appended to

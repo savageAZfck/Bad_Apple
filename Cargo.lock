@@ -274,7 +274,9 @@ dependencies = [
  "memmap2",
  "metal",
  "mictlan",
- "mil_spec",
+ "mil_compile",
+ "mil_machines",
+ "mil_spec 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nagi-escrow",
  "nagual",
  "ndarray",
@@ -2303,6 +2305,27 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "mil_compile"
+version = "0.1.0"
+dependencies = [
+ "mil_spec 0.3.0",
+]
+
+[[package]]
+name = "mil_machines"
+version = "0.1.0"
+dependencies = [
+ "mil_spec 0.3.0",
+]
+
+[[package]]
+name = "mil_spec"
+version = "0.3.0"
+dependencies = [
+ "half",
 ]
 
 [[package]]
