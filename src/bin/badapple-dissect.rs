@@ -12,12 +12,22 @@
 //!   badapple-dissect strings <binary> [--min N] [--grep <pat>]
 //!   badapple-dissect audit <binary> [--save]
 //!   badapple-dissect diff <old> <new>
+//!   badapple-dissect funcs <binary>            function table + exports
+//!   badapple-dissect disasm <binary> <hexaddr> disasm the function at addr
+//!   badapple-dissect hunt <binary> <substr>    string -> xref -> disasm context
 //!   badapple-dissect cache list [grep]           dyld cache image index
 //!   badapple-dissect cache audit <name> [--save] carve + audit a cached image
+//!   badapple-dissect cache extract <name> [-o out]
+//!   badapple-dissect cache hunt <name> <substr>  same hunt on a cached image
 //!   badapple-dissect status
 
 use anyhow::{Context, Result};
-use haruspex::{audit_bytes, audit_file, cache::SharedCache, diff, strings, Report};
+use haruspex::{
+    audit_bytes, audit_file,
+    cache::SharedCache,
+    code::{disasm_listing, index_code, CodeIndex},
+    diff, parse, strings, Report, Slice,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -46,8 +56,15 @@ fn usage() -> ! {
          strings <binary> [--min N] [--grep <pat>]\n\
          audit <binary> [--save]        full report + flags (--save keeps it)\n\
          diff <old> <new>               what changed between two binaries\n\
+         funcs <binary>                function table + exported symbols\n\
+         disasm <binary> <hexaddr>      disasm the function containing addr\n\
+         hunt <binary> <substr>         string -> xrefs -> disasm context\n\
          cache list [grep]              images inside the dyld shared cache\n\
          cache audit <name> [--save]    carve + audit a cached framework\n\
+         cache extract <name> [-o out]  carve an image to disk\n\
+         cache funcs <name>             function table of a cached image\n\
+         cache disasm <name> <hexaddr>  disasm inside a cached image\n\
+         cache hunt <name> <substr>     xref a string inside a cached image\n\
          status                         report inventory"
     );
     std::process::exit(2);
@@ -57,6 +74,96 @@ fn arg_flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.windows(2)
         .find(|w| w[0] == name)
         .map(|w| w[1].as_str())
+}
+
+/// Function-table + export listing shared by file and cache paths.
+fn show_funcs(slice: &Slice, idx: &CodeIndex) {
+    println!(
+        "{} functions, {} exports, {} xrefs",
+        idx.functions.len(),
+        idx.exports.len(),
+        idx.xrefs.len()
+    );
+    let _ = slice;
+    for (_, n) in &idx.exports {
+        println!("  export {n}");
+    }
+}
+
+/// Disassemble the function containing `addr` (hex or decimal).
+fn show_disasm(bytes: &[u8], slice: &Slice, idx: &CodeIndex, addr: u64) -> Result<()> {
+    let f = idx
+        .function_at(addr)
+        .with_context(|| format!("no function contains {addr:#x}"))?;
+    println!("{} ({:#x}..{:#x})", f.label(), f.addr, f.end);
+    let t = slice.text().context("no __text section")?;
+    let lo = (f.addr - t.addr) as usize;
+    let hi = (f.end - t.addr) as usize;
+    let code = &bytes[t.fileoff as usize + lo..t.fileoff as usize + hi];
+    for line in disasm_listing(code, f.addr) {
+        println!("  {line}");
+    }
+    Ok(())
+}
+
+/// The hunt: for every string matching `grep`, find code references to
+/// it and disassemble the surrounding context.
+fn hunt(bytes: &[u8], slice: &Slice, idx: &CodeIndex, grep: &str) -> Result<()> {
+    let mut found = false;
+    for os in strings(bytes, 6) {
+        if !os.text.contains(grep) {
+            continue;
+        }
+        let Some(va) = slice.vmaddr_of_fileoff(os.offset) else {
+            continue;
+        };
+        let sites: Vec<u64> = idx
+            .xrefs
+            .iter()
+            .filter(|x| x.target == va)
+            .map(|x| x.site)
+            .collect();
+        found = true;
+        if sites.is_empty() {
+            println!("{:?} — no code refs", os.text);
+            continue;
+        }
+        println!("{:?} @ {va:#x}", os.text);
+        for site in sites.iter().take(4) {
+            let f = match idx.function_at(*site) {
+                Some(f) => f,
+                None => continue,
+            };
+            println!(
+                "  ref {site:#x} in {} ({:#x}..{:#x})",
+                f.label(),
+                f.addr,
+                f.end
+            );
+            let t = slice.text().context("no __text")?;
+            let lo = site.saturating_sub(96).max(f.addr);
+            let hi = (site + 24).min(f.end);
+            let a = t.fileoff as usize + (lo - t.addr) as usize;
+            let b = t.fileoff as usize + (hi - t.addr) as usize;
+            for line in disasm_listing(&bytes[a..b], lo) {
+                let mark = if line.starts_with(&format!("{site:x}:")) {
+                    " <=="
+                } else {
+                    ""
+                };
+                println!("      {line}{mark}");
+            }
+        }
+    }
+    if !found {
+        eprintln!("no strings matching {grep:?}");
+    }
+    Ok(())
+}
+
+fn hex_or_dec(s: &str) -> Result<u64> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    Ok(u64::from_str_radix(s, 16).or_else(|_| s.parse::<u64>())?)
 }
 
 fn main() -> Result<()> {
@@ -144,6 +251,33 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&diff(&a, &b))?);
             Ok(())
         }
+        "funcs" | "disasm" | "hunt" => {
+            let path = args.get(1).context("needs a binary path")?;
+            let bytes = fs::read(path)?;
+            let m = parse(&bytes)?;
+            let slice = m.slices.first().context("no slice")?;
+            let idx = index_code(&bytes, slice, |off, len| {
+                let (lo, hi) = (off as usize, off as usize + len as usize);
+                bytes
+                    .get(lo..hi)
+                    .map(|s| s.to_vec())
+                    .ok_or(haruspex::Error::Malformed("range outside file"))
+            })?;
+            match args[0].as_str() {
+                "funcs" => {
+                    show_funcs(slice, &idx);
+                    Ok(())
+                }
+                "disasm" => {
+                    let a = hex_or_dec(args.get(2).context("disasm needs an address")?)?;
+                    show_disasm(&bytes, slice, &idx, a)
+                }
+                _ => {
+                    let g = args.get(2).context("hunt needs a substring")?;
+                    hunt(&bytes, slice, &idx, g)
+                }
+            }
+        }
         "cache" => {
             let mut cache = SharedCache::open(Path::new(
                 std::env::var("BADAPPLE_DYLD_CACHE")
@@ -187,8 +321,30 @@ fn main() -> Result<()> {
                     fs::write(&out, &bytes)?;
                     eprintln!("{} -> {} ({} bytes)", path, out, bytes.len());
                 }
+                Some("funcs") | Some("disasm") | Some("hunt") => {
+                    let sub = args[1].as_str();
+                    let name = args.get(2).context("needs an image name")?;
+                    let (_, bytes) = cache.extract(name)?;
+                    let m = parse(&bytes)?;
+                    let slice = m.slices.first().context("no slice")?;
+                    let (_, idx) = cache.code_index(name)?;
+                    (match sub {
+                        "funcs" => {
+                            show_funcs(slice, &idx);
+                            Ok(())
+                        }
+                        "disasm" => {
+                            let a = hex_or_dec(args.get(3).context("disasm needs an address")?)?;
+                            show_disasm(&bytes, slice, &idx, a)
+                        }
+                        _ => {
+                            let g = args.get(3).context("hunt needs a substring")?;
+                            hunt(&bytes, slice, &idx, g)
+                        }
+                    })?
+                }
                 _ => {
-                    eprintln!("cache needs 'list [grep]' or 'audit <name>'");
+                    eprintln!("cache needs list|audit|extract|funcs|disasm|hunt");
                     usage();
                 }
             }
