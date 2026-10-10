@@ -863,6 +863,33 @@ BADAPPLE_ANE_COMPUTE_UNITS=ane cargo test --test ane_brain_perf --release -- --n
   (int4) and `constexpr_lut_to_dense` (uint4) emit compile fine but fail
   `-14` on the proven `--layers-per-shard 1` layout too — it was never the
   shard size. int8 remains the working ANE quant.
+
+### Direct e5rt path (mil_spec) — Oct 2026
+
+The 4B ANE brain can now run **without CoreML**: `mil_infer`'s e5rt path
+drives the same `.mlmodelc` shards directly through `aned` (Espresso) —
+all 36 layer ops + 4 head ops in ONE execution stream, hidden ping-pong
+buffers chained on-die, KV caches resident as inout ports.
+
+- **Runtime:** `mil_infer::ane_pipeline::Pipeline` composes shards;
+  `mil_infer::ane_decode::Decoder` runs the real decode loop (embedding
+  row, per-position rope, causal+write masks, argmax). CLI:
+  `milc ane decode <shard_dir> --tokens <a,b,c> --max-new N`.
+- **Conformance:** identical token ids vs the MLModel path on test
+  prompts; 36-layer hidden and KV cache contents bit-identical.
+- **Engine swap:** `mil_ane_bridge` (cdylib `libBadAppleANEBridge.dylib`,
+  built from `~/mil_spec`) exports the full `bad_apple_ane_*` ABI.
+  `BADAPPLE_ANE_BRIDGE=<path-to-dylib>` selects it — `ane_core.rs`
+  already prefers that env var. Verified via `ane_gen` end-to-end.
+- **Baseline harness:** `tools/ane_conform.swift` (MLModel reference
+  decode), `tools/ane_layer_probe.swift` (N-layer bisect), matched by
+  `mil_infer` example `e5_conform`.
+- **ane_conform gotcha:** head logits MLMultiArrays are channel-strided
+  (vocab stride 32 on ANE) — argmax by the dim stride, never flat. The
+  e5rt buffer is already packed (flat index = token id).
+- **aned contention:** two ANE clients compiling shards concurrently can
+  fail (`e5_compiler_compile`/`op_create` rc 11/13, or `-14` on the
+  MLModel side) — retry sequentially; not a model problem.
 - **-14 has two causes, don't conflate:** multi-layer shards (4 layers of a
   d=2560 model exceeds the plan builder) vs unsupported ops (sub-byte
   dequant). int8 + 1 layer/shard is the proven envelope.
