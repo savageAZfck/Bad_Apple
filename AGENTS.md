@@ -126,6 +126,20 @@ src/platform/apple_desktop/install_dashboard_agent.sh
 launchctl print gui/$(id -u)/com.badapple.dashboard
 ```
 
+All `/api/*` routes require `Authorization: Bearer` with the token at
+`/var/lib/bad_apple/dashboard.token` (mode 0600, auto-minted on first run;
+`BADAPPLE_DASHBOARD_TOKEN` overrides). The token is never served over HTTP —
+the menu bar appends it as a `#token=` URL fragment when opening the
+dashboard, and `web/static/csrf.js` stores it in sessionStorage; without it
+the UI prompts for a paste. Mutating calls additionally require the
+`X-CSRF-Token` from `/api/csrf`, and every request must carry a loopback
+`Host` header (DNS-rebinding guard). For curl:
+
+```bash
+TOK=$(cat /var/lib/bad_apple/dashboard.token)
+curl -H "Authorization: Bearer $TOK" http://127.0.0.1:8787/api/status
+```
+
 ## Test a query
 
 ```bash
@@ -227,6 +241,40 @@ Env: `BADAPPLE_IFY=0` disables; `BADAPPLE_IFY_PHASE` forces a phase;
 (15s default poll); `BADAPPLE_IFY_DIR`/`BADAPPLE_LEDGER` override paths
 (tests).
 
+## Self red-team (generated probes)
+
+`badapple redteam` runs the adversarial probe harness (`src/red_team/`):
+12 built-in probes across `cage|slicks|p2p|wasm|policy|audit` plus any
+model-authored probes loaded from `~/.bad_apple/redteam/probes/*.json`.
+
+```bash
+badapple redteam run            # every probe once; JSON report, exit 1 on findings
+badapple redteam watch [sec]    # continuous loop (default 30s)
+badapple redteam status         # score + finding summary
+badapple redteam category <c>   # one category
+badapple redteam probe <id>     # one probe by id
+badapple redteam generated      # list model-authored probes
+badapple redteam propose [--focus <x>] [--dry-run]
+```
+
+`propose` is the generative layer: the organism hypothesizes a weakness via
+the raw `inference` agent method (bypasses persona — personas narrate instead
+of emitting JSON), emits a declarative `ProbeSpec`, and the harness
+validates, persists (0600, `gen_*` ids, ≤64 probes FIFO), executes, and
+appends the result to the hash-chained findings log
+`~/.bad_apple/redteam/findings.jsonl`.
+
+Specs are interpreted, never compiled — check kinds: `file_absent`,
+`file_present`, `file_contains`, `file_not_contains`, `file_mode_max`
+(octal string), `http_status`, `http_not_status` (loopback only, never
+authenticated), `port_closed` (loopback only), `socket_rejects`,
+`process_present`, `process_absent`. Paths jail to `/var/lib/bad_apple`,
+`~/.bad_apple`, `/var/run/badapple`, `/tmp`, the repo root, and
+`BADAPPLE_RED_TEAM_ROOTS` additions. `BADAPPLE_RED_TEAM_DIR` redirects the
+probe/findings dirs (tests). Generated probes cannot write files, reach
+non-loopback addresses, or carry credentials — they see exactly what an
+unauthenticated local caller sees.
+
 ## Sovereign ledger layer (defense in depth)
 
 `badapple-sovereign` (built from `src/bin/badapple-sovereign.rs`) is a thin
@@ -250,6 +298,37 @@ Manual run:
 ```bash
 target/release/badapple-sovereign            # verify + harden + checkpoint
 target/release/badapple-sovereign --checkpoint   # verify + re-sign only
+```
+
+## X-ray eyes (dissect organ)
+
+`badapple-dissect` (built from `src/bin/badapple-dissect.rs`) is a thin
+wrapper over the public `haruspex-macho` crate (`haruspex` dir dep). It
+lets the organism see inside the machine it lives on: pure-Rust Mach-O
+inspection of any binary — fat/thin arch slices, load commands, linked
+dylibs, symtab imports/exports, embedded entitlements walked out of the
+code-signature superblob, `__objc_classname` inventory, and ASCII +
+UTF-16LE strings with file offsets.
+
+`audit` folds everything into an evidence-backed report: sha256 identity
+plus flags for unsigned slices, executable stacks, sensitive-API
+imports (keychain, camera/mic, screen capture, `task_for_pid`,
+privileged-helper install, shell/spawn), embedded URLs, and
+attacker-writable rpaths. `diff` answers what a binary update changed —
+dylib/import/entitlement/URL set deltas plus hash and size.
+
+The organ is read-only by construction: it never execs, never dlopens,
+never touches the network. Saved reports go under
+`/var/lib/bad_apple/dissect/reports/` (`BADAPPLE_DISSECT_DIR` overrides,
+tests). Flags are observations with evidence offsets, not verdicts —
+a sceptic re-checks the bytes.
+
+```bash
+badapple-dissect inspect /Applications/Some.app/Contents/MacOS/Some
+badapple-dissect strings /usr/bin/curl --min 8 --grep http
+badapple-dissect audit /tmp/suspect --save
+badapple-dissect diff /bin/ls /tmp/ls.new
+badapple-dissect status
 ```
 
 ## Respawn state snapshots (undo layer)
@@ -756,6 +835,38 @@ BADAPPLE_ANE_COMPUTE_UNITS=ane cargo test --test ane_brain_perf --release -- --n
 - Qwen3 chat template: render with `enable_thinking: false` or the answer
   budget is spent inside `<think>`.
 
+### Lessons from the Qwen3-8B + Qwen3-4B two-brain rollout (Oct 2026)
+
+- **Stale dream LoRAs are brain-geometry-locked and crash silently.**
+  `applyDreamAdapterIfPresent` injects `lora_adapters/dream` at every model
+  load; `model.update` assigns weights by name with no shape check, so a
+  `lora_a [5120,8]` (Qwen3-14B geometry) injected into the 8B (hidden 4096)
+  survives load and traps the first `QLoRALinear` matmul —
+  `[matmul] (1,L,4096) × (5120,8)`. The do/catch only guards `load()`, so it
+  bricks generation, not load. `applyAdapter` now preflights every `lora_a`
+  input dim against the model's layer input dims and throws
+  `adapterGeometryMismatch`. The 14B-era adapter is archived at
+  `lora_adapters/dream-archived-qwen3-14b`; retrain on the live brain before
+  unarchiving.
+- **ANE spec drafting measured net-negative on this pairing.** Qwen3-8B GPU
+  + Qwen3-4B ANE draft ran end-to-end (74% acceptance) but lost: draft cost
+  ~145 ms/tok is the ~40-dispatch chain floor (≈6.7 tok/s, as documented),
+  always slower than the ~30-70 ms GPU decode step, and its residency adds
+  memory pressure on the verifier. The ANE brain wins as a *concurrent*
+  second brain (`BADAPPLE_ANE_BRAIN=1`, background/agent work routes via
+  `brain:"ane"|"auto"`), not a draft — `BADAPPLE_ANE_DRAFT=0` now.
+- **ANE footprint is smaller than file size.** The 4.5 GiB artifact's real
+  RSS delta measured **-0.37 GiB** — CoreML mmaps shards; don't size the
+  resident set from `du`. The admission gate's file-size estimate is
+  conservative by ~2×.
+- **int4 does not plan-build on ANE.** Both `constexpr_blockwise_shift_scale`
+  (int4) and `constexpr_lut_to_dense` (uint4) emit compile fine but fail
+  `-14` on the proven `--layers-per-shard 1` layout too — it was never the
+  shard size. int8 remains the working ANE quant.
+- **-14 has two causes, don't conflate:** multi-layer shards (4 layers of a
+  d=2560 model exceeds the plan builder) vs unsupported ops (sub-byte
+  dequant). int8 + 1 layer/shard is the proven envelope.
+
 ## Mesh-brain (pipeline-parallel distributed inference)
 
 One model split across trusted peers — layers partitioned by rank, hidden
@@ -1016,7 +1127,7 @@ cargo clippy --release
   menu bar persona editor and full control-center UI are not currently available
   from the web.
 - `curious_self_improve` is a native tool that runs a bounded self-check (cert suite, doctor, output firewall, git status, and source TODO/FIXME/HACK/XXX scan) and writes a proposal note to `~/.bad_apple/notes/proposed_patches/`. Trigger it with `target/release/badapple "curious check"`.
-- Curious autopilot: it is wired to the same toggle as autopilot. When autopilot is on, the engine runs `curious_self_improve` on a loop. Set the interval in seconds with `BADAPPLE_CURIOUS_INTERVAL` (default 300; 0 disables).
+- Curious autopilot: it is wired to the same toggle as autopilot. When autopilot is on, the engine runs `curious_self_improve` on a loop. Set the interval in seconds with `BADAPPLE_CURIOUS_INTERVAL` (default 3600; 0 disables). `BADAPPLE_CURIOUS_IDLE_SECONDS` (default 900) gates each pass on user inactivity — the 14B pass evicts the user's prefix cache, so Curious only runs when the owner is away.
 - Tool prompts are now generated in plain English with a concrete `<tool_call>` example for each relevant tool, and the executor recognizes common 7B-model misnames (e.g. `add_output_firewall_pattern` -> `update_output_firewall`, `run_diagnostics` -> `self_audit`).
 - Self-introspection tools: `self_history` (tails `ledger.jsonl`, `~/.bad_apple/ify/findings.jsonl`, and `badapple strategy list`; args `source`/`limit`/`filter`) and `system_inventory` (hardware/storage/power/processes/logs/thermal via bounded subprocesses; serials/UUIDs stripped) are read-only and approval-free in `policy.yaml`. Like `self_audit`, they also run deterministically on user phrases (`wantsIntrospection` in `BadAppleEngine.swift` — "what happened", "your history", "system inventory", "what's running"), then the model voices the records in first person; this bypasses flaky 7B `<tool_call>` emission for unfamiliar tool names.
 - Ambient context is injected as `Your senses (live ambient state ...)` so the model attributes screen/hearing/thermal lines to its own perception rather than anonymous data.
@@ -1329,3 +1440,35 @@ and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.
 - `badapple-p2p` no longer has any hard-coded fallback secret. `BADAPPLE_P2P_SECRET` must be at least 32 bytes, or `BADAPPLE_SLICKS_KEY_PATH` must point to a non-empty key file. P2P output directories are validated to be absolute, `..`-free, and under `/var/lib/bad_apple` or `~/.bad_apple`.
 - `BadAppleTools.runShell` blocks execution-spawning `find` arguments (`-exec`, `-ok`, `;`, `{}`, `-delete`, `xargs`), and `runAppleScript` rejects additional bypass patterns (`do javascript`, `open location`, `keystroke`, `key code`, `current application`, `current application's`).
 - `BadAppleModelManager` no longer forces `HF_HUB_OFFLINE=0` during downloads; the daemon's `set_allow_downloads` handler defaults to off and respects the configured policy.
+
+## ANE 14B split-brain (this session)
+
+- `src/bin/badapple-aneconvert-legacy.rs` — write-mask (ios19-protocol) emit grafted with a dequant read path for MLX 4-bit checkpoints. This emit (commit `5467846` lineage) is the one that plan-builds reliably and produced the deployed `qwen3b_v2` artifacts.
+- **Quant scales/biases are BF16, not F16** — `dequant_mlx_q4` must decode them with `half::bf16`. Reading as f16 silently poisons every weight (deterministic garbage logits). Nibble order is LSB-first (`(word >> 4*j) & 0xF`), `w = scale*q + bias`, `scales[r][i/group]`.
+- ANE plan-build `-14` is *cumulative and byte-driven*: fp16 shards (~660 MB) fail past ~17 loads; **int8 shards (~330 MB) plan 20+ clean** — verified with a 20-shard tail. `.all` compute units can't plan this graph — only `cpuAndNeuralEngine` (rawValue 3) works.
+- ANE rank server: `badapple-ane-rank` speaks the mesh `step` protocol (`serve_ane_tail` in `mesh_brain.rs`) via new bridge export `bad_apple_ane_forward_hidden`. Manifest validator requires layers relabeled contiguous from 0 (`tail_manifest.json`).
+- `examples/mesh_shard.rs` builds rank dirs with explicit layer ranges; `examples/mesh_step.rs` sends a one-shot hidden step for bisecting.
+- 14B split topology verified end-to-end: GPU rank 0 `layers 0-20` (MLX, `:8741`, `--embed --next 8744`) → ANE rank 1 `layers 20-40` relabeled (`:8744`, has head, 20 int8 shards). Artifacts: `ane_artifacts/qwen14b_tail/` + `ane_artifacts/q14_gpu_prefix/`. Bring-up: `tools/mesh14_up.sh` (idempotent, `--down` to stop). `/tmp` is NOT durable — artifacts were lost once to a reboot already.
+- **Always convert ANE tails with `--weight-bits 8`**: fp16 tail weights (~660 MB/shard) push the 16 GB box into swap thrash (~15 s/token). int8 row-quantized (~330 MB/shard) decodes ~0.2 s/tok per shard and end-to-end runs ~1.5 tok/s without thrashing.
+- `badapple mesh-brain ask --to 127.0.0.1:8741 --prompt ... --max-tokens N` drives the whole mesh; verified "Paris" / "H2O" through the seam.
+- **Daemon integration (verified)**: `BadAppleInference.loadModel(from:)` detects a rank-0 `mesh_brain_rank.json`, pings the endpoint at load (dead mesh → `modelLoadFailed`), loads the tokenizer standalone, and routes `generate` through `MeshBrainLink` — public APIs unchanged. `switchMainModel` resolves a custom model's registered `local_path` and loads it directly (bypasses the Hub downloader). Custom profiles are persisted across daemon restarts (`PersistedState.profiles`; pre-fix state files get a synthesized profile from `local_path`).
+- The rank-0 dir must live under the HF cache root (`addModel` jails paths there) — `~/.cache/huggingface/hub/q14-mesh/model` in this deployment. Register: `badapple model add <dir> q14_mesh mesh14/local`, then `badapple model use q14_mesh`. Verified end-to-end: daemon query → rank 0 → ANE tail → "Tokyo".
+
+## Mesh hardening (post-integration session)
+
+- **`markLoaded` self-deadlock**: it held the manager's non-recursive `NSLock` then called `verifyProvenance`, which re-takes the same lock (lines ~944/~1015) — the task blocks on itself forever and wedges `modelOperationGate`, so every model op hangs silently. Provenance now runs AFTER the lock is released (`BadAppleModelManager.swift` `markLoaded`). `NSLock` is not recursive — any `lock.lock(); defer` scope that calls another locking method on the same manager is a latent deadlock; check callers before adding lock-taking helpers.
+- **Audit ledger `lastHash()`** used to read+split the ENTIRE `ledger.jsonl` (29 MB/87k lines) on every `append()` under the ledger lock — startup audit bursts convoyed every other subsystem behind minutes of string splitting. It now tail-reads a 1 MiB window and only falls back to a full read if the tail line can't parse (`BadAppleSecurity.swift`).
+- **Mesh timeout budget must count the PROMPT, not just max_tokens**: rank0→tail `step` budget is `meshTimeout + rows*4` (`BadAppleShard.swift`); daemon→rank0 `generate` budget is `meshTimeout + promptTokens*0.5 + maxTokens*30` (`BadAppleInference.swift`). A fixed or token-only budget kills multi-thousand-token prefills mid-flight.
+- **CLI/gatekeeper 15-min walls**: `bad_apple_ipc.rs` and `gatekeeper.rs` upstream both had `Duration::from_mins(15)` — cold mesh queries legitimately exceed it. Now `BADAPPLE_CALL_TIMEOUT_MINS` (default 45) on both.
+- **ANE tail context floor**: the deployed manifest's `seq_len` bounds `position`; a prompt longer than seq_len pushes `position` past the mask horizon → CoreML raises an NSException → unwinds across the Rust FFI → `panic_abort` shows as `entered unreachable code` at `panic_abort.rs:28` (ANY foreign exception reads this way with `panic="abort"`). `forwardHidden` now bounds-checks `rows <= sequenceLength - position` and returns nil (clean error) — sibling paths already had the check. Tail reconverted `--seq-len 8192` because the persona system prompt is ~4k tokens.
+- **Prefix-continuity**: rank0 keeps `prefilledIds`, diffs each new prompt against them, sends a `rewind` op (reuses `bad_apple_ane_rewind` FFI; `frame.token` = target position) and `KVCache.trim` locally, then prefills only the delta when shared ≥ 64. Second-and-later turns reuse the ~4k-token system-prompt KV instead of re-prefilling (~4000 rows → ~50 rows).
+- **Restart hygiene**: `mesh14_up.sh --down` only pkills `badapple-ane-rank` — the GPU rank0 (`badapple-engine` with `BADAPPLE_SHARD_DIR`) survives and must be killed/relaunched manually to pick up a rebuilt `libBadAppleMLX.dylib`. The daemon also maps that dylib at launch — engine restarts pick up dylib changes, rank processes do too, but ONLY on relaunch.
+- A `badapple` CLI response arriving in ~1 s is almost always the daemon semantic cache, not the mesh — verify with a never-before-asked prompt.
+
+## Mesh-exclusive brain semantics
+
+- Switching to `q14_mesh` is a full exchange, not an overlay: `unloadModels()` drops the prior local `ModelContainer` + fast tier, `setMeshReady` + `Memory.clearCache()` release MLX/Metal buffers, `runtime.releaseModelMemory` frees the reservation, and `unload()` now also clears `meshHost`/`meshTokenizer`/prefix cache so switching back to a local model is clean.
+- `inference.isMeshBacked` (`meshHost != nil`) gates secondary tiers OFF: fast-tier routing, the ANE drafter session, and speculative-draft dispatch are skipped — no local secondary model can engage while the mesh is the brain. `switchMainModel` also calls `BadAppleANEDrafter.shared.unload` when landing on a mesh model.
+- `model use` now `markUnloaded`s every other `loaded` profile before `markLoaded` — the registry can't show two resident mains anymore.
+- `BADAPPLE_MAIN_MODEL=q14_mesh` is the daemon default in `com.badapple.mlx.plist` (installed plist too): boot goes straight to the mesh and never loads the 7B. Startup `loadModel()` resolves custom `local_path` the same way `switchMainModel` does (`modelDirectory(for:)`). Caveat: if ranks are down at boot the eager/lazy load fails — bring ranks up (`tools/mesh14_up.sh`) then `badapple model use q14_mesh` or issue any query to retry.
+- The daemon's residual ~2.7 GB resident while mesh-backed is the ANE organisms (sentinel/council/drafter brain ~1.9 GiB) + embedding model — NOT the old 7B. Verify with `vmmap <pid> | grep -c Qwen2.5-Coder` (expect 0).

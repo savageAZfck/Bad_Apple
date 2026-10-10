@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "bad_apple"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -264,6 +264,7 @@ dependencies = [
  "futures-util",
  "germline",
  "half",
+ "haruspex-macho",
  "hex",
  "hf-chat-template",
  "hmac 0.13.0",
@@ -1796,6 +1797,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "haruspex-macho"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2309,27 +2319,25 @@ dependencies = [
 
 [[package]]
 name = "mil_compile"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69972da1d0f567c3fe4be5dde123665641d0bb3994c100ec635f05288fddfa9e"
+checksum = "1601a7ca3495f4daea961d0db304e8a4df36a1f41501433263fff7a96005fd01"
 dependencies = [
  "mil_spec",
 ]
 
 [[package]]
 name = "mil_machines"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c10aa4906380f0baf936d843783b4c23d4fc08fd35f6177af03886fe1efd33cf"
+checksum = "d7619370f4c2bfe4169b35230a84681a93b34141405d052b2cd0ec0f7d129ce6"
 dependencies = [
  "mil_spec",
 ]
 
 [[package]]
 name = "mil_spec"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78c7295ff8ec81779717a0f3352d486dfb9683a49be76eafaafaf97afdc68ed0"
+version = "0.4.1"
 dependencies = [
  "half",
 ]

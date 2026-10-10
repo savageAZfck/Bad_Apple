@@ -34,6 +34,7 @@ bar — with the parts a creature needs, not just the parts a demo needs:
 | **Conscience** | 14-seat Council of Minds votes on every gated action, votes journaled |
 | **Governance** | Consent registry, certified erasure, subject vault, provenance manifest, constitutional amendments, signed oversight bulletins |
 | **Hands** | Files, shell, AppleScript, Shortcuts, mail/calendar/reminders, local MCP tools — all under per-tool policy |
+| **X-ray eyes** | `badapple-dissect` (haruspex-macho) — pure-Rust Mach-O autopsy: slices, dylibs, imports, entitlements, strings, update diffs. Evidence-backed, read-only |
 
 Both big brains run **at the same time**. Per request, the `brain` field on
 the inference route selects `ane`, `gpu`, or `auto`; the daemon admits or

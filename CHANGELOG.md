@@ -2,6 +2,47 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.9.0] — 2026-10-10
+
+### Added
+- **New organ — X-ray eyes**: `badapple-dissect`, a thin wrapper over the
+  new public `haruspex-macho` crate. Pure-Rust Mach-O inspection with no
+  external tools: fat/thin arch slices, load commands, linked dylibs,
+  symbol-table imports/exports, embedded entitlements walked out of the
+  code-signature superblob, `__objc_classname` inventory, and ASCII +
+  UTF-16LE strings with file offsets. `audit` folds it into an
+  evidence-backed report — sha256 identity plus flags for unsigned
+  slices, executable stacks, sensitive-API imports (keychain, camera,
+  screen capture, task_for_pid, privileged helpers), embedded URLs, and
+  writable rpaths. `diff` answers "what did that binary update actually
+  change". Read-only by construction: no exec, no dyld, no network.
+- **ANE convert — Gemma3 + MLX quantization**: `badapple-aneconvert`
+  reads MLX 4-bit affine-quantized checkpoints (packed U32 nibbles,
+  F16 scale/bias stripes, `quantization.group_size`) and the Gemma3
+  architecture — sliding-window local layers with their own RoPE base,
+  `query_pre_attn_scalar` score scale, `text_config` nesting, Gemma
+  RMSNorm `1+w` bake, and `sqrt(d_model)` embedding scale. Ships
+  `badapple-aneconvert-legacy`, `badapple-aneconvert-v060`, and
+  `badapple-ane-rank` alongside.
+- **ANE tail rank on the mesh**: `mesh_brain` can serve the sharded ANE
+  core on the mesh wire so an upstream GPU prefix rank offloads its
+  suffix to the Neural Engine — nonce handshake, optional AES-256-GCM
+  packets, `ping`/`reset`/`step`, plus a `vstep` speculative-verify op
+  returning per-row argmaxes.
+- **Generated red-team probes**: `badapple redteam propose` — the
+  organism hypothesizes weaknesses via the raw inference agent method,
+  emits a declarative `ProbeSpec`, and the harness validates, persists
+  (0600, ≤64 FIFO), executes, and appends to the hash-chained findings
+  log. Specs are interpreted, never compiled.
+- Dashboard and Control Center updates; mesh step/reset/vstep probe
+  examples.
+
+### Changed
+- `mil_spec` 0.3.0 → 0.4.1, `mil_machines`/`mil_compile` 0.1.0 → 0.2.0 —
+  picks up shape ranges, the corrected `MLComputeUnits` mapping, the
+  `MLComputePlan` reader, sharded-bundle conversion, and fused KV
+  state writes from the published toolchain.
+
 ## [0.8.0] — 2026-10-07
 
 ### Added
