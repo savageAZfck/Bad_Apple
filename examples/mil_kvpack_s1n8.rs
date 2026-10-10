@@ -82,9 +82,21 @@ fn main() -> Result<(), String> {
     let (vst, vbm, vem, vsm) = masks(&mut blk, "vm");
 
     // shard-style provenance: qkv [1,2048,1,1] -> slices -> reshape [1,8,1,128]
-    let k_sl = blk.slice("qkv", &[0, 0, 0, 0], &[1, 1024, 1, 1], &[1, 1024, 1, 1], "k_sl");
+    let k_sl = blk.slice(
+        "qkv",
+        &[0, 0, 0, 0],
+        &[1, 1024, 1, 1],
+        &[1, 1024, 1, 1],
+        "k_sl",
+    );
     let nk_t = blk.reshape(&k_sl, &[1, 8, 1, 128], "nk_t");
-    let v_sl = blk.slice("qkv", &[0, 1024, 0, 0], &[1, 2048, 1, 1], &[1, 1024, 1, 1], "v_sl");
+    let v_sl = blk.slice(
+        "qkv",
+        &[0, 1024, 0, 0],
+        &[1, 2048, 1, 1],
+        &[1, 1024, 1, 1],
+        "v_sl",
+    );
     let nv_t = blk.reshape(&v_sl, &[1, 8, 1, 128], "nv_t");
 
     let kv0 = blk.read_state("kv", &kv_shape, "kv0");
@@ -132,27 +144,95 @@ fn main() -> Result<(), String> {
     let go = blk.conv1x1("xq", "wbig", None, 8192, "go");
     blk.outputs = vec![scores, k_full, kv2.clone(), go.clone()];
 
-    let states = vec![Feature { name: "kv".into(), shape: kv_shape.clone(), dtype: DType::Fp16, is_state: true }];
+    let states = vec![Feature {
+        name: "kv".into(),
+        shape: kv_shape.clone(),
+        dtype: DType::Fp16,
+        is_state: true,
+    }];
     let outputs = vec![
-        Feature { name: "scores".into(), shape: vec![1, 8, 4, 2048], dtype: DType::Fp16, is_state: false },
-        Feature { name: "k_full".into(), shape: vec![1, 8, 2048, 128], dtype: DType::Fp16, is_state: false },
-        Feature { name: "kv2".into(), shape: kv_shape.clone(), dtype: DType::Fp16, is_state: false },
-        Feature { name: "go".into(), shape: vec![1, 8192, 1, 1], dtype: DType::Fp16, is_state: false },
+        Feature {
+            name: "scores".into(),
+            shape: vec![1, 8, 4, 2048],
+            dtype: DType::Fp16,
+            is_state: false,
+        },
+        Feature {
+            name: "k_full".into(),
+            shape: vec![1, 8, 2048, 128],
+            dtype: DType::Fp16,
+            is_state: false,
+        },
+        Feature {
+            name: "kv2".into(),
+            shape: kv_shape.clone(),
+            dtype: DType::Fp16,
+            is_state: false,
+        },
+        Feature {
+            name: "go".into(),
+            shape: vec![1, 8192, 1, 1],
+            dtype: DType::Fp16,
+            is_state: false,
+        },
     ];
     let inputs = vec![
-        Feature { name: "qkv".into(), shape: vec![1, 2048, 1, 1], dtype: DType::Fp16, is_state: false },
-        Feature { name: "pos".into(), shape: vec![1], dtype: DType::Int32, is_state: false },
-        Feature { name: "q".into(), shape: vec![1, 8, 4, 128], dtype: DType::Fp16, is_state: false },
-        Feature { name: "xq".into(), shape: vec![1, 8, 1, 1], dtype: DType::Fp16, is_state: false },
-        Feature { name: "wbig".into(), shape: vec![8192, 8, 1, 1], dtype: DType::Fp16, is_state: false },
+        Feature {
+            name: "qkv".into(),
+            shape: vec![1, 2048, 1, 1],
+            dtype: DType::Fp16,
+            is_state: false,
+        },
+        Feature {
+            name: "pos".into(),
+            shape: vec![1],
+            dtype: DType::Int32,
+            is_state: false,
+        },
+        Feature {
+            name: "q".into(),
+            shape: vec![1, 8, 4, 128],
+            dtype: DType::Fp16,
+            is_state: false,
+        },
+        Feature {
+            name: "xq".into(),
+            shape: vec![1, 8, 1, 1],
+            dtype: DType::Fp16,
+            is_state: false,
+        },
+        Feature {
+            name: "wbig".into(),
+            shape: vec![8192, 8, 1, 1],
+            dtype: DType::Fp16,
+            is_state: false,
+        },
     ];
     let fn_inputs = vec![
-        NVT { name: "qkv".into(), ty: f16(&[1, 2048, 1, 1]) },
-        NVT { name: "pos".into(), ty: ValueType::Tensor(TensorType::i32v(1)) },
-        NVT { name: "q".into(), ty: f16(&[1, 8, 4, 128]) },
-        NVT { name: "xq".into(), ty: f16(&[1, 8, 1, 1]) },
-        NVT { name: "wbig".into(), ty: f16(&[8192, 8, 1, 1]) },
-        NVT { name: "kv".into(), ty: ValueType::State(TensorType::f16(&kv_shape)) },
+        NVT {
+            name: "qkv".into(),
+            ty: f16(&[1, 2048, 1, 1]),
+        },
+        NVT {
+            name: "pos".into(),
+            ty: ValueType::Tensor(TensorType::i32v(1)),
+        },
+        NVT {
+            name: "q".into(),
+            ty: f16(&[1, 8, 4, 128]),
+        },
+        NVT {
+            name: "xq".into(),
+            ty: f16(&[1, 8, 1, 1]),
+        },
+        NVT {
+            name: "wbig".into(),
+            ty: f16(&[8192, 8, 1, 1]),
+        },
+        NVT {
+            name: "kv".into(),
+            ty: ValueType::State(TensorType::f16(&kv_shape)),
+        },
     ];
     let meta = ModelMeta::new(10, "CoreML9")
         .creator("mil_kvpack_s1n8")

@@ -23,8 +23,7 @@ use std::path::{Path, PathBuf};
 
 const ROOT: &str = "/var/lib/bad_apple/dissect";
 // Darwin 27 keeps the cache inside the OS cryptex, not /System/Library.
-const DYLD_CACHE: &str =
-    "/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
+const DYLD_CACHE: &str = "/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
 
 fn root() -> PathBuf {
     std::env::var("BADAPPLE_DISSECT_DIR")
@@ -116,7 +115,12 @@ fn main() -> Result<()> {
                         continue;
                     }
                 }
-                println!("{:>8x} {}{}", s.offset, s.text, if s.wide { " (wide)" } else { "" });
+                println!(
+                    "{:>8x} {}{}",
+                    s.offset,
+                    s.text,
+                    if s.wide { " (wide)" } else { "" }
+                );
             }
             Ok(())
         }
@@ -142,7 +146,9 @@ fn main() -> Result<()> {
         }
         "cache" => {
             let mut cache = SharedCache::open(Path::new(
-                std::env::var("BADAPPLE_DYLD_CACHE").as_deref().unwrap_or(DYLD_CACHE),
+                std::env::var("BADAPPLE_DYLD_CACHE")
+                    .as_deref()
+                    .unwrap_or(DYLD_CACHE),
             ))?;
             match args.get(1).map(|s| s.as_str()) {
                 Some("list") => {
@@ -175,10 +181,7 @@ fn main() -> Result<()> {
                         .find(|w| w[0] == "-o")
                         .map(|w| w[1].clone())
                         .unwrap_or_else(|| {
-                            format!(
-                                "/tmp/{}.carved",
-                                name.rsplit('/').next().unwrap_or("image")
-                            )
+                            format!("/tmp/{}.carved", name.rsplit('/').next().unwrap_or("image"))
                         });
                     let (path, bytes) = cache.extract(name)?;
                     fs::write(&out, &bytes)?;

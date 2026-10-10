@@ -57,7 +57,11 @@ impl St {
     fn get(&self, name: &str) -> Vec<f32> {
         let mut v = self.get_raw(name);
         if std::env::var("Q8").is_ok() && name.ends_with("proj.weight") {
-            let cols = if name.contains("down_proj") { 6912usize } else { 1152usize };
+            let cols = if name.contains("down_proj") {
+                6912usize
+            } else {
+                1152usize
+            };
             let rows = v.len() / cols;
             for r in 0..rows {
                 let row = &mut v[r * cols..(r + 1) * cols];
@@ -69,7 +73,9 @@ impl St {
             }
         }
         if std::env::var("FP16").is_ok() {
-            for x in v.iter_mut() { *x = h16(*x) }
+            for x in v.iter_mut() {
+                *x = h16(*x)
+            }
         }
         return v;
     }
@@ -133,17 +139,26 @@ const EPS: f32 = 1e-6;
 const NL: usize = 26;
 
 fn h16(v: f32) -> f32 {
-    if std::env::var("FP16").is_err() { return v }
+    if std::env::var("FP16").is_err() {
+        return v;
+    }
     half::f16::from_f32(v).to_f32()
 }
 fn v16(v: &mut [f32]) {
-    if std::env::var("FP16").is_err() { return }
-    for x in v.iter_mut() { *x = half::f16::from_f32(*x).to_f32() }
+    if std::env::var("FP16").is_err() {
+        return;
+    }
+    for x in v.iter_mut() {
+        *x = half::f16::from_f32(*x).to_f32()
+    }
 }
 
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).unwrap());
-    let toks: Vec<usize> = std::env::args().skip(2).map(|a| a.parse().unwrap()).collect();
+    let toks: Vec<usize> = std::env::args()
+        .skip(2)
+        .map(|a| a.parse().unwrap())
+        .collect();
     let st = St::load(&dir);
     let emb_scale = (D as f32).sqrt();
     let s = toks.len();
@@ -152,7 +167,12 @@ fn main() {
     // hidden[s][D]
     let mut hid: Vec<Vec<f32>> = toks
         .iter()
-        .map(|&t| emb[t * D..(t + 1) * D].iter().map(|v| v * emb_scale).collect())
+        .map(|&t| {
+            emb[t * D..(t + 1) * D]
+                .iter()
+                .map(|v| v * emb_scale)
+                .collect()
+        })
         .collect();
 
     let dlayer: usize = std::env::var("REFLAYER")
@@ -199,7 +219,10 @@ fn main() {
                 vv.extend_from_slice(&vs[t]);
             }
             // pad to 8 rows so the concat layout matches the probe
-            while kk.len() < 8 * DH { kk.push(0.0); vv.push(0.0); }
+            while kk.len() < 8 * DH {
+                kk.push(0.0);
+                vv.push(0.0);
+            }
             fs::write("/tmp/ref_k.bin", bytemuck::cast_slice(&kk)).unwrap();
             fs::write("/tmp/ref_v.bin", bytemuck::cast_slice(&vv)).unwrap();
         }
@@ -218,9 +241,7 @@ fn main() {
             for h in 0..NH {
                 let qh = &q[h * DH..(h + 1) * DH];
                 let mut sc: Vec<f32> = (0..=t)
-                    .map(|k| {
-                        qh.iter().zip(&ks[k]).map(|(a, b)| a * b).sum::<f32>() * scale
-                    })
+                    .map(|k| qh.iter().zip(&ks[k]).map(|(a, b)| a * b).sum::<f32>() * scale)
                     .collect();
                 let mx = sc.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let mut sum = 0f32;
@@ -229,15 +250,25 @@ fn main() {
                     sum += *v;
                 }
                 if i == dlayer && t == s - 1 {
-                    let mut idx: Vec<(usize, f32)> = sc.iter().enumerate().map(|(k, &v)| (k, v / sum)).collect();
+                    let mut idx: Vec<(usize, f32)> =
+                        sc.iter().enumerate().map(|(k, &v)| (k, v / sum)).collect();
                     idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                    let tops: Vec<String> = idx.iter().take(8).map(|(k, v)| format!("{k}:{v:.3}")).collect();
+                    let tops: Vec<String> = idx
+                        .iter()
+                        .take(8)
+                        .map(|(k, v)| format!("{k}:{v:.3}"))
+                        .collect();
                     println!("ref row{h}: {}", tops.join(" "));
                 }
                 if i == dlayer && t == s - 1 {
-                    let mut idx: Vec<(usize, f32)> = sc.iter().enumerate().map(|(k, &v)| (k, v / sum)).collect();
+                    let mut idx: Vec<(usize, f32)> =
+                        sc.iter().enumerate().map(|(k, &v)| (k, v / sum)).collect();
                     idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                    let tops: Vec<String> = idx.iter().take(8).map(|(k, v)| format!("{k}:{v:.3}")).collect();
+                    let tops: Vec<String> = idx
+                        .iter()
+                        .take(8)
+                        .map(|(k, v)| format!("{k}:{v:.3}"))
+                        .collect();
                     println!("ref row{h}: {}", tops.join(" "));
                 }
                 let mut acc = vec![0f32; DH];
@@ -247,11 +278,17 @@ fn main() {
                     }
                 }
                 if i == dlayer && t == s - 1 && std::env::var("DUMPATTN").is_ok() {
-                    fs::write(format!("/tmp/ref_attn_h{h}.bin"), bytemuck::cast_slice(&acc)).unwrap();
+                    fs::write(
+                        format!("/tmp/ref_attn_h{h}.bin"),
+                        bytemuck::cast_slice(&acc),
+                    )
+                    .unwrap();
                 }
                 heads.extend(acc);
             }
-            if std::env::var("NOATTN").is_ok() { heads.iter_mut().for_each(|v| *v = 0.0); }
+            if std::env::var("NOATTN").is_ok() {
+                heads.iter_mut().for_each(|v| *v = 0.0);
+            }
             let o = matmul(&wo, D, NH * DH, &heads);
             if i == dlayer && t == s - 1 && std::env::var("DUMPO").is_ok() {
                 fs::write("/tmp/ref_o.bin", bytemuck::cast_slice(&o)).unwrap();
@@ -280,7 +317,8 @@ fn main() {
             let ffn: Vec<f32> = g.iter().zip(&u).map(|(a, b)| gelu_tanh(*a) * b).collect();
             if i == dlayer && t == s - 1 && std::env::var("DUMPHID").is_ok() {
                 fs::write("/tmp/ref_hid.bin", bytemuck::cast_slice(&ffn)).unwrap();
-                let mut gu = g.clone(); gu.extend_from_slice(&u);
+                let mut gu = g.clone();
+                gu.extend_from_slice(&u);
                 fs::write("/tmp/ref_gu.bin", bytemuck::cast_slice(&gu)).unwrap();
                 fs::write("/tmp/ref_g.bin", bytemuck::cast_slice(&g)).unwrap();
             }
@@ -309,12 +347,7 @@ fn main() {
     let h = rms_norm(&hid[s - 1], &nw, EPS);
     let vocab = emb.len() / D;
     let mut pairs: Vec<(usize, f32)> = (0..vocab)
-        .map(|v| {
-            (
-                v,
-                (0..D).map(|j| emb[v * D + j] * h[j]).sum::<f32>(),
-            )
-        })
+        .map(|v| (v, (0..D).map(|j| emb[v * D + j] * h[j]).sum::<f32>()))
         .collect();
     pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     print!("ref top8:");

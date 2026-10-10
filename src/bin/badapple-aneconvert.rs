@@ -853,7 +853,15 @@ fn emit_layer_shard(
             &w,
             &[d, 1, 1],
         );
-        let normed = rms_norm_big(&mut blk, &cur, &wn, d, cfg.eps, &shape_x, &format!("l{i}_an"));
+        let normed = rms_norm_big(
+            &mut blk,
+            &cur,
+            &wn,
+            d,
+            cfg.eps,
+            &shape_x,
+            &format!("l{i}_an"),
+        );
         cut!("an", normed, [1, d, 1, s]);
 
         // ---- fused QKV conv ----
@@ -893,7 +901,14 @@ fn emit_layer_shard(
                 &format!("l{i}_qkv"),
             )
         } else {
-            conv1x1_w(&mut blk, &normed, &wqkv, q_dim + 2 * kv_dim, s, &format!("l{i}_qkv"))
+            conv1x1_w(
+                &mut blk,
+                &normed,
+                &wqkv,
+                q_dim + 2 * kv_dim,
+                s,
+                &format!("l{i}_qkv"),
+            )
         };
 
         let q = blk.slice(
@@ -1065,31 +1080,11 @@ fn emit_layer_shard(
                     &[1, n_h, rope_half, s],
                     &format!("{tag}_hi"),
                 );
-                let a = blk.mul(
-                    &x_lo,
-                    &cos_in,
-                    &[1, n_h, rope_half, s],
-                    &format!("{tag}_a"),
-                );
-                let b = blk.mul(
-                    &x_hi,
-                    &sin_in,
-                    &[1, n_h, rope_half, s],
-                    &format!("{tag}_b"),
-                );
+                let a = blk.mul(&x_lo, &cos_in, &[1, n_h, rope_half, s], &format!("{tag}_a"));
+                let b = blk.mul(&x_hi, &sin_in, &[1, n_h, rope_half, s], &format!("{tag}_b"));
                 let r_lo = blk.sub(&a, &b, &[1, n_h, rope_half, s], &format!("{tag}_rlo"));
-                let c = blk.mul(
-                    &x_lo,
-                    &sin_in,
-                    &[1, n_h, rope_half, s],
-                    &format!("{tag}_c"),
-                );
-                let d2 = blk.mul(
-                    &x_hi,
-                    &cos_in,
-                    &[1, n_h, rope_half, s],
-                    &format!("{tag}_d"),
-                );
+                let c = blk.mul(&x_lo, &sin_in, &[1, n_h, rope_half, s], &format!("{tag}_c"));
+                let d2 = blk.mul(&x_hi, &cos_in, &[1, n_h, rope_half, s], &format!("{tag}_d"));
                 let r_hi = blk.add(&c, &d2, &[1, n_h, rope_half, s], &format!("{tag}_rhi"));
                 let cat = if has_pass {
                     blk.concat(
@@ -1229,7 +1224,11 @@ fn emit_layer_shard(
                 &format!("l{i}_kup"),
                 ValueType::Tensor(TensorType::f16(&kvshape)),
             );
-            cut!("kupd", cur_kv, [kvshape[0], kvshape[1], kvshape[2], kvshape[3]]);
+            cut!(
+                "kupd",
+                cur_kv,
+                [kvshape[0], kvshape[1], kvshape[2], kvshape[3]]
+            );
             // V row: write [1,nkv,s,dh] at [2l+1,0,pos,0]..[2l+2,nkv,pos+s,dh]
             // BADAPPLE_KVDUP (debug): write the K row twice instead — splits
             // "second chained update fails" from "row-1 update fails".
@@ -1250,10 +1249,7 @@ fn emit_layer_shard(
                 "slice_update",
                 vec![
                     ("x".into(), bind(&cur_kv).1),
-                    (
-                        "update".into(),
-                        bind(if dup { &new_k } else { &new_v }).1,
-                    ),
+                    ("update".into(), bind(if dup { &new_k } else { &new_v }).1),
                     ("begin".into(), bind(&vb).1),
                     ("end".into(), bind(&ve).1),
                     ("stride".into(), bind(&vst).1),
@@ -1458,7 +1454,12 @@ fn emit_layer_shard(
             // input (`attn_mask_slide`); the in-graph i32 compare/cast chain
             // it replaced failed ANE plan-build (-14) on the full layer.
             let masked = if cfg.is_sliding(i) {
-                blk.add(&m0, "attn_mask_slide", &[1, nkv, rows, seq], &format!("l{i}_mskw"))
+                blk.add(
+                    &m0,
+                    "attn_mask_slide",
+                    &[1, nkv, rows, seq],
+                    &format!("l{i}_mskw"),
+                )
             } else {
                 m0
             };
@@ -1517,9 +1518,7 @@ fn emit_layer_shard(
         cut!("o", o, [1, d, 1, s]);
         // Gemma3 post_attention_layernorm normalizes the sublayer OUTPUT
         // before the residual add; Qwen3 adds the raw o_proj result.
-        let o2 = if cfg.arch == Arch::Gemma3Text
-            && std::env::var("BADAPPLE_NO_POSTNORM").is_err()
-        {
+        let o2 = if cfg.arch == Arch::Gemma3Text && std::env::var("BADAPPLE_NO_POSTNORM").is_err() {
             let wp = norm_w(st, &format!("{p}.post_attention_layernorm.weight"))?;
             let wpn = blob(
                 &mut wb,
@@ -1528,7 +1527,15 @@ fn emit_layer_shard(
                 &wp,
                 &[d, 1, 1],
             );
-            rms_norm_big(&mut blk, &o, &wpn, d, cfg.eps, &shape_x, &format!("l{i}_pan"))
+            rms_norm_big(
+                &mut blk,
+                &o,
+                &wpn,
+                d,
+                cfg.eps,
+                &shape_x,
+                &format!("l{i}_pan"),
+            )
         } else {
             o
         };
@@ -1565,16 +1572,19 @@ fn emit_layer_shard(
                 &format!("l{i}_ks8"),
             );
             let kf = blk.reshape(&ks8, &[1, nkv * 8 * dh, 1, 1], &format!("l{i}_ks8f"));
-            cur = blk.concat(
-                &[kf, x1.clone()],
-                1,
-                &[1, nkv * 8 * dh + d, 1, s],
-                "hidden",
-            );
+            cur = blk.concat(&[kf, x1.clone()], 1, &[1, nkv * 8 * dh + d, 1, s], "hidden");
             cut_shape = Some(vec![1, nkv * 8 * dh + d, 1, s]);
             break;
         }
-        let n2 = rms_norm_big(&mut blk, &x1, &wfnn, d, cfg.eps, &shape_x, &format!("l{i}_fn"));
+        let n2 = rms_norm_big(
+            &mut blk,
+            &x1,
+            &wfnn,
+            d,
+            cfg.eps,
+            &shape_x,
+            &format!("l{i}_fn"),
+        );
         // BADAPPLE_SPLIT_FFN: end the layer shard at concat(res1, fn_norm).
         // The wide FFN conv miscompiles when it shares a plan with the
         // stateful attention chain — kvdbg verified the K state and res1
@@ -1582,12 +1592,7 @@ fn emit_layer_shard(
         // The paired ffn_s shard computes the whole FFN tail on a real
         // model input (conv-on-input is the verified-exact configuration).
         if split_ffn {
-            cur = blk.concat(
-                &[x1.clone(), n2.clone()],
-                1,
-                &[1, 2 * d, 1, s],
-                "hidden",
-            );
+            cur = blk.concat(&[x1.clone(), n2.clone()], 1, &[1, 2 * d, 1, s], "hidden");
             cut_shape = Some(vec![1, 2 * d, 1, s]);
             break;
         }
@@ -1671,12 +1676,7 @@ fn emit_layer_shard(
                 if split_n == 1 {
                     outs.pop().unwrap()
                 } else {
-                    blk.concat(
-                        &outs,
-                        1,
-                        &[1, cfg.d_ff, 1, s],
-                        &format!("l{i}_{tag}cat"),
-                    )
+                    blk.concat(&outs, 1, &[1, cfg.d_ff, 1, s], &format!("l{i}_{tag}cat"))
                 }
             };
             (proj_chunks(&gw, "g"), proj_chunks(&uw, "u"))
@@ -1697,9 +1697,24 @@ fn emit_layer_shard(
             // linear_w's matmul path — the reshape pair changes the input
             // layout and breaks the norm→conv fusion miscompile.
             let gu = if std::env::var("BADAPPLE_GU_MM").is_ok() {
-                linear_w(&mut blk, &ffn_in, &wgu, d, 2 * cfg.d_ff, s, &format!("l{i}_gu"))
+                linear_w(
+                    &mut blk,
+                    &ffn_in,
+                    &wgu,
+                    d,
+                    2 * cfg.d_ff,
+                    s,
+                    &format!("l{i}_gu"),
+                )
             } else {
-                conv1x1_w(&mut blk, &ffn_in, &wgu, 2 * cfg.d_ff, s, &format!("l{i}_gu"))
+                conv1x1_w(
+                    &mut blk,
+                    &ffn_in,
+                    &wgu,
+                    2 * cfg.d_ff,
+                    s,
+                    &format!("l{i}_gu"),
+                )
             };
             // CUT=gufn: hidden = concat(attn4, o, res1, fn_xn, gu) — one
             // output buffer materializes the whole chain: extra outputs
@@ -1741,9 +1756,7 @@ fn emit_layer_shard(
             )
         };
         // Gate activation: Qwen3 silu, Gemma3 gelu (tanh approximation).
-        let act = if cfg.arch == Arch::Gemma3Text
-            && std::env::var("BADAPPLE_GEMMA_SILU").is_err()
-        {
+        let act = if cfg.arch == Arch::Gemma3Text && std::env::var("BADAPPLE_GEMMA_SILU").is_err() {
             blk.o1(
                 "gelu",
                 vec![
@@ -1791,21 +1804,28 @@ fn emit_layer_shard(
         cut!("down", ffn, [1, d, 1, s]);
         // Gemma3 post_feedforward_layernorm normalizes the MLP output
         // before the residual add.
-        let ffn_out = if cfg.arch == Arch::Gemma3Text
-            && std::env::var("BADAPPLE_NO_POSTNORM").is_err()
-        {
-            let wp = norm_w(st, &format!("{p}.post_feedforward_layernorm.weight"))?;
-            let wpn = blob(
-                &mut wb,
-                &mut blk,
-                &format!("w_post_ffn_{i}"),
-                &wp,
-                &[d, 1, 1],
-            );
-            rms_norm_big(&mut blk, &ffn, &wpn, d, cfg.eps, &shape_x, &format!("l{i}_pfn"))
-        } else {
-            ffn
-        };
+        let ffn_out =
+            if cfg.arch == Arch::Gemma3Text && std::env::var("BADAPPLE_NO_POSTNORM").is_err() {
+                let wp = norm_w(st, &format!("{p}.post_feedforward_layernorm.weight"))?;
+                let wpn = blob(
+                    &mut wb,
+                    &mut blk,
+                    &format!("w_post_ffn_{i}"),
+                    &wp,
+                    &[d, 1, 1],
+                );
+                rms_norm_big(
+                    &mut blk,
+                    &ffn,
+                    &wpn,
+                    d,
+                    cfg.eps,
+                    &shape_x,
+                    &format!("l{i}_pfn"),
+                )
+            } else {
+                ffn
+            };
         // the last layer's output must be named `hidden` to match the declared
         // model output feature (CoreML binds program outputs by name).
         let stop_at = std::env::var("BADAPPLE_STOP_AT").ok();
@@ -1880,9 +1900,7 @@ fn emit_layer_shard(
     for (extra_name, _) in &cut_extra {
         blk.outputs.push(extra_name.clone());
     }
-    let out_shape_decl = cut_shape
-        .or(stop_shape)
-        .unwrap_or_else(|| vec![1, d, 1, s]);
+    let out_shape_decl = cut_shape.or(stop_shape).unwrap_or_else(|| vec![1, d, 1, s]);
 
     // ---- serialize ----
     // Rope inputs carry R rows: row 0 = global base, row 1 = local base
@@ -2159,9 +2177,7 @@ fn emit_ffn_shard(
             &[1, cfg.d_ff, 1, s],
             &format!("l{i}_up"),
         );
-        let act = if cfg.arch == Arch::Gemma3Text
-            && std::env::var("BADAPPLE_GEMMA_SILU").is_err()
-        {
+        let act = if cfg.arch == Arch::Gemma3Text && std::env::var("BADAPPLE_GEMMA_SILU").is_err() {
             blk.o1(
                 "gelu",
                 vec![
@@ -2209,35 +2225,45 @@ fn emit_ffn_shard(
             let a = blk.konst_f16(&format!("l{i}_dalpha"), alpha);
             blk.mul(&raw, &a, &shape_x, &format!("l{i}_down"))
         } else {
-            linear_w(&mut blk, &hidden, &wd, cfg.d_ff, d, s, &format!("l{i}_down"))
+            linear_w(
+                &mut blk,
+                &hidden,
+                &wd,
+                cfg.d_ff,
+                d,
+                s,
+                &format!("l{i}_down"),
+            )
         };
-        let ffn_out = if cfg.arch == Arch::Gemma3Text
-            && std::env::var("BADAPPLE_NO_POSTNORM").is_err()
-        {
-            // Gemma stores w but applies (1+w); fold the +1 at emission.
-            let wp_raw = st.get_f16(&format!("{p}.post_feedforward_layernorm.weight"))?;
-            let wp = if cfg.norm_plus_one {
-                f16_plus_one(&wp_raw)
+        let ffn_out =
+            if cfg.arch == Arch::Gemma3Text && std::env::var("BADAPPLE_NO_POSTNORM").is_err() {
+                // Gemma stores w but applies (1+w); fold the +1 at emission.
+                let wp_raw = st.get_f16(&format!("{p}.post_feedforward_layernorm.weight"))?;
+                let wp = if cfg.norm_plus_one {
+                    f16_plus_one(&wp_raw)
+                } else {
+                    wp_raw
+                };
+                let wpn = wb.put(&format!("w_post_ffn_{i}"), DType::Fp16, &[d, 1, 1], &wp);
+                let wpn = blk.konst_blob(
+                    &format!("w_post_ffn_{i}"),
+                    WEIGHTS_NAME,
+                    wpn,
+                    DType::Fp16,
+                    &[d, 1, 1],
+                );
+                rms_norm_big(
+                    &mut blk,
+                    &ffn,
+                    &wpn,
+                    d,
+                    cfg.eps,
+                    &shape_x,
+                    &format!("l{i}_pfn"),
+                )
             } else {
-                wp_raw
+                ffn
             };
-            let wpn = wb.put(
-                &format!("w_post_ffn_{i}"),
-                DType::Fp16,
-                &[d, 1, 1],
-                &wp,
-            );
-            let wpn = blk.konst_blob(
-                &format!("w_post_ffn_{i}"),
-                WEIGHTS_NAME,
-                wpn,
-                DType::Fp16,
-                &[d, 1, 1],
-            );
-            rms_norm_big(&mut blk, &ffn, &wpn, d, cfg.eps, &shape_x, &format!("l{i}_pfn"))
-        } else {
-            ffn
-        };
         let out_nm = if i == le - 1 { "hidden" } else { "" };
         let nm = if out_nm.is_empty() {
             format!("l{i}_res2")
@@ -2426,7 +2452,15 @@ fn emit_probe(
         DType::Fp16,
         &[d, 1, 1],
     );
-    let normed = rms_norm_big(&mut blk, "x", &wn, d, cfg.eps, &[1, d, 1, 1], &format!("l{ls}_an"));
+    let normed = rms_norm_big(
+        &mut blk,
+        "x",
+        &wn,
+        d,
+        cfg.eps,
+        &[1, d, 1, 1],
+        &format!("l{ls}_an"),
+    );
     if stage == "an" {
         let z = blk.konst_f16("pz", 0.0);
         let o = blk.add(&normed, &z, &[1, d, 1, 1], "out");
@@ -3144,10 +3178,7 @@ fn main() {
                     std::io::stderr().flush().ok();
                     match emit_ffn_shard(&st, &cfg, ls, le, &out_dir, decode_width, false) {
                         Ok((fpkg, _fc, _fw)) => {
-                            ent.insert(
-                                "ffn_package_path".into(),
-                                json!(rel(&fpkg, &out_dir)),
-                            );
+                            ent.insert("ffn_package_path".into(), json!(rel(&fpkg, &out_dir)));
                             if no_compile {
                                 ent.insert("ffn_status".into(), json!("packaged"));
                                 eprintln!("packaged (compile skipped)");
@@ -3160,10 +3191,7 @@ fn main() {
                                             json!(rel(&c, &out_dir)),
                                         );
                                         let sz = dir_size(&c);
-                                        ent.insert(
-                                            "ffn_compiled_size_bytes".into(),
-                                            json!(sz),
-                                        );
+                                        ent.insert("ffn_compiled_size_bytes".into(), json!(sz));
                                         eprintln!("compiled ({:.1} MB)", sz as f64 / 1e6);
                                         if !keep_packages {
                                             let _ = std::fs::remove_dir_all(&fpkg);
@@ -3255,10 +3283,7 @@ fn main() {
                         std::io::stderr().flush().ok();
                         match emit_ffn_shard(&st, &cfg, pls, ple, &out_dir, prefill_chunk, true) {
                             Ok((fpkg, _fc, _fw)) => {
-                                ent.insert(
-                                    "ffn_package_path".into(),
-                                    json!(rel(&fpkg, &out_dir)),
-                                );
+                                ent.insert("ffn_package_path".into(), json!(rel(&fpkg, &out_dir)));
                                 if no_compile {
                                     ent.insert("ffn_status".into(), json!("packaged"));
                                     eprintln!("packaged (compile skipped)");
