@@ -761,7 +761,13 @@ where
     let timestamp_ms = now_unix_ms()?;
     let client_nonce = random_nonce();
     let mut stream = connect_daemon()?;
-    stream.set_read_timeout(Some(Duration::from_mins(15)))?;
+    // Mesh-backed generations can legitimately outrun a short read budget
+    // (cold system-prompt prefill on the ANE tail), so the cap is tunable.
+    let read_mins: u64 = std::env::var("BADAPPLE_CALL_TIMEOUT_MINS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(45);
+    stream.set_read_timeout(Some(Duration::from_mins(read_mins)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
 

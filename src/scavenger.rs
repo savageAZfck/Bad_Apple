@@ -1466,22 +1466,22 @@ mod index_tests {
         let file = dir.join("hello.rs");
         fs::write(&file, "fn main() { println!(\"one\"); }").unwrap();
 
-        let (files1, chunks1) = index_directories_at(&[dir.clone()], &db).unwrap();
+        let (files1, chunks1) = index_directories_at(std::slice::from_ref(&dir), &db).unwrap();
         assert_eq!(files1, 1);
         assert!(chunks1 > 0);
 
         // Same mtime → fast-path skip, no read.
-        let (files2, _) = index_directories_at(&[dir.clone()], &db).unwrap();
+        let (files2, _) = index_directories_at(std::slice::from_ref(&dir), &db).unwrap();
         assert_eq!(files2, 0);
 
         // mtime bumped, content unchanged → hash check still skips embed.
         fs::write(&file, "fn main() { println!(\"one\"); }").unwrap();
-        let (files3, _) = index_directories_at(&[dir.clone()], &db).unwrap();
+        let (files3, _) = index_directories_at(std::slice::from_ref(&dir), &db).unwrap();
         assert_eq!(files3, 0);
 
         // Content change inside the same second → nanos mtime still catches it.
         fs::write(&file, "fn main() { println!(\"two\"); }").unwrap();
-        let (files4, _) = index_directories_at(&[dir.clone()], &db).unwrap();
+        let (files4, _) = index_directories_at(std::slice::from_ref(&dir), &db).unwrap();
         assert_eq!(files4, 1);
 
         // A differently-spelled alias (symlinked prefix like /var →

@@ -192,9 +192,9 @@ fn parse_verdict(raw: &str) -> (Verdict, String) {
         Verdict::Allow
     } else if head.starts_with("DENY") {
         Verdict::Deny
-    } else if head.starts_with("ESCALATE") {
-        Verdict::Escalate
     } else {
+        // Explicit ESCALATE or anything malformed — routed to the human
+        // either way. Default-deny is the point.
         Verdict::Escalate
     };
     (verdict, reason)

@@ -5647,9 +5647,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     @objc private func openDashboard() {
-        if let url = URL(string: "http://127.0.0.1:8787") {
+        if let url = dashboardURL("") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// Dashboard URL with the bearer token in the fragment — the fragment is
+    /// never sent over the wire; csrf.js moves it into sessionStorage and
+    /// scrubs the URL. If the token file is absent the page still loads and
+    /// the user is prompted to paste it.
+    private func dashboardURL(_ path: String) -> URL? {
+        var raw = "http://127.0.0.1:8787" + path
+        if let token = try? String(contentsOf: URL(fileURLWithPath: "/var/lib/bad_apple/dashboard.token"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty,
+           let encoded = token.addingPercentEncoding(withAllowedCharacters: .alphanumerics) {
+            raw += "#token=" + encoded
+        }
+        return URL(string: raw)
     }
 
     @objc private func showStatus() {
@@ -6489,7 +6504,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     /// Opens the model management dashboard at http://127.0.0.1:8787/models
     @objc private func openModelManager() {
-        if let url = URL(string: "http://127.0.0.1:8787/models") {
+        if let url = dashboardURL("/models") {
             NSWorkspace.shared.open(url)
         }
     }

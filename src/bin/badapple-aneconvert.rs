@@ -24,14 +24,16 @@ use std::process::Command;
 #[derive(Clone, Debug)]
 struct TensorInfo {
     dtype: String,
-    shape: Vec<usize>,
     file: PathBuf,
     begin: u64,
     end: u64,
+    shape: Vec<u64>,
 }
 
 struct StIndex {
     tensors: HashMap<String, TensorInfo>,
+    /// MLX quantization group size (config.json → quantization.group_size).
+    group_size: usize,
 }
 
 impl StIndex {
@@ -75,29 +77,35 @@ impl StIndex {
                     continue;
                 }
                 let dtype = meta["dtype"].as_str().unwrap_or("F16").to_string();
-                let shape: Vec<usize> = meta["shape"]
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .map(|v| v.as_u64().unwrap_or(0) as usize)
-                    .collect();
                 let offs = meta["data_offsets"].as_array().ok_or("no data_offsets")?;
                 let begin = offs[0].as_u64().unwrap_or(0);
                 let end = offs[1].as_u64().unwrap_or(0);
+                let shape: Vec<u64> = meta["shape"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+                    .unwrap_or_default();
                 let base = 8 + hlen as u64;
                 tensors.insert(
                     name.clone(),
                     TensorInfo {
                         dtype,
-                        shape,
                         file: file.clone(),
                         begin: base + begin,
                         end: base + end,
+                        shape,
                     },
                 );
             }
         }
-        Ok(StIndex { tensors })
+        let group_size = std::fs::read_to_string(dir.join("config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|c| c["quantization"]["group_size"].as_u64())
+            .unwrap_or(64) as usize;
+        Ok(StIndex {
+            tensors,
+            group_size,
+        })
     }
 
     fn get_raw(&self, name: &str) -> Result<Vec<u8>, String> {
@@ -124,9 +132,122 @@ impl StIndex {
             "F16" => Ok(raw),
             "BF16" => Ok(bf16_bytes_to_f16(&raw)),
             "F32" => Ok(f32_bytes_to_f16(&raw)),
+            // MLX-quantized linear: packed U32 nibbles + F16 scales/biases.
+            "U32" => {
+                let base = name
+                    .strip_suffix(".weight")
+                    .ok_or_else(|| format!("{name}: quantized tensor without .weight suffix"))?;
+                let scales = self.get_raw(&format!("{base}.scales"))?;
+                let biases = self.get_raw(&format!("{base}.biases"))?;
+                dequant_mlx_q4(&raw, &t.shape, &scales, &biases, self.group_size)
+            }
             other => Err(format!("{name}: unsupported dtype {other}")),
         }
     }
+
+    /// Read rows [r0, r1) of a 2-D tensor as fp16 bytes. For U32-quantized
+    /// tensors the packed weight rows and their per-row scale/bias stripes
+    /// are sliced independently, then dequantized.
+    fn get_f16_rows(&self, name: &str, r0: u64, r1: u64) -> Result<Vec<u8>, String> {
+        let t = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| format!("missing tensor {name}"))?;
+        if t.shape.len() != 2 {
+            return Err(format!("{name}: expected 2-D tensor, got {:?}", t.shape));
+        }
+        let rows = t.shape[0];
+        if r1 > rows || r0 >= r1 {
+            return Err(format!("{name}: bad row range {r0}..{r1} of {rows}"));
+        }
+        let read_at = |t: &TensorInfo, off: u64, len: u64| -> Result<Vec<u8>, String> {
+            let mut fh = std::fs::File::open(&t.file).map_err(|e| e.to_string())?;
+            fh.seek(SeekFrom::Start(t.begin + off))
+                .map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; len as usize];
+            fh.read_exact(&mut buf).map_err(|e| e.to_string())?;
+            Ok(buf)
+        };
+        if t.dtype == "U32" {
+            let base = name
+                .strip_suffix(".weight")
+                .ok_or_else(|| format!("{name}: quantized tensor without .weight suffix"))?;
+            let st_t = self
+                .tensors
+                .get(&format!("{base}.scales"))
+                .ok_or_else(|| format!("{name}: missing scales"))?;
+            let bt_t = self
+                .tensors
+                .get(&format!("{base}.biases"))
+                .ok_or_else(|| format!("{name}: missing biases"))?;
+            let packed_row = (t.end - t.begin) / rows; // cols*4 bytes
+            let ngroups = t.shape[1] * 8 / self.group_size as u64; // unpacked groups
+            let srow = ngroups * 2;
+            let n = r1 - r0;
+            let wr = read_at(t, r0 * packed_row, n * packed_row)?;
+            let sr = read_at(st_t, r0 * srow, n * srow)?;
+            let br = read_at(bt_t, r0 * srow, n * srow)?;
+            return dequant_mlx_q4(&wr, &[n, t.shape[1]], &sr, &br, self.group_size);
+        }
+        let elem: u64 = match t.dtype.as_str() {
+            "F16" | "BF16" => 2,
+            "F32" => 4,
+            o => return Err(format!("{name}: unsupported dtype {o}")),
+        };
+        let row_bytes = t.shape[1] * elem;
+        let raw = read_at(t, r0 * row_bytes, (r1 - r0) * row_bytes)?;
+        match t.dtype.as_str() {
+            "F16" => Ok(raw),
+            "BF16" => Ok(bf16_bytes_to_f16(&raw)),
+            _ => Ok(f32_bytes_to_f16(&raw)),
+        }
+    }
+}
+
+/// Dequantize an MLX 4-bit affine-quantized weight to fp16 bytes.
+/// Layout: `weight` is U32 [rows, cols/8] — 8 consecutive input-dim nibbles
+/// per word, least-significant nibble first. `scales`/`biases` are F16
+/// [rows, cols/group_size]. Reconstruction: w = scale * q + bias.
+fn dequant_mlx_q4(
+    raw: &[u8],
+    shape: &[u64],
+    scales: &[u8],
+    biases: &[u8],
+    group: usize,
+) -> Result<Vec<u8>, String> {
+    if shape.len() != 2 {
+        return Err(format!("quantized weight must be 2-D, got {shape:?}"));
+    }
+    let (rows, packed_cols) = (shape[0] as usize, shape[1] as usize);
+    let cols = packed_cols * 8;
+    if group == 0 || cols % group != 0 {
+        return Err(format!("cols {cols} not divisible by group_size {group}"));
+    }
+    let ngroups = cols / group;
+    if scales.len() != rows * ngroups * 2 || biases.len() != scales.len() {
+        return Err(format!(
+            "scale/bias size mismatch: {} bytes for [{rows}x{ngroups}]",
+            scales.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(rows * cols * 2);
+    for r in 0..rows {
+        let row = &raw[r * packed_cols * 4..(r + 1) * packed_cols * 4];
+        for w in 0..packed_cols {
+            let word =
+                u32::from_le_bytes([row[w * 4], row[w * 4 + 1], row[w * 4 + 2], row[w * 4 + 3]]);
+            for n in 0..8usize {
+                let i = w * 8 + n;
+                let g = i / group;
+                let so = (r * ngroups + g) * 2;
+                let s = half::bf16::from_le_bytes([scales[so], scales[so + 1]]).to_f32();
+                let b = half::bf16::from_le_bytes([biases[so], biases[so + 1]]).to_f32();
+                let q = ((word >> (n * 4)) & 0xF) as f32;
+                out.extend_from_slice(&half::f16::from_f32(s * q + b).to_le_bytes());
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn bf16_bytes_to_f16(raw: &[u8]) -> Vec<u8> {
@@ -149,8 +270,15 @@ fn f32_bytes_to_f16(raw: &[u8]) -> Vec<u8> {
 
 // ======== model config ========
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arch {
+    Qwen3,
+    Gemma3Text,
+}
+
 #[derive(Clone)]
 struct Cfg {
+    arch: Arch,
     d_model: i64,
     n_layers: i64,
     n_heads: i64,
@@ -159,16 +287,41 @@ struct Cfg {
     d_ff: i64,
     vocab: i64,
     rope_theta: f64,
+    /// Gemma3 local (sliding-window) layers use a different RoPE base
+    /// (`rope_local_base_freq`, 1e4) than global layers (`rope_theta`, 1e6).
+    /// Equals rope_theta for single-base architectures.
+    rope_local_theta: f64,
     eps: f32,
     rope_dim: i64,
     has_qk_norm: bool,
     tie_embeddings: bool,
+    /// Score scale: Qwen3 1/sqrt(d_head); Gemma3 query_pre_attn_scalar^-0.5.
+    attn_scale: f32,
+    /// Sliding-window width (0 = no windowing). Gemma3 local layers only.
+    sliding_window: i64,
+    /// Global layer every N: sliding iff (layer+1) % pattern != 0.
+    sliding_pattern: i64,
+    /// Gemma RMSNorm stores w but applies (1+w) — bake +1 into weights.
+    norm_plus_one: bool,
+    /// Gemma scales embeddings by sqrt(d_model) — baked into embedding.f16.
+    embed_scale: f32,
 }
 
 impl Cfg {
     fn from_config(dir: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?;
-        let c: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let root: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let model_type = root["model_type"].as_str().unwrap_or("");
+        let arch = match model_type {
+            "gemma3" | "gemma3_text" => Arch::Gemma3Text,
+            _ => Arch::Qwen3,
+        };
+        // Gemma3 multimodal checkpoints nest the LM config under text_config.
+        let c = if root["text_config"].is_object() {
+            &root["text_config"]
+        } else {
+            &root
+        };
         let g = |k: &str| c[k].as_i64().unwrap_or(0);
         let d_model = g("hidden_size");
         let n_heads = g("num_attention_heads");
@@ -176,7 +329,15 @@ impl Cfg {
             c["head_dim"]
                 .as_i64()
                 .unwrap_or(if n_heads > 0 { d_model / n_heads } else { 0 });
+        let rope_theta = c["rope_theta"].as_f64().unwrap_or(1_000_000.0);
+        let rope_local_theta = c["rope_local_base_freq"].as_f64().unwrap_or(rope_theta);
+        let attn_scale = c["query_pre_attn_scalar"]
+            .as_f64()
+            .map(|s| (s as f32).sqrt().recip())
+            .unwrap_or_else(|| 1.0 / (d_head as f32).sqrt());
+        let sliding_pattern = c["sliding_window_pattern"].as_i64().unwrap_or(0);
         Ok(Cfg {
+            arch,
             d_model,
             n_layers: g("num_hidden_layers"),
             n_heads,
@@ -184,13 +345,101 @@ impl Cfg {
             d_head,
             d_ff: g("intermediate_size"),
             vocab: g("vocab_size"),
-            rope_theta: c["rope_theta"].as_f64().unwrap_or(1_000_000.0),
+            rope_theta,
+            rope_local_theta,
             eps: c["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
             rope_dim: d_head,
-            has_qk_norm: true, // Qwen3 always has q_norm/k_norm
+            // Both Qwen3 and Gemma3 carry per-head q_norm/k_norm.
+            has_qk_norm: true,
             tie_embeddings: c["tie_word_embeddings"].as_bool().unwrap_or(false),
+            attn_scale,
+            sliding_window: c["sliding_window"].as_i64().unwrap_or(0),
+            sliding_pattern,
+            norm_plus_one: arch == Arch::Gemma3Text,
+            embed_scale: if arch == Arch::Gemma3Text {
+                (d_model as f32).sqrt()
+            } else {
+                1.0
+            },
         })
     }
+
+    fn arch_name(&self) -> &'static str {
+        match self.arch {
+            Arch::Qwen3 => "qwen3",
+            Arch::Gemma3Text => "gemma3_text",
+        }
+    }
+
+    /// Two rope input rows (global + local) only when the arch has a
+    /// second base frequency — keeps Qwen3 artifacts/inputs untouched.
+    fn rope_rows(&self) -> i64 {
+        if std::env::var("BADAPPLE_GEMMA_NO_LOCAL_ROPE").is_ok() {
+            return 1;
+        }
+        if self.rope_local_theta != self.rope_theta {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// RoPE input row for layer `i`: 1 = local base, 0 = global.
+    fn rope_row(&self, i: i64) -> i64 {
+        if self.rope_rows() == 2 && self.is_sliding(i) {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn is_sliding(&self, i: i64) -> bool {
+        if std::env::var("BADAPPLE_GEMMA_NO_SLIDING").is_ok() {
+            return false;
+        }
+        self.sliding_window > 0 && self.sliding_pattern > 0 && (i + 1) % self.sliding_pattern != 0
+    }
+}
+
+/// Gemma RMSNorm: out = x̂ · (1 + w) — fold the +1 into stored fp16 weights.
+fn f16_plus_one(bytes: &[u8]) -> Vec<u8> {
+    map_f16(bytes, |v| v + 1.0)
+}
+
+/// Multiply each fp16 column of a row-major [rows, cols] weight by the
+/// matching fp16 scale element: out[r][c] = w[r][c] * col[c]. Folds a
+/// broadcast elementwise norm-weight mul into a following projection.
+fn f16_scale_cols(w: &[u8], col: &[u8]) -> Vec<u8> {
+    let ncols = col.len() / 2;
+    let cv: Vec<f32> = col
+        .chunks_exact(2)
+        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+        .collect();
+    w.chunks_exact(2)
+        .enumerate()
+        .flat_map(|(i, b)| {
+            let v = half::f16::from_le_bytes([b[0], b[1]]).to_f32() * cv[i % ncols];
+            half::f16::from_f32(v).to_le_bytes()
+        })
+        .collect()
+}
+
+/// Gemma embeddings enter the graph pre-scaled by sqrt(d_model).
+fn f16_scale_all(bytes: &[u8], scale: f32) -> Vec<u8> {
+    if (scale - 1.0).abs() < f32::EPSILON {
+        return bytes.to_vec();
+    }
+    map_f16(bytes, |v| v * scale)
+}
+
+fn map_f16(bytes: &[u8], f: impl Fn(f32) -> f32) -> Vec<u8> {
+    bytes
+        .chunks_exact(2)
+        .flat_map(|b| {
+            let v = half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
+            half::f16::from_f32(f(v)).to_bits().to_le_bytes()
+        })
+        .collect()
 }
 
 // ======== weight table assembled per layer ========
@@ -234,6 +483,45 @@ fn quantize_q8_rows(fp16: &[u8], rows: usize) -> (Vec<u8>, Vec<u8>) {
     (q, scales)
 }
 
+/// Symmetric per-row 4-bit palettization: scale_r = max|w_r| / 7, index =
+/// round(w / scale_r) + 8 clamped to [0, 15]. Packed two nibbles per byte,
+/// low nibble = even index. The LUT per row holds scale_r*(i-8) for i in
+/// 0..16 — reconstruction is identical to signed int4 + scale, packaged in
+/// the `constexpr_lut_to_dense` form the ANE lowers.
+/// `fp16` is row-major [rows, cols]. Returns (packed bytes, fp16 LUT bytes).
+fn quantize_q4_rows(fp16: &[u8], rows: usize) -> (Vec<u8>, Vec<u8>) {
+    let cols = fp16.len() / 2 / rows;
+    let mut q = Vec::with_capacity(rows * cols.div_ceil(2));
+    let mut lut = Vec::with_capacity(rows * 16 * 2);
+    let mut row = vec![0f32; cols];
+    for r in 0..rows {
+        let base = r * cols * 2;
+        let mut amax = 0f32;
+        for (c, v) in row.iter_mut().enumerate() {
+            let o = base + c * 2;
+            *v = half::f16::from_le_bytes([fp16[o], fp16[o + 1]]).to_f32();
+            amax = amax.max(v.abs());
+        }
+        let scale = half::f16::from_f32(if amax > 0.0 { amax / 7.0 } else { 1.0 });
+        let s = scale.to_f32();
+        let mut c = 0;
+        while c < cols {
+            let lo = ((row[c] / s).round().clamp(-8.0, 7.0) as i8 + 8) & 0xF;
+            let hi = if c + 1 < cols {
+                ((row[c + 1] / s).round().clamp(-8.0, 7.0) as i8 + 8) & 0xF
+            } else {
+                0
+            };
+            q.push((lo as u8) | ((hi as u8) << 4));
+            c += 2;
+        }
+        for i in 0..16 {
+            lut.extend_from_slice(&half::f16::from_f32(s * (i as f32 - 8.0)).to_le_bytes());
+        }
+    }
+    (q, lut)
+}
+
 /// α for the down_proj input pre-scale (int8 only; 1 = off). `BADAPPLE_Q8_DOWN_PRESCALE`.
 fn down_prescale() -> f32 {
     if weight_bits() != 8 {
@@ -258,10 +546,19 @@ fn weight_const(
     if weight_bits() == 8 {
         let (q, s) = quantize_q8_rows(fp16, shape[0] as usize);
         let mut scale_shape = vec![shape[0]];
-        scale_shape.extend(std::iter::repeat(1).take(shape.len() - 1));
+        scale_shape.extend(std::iter::repeat_n(1, shape.len() - 1));
         let qoff = wb.put(&format!("{name}_q8"), DType::Int8, shape, &q);
         let soff = wb.put(&format!("{name}_scale"), DType::Fp16, &scale_shape, &s);
         blk.konst_q8(name, WEIGHTS_NAME, qoff, soff, shape)
+    } else if weight_bits() == 4 {
+        let (q, lut) = quantize_q4_rows(fp16, shape[0] as usize);
+        let mut lut_shape = vec![shape[0]];
+        lut_shape.extend(std::iter::repeat_n(1, shape.len() - 1));
+        lut_shape.push(16);
+        lut_shape.push(1);
+        let qoff = wb.put(&format!("{name}_q4"), DType::Uint4, shape, &q);
+        let loff = wb.put(&format!("{name}_lut"), DType::Fp16, &lut_shape, &lut);
+        blk.konst_q4(name, WEIGHTS_NAME, qoff, loff, shape)
     } else {
         let off = wb.put(name, DType::Fp16, shape, fp16);
         blk.konst_blob(name, WEIGHTS_NAME, off, DType::Fp16, shape)
@@ -288,8 +585,86 @@ fn tile_head_w(bytes: &[u8], n: i64) -> Vec<u8> {
     out
 }
 
+/// Matmul-form linear projection: out[1,cout,1,s] = W[cout,d] @ x[1,d,1,s].
+/// Emitted in place of conv1x1_w where a `conv` op in the same graph as
+/// chained slice_updates fails ANE plan-build (-14) — matmul is the proven
+/// formulation (attention paths, mil_kvpack).
+fn linear_w(blk: &mut Block, x: &str, w: &str, d: i64, cout: i64, s: i64, name: &str) -> String {
+    let xr = blk.reshape(x, &[1, 1, d, s], &format!("{name}_xr"));
+    let wr = blk.reshape(w, &[1, 1, cout, d], &format!("{name}_wr"));
+    let mm = blk.matmul(&wr, &xr, false, &[1, 1, cout, s], name);
+    blk.reshape(&mm, &[1, cout, 1, s], &format!("{name}_b"))
+}
+
 /// 1x1 conv whose output spatial width is `s`. `conv1x1` hardcodes width 1;
 /// prefill shards (s>1) declare the real shape so MIL type-checks.
+/// RMSNorm hardened for massive activations, with a subnormal floor.
+///
+/// mil_spec's safe-norm prescales x by 1/sqrt(d) before squaring, keeping
+/// x^2 inside fp16 — but that only covers |x| < sqrt(65504)*sqrt(d) (~8.7k
+/// for d=1152). Gemma3's massive activation channels exceed that: the fp16
+/// accumulator saturates, the mean reads low, rsqrt overestimates, and the
+/// channel amplifies ~10x per layer until the sum overflows to Inf and the
+/// layer collapses to NaN.
+///
+/// rms_norm is scale-invariant — (x/c)/rms(x/c) == x/rms(x) — so this emits
+/// xs = x/(8*sqrt(d)) and eps/(c^2*d), extending safe |x| to ~70k while the
+/// math stays identical. A plain x/64 overcorrected: sq fell into fp16
+/// subnormal territory and `mean` underflowed to 0 for small-rms inputs,
+/// turning rsqrt(0) into +Inf (observed at l4, step 4 — inf, not the
+/// earlier NaN). The maximum(var, 1e-7) floor bounds rsqrt <= ~3162 for
+/// degenerate near-zero inputs, which are ~0 anyway.
+fn rms_norm_big(
+    blk: &mut Block,
+    x: &str,
+    w: &str,
+    d: i64,
+    eps: f32,
+    shape4: &[i64],
+    pfx: &str,
+) -> String {
+    const C: f32 = 8.0;
+    let k = (d as f32).sqrt();
+    let inv = blk.konst_f16(&format!("{pfx}_bigik"), 1.0 / (C * k));
+    let xs = blk.mul(x, &inv, shape4, &format!("{pfx}_bigxs"));
+    let sq = blk.mul(&xs, &xs, shape4, &format!("{pfx}_bigsq"));
+    let axes = blk.konst_i32(&format!("{pfx}_bigax"), &[1]);
+    let kd = blk.konst_bool(&format!("{pfx}_bigkd"), true);
+    let mut mshape = shape4.to_vec();
+    mshape[1] = 1;
+    let mean = blk.o1(
+        "reduce_mean",
+        vec![
+            ("x".into(), bind(&sq).1),
+            ("axes".into(), bind(&axes).1),
+            ("keep_dims".into(), bind(&kd).1),
+        ],
+        &format!("{pfx}_bigm"),
+        ValueType::Tensor(TensorType::f16(&mshape)),
+    );
+    let e = blk.konst_f16(&format!("{pfx}_bige"), eps / (C * C * k * k));
+    let vp = blk.add(&mean, &e, &mshape, &format!("{pfx}_bigvp"));
+    let fl = blk.konst_f16(&format!("{pfx}_bigfl"), 1e-7);
+    let vm = blk.o1(
+        "maximum",
+        vec![("x".into(), bind(&vp).1), ("y".into(), bind(&fl).1)],
+        &format!("{pfx}_bigvm"),
+        ValueType::Tensor(TensorType::f16(&mshape)),
+    );
+    let z = blk.konst_f16(&format!("{pfx}_bigz"), 0.0);
+    let r = blk.o1(
+        "rsqrt",
+        vec![("x".into(), bind(&vm).1), ("epsilon".into(), bind(&z).1)],
+        &format!("{pfx}_bigr"),
+        ValueType::Tensor(TensorType::f16(&mshape)),
+    );
+    // Keep mil's naming: the pre-weight normalized tensor is `{pfx}_xn`,
+    // the weighted output `{pfx}_out` — the monolith's fold path consumes
+    // `{i}_fn_xn` directly.
+    let xn = blk.mul(&xs, &r, shape4, &format!("{pfx}_xn"));
+    blk.mul(&xn, w, shape4, &format!("{pfx}_out"))
+}
+
 fn conv1x1_w(blk: &mut Block, x: &str, w: &str, cout: i64, s: i64, name: &str) -> String {
     if s == 1 {
         return blk.conv1x1(x, w, None, cout, name);
@@ -334,6 +709,7 @@ fn conv1x1_w(blk: &mut Block, x: &str, w: &str, cout: i64, s: i64, name: &str) -
 /// Emit one stateful transformer-layer shard covering layers [ls, le).
 /// `s` is the token width per forward: 1 = decode shard, >1 = prefill shard
 /// (same state names/shapes so it shares MLState with the decode shards).
+#[allow(clippy::too_many_arguments)]
 fn emit_layer_shard(
     st: &StIndex,
     cfg: &Cfg,
@@ -377,6 +753,7 @@ fn emit_layer_shard(
     let mut cur = "x".to_string();
     let shape_x = vec![1, d, 1, s];
     let n_state = le - ls;
+    let split_ffn = std::env::var("BADAPPLE_SPLIT_FFN").is_ok();
     // Packed KV state: ONE buffer per shard [2*nl, nkv, seq, dh], rows
     // 2l (K) and 2l+1 (V), chained through every layer's slice_update and
     // committed once per call. One state object total (the documented
@@ -384,14 +761,91 @@ fn emit_layer_shard(
     // transpose_y, because a standalone transpose of a
     // slice_update-derived state slice fails ANE plan-build -14
     // (verified by mil_kvpack).
-    let kvshape: Vec<i64> = vec![2 * n_state as i64, nkv, seq, dh];
+    let kvshape: Vec<i64> = vec![2 * n_state, nkv, seq, dh];
     let mut cur_kv = blk.read_state("kv_cache", &kvshape, "kv_init");
+
+    // Gemma stores RMSNorm weights w but applies (1+w); fold the +1 in
+    // at emission so the in-graph mul stays identical to Qwen3's.
+    let norm_w = |st: &StIndex, name: &str| -> Result<Vec<u8>, String> {
+        let raw = st.get_f16(name)?;
+        Ok(if cfg.norm_plus_one {
+            f16_plus_one(&raw)
+        } else {
+            raw
+        })
+    };
+
+    // BADAPPLE_CUT=<stage> truncates emission mid-layer (single-layer
+    // shards only) for plan-build bisection: `cur` becomes the named
+    // intermediate and the layer loop exits before later stages emit.
+    let cut_at = std::env::var("BADAPPLE_CUT").ok();
+    let mut cut_shape: Option<Vec<i64>> = None;
+    // Values kept alive by declaring them as extra model outputs: a dead
+    // rope/slice value is itself an ANE plan-build (-14) suspect, so each
+    // cut can nominate the graph values the truncated tail would have used.
+    let mut cut_extra: Vec<(String, Vec<i64>)> = Vec::new();
+    macro_rules! cut {
+        ($stage:expr, $val:expr, $shape:expr $(; $($kv:expr => $kshape:expr),*)?) => {
+            if cut_at.as_deref() == Some($stage) && le - ls == 1 {
+                let z = blk.konst_f16(&format!("cutz_{}", $stage), 0.0);
+                cur = blk.add(&$val, &z, &$shape, "hidden");
+                cut_shape = Some($shape.to_vec());
+                $($( cut_extra.push(($kv.clone(), $kshape.to_vec())); )*)?
+                break;
+            }
+        };
+    }
 
     for i in ls..le {
         let p = format!("model.layers.{i}");
 
+        // ---- rope input row select ----
+        // rope_cos/rope_sin arrive [R, half] (s==1) or [R,1,half,s] (s>1):
+        // row 0 global base, row 1 local base (Gemma3 sliding layers).
+        let rope_row = cfg.rope_row(i);
+        let (cos_in, sin_in) = if cfg.rope_rows() == 2 {
+            let (cs, ss) = if s == 1 {
+                (
+                    blk.slice(
+                        "rope_cos",
+                        &[rope_row as i32, 0],
+                        &[rope_row as i32 + 1, rope_half as i32],
+                        &[1, rope_half],
+                        &format!("l{i}_cosr"),
+                    ),
+                    blk.slice(
+                        "rope_sin",
+                        &[rope_row as i32, 0],
+                        &[rope_row as i32 + 1, rope_half as i32],
+                        &[1, rope_half],
+                        &format!("l{i}_sinr"),
+                    ),
+                )
+            } else {
+                (
+                    blk.slice(
+                        "rope_cos",
+                        &[rope_row as i32, 0, 0, 0],
+                        &[rope_row as i32 + 1, 1, rope_half as i32, s as i32],
+                        &[1, 1, rope_half, s],
+                        &format!("l{i}_cosr"),
+                    ),
+                    blk.slice(
+                        "rope_sin",
+                        &[rope_row as i32, 0, 0, 0],
+                        &[rope_row as i32 + 1, 1, rope_half as i32, s as i32],
+                        &[1, 1, rope_half, s],
+                        &format!("l{i}_sinr"),
+                    ),
+                )
+            };
+            (cs, ss)
+        } else {
+            ("rope_cos".to_string(), "rope_sin".to_string())
+        };
+
         // ---- attn_norm ----
-        let w = st.get_f16(&format!("{p}.input_layernorm.weight"))?;
+        let w = norm_w(st, &format!("{p}.input_layernorm.weight"))?;
         let wn = blob(
             &mut wb,
             &mut blk,
@@ -399,7 +853,8 @@ fn emit_layer_shard(
             &w,
             &[d, 1, 1],
         );
-        let normed = blk.rms_norm(&cur, &wn, d, cfg.eps, &shape_x, &format!("l{i}_an"));
+        let normed = rms_norm_big(&mut blk, &cur, &wn, d, cfg.eps, &shape_x, &format!("l{i}_an"));
+        cut!("an", normed, [1, d, 1, s]);
 
         // ---- fused QKV conv ----
         let qw = st.get_f16(&format!("{p}.self_attn.q_proj.weight"))?;
@@ -415,14 +870,31 @@ fn emit_layer_shard(
             &qkv_w,
             &[q_dim + 2 * kv_dim, d, 1, 1],
         );
-        let qkv = conv1x1_w(
-            &mut blk,
-            &normed,
-            &wqkv,
-            q_dim + 2 * kv_dim,
-            s,
-            &format!("l{i}_qkv"),
-        );
+        // BADAPPLE_QKV_INPUT (debug): declare `qkv` as a raw input instead of
+        // the weight conv — isolates conv/state-update plan interactions.
+        // The projection runs as a matmul, not a conv: a `conv` op upstream
+        // of the chained slice_update pair fails ANE plan-build (-14) on
+        // newer CoreML, while the identical matmul plans clean (bisected:
+        // conv+1 update passes, conv+2 fails; matmul+2 passes).
+        // The projection runs as a matmul at s==1 (a `conv` upstream of the
+        // chained slice_update pair fails ANE plan-build at s==1) but as a
+        // conv at s>1 — the reverse pairing, where the s>1 matmul chain is
+        // the one that fails plan-build (-14).
+        let qkv = if std::env::var("BADAPPLE_QKV_INPUT").is_ok() {
+            "qkv".to_string()
+        } else if s == 1 {
+            linear_w(
+                &mut blk,
+                &normed,
+                &wqkv,
+                d,
+                q_dim + 2 * kv_dim,
+                s,
+                &format!("l{i}_qkv"),
+            )
+        } else {
+            conv1x1_w(&mut blk, &normed, &wqkv, q_dim + 2 * kv_dim, s, &format!("l{i}_qkv"))
+        };
 
         let q = blk.slice(
             &qkv,
@@ -445,11 +917,12 @@ fn emit_layer_shard(
             &[1, kv_dim, 1, s],
             &format!("l{i}_v"),
         );
+        cut!("qkv", qkv, [1, q_dim + 2 * kv_dim, 1, s]);
 
-        // ---- per-head q/k RMSNorm (Qwen3) ----
-        let (qn, kn) = if cfg.has_qk_norm {
-            let qnw = st.get_f16(&format!("{p}.self_attn.q_norm.weight"))?;
-            let knw = st.get_f16(&format!("{p}.self_attn.k_norm.weight"))?;
+        // ---- per-head q/k RMSNorm (Qwen3/Gemma3) ----
+        let (qn, kn) = if cfg.has_qk_norm && std::env::var("BADAPPLE_NO_QKNORM").is_err() {
+            let qnw = norm_w(st, &format!("{p}.self_attn.q_norm.weight"))?;
+            let knw = norm_w(st, &format!("{p}.self_attn.k_norm.weight"))?;
             let qn_tiled = tile_head_w(&qnw, nh);
             let kn_tiled = tile_head_w(&knw, nkv);
             let qn = blob(
@@ -483,6 +956,7 @@ fn emit_layer_shard(
         } else {
             (q, k)
         };
+        cut!("qn", qn, [1, q_dim, 1, s]);
 
         // ---- RoPE (host supplies rope_cos/rope_sin (1, rope_half)) ----
         let rope =
@@ -528,8 +1002,8 @@ fn emit_layer_shard(
                     &[1, n_h, rope_half],
                     &format!("{tag}_hi"),
                 );
-                let cos_b = blk.reshape("rope_cos", &[1, 1, rope_half], &format!("{tag}_cos"));
-                let sin_b = blk.reshape("rope_sin", &[1, 1, rope_half], &format!("{tag}_sin"));
+                let cos_b = blk.reshape(&cos_in, &[1, 1, rope_half], &format!("{tag}_cos"));
+                let sin_b = blk.reshape(&sin_in, &[1, 1, rope_half], &format!("{tag}_sin"));
                 let a = blk.mul(&x_lo, &cos_b, &[1, n_h, rope_half], &format!("{tag}_a"));
                 let b = blk.mul(&x_hi, &sin_b, &[1, n_h, rope_half], &format!("{tag}_b"));
                 let r_lo = blk.sub(&a, &b, &[1, n_h, rope_half], &format!("{tag}_rlo"));
@@ -593,26 +1067,26 @@ fn emit_layer_shard(
                 );
                 let a = blk.mul(
                     &x_lo,
-                    "rope_cos",
+                    &cos_in,
                     &[1, n_h, rope_half, s],
                     &format!("{tag}_a"),
                 );
                 let b = blk.mul(
                     &x_hi,
-                    "rope_sin",
+                    &sin_in,
                     &[1, n_h, rope_half, s],
                     &format!("{tag}_b"),
                 );
                 let r_lo = blk.sub(&a, &b, &[1, n_h, rope_half, s], &format!("{tag}_rlo"));
                 let c = blk.mul(
                     &x_lo,
-                    "rope_sin",
+                    &sin_in,
                     &[1, n_h, rope_half, s],
                     &format!("{tag}_c"),
                 );
                 let d2 = blk.mul(
                     &x_hi,
-                    "rope_cos",
+                    &cos_in,
                     &[1, n_h, rope_half, s],
                     &format!("{tag}_d"),
                 );
@@ -629,7 +1103,10 @@ fn emit_layer_shard(
                 };
                 blk.reshape(&cat, &[1, total, 1, s], &format!("{tag}_flat"))
             };
-        let (q_r, k_r) = if s == 1 {
+        let skip_rope = std::env::var("BADAPPLE_NO_ROPE").is_ok();
+        let (q_r, k_r) = if skip_rope {
+            (qn.clone(), kn.clone())
+        } else if s == 1 {
             (
                 rope(&mut blk, &qn, nh, dh, q_dim, &format!("l{i}_rq")),
                 rope(&mut blk, &kn, nkv, dh, kv_dim, &format!("l{i}_rk")),
@@ -641,6 +1118,7 @@ fn emit_layer_shard(
             )
         };
 
+        cut!("rq", q_r, [1, q_dim, 1, s]);
         let (new_k, new_v) = if s == 1 {
             (
                 blk.reshape(&k_r, &[1, nkv, 1, dh], &format!("l{i}_nk")),
@@ -701,23 +1179,30 @@ fn emit_layer_shard(
             let cv = blk.konst_i32(&format!("l{i}_cv"), &[krow + 2]);
             let cnkv = blk.konst_i32(&format!("l{i}_cnkv"), &[nkv as i32]);
             let cdh = blk.konst_i32(&format!("l{i}_cdh"), &[dh as i32]);
-            let st4 = blk.konst_i32(&format!("l{i}_st4"), &[1, 1, 1, 1]);
-            let bm4 = blk.op(
-                "const",
-                vec![],
-                vec![(
-                    &format!("l{i}_bm4"),
-                    ValueType::Tensor(TensorType {
-                        dtype: DType::Bool,
-                        shape: vec![4],
-                    }),
-                )],
-                vec![(
-                    "val".into(),
-                    mil_spec::Value::bools(&[false, false, false, false]),
-                )],
-            )[0]
-            .clone();
+            // Per-update mask/stride consts: reusing one const across chained
+            // slice_updates fails ANE plan-build on newer OS releases.
+            let mk_masks = |blk: &mut Block, pfx: &str| -> (String, String) {
+                let st = blk.konst_i32(&format!("{pfx}_st"), &[1, 1, 1, 1]);
+                let bm = blk.op(
+                    "const",
+                    vec![],
+                    vec![(
+                        &format!("{pfx}_bm"),
+                        ValueType::Tensor(TensorType {
+                            dtype: DType::Bool,
+                            shape: vec![4],
+                        }),
+                    )],
+                    vec![(
+                        "val".into(),
+                        mil_spec::Value::bools(&[false, false, false, false]),
+                    )],
+                )[0]
+                .clone();
+                (st, bm)
+            };
+            let (kst, kbm) = mk_masks(&mut blk, &format!("l{i}_km"));
+            let (vst, vbm) = mk_masks(&mut blk, &format!("l{i}_vm"));
             // K row: write [1,nkv,s,dh] at [2l,0,pos,0]..[2l+1,nkv,pos+s,dh]
             let kb = concat4(
                 &mut blk,
@@ -736,40 +1221,50 @@ fn emit_layer_shard(
                     ("update".into(), bind(&new_k).1),
                     ("begin".into(), bind(&kb).1),
                     ("end".into(), bind(&ke).1),
-                    ("stride".into(), bind(&st4).1),
-                    ("begin_mask".into(), bind(&bm4).1),
-                    ("end_mask".into(), bind(&bm4).1),
-                    ("squeeze_mask".into(), bind(&bm4).1),
+                    ("stride".into(), bind(&kst).1),
+                    ("begin_mask".into(), bind(&kbm).1),
+                    ("end_mask".into(), bind(&kbm).1),
+                    ("squeeze_mask".into(), bind(&kbm).1),
                 ],
                 &format!("l{i}_kup"),
                 ValueType::Tensor(TensorType::f16(&kvshape)),
             );
+            cut!("kupd", cur_kv, [kvshape[0], kvshape[1], kvshape[2], kvshape[3]]);
             // V row: write [1,nkv,s,dh] at [2l+1,0,pos,0]..[2l+2,nkv,pos+s,dh]
-            let vb = concat4(
-                &mut blk,
-                &format!("l{i}_vb"),
-                &[ck1.as_str(), c0.as_str(), pos_i32.as_str(), c0.as_str()],
-            );
-            let ve = concat4(
-                &mut blk,
-                &format!("l{i}_ve"),
-                &[cv.as_str(), cnkv.as_str(), pos_s.as_str(), cdh.as_str()],
-            );
+            // BADAPPLE_KVDUP (debug): write the K row twice instead — splits
+            // "second chained update fails" from "row-1 update fails".
+            let dup = std::env::var("BADAPPLE_KVDUP").is_ok();
+            let vbs: [&str; 4] = if dup {
+                [ck.as_str(), c0.as_str(), pos_i32.as_str(), c0.as_str()]
+            } else {
+                [ck1.as_str(), c0.as_str(), pos_i32.as_str(), c0.as_str()]
+            };
+            let vb = concat4(&mut blk, &format!("l{i}_vb"), &vbs);
+            let ves: [&str; 4] = if dup {
+                [ck1.as_str(), cnkv.as_str(), pos_s.as_str(), cdh.as_str()]
+            } else {
+                [cv.as_str(), cnkv.as_str(), pos_s.as_str(), cdh.as_str()]
+            };
+            let ve = concat4(&mut blk, &format!("l{i}_ve"), &ves);
             cur_kv = blk.o1(
                 "slice_update",
                 vec![
                     ("x".into(), bind(&cur_kv).1),
-                    ("update".into(), bind(&new_v).1),
+                    (
+                        "update".into(),
+                        bind(if dup { &new_k } else { &new_v }).1,
+                    ),
                     ("begin".into(), bind(&vb).1),
                     ("end".into(), bind(&ve).1),
-                    ("stride".into(), bind(&st4).1),
-                    ("begin_mask".into(), bind(&bm4).1),
-                    ("end_mask".into(), bind(&bm4).1),
-                    ("squeeze_mask".into(), bind(&bm4).1),
+                    ("stride".into(), bind(&vst).1),
+                    ("begin_mask".into(), bind(&vbm).1),
+                    ("end_mask".into(), bind(&vbm).1),
+                    ("squeeze_mask".into(), bind(&vbm).1),
                 ],
                 &format!("l{i}_vup"),
                 ValueType::Tensor(TensorType::f16(&kvshape)),
             );
+            cut!("vupd", cur_kv, [kvshape[0], kvshape[1], kvshape[2], kvshape[3]]; q_r => [1, q_dim, 1, s]);
             let k_attn = blk.slice(
                 &cur_kv,
                 &[krow, 0, 0, 0],
@@ -784,6 +1279,7 @@ fn emit_layer_shard(
                 &[1, nkv, seq, dh],
                 &format!("l{i}_vfull"),
             );
+            cut!("kf", k_attn, [1, nkv, seq, dh]);
             (k_attn, v_attn)
         } else {
             // Prefill hybrid: kv_write_mask [1,1,seq,s] encodes the write
@@ -896,6 +1392,7 @@ fn emit_layer_shard(
             );
             (k_full, v_full)
         };
+        cut!("kv", k_attn, [1, nkv, seq, dh]);
         // ---- explicit attention (matmul·scale·+mask·softmax·matmul) ----
         // The fused scaled_dot_product_attention op is numerically unstable
         // on the folded GQA multi-query shape q [1,nkv,hpk,dh]: across model
@@ -952,10 +1449,21 @@ fn emit_layer_shard(
                 &[1, nkv, rows, seq],
                 &format!("l{i}_sc"),
             );
-            let scl = blk.konst_f16(&format!("l{i}_scl"), 1.0 / (dh as f32).sqrt());
+            let scl = blk.konst_f16(&format!("l{i}_scl"), cfg.attn_scale);
             let sc = blk.mul(&scores, &scl, &[1, nkv, rows, seq], &format!("l{i}_scm"));
-            let masked = blk.add(&sc, "attn_mask", &[1, nkv, rows, seq], &format!("l{i}_msk"));
+            cut!("sc", sc, [1, nkv, rows, seq]);
+            let m0 = blk.add(&sc, "attn_mask", &[1, nkv, rows, seq], &format!("l{i}_msk"));
+            // Gemma3 sliding-window layers additionally mask keys older than
+            // q - (w-1). The band mask arrives from the bridge as a second
+            // input (`attn_mask_slide`); the in-graph i32 compare/cast chain
+            // it replaced failed ANE plan-build (-14) on the full layer.
+            let masked = if cfg.is_sliding(i) {
+                blk.add(&m0, "attn_mask_slide", &[1, nkv, rows, seq], &format!("l{i}_mskw"))
+            } else {
+                m0
+            };
             let probs = blk.softmax(&masked, 3, &[1, nkv, rows, seq], &format!("l{i}_pb"), false);
+            cut!("pb", probs, [1, nkv, rows, seq]);
             // BADAPPLE_ONES_ATTN=1 (debug): swap the V operand for all-ones
             // (v_attn*0+1 keeps it live) so attn4 emits the softmax ROW SUMS
             // — a normalized softmax yields exactly 1.0.
@@ -974,6 +1482,7 @@ fn emit_layer_shard(
                 &[1, nkv, rows, dh],
                 &format!("l{i}_sdpa"),
             );
+            cut!("attn", attn, [1, nkv, rows, dh]);
             if s == 1 {
                 // slice the real hpk rows out of the padded result, then
                 // unfold [1,nkv,hpk,dh] -> [1,q_dim,1,1] with one reshape.
@@ -1005,10 +1514,36 @@ fn emit_layer_shard(
             &[d, q_dim, 1, 1],
         );
         let o = conv1x1_w(&mut blk, &attn4, &wo, d, s, &format!("l{i}_o"));
-        let x1 = blk.add(&cur, &o, &shape_x, &format!("l{i}_res1"));
+        cut!("o", o, [1, d, 1, s]);
+        // Gemma3 post_attention_layernorm normalizes the sublayer OUTPUT
+        // before the residual add; Qwen3 adds the raw o_proj result.
+        let o2 = if cfg.arch == Arch::Gemma3Text
+            && std::env::var("BADAPPLE_NO_POSTNORM").is_err()
+        {
+            let wp = norm_w(st, &format!("{p}.post_attention_layernorm.weight"))?;
+            let wpn = blob(
+                &mut wb,
+                &mut blk,
+                &format!("w_post_attn_{i}"),
+                &wp,
+                &[d, 1, 1],
+            );
+            rms_norm_big(&mut blk, &o, &wpn, d, cfg.eps, &shape_x, &format!("l{i}_pan"))
+        } else {
+            o
+        };
+        let x1 = blk.add(&cur, &o2, &shape_x, &format!("l{i}_res1"));
 
         // ---- FFN ----
-        let wfn = st.get_f16(&format!("{p}.post_attention_layernorm.weight"))?;
+        // Qwen3's FFN norm is named post_attention_layernorm; Gemma3's is
+        // pre_feedforward_layernorm (its post_attention_layernorm already
+        // ran above, post-attention).
+        let ffn_norm_name = if cfg.arch == Arch::Gemma3Text {
+            "pre_feedforward_layernorm"
+        } else {
+            "post_attention_layernorm"
+        };
+        let wfn = norm_w(st, &format!("{p}.{ffn_norm_name}.weight"))?;
         let wfnn = blob(
             &mut wb,
             &mut blk,
@@ -1016,40 +1551,221 @@ fn emit_layer_shard(
             &wfn,
             &[d, 1, 1],
         );
-        let n2 = blk.rms_norm(&x1, &wfnn, d, cfg.eps, &shape_x, &format!("l{i}_fn"));
-        let gw = st.get_f16(&format!("{p}.mlp.gate_proj.weight"))?;
-        let uw = st.get_f16(&format!("{p}.mlp.up_proj.weight"))?;
-        let mut gu_w = gw;
-        gu_w.extend_from_slice(&uw);
-        let wgu = weight_const(
-            &mut wb,
-            &mut blk,
-            &format!("w_gu_{i}"),
-            &gu_w,
-            &[2 * cfg.d_ff, d, 1, 1],
-        );
-        let gu = conv1x1_w(&mut blk, &n2, &wgu, 2 * cfg.d_ff, s, &format!("l{i}_gu"));
-        let gate = blk.slice(
-            &gu,
-            &[0, 0, 0, 0],
-            &[1, cfg.d_ff as i32, 1, s as i32],
-            &[1, cfg.d_ff, 1, s],
-            &format!("l{i}_gate"),
-        );
-        let up = blk.slice(
-            &gu,
-            &[0, cfg.d_ff as i32, 0, 0],
-            &[1, (2 * cfg.d_ff) as i32, 1, s as i32],
-            &[1, cfg.d_ff, 1, s],
-            &format!("l{i}_up"),
-        );
-        let silu = blk.o1(
-            "silu",
-            vec![("x".into(), bind(&gate).1)],
-            &format!("l{i}_silu"),
-            ValueType::Tensor(TensorType::f16(&[1, cfg.d_ff, 1, s])),
-        );
-        let hidden = blk.mul(&silu, &up, &[1, cfg.d_ff, 1, s], &format!("l{i}_hid"));
+        cut!("res1", x1, [1, d, 1, s]);
+        // CUT=kvdbg: hidden = concat(K rows 0..8 read back from the packed
+        // state post-update, res1) — reads the state's actual contents
+        // through the terminal output buffer (extra outputs see reused
+        // buffers, untrusted).
+        if cut_at.as_deref() == Some("kvdbg") && le - ls == 1 {
+            let ks8 = blk.slice(
+                &k_attn,
+                &[0, 0, 0, 0],
+                &[1, nkv as i32, 8, dh as i32],
+                &[1, nkv, 8, dh],
+                &format!("l{i}_ks8"),
+            );
+            let kf = blk.reshape(&ks8, &[1, nkv * 8 * dh, 1, 1], &format!("l{i}_ks8f"));
+            cur = blk.concat(
+                &[kf, x1.clone()],
+                1,
+                &[1, nkv * 8 * dh + d, 1, s],
+                "hidden",
+            );
+            cut_shape = Some(vec![1, nkv * 8 * dh + d, 1, s]);
+            break;
+        }
+        let n2 = rms_norm_big(&mut blk, &x1, &wfnn, d, cfg.eps, &shape_x, &format!("l{i}_fn"));
+        // BADAPPLE_SPLIT_FFN: end the layer shard at concat(res1, fn_norm).
+        // The wide FFN conv miscompiles when it shares a plan with the
+        // stateful attention chain — kvdbg verified the K state and res1
+        // are exact until the conv exists downstream in the same model.
+        // The paired ffn_s shard computes the whole FFN tail on a real
+        // model input (conv-on-input is the verified-exact configuration).
+        if split_ffn {
+            cur = blk.concat(
+                &[x1.clone(), n2.clone()],
+                1,
+                &[1, 2 * d, 1, s],
+                "hidden",
+            );
+            cut_shape = Some(vec![1, 2 * d, 1, s]);
+            break;
+        }
+        cut!("fn", n2, [1, d, 1, s]; n2.clone() => [1, d, 1, s]);
+        // The wide FFN projection must not consume the elementwise
+        // norm-weight product (`l{i}_fn_out` = xn * w) directly: the ANE
+        // compiler fuses the broadcast mul into the conv's producer and
+        // miscomputes it (~8% error — verified: conv on the identical input
+        // is exact at 0.003, and the same graph minus the conv reads 0.05).
+        // Instead the norm weight is folded into the projection's weight
+        // COLUMNS — conv(W·diag(w), xn) == conv(W, xn·w) exactly — and the
+        // conv reads `l{i}_fn_xn`, the pre-weight norm output. Even that
+        // isn't sufficient: the fused plan still miscomputes the norm
+        // upstream of the conv. Drive the conv input through a
+        // reverse_sequence round-trip — real data movement with no fold
+        // rule in the compiler, so the tensor physically materializes
+        // before the projection reads it.
+        let ffn_in = {
+            // lengths = channel count (1152): reverse the full seq_axis=1
+            // for the single batch element.
+            let seq_len_c = blk.konst_i32(&format!("l{i}_rsl"), &[d as i32]);
+            let rsa = blk.konst_scalar_i32(&format!("l{i}_rsa"), 1);
+            let rba = blk.konst_scalar_i32(&format!("l{i}_rba"), 0);
+            let xn = format!("l{i}_fn_xn");
+            let r1 = blk.o1(
+                "reverse_sequence",
+                vec![
+                    ("x".into(), bind(&xn).1),
+                    ("lengths".into(), bind(&seq_len_c).1),
+                    ("seq_axis".into(), bind(&rsa).1),
+                    ("batch_axis".into(), bind(&rba).1),
+                ],
+                &format!("l{i}_fnr1"),
+                ValueType::Tensor(TensorType::f16(&shape_x)),
+            );
+            let rsa2 = blk.konst_scalar_i32(&format!("l{i}_rsa2"), 1);
+            let rba2 = blk.konst_scalar_i32(&format!("l{i}_rba2"), 0);
+            blk.o1(
+                "reverse_sequence",
+                vec![
+                    ("x".into(), bind(&r1).1),
+                    ("lengths".into(), bind(&seq_len_c).1),
+                    ("seq_axis".into(), bind(&rsa2).1),
+                    ("batch_axis".into(), bind(&rba2).1),
+                ],
+                &format!("l{i}_fnr2"),
+                ValueType::Tensor(TensorType::f16(&shape_x)),
+            )
+        };
+        // Column-fold the FFN norm weight into gate/up weights (fp16 math —
+        // (1+w) already baked into `wfn` by norm_w for Gemma).
+        let gw = f16_scale_cols(&st.get_f16(&format!("{p}.mlp.gate_proj.weight"))?, &wfn);
+        let uw = f16_scale_cols(&st.get_f16(&format!("{p}.mlp.up_proj.weight"))?, &wfn);
+        // BADAPPLE_SPLIT_GU (debug): separate gate/up projections — tests
+        // whether the 2*d_ff-wide single projection itself fails plan-build.
+        let (gate, up) = if let Ok(split_n) = std::env::var("BADAPPLE_SPLIT_GU") {
+            let split_n: usize = split_n.parse().unwrap_or(1);
+            let chunk = (cfg.d_ff as usize) / split_n;
+            let chunk_b = chunk * 2; // f16 bytes per row
+            let mut proj_chunks = |w: &[u8], tag: &str| -> String {
+                let mut outs = Vec::with_capacity(split_n);
+                for c in 0..split_n {
+                    let wname = format!("w_{tag}{c}_{i}");
+                    let wc = weight_const(
+                        &mut wb,
+                        &mut blk,
+                        &wname,
+                        &w[c * chunk * d as usize * 2..(c + 1) * chunk * d as usize * 2],
+                        &[chunk as i64, d, 1, 1],
+                    );
+                    let _ = chunk_b;
+                    outs.push(conv1x1_w(
+                        &mut blk,
+                        &ffn_in,
+                        &wc,
+                        chunk as i64,
+                        s,
+                        &format!("l{i}_{tag}{c}"),
+                    ));
+                }
+                if split_n == 1 {
+                    outs.pop().unwrap()
+                } else {
+                    blk.concat(
+                        &outs,
+                        1,
+                        &[1, cfg.d_ff, 1, s],
+                        &format!("l{i}_{tag}cat"),
+                    )
+                }
+            };
+            (proj_chunks(&gw, "g"), proj_chunks(&uw, "u"))
+        } else {
+            let mut gu_w = gw;
+            gu_w.extend_from_slice(&uw);
+            let wgu = weight_const(
+                &mut wb,
+                &mut blk,
+                &format!("w_gu_{i}"),
+                &gu_w,
+                &[2 * cfg.d_ff, d, 1, 1],
+            );
+            // Post-update projections stay conv: matmul's reshapes on the
+            // FFN-norm output fail plan-build where the conv passes
+            // (bisected). The pre-update QKV projection is the inverse.
+            // BADAPPLE_GU_MM (debug): route the fused projection through
+            // linear_w's matmul path — the reshape pair changes the input
+            // layout and breaks the norm→conv fusion miscompile.
+            let gu = if std::env::var("BADAPPLE_GU_MM").is_ok() {
+                linear_w(&mut blk, &ffn_in, &wgu, d, 2 * cfg.d_ff, s, &format!("l{i}_gu"))
+            } else {
+                conv1x1_w(&mut blk, &ffn_in, &wgu, 2 * cfg.d_ff, s, &format!("l{i}_gu"))
+            };
+            // CUT=gufn: hidden = concat(attn4, o, res1, fn_xn, gu) — one
+            // output buffer materializes the whole chain: extra outputs
+            // read reused buffers and can't be trusted mid-graph, but the
+            // terminal concat pins all five values.
+            if cut_at.as_deref() == Some("gufn") && le - ls == 1 {
+                let cat = blk.concat(
+                    &[
+                        format!("l{i}_attn4"),
+                        format!("l{i}_o"),
+                        x1.clone(),
+                        format!("l{i}_fn_xn"),
+                        gu.clone(),
+                    ],
+                    1,
+                    &[1, q_dim + 3 * d + 2 * cfg.d_ff, 1, s],
+                    "hidden",
+                );
+                cur = cat;
+                cut_shape = Some(vec![1, q_dim + 3 * d + 2 * cfg.d_ff, 1, s]);
+                break;
+            }
+            cut!("gu", gu, [1, 2 * cfg.d_ff, 1, s]);
+            (
+                blk.slice(
+                    &gu,
+                    &[0, 0, 0, 0],
+                    &[1, cfg.d_ff as i32, 1, s as i32],
+                    &[1, cfg.d_ff, 1, s],
+                    &format!("l{i}_gate"),
+                ),
+                blk.slice(
+                    &gu,
+                    &[0, cfg.d_ff as i32, 0, 0],
+                    &[1, (2 * cfg.d_ff) as i32, 1, s as i32],
+                    &[1, cfg.d_ff, 1, s],
+                    &format!("l{i}_up"),
+                ),
+            )
+        };
+        // Gate activation: Qwen3 silu, Gemma3 gelu (tanh approximation).
+        let act = if cfg.arch == Arch::Gemma3Text
+            && std::env::var("BADAPPLE_GEMMA_SILU").is_err()
+        {
+            blk.o1(
+                "gelu",
+                vec![
+                    ("x".into(), bind(&gate).1),
+                    (
+                        "mode".into(),
+                        bind_const(mil_spec::Value::Str("TANH_APPROXIMATION".into())),
+                    ),
+                ],
+                &format!("l{i}_gelu"),
+                ValueType::Tensor(TensorType::f16(&[1, cfg.d_ff, 1, s])),
+            )
+        } else {
+            blk.o1(
+                "silu",
+                vec![("x".into(), bind(&gate).1)],
+                &format!("l{i}_silu"),
+                ValueType::Tensor(TensorType::f16(&[1, cfg.d_ff, 1, s])),
+            )
+        };
+        let hidden = blk.mul(&act, &up, &[1, cfg.d_ff, 1, s], &format!("l{i}_hid"));
+        cut!("hid", hidden, [1, cfg.d_ff, 1, s]);
         let dw = st.get_f16(&format!("{p}.mlp.down_proj.weight"))?;
         let wd = weight_const(
             &mut wb,
@@ -1072,6 +1788,24 @@ fn emit_layer_shard(
         } else {
             conv1x1_w(&mut blk, &hidden, &wd, d, s, &format!("l{i}_down"))
         };
+        cut!("down", ffn, [1, d, 1, s]);
+        // Gemma3 post_feedforward_layernorm normalizes the MLP output
+        // before the residual add.
+        let ffn_out = if cfg.arch == Arch::Gemma3Text
+            && std::env::var("BADAPPLE_NO_POSTNORM").is_err()
+        {
+            let wp = norm_w(st, &format!("{p}.post_feedforward_layernorm.weight"))?;
+            let wpn = blob(
+                &mut wb,
+                &mut blk,
+                &format!("w_post_ffn_{i}"),
+                &wp,
+                &[d, 1, 1],
+            );
+            rms_norm_big(&mut blk, &ffn, &wpn, d, cfg.eps, &shape_x, &format!("l{i}_pfn"))
+        } else {
+            ffn
+        };
         // the last layer's output must be named `hidden` to match the declared
         // model output feature (CoreML binds program outputs by name).
         let stop_at = std::env::var("BADAPPLE_STOP_AT").ok();
@@ -1080,7 +1814,7 @@ fn emit_layer_shard(
         } else {
             format!("l{i}_res2")
         };
-        cur = blk.add(&x1, &ffn, &shape_x, &out_nm);
+        cur = blk.add(&x1, &ffn_out, &shape_x, &out_nm);
     }
     // Commit the chained packed-KV updates once per call.
     blk.write_state("kv_cache", &cur_kv);
@@ -1143,13 +1877,21 @@ fn emit_layer_shard(
         }
     }
     blk.outputs = vec![cur.clone()];
-    let out_shape_decl = stop_shape.unwrap_or_else(|| vec![1, d, 1, s]);
+    for (extra_name, _) in &cut_extra {
+        blk.outputs.push(extra_name.clone());
+    }
+    let out_shape_decl = cut_shape
+        .or(stop_shape)
+        .unwrap_or_else(|| vec![1, d, 1, s]);
 
     // ---- serialize ----
+    // Rope inputs carry R rows: row 0 = global base, row 1 = local base
+    // (Gemma3 sliding-window layers slice their own row in-graph).
+    let rrows = cfg.rope_rows();
     let rope_shape: Vec<i64> = if s == 1 {
-        vec![1, rope_half]
+        vec![rrows, rope_half]
     } else {
-        vec![1, 1, rope_half, s]
+        vec![rrows, 1, rope_half, s]
     };
     // s==1 declares a real dim2 on attn_mask ([1,1,rows,seq] where rows is
     // the padded query count): a [1,1,1,seq] mask broadcasts dim2 1->rows,
@@ -1182,18 +1924,40 @@ fn emit_layer_shard(
             name: "pos".into(),
             ty: ValueType::Tensor(TensorType::i32v(1)),
         },
-        NVT {
-            name: "kv_cache".into(),
-            ty: ValueType::State(TensorType::f16(&kvshape)),
-        },
     ];
+    // Sliding-window shards take a second band mask from the bridge.
+    let has_sliding = (ls..le).any(|i| cfg.is_sliding(i));
+    if has_sliding {
+        fn_inputs.push(NVT {
+            name: "attn_mask_slide".into(),
+            ty: ValueType::Tensor(TensorType::f16(&mask_shape)),
+        });
+    }
+    fn_inputs.push(NVT {
+        name: "kv_cache".into(),
+        ty: ValueType::State(TensorType::f16(&kvshape)),
+    });
+    if std::env::var("BADAPPLE_QKV_INPUT").is_ok() {
+        fn_inputs.push(NVT {
+            name: "qkv".into(),
+            ty: ValueType::Tensor(TensorType::f16(&[1, q_dim + 2 * kv_dim, 1, s])),
+        });
+    }
+    if std::env::var("BADAPPLE_GU_INPUT").is_ok() {
+        for n in ["wgu_g", "wgu_u"] {
+            fn_inputs.push(NVT {
+                name: n.into(),
+                ty: ValueType::Tensor(TensorType::f16(&[cfg.d_ff, d, 1, 1])),
+            });
+        }
+    }
     let states: Vec<Feature> = vec![Feature {
         name: "kv_cache".into(),
         shape: kvshape.clone(),
         dtype: DType::Fp16,
         is_state: true,
     }];
-    let inputs: Vec<Feature> = vec![
+    let mut inputs: Vec<Feature> = vec![
         Feature {
             name: "x".into(),
             shape: vec![1, d, 1, s],
@@ -1225,12 +1989,46 @@ fn emit_layer_shard(
             is_state: false,
         },
     ];
-    let outputs = vec![Feature {
+    if has_sliding {
+        inputs.push(Feature {
+            name: "attn_mask_slide".into(),
+            shape: mask_shape.clone(),
+            dtype: DType::Fp16,
+            is_state: false,
+        });
+    }
+    if std::env::var("BADAPPLE_QKV_INPUT").is_ok() {
+        inputs.push(Feature {
+            name: "qkv".into(),
+            shape: vec![1, q_dim + 2 * kv_dim, 1, s],
+            dtype: DType::Fp16,
+            is_state: false,
+        });
+    }
+    if std::env::var("BADAPPLE_GU_INPUT").is_ok() {
+        for n in ["wgu_g", "wgu_u"] {
+            inputs.push(Feature {
+                name: n.into(),
+                shape: vec![cfg.d_ff, d, 1, 1],
+                dtype: DType::Fp16,
+                is_state: false,
+            });
+        }
+    }
+    let mut outputs = vec![Feature {
         name: "hidden".into(),
         shape: out_shape_decl,
         dtype: DType::Fp16,
         is_state: false,
     }];
+    for (extra_name, extra_shape) in &cut_extra {
+        outputs.push(Feature {
+            name: extra_name.clone(),
+            shape: extra_shape.clone(),
+            dtype: DType::Fp16,
+            is_state: false,
+        });
+    }
 
     // The ANE plan-build coverage of the slice_update graph is
     // spec-dependent: the s==1 (decode) graph only plans under ios18/
@@ -1243,6 +2041,15 @@ fn emit_layer_shard(
     } else {
         (10, "CoreML9")
     };
+    // Spec-version sweep for new OS releases: ANE plan-build coverage
+    // shifts per CoreML generation (documented above).
+    let (sv, ops) = if let Ok(v) = std::env::var("BADAPPLE_SPEC_VERSION") {
+        let n: i32 = v.parse().unwrap_or(sv);
+        let o = std::env::var("BADAPPLE_OPSET").unwrap_or_else(|_| ops.to_string());
+        (n, Box::leak(o.into_boxed_str()) as &'static str)
+    } else {
+        (sv, ops)
+    };
     let meta = ModelMeta::new(sv, ops)
         .creator("badapple-aneconvert")
         .description("Bad Apple native ANE shard");
@@ -1253,10 +2060,242 @@ fn emit_layer_shard(
     Ok((pkg_dir, mlmodelc, weights))
 }
 
+/// Stateless FFN half of a split layer (BADAPPLE_SPLIT_FFN): consumes
+/// `x = concat(res1, ffn_norm_out)` [1, 2d, 1, s] emitted by the attention
+/// shard and emits the completed layer output `res1 + post_ffn_norm(ffn)`.
+///
+/// Why this exists: the wide FFN conv miscompiles when it shares a plan
+/// with the stateful attention chain — multi-token decode produced a res1
+/// 8.9-off and gu 3.2-off inside the monolithic graph while every cut
+/// ending before the conv was exact, and a standalone conv on a real
+/// input matched at 0.003. A model boundary is the only materialization
+/// the compiler cannot fuse across, so the conv lives in its own model.
+fn emit_ffn_shard(
+    st: &StIndex,
+    cfg: &Cfg,
+    ls: i64,
+    le: i64,
+    out_dir: &Path,
+    s: i64,
+    is_prefill: bool,
+) -> Result<(PathBuf, PathBuf, Vec<u8>), String> {
+    if le - ls != 1 {
+        // Each FFN shard consumes exactly one layer's split output —
+        // multi-layer coverage is impossible by construction (the
+        // intermediate res1/fn values only exist inside the paired
+        // attention shard), so split mode always runs lps=1.
+        return Err("split FFN shards are per-layer (le-ls must be 1)".into());
+    }
+    let name = if is_prefill {
+        format!("ffn_p{:02}-{:02}", ls, le)
+    } else {
+        format!("ffn_s{:02}-{:02}", ls, le)
+    };
+    let pkg_dir = out_dir.join(format!("{name}.mlpackage"));
+
+    let mut blk = Block::new();
+    let mut wb = WeightBin::new();
+    let d = cfg.d_model;
+    let shape_x = vec![1, d, 1, s];
+
+    // Single input x = concat(res1, fn_norm) [1,2d,1,s]: slices take the
+    // halves so the bridge can hand the attention shard's output over
+    // verbatim. (Earlier "all zeros" reads were a readback artifact — the
+    // output MLMultiArray carries channel-stride 32 and must be read
+    // stride-aware; the slice path computes correctly.)
+    let res1 = blk.slice(
+        "x",
+        &[0, 0, 0, 0],
+        &[1, d as i32, 1, s as i32],
+        &shape_x,
+        "in_res1",
+    );
+    let n2 = blk.slice(
+        "x",
+        &[0, d as i32, 0, 0],
+        &[1, (2 * d) as i32, 1, s as i32],
+        &shape_x,
+        "in_fn",
+    );
+
+    let ffn_cut = std::env::var("BADAPPLE_FFN_CUT").ok();
+    let mut cur = res1.clone();
+    let mut out_shape_override: Option<Vec<i64>> = None;
+    for i in ls..le {
+        let p = format!("model.layers.{i}");
+        let gw = st.get_f16(&format!("{p}.mlp.gate_proj.weight"))?;
+        let uw = st.get_f16(&format!("{p}.mlp.up_proj.weight"))?;
+        let mut gu_w = gw;
+        gu_w.extend_from_slice(&uw);
+        let wgu = weight_const(
+            &mut wb,
+            &mut blk,
+            &format!("w_gu_{i}"),
+            &gu_w,
+            &[2 * cfg.d_ff, d, 1, 1],
+        );
+        // Matmul, not conv: post-update matmul reshapes are the documented
+        // -14 case, but this shard has no slice_update at all — and the
+        // conv form miscomputes here regardless (output written at stride
+        // 32 into the flat buffer: ane[k*32] == ref[k] to 0.001).
+        let gu = linear_w(&mut blk, &n2, &wgu, d, 2 * cfg.d_ff, s, &format!("l{i}_gu"));
+        if ffn_cut.as_deref() == Some("gu") {
+            let z = blk.konst_f16("fcz", 0.0);
+            cur = blk.add(&gu, &z, &[1, 2 * cfg.d_ff, 1, s], "hidden");
+            out_shape_override = Some(vec![1, 2 * cfg.d_ff, 1, s]);
+            break;
+        }
+        let gate = blk.slice(
+            &gu,
+            &[0, 0, 0, 0],
+            &[1, cfg.d_ff as i32, 1, s as i32],
+            &[1, cfg.d_ff, 1, s],
+            &format!("l{i}_gate"),
+        );
+        let up = blk.slice(
+            &gu,
+            &[0, cfg.d_ff as i32, 0, 0],
+            &[1, (2 * cfg.d_ff) as i32, 1, s as i32],
+            &[1, cfg.d_ff, 1, s],
+            &format!("l{i}_up"),
+        );
+        let act = if cfg.arch == Arch::Gemma3Text
+            && std::env::var("BADAPPLE_GEMMA_SILU").is_err()
+        {
+            blk.o1(
+                "gelu",
+                vec![
+                    ("x".into(), bind(&gate).1),
+                    (
+                        "mode".into(),
+                        bind_const(mil_spec::Value::Str("TANH_APPROXIMATION".into())),
+                    ),
+                ],
+                &format!("l{i}_gelu"),
+                ValueType::Tensor(TensorType::f16(&[1, cfg.d_ff, 1, s])),
+            )
+        } else {
+            blk.o1(
+                "silu",
+                vec![("x".into(), bind(&gate).1)],
+                &format!("l{i}_silu"),
+                ValueType::Tensor(TensorType::f16(&[1, cfg.d_ff, 1, s])),
+            )
+        };
+        let hidden = blk.mul(&act, &up, &[1, cfg.d_ff, 1, s], &format!("l{i}_hid"));
+        if ffn_cut.as_deref() == Some("hid") {
+            let z = blk.konst_f16("fcz", 0.0);
+            cur = blk.add(&hidden, &z, &[1, cfg.d_ff, 1, s], "hidden");
+            out_shape_override = Some(vec![1, cfg.d_ff, 1, s]);
+            break;
+        }
+        let dw = st.get_f16(&format!("{p}.mlp.down_proj.weight"))?;
+        let wd = weight_const(
+            &mut wb,
+            &mut blk,
+            &format!("w_down_{i}"),
+            &dw,
+            &[d, cfg.d_ff, 1, 1],
+        );
+        // Down projection is matmul for the same reason as gate/up: the
+        // conv form scatters outputs at stride 32 inside this plan, and
+        // the matmul -14 case (post-slice_update reshapes) does not exist
+        // in a stateless shard.
+        let alpha = down_prescale();
+        let ffn = if alpha > 1.0 {
+            let inv = blk.konst_f16(&format!("l{i}_dinv"), 1.0 / alpha);
+            let hs = blk.mul(&hidden, &inv, &[1, cfg.d_ff, 1, s], &format!("l{i}_hids"));
+            let raw = linear_w(&mut blk, &hs, &wd, cfg.d_ff, d, s, &format!("l{i}_down_s"));
+            let a = blk.konst_f16(&format!("l{i}_dalpha"), alpha);
+            blk.mul(&raw, &a, &shape_x, &format!("l{i}_down"))
+        } else {
+            linear_w(&mut blk, &hidden, &wd, cfg.d_ff, d, s, &format!("l{i}_down"))
+        };
+        let ffn_out = if cfg.arch == Arch::Gemma3Text
+            && std::env::var("BADAPPLE_NO_POSTNORM").is_err()
+        {
+            // Gemma stores w but applies (1+w); fold the +1 at emission.
+            let wp_raw = st.get_f16(&format!("{p}.post_feedforward_layernorm.weight"))?;
+            let wp = if cfg.norm_plus_one {
+                f16_plus_one(&wp_raw)
+            } else {
+                wp_raw
+            };
+            let wpn = wb.put(
+                &format!("w_post_ffn_{i}"),
+                DType::Fp16,
+                &[d, 1, 1],
+                &wp,
+            );
+            let wpn = blk.konst_blob(
+                &format!("w_post_ffn_{i}"),
+                WEIGHTS_NAME,
+                wpn,
+                DType::Fp16,
+                &[d, 1, 1],
+            );
+            rms_norm_big(&mut blk, &ffn, &wpn, d, cfg.eps, &shape_x, &format!("l{i}_pfn"))
+        } else {
+            ffn
+        };
+        let out_nm = if i == le - 1 { "hidden" } else { "" };
+        let nm = if out_nm.is_empty() {
+            format!("l{i}_res2")
+        } else {
+            out_nm.to_string()
+        };
+        cur = blk.add(&res1, &ffn_out, &shape_x, &nm);
+    }
+    blk.outputs = vec![cur.clone()];
+
+    let (sv, ops) = if s == 1 {
+        (9, "CoreML8")
+    } else {
+        (10, "CoreML9")
+    };
+    let (sv, ops) = if let Ok(v) = std::env::var("BADAPPLE_SPEC_VERSION") {
+        let n: i32 = v.parse().unwrap_or(sv);
+        let o = std::env::var("BADAPPLE_OPSET").unwrap_or_else(|_| ops.to_string());
+        (n, Box::leak(o.into_boxed_str()) as &'static str)
+    } else {
+        (sv, ops)
+    };
+    let shape_2d = vec![1, 2 * d, 1, s];
+    let fn_inputs: Vec<NVT> = vec![NVT {
+        name: "x".into(),
+        ty: ValueType::Tensor(TensorType::f16(&shape_2d)),
+    }];
+    let inputs: Vec<Feature> = vec![Feature {
+        name: "x".into(),
+        shape: shape_2d,
+        dtype: DType::Fp16,
+        is_state: false,
+    }];
+    let outputs = vec![Feature {
+        name: "hidden".into(),
+        shape: out_shape_override.unwrap_or_else(|| vec![1, d, 1, s]),
+        dtype: DType::Fp16,
+        is_state: false,
+    }];
+    let states: Vec<Feature> = vec![];
+    let meta = ModelMeta::new(sv, ops)
+        .creator("badapple-aneconvert")
+        .description("Bad Apple native ANE FFN shard (split layer tail)");
+    let spec = encode_model(&inputs, &outputs, &states, &blk, &fn_inputs, &meta);
+    let weights = wb.finish();
+    write_mlpackage(&pkg_dir, &spec, Some(&weights)).map_err(|e| e.to_string())?;
+    let mlmodelc = out_dir.join(format!("{name}.mlmodelc"));
+    Ok((pkg_dir, mlmodelc, weights))
+}
+
 /// per-head RMSNorm over axis 1 of (n, dh, 1, 1); weight application handled by caller.
 fn head_rms(blk: &mut Block, x: &str, d: i64, eps: f32, shape4: &[i64], pfx: &str) -> String {
+    // Same two-sided fp16 guard as rms_norm_big: 1/(8*sqrt(d)) prescale so
+    // per-head activations survive |x| up to ~70k, plus a subnormal floor
+    // before rsqrt so near-zero heads can't produce rsqrt(0)=Inf.
+    const C: f32 = 8.0;
     let k = (d as f32).sqrt();
-    let inv_k = blk.konst_f16(&format!("{pfx}_ik"), 1.0 / k);
+    let inv_k = blk.konst_f16(&format!("{pfx}_ik"), 1.0 / (C * k));
     let xs = blk.mul(x, &inv_k, shape4, &format!("{pfx}_xs"));
     let sq = blk.mul(&xs, &xs, shape4, &format!("{pfx}_sq"));
     let axes = blk.konst_i32(&format!("{pfx}_ax"), &[1]);
@@ -1272,12 +2311,19 @@ fn head_rms(blk: &mut Block, x: &str, d: i64, eps: f32, shape4: &[i64], pfx: &st
         &format!("{pfx}_m"),
         ValueType::Tensor(TensorType::f16(&mshape)),
     );
-    let e = blk.konst_f16(&format!("{pfx}_e"), eps / (k * k));
+    let e = blk.konst_f16(&format!("{pfx}_e"), eps / (C * C * k * k));
     let vp = blk.add(&mean, &e, &mshape, &format!("{pfx}_vp"));
+    let fl = blk.konst_f16(&format!("{pfx}_fl"), 1e-7);
+    let vm = blk.o1(
+        "maximum",
+        vec![("x".into(), bind(&vp).1), ("y".into(), bind(&fl).1)],
+        &format!("{pfx}_vm"),
+        ValueType::Tensor(TensorType::f16(&mshape)),
+    );
     let z = blk.konst_f16(&format!("{pfx}_z"), 0.0);
     let r = blk.o1(
         "rsqrt",
-        vec![("x".into(), bind(&vp).1), ("epsilon".into(), bind(&z).1)],
+        vec![("x".into(), bind(&vm).1), ("epsilon".into(), bind(&z).1)],
         &format!("{pfx}_r"),
         ValueType::Tensor(TensorType::f16(&mshape)),
     );
@@ -1299,11 +2345,14 @@ fn emit_head_shard(
     let d = cfg.d_model;
     let vsz = vend - vstart;
 
-    let nw = st.get_f16("model.norm.weight")?;
+    let mut nw = st.get_f16("model.norm.weight")?;
+    if cfg.norm_plus_one {
+        nw = f16_plus_one(&nw);
+    }
     let noff = wb.put("w_out_norm", DType::Fp16, &[d, 1, 1], &nw);
     let wn = blk.konst_blob("w_out_norm", WEIGHTS_NAME, noff, DType::Fp16, &[d, 1, 1]);
 
-    let normed = blk.rms_norm("x", &wn, d, cfg.eps, &[1, d, 1, 1], "hn");
+    let normed = rms_norm_big(&mut blk, "x", &wn, d, cfg.eps, &[1, d, 1, 1], "hn");
 
     // sliced lm head weight: (vsz, d) -> conv (vsz, d, 1, 1)
     let lm_name = if cfg.tie_embeddings || !st.tensors.contains_key("lm_head.weight") {
@@ -1311,19 +2360,7 @@ fn emit_head_shard(
     } else {
         "lm_head.weight"
     };
-    let t = &st.tensors[lm_name];
-    let row_bytes = (d as u64) * 2;
-    let mut fh = std::fs::File::open(&t.file).map_err(|e| e.to_string())?;
-    fh.seek(SeekFrom::Start(t.begin + (vstart as u64) * row_bytes))
-        .map_err(|e| e.to_string())?;
-    let mut slice_raw = vec![0u8; (vsz as u64 * row_bytes) as usize];
-    fh.read_exact(&mut slice_raw).map_err(|e| e.to_string())?;
-    let slice_f16 = match t.dtype.as_str() {
-        "F16" => slice_raw,
-        "BF16" => bf16_bytes_to_f16(&slice_raw),
-        "F32" => f32_bytes_to_f16(&slice_raw),
-        o => return Err(format!("lm_head dtype {o}")),
-    };
+    let slice_f16 = st.get_f16_rows(lm_name, vstart as u64, vend as u64)?;
     let wl = weight_const(&mut wb, &mut blk, "w_lm", &slice_f16, &[vsz, d, 1, 1]);
     let logits = blk.conv1x1(&normed, &wl, None, vsz, "logits");
     blk.outputs = vec![logits];
@@ -1363,6 +2400,9 @@ fn emit_probe(
     stage: &str,
     out_dir: &Path,
 ) -> Result<(PathBuf, PathBuf, Vec<u8>), String> {
+    if cfg.arch != Arch::Qwen3 {
+        return Err("probe emitter is qwen3-only".into());
+    }
     let name = format!("probe_l{ls}_{stage}");
     let pkg_dir = out_dir.join(format!("{name}.mlpackage"));
     let mut blk = Block::new();
@@ -1386,7 +2426,7 @@ fn emit_probe(
         DType::Fp16,
         &[d, 1, 1],
     );
-    let normed = blk.rms_norm("x", &wn, d, cfg.eps, &[1, d, 1, 1], &format!("l{ls}_an"));
+    let normed = rms_norm_big(&mut blk, "x", &wn, d, cfg.eps, &[1, d, 1, 1], &format!("l{ls}_an"));
     if stage == "an" {
         let z = blk.konst_f16("pz", 0.0);
         let o = blk.add(&normed, &z, &[1, d, 1, 1], "out");
@@ -1753,6 +2793,7 @@ fn emit_probe(
     Err(format!("unknown probe stage {stage}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_probe(
     pkg_dir: &Path,
     out_dir: &Path,
@@ -1819,6 +2860,9 @@ fn finish_probe(
 /// Write the raw fp16 embedding table [vocab, d] row-major.
 fn emit_embedding(st: &StIndex, cfg: &Cfg, path: &Path) -> Result<(), String> {
     let raw = st.get_f16("model.embed_tokens.weight")?;
+    // Gemma3 scales embeddings by sqrt(d_model); the scale is baked here so
+    // the bridge's row-gather feeds `x` already scaled.
+    let raw = f16_scale_all(&raw, cfg.embed_scale);
     std::fs::write(path, &raw).map_err(|e| e.to_string())?;
     let want = (cfg.vocab * cfg.d_model * 2) as usize;
     if raw.len() != want {
@@ -1899,8 +2943,8 @@ fn main() {
             }
             "--weight-bits" => {
                 let bits: u32 = args[i + 1].parse().unwrap_or(16);
-                if bits != 8 && bits != 16 {
-                    eprintln!("--weight-bits must be 8 or 16");
+                if bits != 4 && bits != 8 && bits != 16 {
+                    eprintln!("--weight-bits must be 4, 8, or 16");
                     std::process::exit(2);
                 }
                 let _ = WEIGHT_BITS.set(bits);
@@ -1933,6 +2977,18 @@ fn main() {
             _ => {}
         }
         i += 1;
+    }
+
+    // BADAPPLE_SPLIT_FFN: each layer becomes two models — a stateful
+    // attention shard emitting concat(res1, fn_norm) and a stateless
+    // ffn_s shard computing the conv tail on a real model input. The
+    // monolithic norm→conv chain miscompiles inside stateful plans on
+    // multi-token decode (verified: state contents and res1 are exact
+    // until the conv exists downstream in the same plan). Split forces
+    // lps=1: an FFN shard can only consume its own layer's pair.
+    let split_ffn = std::env::var("BADAPPLE_SPLIT_FFN").is_ok();
+    if split_ffn {
+        lps = 1;
     }
 
     eprintln!(
@@ -1995,20 +3051,26 @@ fn main() {
         "status": "pending",
         "source": { "path": model_dir.to_string_lossy() },
         "model": {
-            "architecture": "qwen3",
+            "architecture": cfg.arch_name(),
             "total_layers": cfg.n_layers,
             "hidden_size": cfg.d_model,
             "vocab_size": cfg.vocab,
             "seq_len": seq,
-            "quant_bits": if weight_bits() == 8 { 8 } else { 0 },
+            "quant_bits": weight_bits(),
             "compute_units": "all",
             "layers_per_shard": lps,
             "decode_width": decode_width,
+            "split_ffn": split_ffn,
             "stateful": true,
             "rope_dim": cfg.rope_dim,
             "rope_freq_base": cfg.rope_theta,
             "rms_norm_eps": cfg.eps,
             "native": true,
+            // Present only for dual-base architectures (Gemma3); the bridge
+            // fills rope row 1 with this base. Row 1 = sliding/local layers.
+            "rope_freq_base_local": cfg.rope_local_theta,
+            "sliding_window": cfg.sliding_window,
+            "sliding_window_pattern": cfg.sliding_pattern,
         },
         "shared": {
             "embedding": {
@@ -2077,6 +3139,51 @@ fn main() {
                     }
                     let _ = mlmodelc;
                 }
+                if split_ffn {
+                    eprint!("  ffn [{ls},{le}) ... ");
+                    std::io::stderr().flush().ok();
+                    match emit_ffn_shard(&st, &cfg, ls, le, &out_dir, decode_width, false) {
+                        Ok((fpkg, _fc, _fw)) => {
+                            ent.insert(
+                                "ffn_package_path".into(),
+                                json!(rel(&fpkg, &out_dir)),
+                            );
+                            if no_compile {
+                                ent.insert("ffn_status".into(), json!("packaged"));
+                                eprintln!("packaged (compile skipped)");
+                            } else {
+                                match compile_pkg(&fpkg, &out_dir) {
+                                    Ok(c) => {
+                                        ent.insert("ffn_status".into(), json!("compiled"));
+                                        ent.insert(
+                                            "ffn_compiled_path".into(),
+                                            json!(rel(&c, &out_dir)),
+                                        );
+                                        let sz = dir_size(&c);
+                                        ent.insert(
+                                            "ffn_compiled_size_bytes".into(),
+                                            json!(sz),
+                                        );
+                                        eprintln!("compiled ({:.1} MB)", sz as f64 / 1e6);
+                                        if !keep_packages {
+                                            let _ = std::fs::remove_dir_all(&fpkg);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        ent.insert("ffn_status".into(), json!("compile_failed"));
+                                        ent.insert("ffn_last_error".into(), json!(e));
+                                        eprintln!("FAILED: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            ent.insert("ffn_status".into(), json!("emit_failed"));
+                            ent.insert("ffn_last_error".into(), json!(e));
+                            eprintln!("emit failed: {e}");
+                        }
+                    }
+                }
                 ent.insert("package_path".into(), json!(rel(&pkg, &out_dir)));
                 shard_entries.push(Value::Object(ent));
             }
@@ -2142,6 +3249,49 @@ fn main() {
                             }
                         }
                         let _ = mlmodelc;
+                    }
+                    if split_ffn {
+                        eprint!("  ffn prefill [{pls},{ple}) ... ");
+                        std::io::stderr().flush().ok();
+                        match emit_ffn_shard(&st, &cfg, pls, ple, &out_dir, prefill_chunk, true) {
+                            Ok((fpkg, _fc, _fw)) => {
+                                ent.insert(
+                                    "ffn_package_path".into(),
+                                    json!(rel(&fpkg, &out_dir)),
+                                );
+                                if no_compile {
+                                    ent.insert("ffn_status".into(), json!("packaged"));
+                                    eprintln!("packaged (compile skipped)");
+                                } else {
+                                    match compile_pkg(&fpkg, &out_dir) {
+                                        Ok(c) => {
+                                            ent.insert("ffn_status".into(), json!("compiled"));
+                                            ent.insert(
+                                                "ffn_compiled_path".into(),
+                                                json!(rel(&c, &out_dir)),
+                                            );
+                                            eprintln!("compiled");
+                                            if !keep_packages {
+                                                let _ = std::fs::remove_dir_all(&fpkg);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            ent.insert(
+                                                "ffn_status".into(),
+                                                json!("compile_failed"),
+                                            );
+                                            ent.insert("ffn_last_error".into(), json!(e));
+                                            eprintln!("FAILED: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                ent.insert("ffn_status".into(), json!("emit_failed"));
+                                ent.insert("ffn_last_error".into(), json!(e));
+                                eprintln!("emit failed: {e}");
+                            }
+                        }
                     }
                     ent.insert("package_path".into(), json!(rel(&pkg, &out_dir)));
                     prefill_entries.push(Value::Object(ent));
@@ -2242,7 +3392,13 @@ fn main() {
         && manifest["shared"]["embedding"]["status"] == "complete";
     // Runtimes tokenize from the artifact dir itself (tokenizer.json for the
     // vocab, tokenizer_config.json for the chat template).
-    for f in ["tokenizer.json", "tokenizer_config.json"] {
+    for f in [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "tokenizer.model",
+        "special_tokens_map.json",
+        "added_tokens.json",
+    ] {
         if let Err(e) = std::fs::copy(model_dir.join(f), out_dir.join(f)) {
             eprintln!("warning: could not copy {f}: {e}");
         }

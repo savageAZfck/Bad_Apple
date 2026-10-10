@@ -45,7 +45,7 @@ fn load_key(chamber: &str) -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("key file must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex::encode(id.seed()))?;
     Ok(id)
@@ -72,7 +72,7 @@ fn load_hansard() -> Result<Hansard> {
 }
 
 fn save_hansard(h: &Hansard) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(
         root().join("chambers.json"),
         serde_json::to_string_pretty(&h.chambers)?,

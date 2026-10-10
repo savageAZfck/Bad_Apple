@@ -208,7 +208,7 @@ fn kill_switch_event_surfaces() {
 #[test]
 fn dispatch_enriches_detail_with_causal_chain() {
     let _g = lock();
-    let fx = fixture("causal");
+    let _fx = fixture("causal");
     let state = ify::IfyState::default();
     let f = ify::Finding {
         id: "ify-test-causal".into(),

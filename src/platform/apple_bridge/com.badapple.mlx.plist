@@ -29,15 +29,25 @@
         <key>BADAPPLE_SOCKET_PATH</key>
         <string>/var/run/badapple/substrate_mlx.sock</string>
         <key>BADAPPLE_MAIN_MODEL</key>
-        <string>mlx-community/Qwen2.5-Coder-7B-Instruct-4bit</string>
+        <string>mlx-community/Qwen3-8B-4bit</string>
+        <key>BADAPPLE_ANE_BRAIN</key>
+        <string>1</string>
+        <key>BADAPPLE_SENTINEL</key>
+        <string>0</string>
+        <key>BADAPPLE_COUNCIL</key>
+        <string>0</string>
+        <key>BADAPPLE_ANE_DRAFT</key>
+        <string>0</string>
         <key>BADAPPLE_MODEL_REVISION</key>
         <string></string>
         <key>BADAPPLE_DRAFT_MODEL</key>
         <string></string>
         <key>BADAPPLE_SPECULATIVE_DRAFT</key>
-        <string>mlx-community/Qwen2.5-0.5B-Instruct-4bit</string>
+        <string></string>
         <key>BADAPPLE_NUM_DRAFT_TOKENS</key>
         <string>__BADAPPLE_NUM_DRAFT_TOKENS__</string>
+        <key>BADAPPLE_VRAM_ADMISSION</key>
+        <string>0</string>
         <key>BADAPPLE_DFLASH</key>
         <string>0</string>
         <key>BADAPPLE_DFLASH_VERIFY_LEN_CAP</key>
@@ -48,6 +58,8 @@
         <string>1</string>
         <key>BADAPPLE_MAX_KV_SIZE</key>
         <string>__BADAPPLE_MAX_KV_SIZE__</string>
+        <key>BADAPPLE_CURIOUS_INTERVAL</key>
+        <string>__BADAPPLE_CURIOUS_INTERVAL__</string>
         <key>BADAPPLE_PREFILL_STEP_SIZE</key>
         <string>__BADAPPLE_PREFILL_STEP_SIZE__</string>
         <key>BADAPPLE_PROMPT_FILE</key>
@@ -63,7 +75,7 @@
         <key>BADAPPLE_IDENTITY_AGENT_SOCKET</key>
         <string>/var/run/badapple/identity.sock</string>
         <key>BADAPPLE_FAST_TIER</key>
-        <string>1</string>
+        <string>0</string>
         <key>BADAPPLE_LAZY_MAIN_MODEL</key>
         <string>1</string>
         <key>BADAPPLE_FAST_MODEL</key>

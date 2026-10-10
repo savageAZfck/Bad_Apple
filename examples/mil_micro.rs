@@ -215,49 +215,6 @@ fn main() -> Result<(), String> {
                 is_state: false,
             }];
         }
-        "sdpa_bare" => {
-            let params: Vec<String> = std::env::var("BADAPPLE_SDPA_PARAMS")
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect();
-            inputs = params
-                .iter()
-                .enumerate()
-                .map(|(i, p)| Feature {
-                    name: format!("in{i}"),
-                    shape: vec![1, 32, 1, 128],
-                    dtype: DType::Fp16,
-                    is_state: false,
-                })
-                .collect();
-            let ins: Vec<(String, Argument)> = params
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.clone(), bind(&format!("in{i}")).1))
-                .collect();
-            let out = blk.o1(
-                "scaled_dot_product_attention",
-                ins,
-                "y",
-                f16(&[1, 32, 1, 128]),
-            );
-            blk.outputs = vec![out];
-            fn_inputs = inputs
-                .iter()
-                .map(|f| NVT {
-                    name: f.name.clone(),
-                    ty: f16(&f.shape),
-                })
-                .collect();
-            outputs = vec![Feature {
-                name: "y".into(),
-                shape: vec![1, 32, 1, 128],
-                dtype: DType::Fp16,
-                is_state: false,
-            }];
-        }
         // Chain of candidate ops on [1,64,1,1] to see preferred device per op.
         "opscan" => {
             inputs = vec![Feature {
@@ -294,7 +251,7 @@ fn main() -> Result<(), String> {
                 "s",
                 f16(&small),
             );
-            let sm = blk.o1(
+            let _sm = blk.o1(
                 "real_div",
                 vec![("x".into(), bind(&e).1), ("y".into(), bind(&s).1)],
                 "sm",

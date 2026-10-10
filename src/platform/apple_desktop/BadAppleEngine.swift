@@ -296,6 +296,7 @@ final class BadAppleEngine: @unchecked Sendable {
     private var _privateModeEnabled = false
     private var _fastTierEnabled = false
     private var _killed = false
+    private var _lastUserActivity = Date()
     private var _workspaceWatcher: BadAppleWorkspaceWatcher?
 
     var isLoaded: Bool {
@@ -347,6 +348,14 @@ final class BadAppleEngine: @unchecked Sendable {
 
     var lastPrefixCache: String {
         return stateLock.withLock { _lastPrefixCache }
+    }
+
+    func noteUserActivity() {
+        stateLock.withLock { _lastUserActivity = Date() }
+    }
+
+    var secondsSinceUserActivity: TimeInterval {
+        stateLock.withLock { Date().timeIntervalSince(_lastUserActivity) }
     }
 
     var lastCacheHit: Bool {
@@ -414,6 +423,15 @@ final class BadAppleEngine: @unchecked Sendable {
     /// Set the VRAM budget in GB.
     func setVRAMBudgetGB(_ gb: UInt64) async {
         await runtime.setVRAMBudget(gb * 1_073_741_824)
+    }
+
+    /// Toggle the model-load admission gate (`BADAPPLE_VRAM_ADMISSION=0`
+    /// disables). The gate estimates free memory before load — on hosts
+    /// where the resident working set is proven to fit through paging,
+    /// the snapshot can be stale-conservative and refuse loads that the
+    /// OS would satisfy by reclaiming file-backed pages.
+    func setVRAMAdmission(enabled: Bool) async {
+        await runtime.setVRAMAdmission(enabled: enabled)
     }
 
     var privateMode: Bool {
@@ -1004,17 +1022,37 @@ final class BadAppleEngine: @unchecked Sendable {
     // MARK: - Model Loading
 
     /// Load the model. Call this at startup or when the model changes.
+    /// A custom-registered model (e.g. a mesh-brain rank dir) carries its own
+    /// local_path; resolve it so the load path bypasses the Hub downloader.
+    private func modelDirectory(for modelId: String) -> URL? {
+        guard let profile = modelManager.listProfiles().first(where: {
+            $0.id == modelId || $0.repoId == modelId
+        }),
+            let path = modelManager.modelStatus(modelId: profile.id)?["local_path"] as? String,
+            !path.isEmpty
+        else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
     func loadModel() async {
+        let mid = stateLock.withLock { _modelId }
         await modelOperationGate.withLock { [self] in
-            await loadMainModel(directory: nil)
+            await loadMainModel(directory: modelDirectory(for: mid))
         }
     }
 
     func switchMainModel(modelId: String, revision: String = "main") async {
+        let directory = modelDirectory(for: modelId)
         await modelOperationGate.withLock { [self] in
             await unloadModels()
             configureMainModel(modelId: modelId, revision: revision)
-            await loadMainModel(directory: nil)
+            await loadMainModel(directory: directory)
+            // Mesh-backed brain: the local ANE drafter can never pair with a
+            // rank-served model — drop its weights too so the 14B exchange is
+            // total.
+            if inference.isMeshBacked {
+                await BadAppleANEDrafter.shared.unload(reason: "mesh brain active — drafter unused")
+            }
         }
     }
 
@@ -2254,8 +2292,10 @@ final class BadAppleEngine: @unchecked Sendable {
             return
         }
 
-        // Fast tier: route simple queries to the 0.5B model when enabled and configured.
-        if fastTierEnabled, let fastInf = fastInference, isSimpleQuery(prompt), !isSelfReferential(prompt), toolRouter.toolSchemasForPrompt(text: prompt) == nil {
+        // Fast tier: route simple queries to the 0.5B model when enabled and
+        // configured. Off while the main brain is mesh-backed — the mesh is
+        // the whole model, no local secondary tier.
+        if fastTierEnabled, !inference.isMeshBacked, let fastInf = fastInference, isSimpleQuery(prompt), !isSelfReferential(prompt), toolRouter.toolSchemasForPrompt(text: prompt) == nil {
             Task {
                 await ensureFastModelLoaded()
                 guard fastModelLoaded else {
@@ -2303,7 +2343,9 @@ final class BadAppleEngine: @unchecked Sendable {
                         }
                         self.auditLedger.append(
                             eventType: "response",
-                            data: ["text": filtered, "tps": result.tokensPerSecond, "tier": "fast"],
+                            data: ["text": filtered, "tps": result.tokensPerSecond, "tier": "fast",
+                                   "prompt_tokens": result.promptTokenCount,
+                                   "prefix_cache": result.prefixCache],
                             persona: persona
                         )
                         if !self.privateMode {
@@ -2364,6 +2406,7 @@ final class BadAppleEngine: @unchecked Sendable {
 
         Task {
             NSLog("[BadAppleEngine] mainModel task entered")
+            self.noteUserActivity()
             await refreshAmbientContext()
 
             let history = inferenceHistory(sessionID: sessionID)
@@ -2425,7 +2468,9 @@ final class BadAppleEngine: @unchecked Sendable {
                     }
                     auditLedger.append(
                         eventType: "response",
-                        data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
+                        data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier,
+                               "prompt_tokens": result.promptTokenCount,
+                               "prefix_cache": result.prefixCache],
                         persona: persona
                     )
                     DispatchQueue.main.async {
@@ -2482,7 +2527,11 @@ final class BadAppleEngine: @unchecked Sendable {
                     }
                     self.auditLedger.append(
                         eventType: "response",
-                        data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
+                        data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier,
+                               "drafts": result.draftProposedTokens,
+                               "accepted": result.draftAcceptedTokens,
+                               "prompt_tokens": result.promptTokenCount,
+                               "prefix_cache": result.prefixCache],
                         persona: persona
                     )
                     if !self.privateMode {
@@ -2512,13 +2561,28 @@ final class BadAppleEngine: @unchecked Sendable {
             // (unready, busy, disabled) we fall through to the normal
             // sampled paths.
             NSLog("[BadAppleEngine] generation dispatch: probing ANE drafter")
-            if let aneSession = await BadAppleANEDrafter.shared.acquire() {
+            if inference.isMeshBacked {
+                // Mesh-backed brain: no local container to draft against —
+                // the whole turn runs on the ranks.
+                inference.generateStreamingTokens(
+                    prompt: prompt,
+                    systemPrompt: sysPrompt,
+                    history: history,
+                    maxTokens: effectiveMaxTokens,
+                    temperature: 0.6,
+                    onToken: onTokenCb,
+                    onComplete: onCompleteCb,
+                    onError: onErrorCb
+                )
+            } else if let aneSession = await BadAppleANEDrafter.shared.acquire() {
                 inference.generateWithANEDrafting(
                     prompt: prompt,
                     systemPrompt: sysPrompt,
                     history: history,
                     session: aneSession,
-                    numDraftTokens: BadAppleInference.envNumDraftTokens,
+                    numDraftTokens: BadAppleInference.adaptiveNumDraftTokens(
+                        acceptPct: lastDraftAcceptPct,
+                        envDefault: BadAppleInference.envNumDraftTokens),
                     maxTokens: effectiveMaxTokens,
                     onToken: onTokenCb,
                     onComplete: onCompleteCb,
@@ -2531,7 +2595,9 @@ final class BadAppleEngine: @unchecked Sendable {
                     systemPrompt: sysPrompt,
                     history: history,
                     draftModelId: draftModelId,
-                    numDraftTokens: BadAppleInference.envNumDraftTokens,
+                    numDraftTokens: BadAppleInference.adaptiveNumDraftTokens(
+                        acceptPct: lastDraftAcceptPct,
+                        envDefault: BadAppleInference.envNumDraftTokens),
                     maxTokens: effectiveMaxTokens,
                     temperature: 0.6,
                     onToken: onTokenCb,
@@ -2614,6 +2680,7 @@ final class BadAppleEngine: @unchecked Sendable {
         maxTokens: Int = 300,
         temperature: Float = 0.6
     ) async throws -> String {
+        noteUserActivity()
         let requestSessionID = conversationSessionID()
 
         // Governed task submission runs before the model guard — policy,
@@ -2904,7 +2971,9 @@ final class BadAppleEngine: @unchecked Sendable {
         // Audit log.
         auditLedger.append(
             eventType: "response",
-            data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier],
+            data: ["text": filtered, "tps": result.tokensPerSecond, "tier": result.tier,
+                   "prompt_tokens": result.promptTokenCount,
+                   "prefix_cache": result.prefixCache],
             persona: persona
         )
         if !privateMode {
@@ -3654,14 +3723,14 @@ final class BadAppleEngine: @unchecked Sendable {
 
     /// Returns the seconds between Curious autopilot self-improvement loops.
     /// Set `BADAPPLE_CURIOUS_INTERVAL` to 0 to disable, or a positive number
-    /// to override the default 300 seconds (5 minutes).
+    /// to override the default 3600 seconds (1 hour).
     private func curiousAutopilotInterval() -> TimeInterval {
         let raw = ProcessInfo.processInfo.environment["BADAPPLE_CURIOUS_INTERVAL"]
         if let raw, let seconds = TimeInterval(raw) {
             if seconds > 0 { return seconds }
             return 0
         }
-        return 300
+        return 3600
     }
 
     /// Returns the active Curious autopilot level from disk.
@@ -3697,6 +3766,11 @@ final class BadAppleEngine: @unchecked Sendable {
                 // more often than the interval — only run if enough time passed.
                 let cooldown = min(self.curiousAutopilotInterval(), 600)
                 guard Date().timeIntervalSince(self.lastCuriousCheck) >= cooldown else { continue }
+                // The 14B pass evicts the user's prefix cache and pages
+                // weights on 16 GB boxes — Curious only runs when the
+                // owner is away.
+                let idleFloor = TimeInterval(ProcessInfo.processInfo.environment["BADAPPLE_CURIOUS_IDLE_SECONDS"] ?? "") ?? 900
+                guard self.secondsSinceUserActivity >= idleFloor else { continue }
                 self.lastCuriousCheck = Date()
                 self.auditLedger.append(
                     eventType: "tool_call",

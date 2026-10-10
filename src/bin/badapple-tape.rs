@@ -14,7 +14,7 @@ use flight_tape::ring::{Ring, RingConfig};
 use flight_tape::trigger::TriggerConfig;
 use flight_tape::verify::verify_bundle;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -221,7 +221,7 @@ fn daemon_running() -> bool {
 /// authority-classified action summary, condensed timeline, and the state
 /// snapshot ids an auditor can materialize to reconstruct exact state.
 /// Deliberately factual — severity labels are hints, not legal conclusions.
-fn report(bundle_dir: &PathBuf) -> Result<(), Box<dyn Error>> {
+fn report(bundle_dir: &Path) -> Result<(), Box<dyn Error>> {
     use sha2::{Digest, Sha256};
 
     let manifest_text = std::fs::read_to_string(bundle_dir.join("manifest.json"))?;

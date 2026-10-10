@@ -46,7 +46,7 @@ fn load_oracle() -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("oracle.key must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex::encode(id.seed()))?;
     Ok(id)
@@ -81,7 +81,7 @@ fn load_log() -> GateLog {
 }
 
 fn save_log(log: &GateLog) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(
         root().join("gatelog.json"),
         serde_json::to_string_pretty(log)?,

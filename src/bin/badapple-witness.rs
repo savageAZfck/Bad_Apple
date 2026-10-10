@@ -45,7 +45,7 @@ fn load_identity() -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("identity.key must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex::encode(id.seed()))?;
     Ok(id)
@@ -62,7 +62,7 @@ fn load_journal() -> Result<WitnessJournal> {
 }
 
 fn save_journal(journal: &WitnessJournal) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(root().join("journal.json"), journal_to_json(journal)?)?;
     Ok(())
 }

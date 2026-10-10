@@ -47,7 +47,7 @@ fn load_identity() -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("identity.key must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex::encode(id.seed()))?;
     Ok(id)

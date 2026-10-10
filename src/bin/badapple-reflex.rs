@@ -46,7 +46,7 @@ fn load_arc() -> Result<ReflexArc> {
 }
 
 fn save_arc(arc: &ReflexArc) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(arc_path(), serde_json::to_string_pretty(arc)?)?;
     Ok(())
 }

@@ -671,36 +671,93 @@ public func badAppleANEProbeShard(
             configuration: configuration
         )
         let inputs = model.modelDescription.inputDescriptionsByName
-        guard inputs["x"] != nil,
-              inputs["rope_cos"] != nil,
-              inputs["rope_sin"] != nil,
-              inputs["attn_mask"] != nil,
-              inputs["kv_write_mask"] != nil,
+        let isHeadShard = inputs["x"] != nil && inputs["rope_cos"] == nil
+        guard let xShape = inputs["x"]?.multiArrayConstraint?.shape.map({ $0.intValue }),
+              isHeadShard || inputs["rope_cos"] != nil,
+              isHeadShard || inputs["rope_sin"] != nil,
+              isHeadShard || inputs["attn_mask"] != nil,
+              isHeadShard || inputs["kv_write_mask"] != nil || inputs["pos"] != nil,
               let outputName = model.modelDescription.outputDescriptionsByName.first(where: {
                   $0.value.type == .multiArray
               })?.key else {
             return false
         }
-        let x = try MLMultiArray(shape: [1, 2048, 1, 1], dataType: .float16)
-        let ropeCos = try MLMultiArray(shape: [1, 64], dataType: .float16)
-        let ropeSin = try MLMultiArray(shape: [1, 64], dataType: .float16)
-        let attnMask = try MLMultiArray(shape: [1, 1, 1, 2048], dataType: .float16)
-        let kvWriteMask = try MLMultiArray(shape: [1, 1, 2048, 1], dataType: .float16)
-        for index in 0..<64 {
+        if isHeadShard {
+            let x = try MLMultiArray(shape: xShape as [NSNumber], dataType: .float16)
+            let provider = try MLDictionaryFeatureProvider(dictionary: [
+                "x": MLFeatureValue(multiArray: x),
+            ])
+            let state = model.makeState()
+            let started = ProcessInfo.processInfo.systemUptime
+            for _ in 0..<iterations {
+                guard let prediction = try withCoreMLCrashGuard({
+                    try model.prediction(from: provider, using: state)
+                }) else {
+                    return false
+                }
+                guard prediction.featureValue(for: outputName)?.multiArrayValue != nil else {
+                    return false
+                }
+            }
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            averageLatencyUs?.pointee = UInt64(elapsed * 1_000_000 / Double(iterations))
+            return true
+        }
+        let cosShape = inputs["rope_cos"]!.multiArrayConstraint!.shape.map({ $0.intValue })
+        let sinShape = inputs["rope_sin"]!.multiArrayConstraint!.shape.map({ $0.intValue })
+        let maskShape = inputs["attn_mask"]!.multiArrayConstraint!.shape.map({ $0.intValue })
+        let x = try MLMultiArray(shape: xShape as [NSNumber], dataType: .float16)
+        let ropeCos = try MLMultiArray(shape: cosShape as [NSNumber], dataType: .float16)
+        let ropeSin = try MLMultiArray(shape: sinShape as [NSNumber], dataType: .float16)
+        let attnMask = try MLMultiArray(shape: maskShape as [NSNumber], dataType: .float16)
+        for index in 0..<ropeCos.count {
             ropeCos[index] = 1
+        }
+        for index in 0..<ropeSin.count {
             ropeSin[index] = 0
         }
-        for index in 0..<2048 {
-            attnMask[index] = NSNumber(value: index == 0 ? Float(0) : Float(-10_000))
-            kvWriteMask[index] = NSNumber(value: index == 0 ? Float(1) : Float(0))
+        // Causal-style probe: permit the current position, mask everything else.
+        let maskWidth = maskShape.last ?? 0
+        for index in 0..<attnMask.count {
+            attnMask[index] = NSNumber(value: index < maskWidth - 1 ? Float(-10_000) : Float(0))
         }
-        let provider = try MLDictionaryFeatureProvider(dictionary: [
+        var dictionary: [String: MLFeatureValue] = [
             "x": MLFeatureValue(multiArray: x),
             "rope_cos": MLFeatureValue(multiArray: ropeCos),
             "rope_sin": MLFeatureValue(multiArray: ropeSin),
             "attn_mask": MLFeatureValue(multiArray: attnMask),
-            "kv_write_mask": MLFeatureValue(multiArray: kvWriteMask),
-        ])
+        ]
+        if let slideShape = inputs["attn_mask_slide"]?.multiArrayConstraint?.shape {
+            let slideMask = try MLMultiArray(shape: slideShape, dataType: .float16)
+            for index in 0..<slideMask.count {
+                slideMask[index] = NSNumber(value: index < maskWidth - 1 ? Float(-10_000) : Float(0))
+            }
+            dictionary["attn_mask_slide"] = MLFeatureValue(multiArray: slideMask)
+        }
+        if let posShape = inputs["pos"]?.multiArrayConstraint?.shape {
+            let pos = try MLMultiArray(shape: posShape, dataType: .int32)
+            pos[0] = 0
+            dictionary["pos"] = MLFeatureValue(multiArray: pos)
+        }
+        if let wmShape = inputs["kv_write_mask"]?.multiArrayConstraint?.shape {
+            let kvWriteMask = try MLMultiArray(shape: wmShape, dataType: .float16)
+            let writeDim = wmShape.count >= 3 ? wmShape[2].intValue : 1
+            for index in 0..<kvWriteMask.count {
+                // Write at the last position of each broadcast group.
+                kvWriteMask[index] = NSNumber(value: index % writeDim == writeDim - 1 ? Float(1) : Float(0))
+            }
+            dictionary["kv_write_mask"] = MLFeatureValue(multiArray: kvWriteMask)
+        }
+        // Debug-emit shards may declare extra inputs (weight-as-input
+        // bisection, attn_mask_slide): zero-fill any unhandled feature.
+        for (name, desc) in inputs where dictionary[name] == nil {
+            guard desc.type == .multiArray,
+                  let shape = desc.multiArrayConstraint?.shape else { continue }
+            let fill = try MLMultiArray(shape: shape, dataType: .float16)
+            for index in 0..<fill.count { fill[index] = 0 }
+            dictionary[name] = MLFeatureValue(multiArray: fill)
+        }
+        let provider = try MLDictionaryFeatureProvider(dictionary: dictionary)
         let state = model.makeState()
         let started = ProcessInfo.processInfo.systemUptime
         for _ in 0..<iterations {
@@ -728,6 +785,11 @@ private struct BadAppleANEShardManifest {
         let path: URL
         let start: Int
         let end: Int
+        /// Split-FFN artifacts pair each layer shard with a stateless
+        /// `ffn_s`/`ffn_p` model computing the projection tail on a real
+        /// model input — the monolithic norm→conv chain miscompiles inside
+        /// stateful plans on multi-token decode.
+        let ffnPath: URL?
     }
 
     struct Head {
@@ -746,6 +808,14 @@ private struct BadAppleANEShardManifest {
     let sequenceLength: Int
     let ropeDimension: Int
     let ropeFrequencyBase: Double
+    /// Gemma3 sliding-window layers use a second RoPE base
+    /// (`rope_local_base_freq`). When present, rope inputs carry two
+    /// rows: 0 = global, 1 = local; shards slice their row in-graph.
+    let ropeLocalFrequencyBase: Double?
+    /// Sliding-window size for Gemma3 local layers (0 = every layer global).
+    /// Sliding shards declare `attn_mask_slide`; the band mask fills here so
+    /// the graph stays free of dynamic index arithmetic (plan-build poison).
+    let slidingWindow: Int
 
     static func load(from url: URL) throws -> Self {
         let data = try Data(contentsOf: url)
@@ -775,7 +845,9 @@ private struct BadAppleANEShardManifest {
                   let end = integer(value["layer_end"]) else {
                 throw NSError(domain: "BadAppleANEShard", code: 2)
             }
-            return Layer(path: resolve(path, relativeTo: base), start: start, end: end)
+            let ffnPath = (value["ffn_compiled_path"] as? String)
+                .map { resolve($0, relativeTo: base) }
+            return Layer(path: resolve(path, relativeTo: base), start: start, end: end, ffnPath: ffnPath)
         }.sorted { $0.start < $1.start }
         var expectedLayerStart = 0
         for layer in layers {
@@ -820,7 +892,9 @@ private struct BadAppleANEShardManifest {
                       let end = integer(value["layer_end"]) else {
                     throw NSError(domain: "BadAppleANEShard", code: 2)
                 }
-                return Layer(path: resolve(path, relativeTo: base), start: start, end: end)
+                let ffnPath = (value["ffn_compiled_path"] as? String)
+                    .map { resolve($0, relativeTo: base) }
+                return Layer(path: resolve(path, relativeTo: base), start: start, end: end, ffnPath: ffnPath)
             }.sorted { $0.start < $1.start }) ?? []
         }
 
@@ -840,7 +914,9 @@ private struct BadAppleANEShardManifest {
             vocabSize: vocabSize,
             sequenceLength: sequenceLength,
             ropeDimension: ropeDimension,
-            ropeFrequencyBase: ropeFrequencyBase
+            ropeFrequencyBase: ropeFrequencyBase,
+            ropeLocalFrequencyBase: number(model["rope_freq_base_local"]),
+            slidingWindow: integer(model["sliding_window"]) ?? 0
         )
     }
 
@@ -909,15 +985,24 @@ private final class BadAppleANELayerShard {
     var state: MLState
     let outputName: String
     let attentionMaskRows: Int
+    /// Positions per call — the x input's last dim ([1, hidden, 1, s]).
+    /// s > 1 shards verify speculative drafts in a single dispatch.
+    let slotCount: Int
     /// Packed-KV shards declare a `pos` i32 input and drive slice_update
     /// begin/end in-graph; legacy shards take `kv_write_mask` instead.
     let usesPosInput: Bool
     let posArray: MLMultiArray?
+    /// Gemma3 shards containing sliding-window layers declare a second mask
+    /// input carrying the lower-bound band restriction.
+    let usesSlideMask: Bool
 
     init(spec: BadAppleANEShardManifest.Layer, configuration: MLModelConfiguration) throws {
         model = try MLModel(contentsOf: spec.path, configuration: configuration)
         let inputs = model.modelDescription.inputDescriptionsByName
         usesPosInput = inputs["pos"] != nil
+        usesSlideMask = inputs["attn_mask_slide"] != nil
+        let xShape = inputs["x"]?.multiArrayConstraint?.shape
+        slotCount = (xShape?.count == 4 ? xShape?[3].intValue : nil) ?? 1
         guard inputs["x"] != nil,
               inputs["rope_cos"] != nil,
               inputs["rope_sin"] != nil,
@@ -956,6 +1041,7 @@ private final class BadAppleANELayerShard {
         ropeCos: MLMultiArray,
         ropeSin: MLMultiArray,
         attentionMask: MLMultiArray,
+        slideMask: MLMultiArray?,
         writeMask: MLMultiArray?,
         pos: Int
     ) throws -> MLMultiArray {
@@ -970,6 +1056,12 @@ private final class BadAppleANELayerShard {
             dict["pos"] = MLFeatureValue(multiArray: posArray)
         } else if let writeMask {
             dict["kv_write_mask"] = MLFeatureValue(multiArray: writeMask)
+        }
+        if usesSlideMask {
+            guard let slideMask else {
+                throw NSError(domain: "BadAppleANEShard", code: 21)
+            }
+            dict["attn_mask_slide"] = MLFeatureValue(multiArray: slideMask)
         }
         let provider = try MLDictionaryFeatureProvider(dictionary: dict)
         guard let prediction = try withCoreMLCrashGuard({
@@ -997,11 +1089,13 @@ private final class BadAppleANEPrefillShard {
     let headsPerKV: Int
     let usesPosInput: Bool
     let posArray: MLMultiArray?
+    let usesSlideMask: Bool
 
     init(path: URL, chunk: Int, configuration: MLModelConfiguration) throws {
         model = try MLModel(contentsOf: path, configuration: configuration)
         let inputs = model.modelDescription.inputDescriptionsByName
         usesPosInput = inputs["pos"] != nil
+        usesSlideMask = inputs["attn_mask_slide"] != nil
         guard inputs["x"] != nil,
               inputs["rope_cos"] != nil,
               inputs["rope_sin"] != nil,
@@ -1023,6 +1117,7 @@ private final class BadAppleANEPrefillShard {
         ropeCos: MLMultiArray,
         ropeSin: MLMultiArray,
         attentionMask: MLMultiArray,
+        slideMask: MLMultiArray?,
         writeMask: MLMultiArray?,
         pos: Int,
         state: MLState
@@ -1039,6 +1134,12 @@ private final class BadAppleANEPrefillShard {
         } else if let writeMask {
             dict["kv_write_mask"] = MLFeatureValue(multiArray: writeMask)
         }
+        if usesSlideMask {
+            guard let slideMask else {
+                throw NSError(domain: "BadAppleANEShard", code: 21)
+            }
+            dict["attn_mask_slide"] = MLFeatureValue(multiArray: slideMask)
+        }
         let provider = try MLDictionaryFeatureProvider(dictionary: dict)
         guard let prediction = try withCoreMLCrashGuard({
             try self.model.prediction(from: provider, using: state)
@@ -1053,6 +1154,70 @@ private final class BadAppleANEPrefillShard {
     }
 }
 
+/// Stateless FFN tail of a split layer (converter `split_ffn` artifacts).
+/// Consumes the attention shard's `hidden` = concat(res1, fn_norm) output
+/// [1, 2d, 1, s] verbatim and emits the completed layer output. Owning the
+/// projection convs in a separate model is the fix for the stateful-plan
+/// miscompile: a model boundary is the only materialization the compiler
+/// cannot fuse across, and conv-on-input is the verified-exact config.
+@available(macOS 15.0, *)
+private final class BadAppleANEFFNShard {
+    let model: MLModel
+    let outputName: String
+
+    init(path: URL, configuration: MLModelConfiguration) throws {
+        model = try MLModel(contentsOf: path, configuration: configuration)
+        guard model.modelDescription.inputDescriptionsByName["x"] != nil,
+              let output = model.modelDescription.outputDescriptionsByName
+                  .first(where: { $0.value.type == .multiArray }) else {
+            throw NSError(domain: "BadAppleANEShard", code: 9)
+        }
+        outputName = output.key
+    }
+
+    func predict(hidden: MLMultiArray) throws -> MLMultiArray {
+        let provider = try MLDictionaryFeatureProvider(dictionary: [
+            "x": MLFeatureValue(multiArray: hidden)
+        ])
+        guard let prediction = try withCoreMLCrashGuard({
+            try self.model.prediction(from: provider)
+        }) else {
+            throw NSError(domain: "BadAppleANEShard", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "SIGSEGV/SIGBUS during ffn prediction"])
+        }
+        guard let output = prediction.featureValue(for: outputName)?.multiArrayValue else {
+            throw NSError(domain: "BadAppleANEShard", code: 10)
+        }
+        // The FFN plan returns a 32-strided (channel-blocked) buffer —
+        // densify so downstream shards/argmax see a packed array.
+        // withUnsafeMutableBytes yields ELEMENT strides (not byte strides).
+        let s1 = output.strides.count > 1 ? output.strides[1].intValue : 1
+        let s3 = output.strides.count > 3 ? output.strides[3].intValue : 1
+        if s1 != 1 || s3 != 1 {
+            let n1 = output.shape[1].intValue
+            let w = output.shape.count > 3 ? output.shape[3].intValue : 1
+            let dense = try MLMultiArray(
+                shape: [1, NSNumber(value: n1), 1, NSNumber(value: w)],
+                dataType: .float16
+            )
+            let dst = dense.dataPointer.assumingMemoryBound(to: Float16.self)
+            output.withUnsafeMutableBytes { buf, strides in
+                let e1 = strides.count > 1 ? strides[1] : 1
+                let e3 = strides.count > 3 ? strides[3] : 1
+                guard let base = buf.baseAddress else { return }
+                let src = base.assumingMemoryBound(to: Float16.self)
+                for c in 0..<n1 {
+                    for j in 0..<w {
+                        dst[c * w + j] = src[c * e1 + j * e3]
+                    }
+                }
+            }
+            return dense
+        }
+        return output
+    }
+}
+
 @available(macOS 15.0, *)
 private final class BadAppleANELMHeadShard {
     let model: MLModel
@@ -1060,6 +1225,9 @@ private final class BadAppleANELMHeadShard {
     let outputName: String
     let vocabStart: Int
     let vocabEnd: Int
+    /// Positions per call — 1 for classic heads, decodeWidth when the head
+    /// was emitted with --decode-width >1 (input [1, d, 1, width]).
+    let width: Int
 
     init(spec: BadAppleANEShardManifest.Head, configuration: MLModelConfiguration) throws {
         model = try MLModel(contentsOf: spec.path, configuration: configuration)
@@ -1074,6 +1242,8 @@ private final class BadAppleANELMHeadShard {
         outputName = output.key
         vocabStart = spec.vocabStart
         vocabEnd = spec.vocabEnd
+        let inShape = input.value.multiArrayConstraint?.shape.map { $0.intValue } ?? []
+        width = inShape.count >= 4 ? max(1, inShape[3]) : 1
     }
 
     func logits(hidden: MLMultiArray) throws -> MLMultiArray {
@@ -1092,6 +1262,24 @@ private final class BadAppleANELMHeadShard {
         }
         return output
     }
+
+    /// Batched variant: hidden [1, d, 1, width] -> logits [1, vsz, 1, width].
+    func logitsBatched(hidden: MLMultiArray) throws -> MLMultiArray {
+        let provider = try MLDictionaryFeatureProvider(dictionary: [
+            inputName: MLFeatureValue(multiArray: hidden),
+        ])
+        guard let prediction = try withCoreMLCrashGuard({
+            try self.model.prediction(from: provider)
+        }) else {
+            throw NSError(domain: "BadAppleANEShard", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "SIGSEGV/SIGBUS during head prediction"])
+        }
+        guard let output = prediction.featureValue(for: outputName)?.multiArrayValue,
+              output.count == (vocabEnd - vocabStart) * width else {
+            throw NSError(domain: "BadAppleANEShard", code: 12)
+        }
+        return output
+    }
 }
 
 @available(macOS 15.0, *)
@@ -1101,17 +1289,43 @@ private final class BadAppleANEShardCore {
     let layers: [BadAppleANELayerShard]
     let heads: [BadAppleANELMHeadShard]
     let prefillShards: [BadAppleANEPrefillShard]
+    /// Split-FFN tails aligned with `layers`/`prefillShards` (nil when the
+    /// artifact is monolithic). Runs right after the paired layer shard.
+    let ffnShards: [BadAppleANEFFNShard?]
+    let prefillFfnShards: [BadAppleANEFFNShard?]
     let configuration: MLModelConfiguration
     let ropeCos: MLMultiArray
     let ropeSin: MLMultiArray
     let attentionMask: MLMultiArray
+    /// Lower-bound band mask for sliding-window layers (Gemma3): zeros on
+    /// [q-w+1, q], -10000 elsewhere. Added to the causal mask in-graph.
+    let attentionMaskSlide: MLMultiArray?
     /// Legacy shards only — packed-KV shards take `pos` and have no mask.
     let writeMask: MLMultiArray?
     var prefillX: MLMultiArray?
     var prefillRopeCos: MLMultiArray?
     var prefillRopeSin: MLMultiArray?
     var prefillAttnMask: MLMultiArray?
+    var prefillSlideMask: MLMultiArray?
     var prefillWriteMask: MLMultiArray?
+    /// Positions per decode call when the artifacts were emitted with
+    /// `--decode-width` > 1. The batched path chunks hidden rows into
+    /// width-W calls carrying per-slot write-mask columns, per-slot RoPE,
+    /// and per-(kv-head, slot) causal attention rows — one ANE dispatch
+    /// set covers W positions, which is what makes speculative verify
+    /// (and fast mesh prefill) cheaper than serial decode.
+    let decodeWidth: Int
+    var batchX: MLMultiArray?
+    var batchRopeCos: MLMultiArray?
+    var batchRopeSin: MLMultiArray?
+    var batchWriteMask: MLMultiArray?
+    /// Reusable [1, hidden, 1, 1] slice buffer for per-slot LM head calls.
+    var headSlot: MLMultiArray?
+    /// RoPE inverse frequencies — pow() per element per call was measurable.
+    var invFreq: [Double]
+    /// Second RoPE base for dual-row rope inputs (Gemma3 sliding layers).
+    /// Row 0 = `invFreq` (global), row 1 = `invFreqLocal` (local).
+    var invFreqLocal: [Double]?
     let lock = NSLock()
     var position = 0
     var placementRatio = -1.0
@@ -1193,6 +1407,31 @@ private final class BadAppleANEShardCore {
         core.reset()
         defer { core.reset() }
 
+        // decode-width > 1 artifacts reject the s=1 token path — benchmark
+        // the real batched seam instead: `decodeWidth` hidden rows per call,
+        // reported as seconds per position.
+        if core.decodeWidth > 1 {
+            let rowBytes = core.manifest.hiddenSize * MemoryLayout<Float16>.size
+            var bytes = [UInt8](repeating: 0, count: rowBytes * core.decodeWidth)
+            _ = bytes.withUnsafeMutableBytes {
+                core.forwardHidden($0.baseAddress!, count: $0.count)
+            }
+            var total: TimeInterval = 0
+            var measured = 0
+            for _ in 0..<iterations {
+                let stepStart = ProcessInfo.processInfo.systemUptime
+                let ok = bytes.withUnsafeMutableBytes {
+                    core.forwardHidden($0.baseAddress!, count: $0.count) != nil
+                }
+                let stepLatency = ProcessInfo.processInfo.systemUptime - stepStart
+                guard ok else { break }
+                total += stepLatency
+                measured += 1
+            }
+            guard measured > 0 else { return 1_000_000.0 }
+            return total / TimeInterval(measured) / TimeInterval(core.decodeWidth)
+        }
+
         // A short, arbitrary prompt to warm the stateful KV cache.
         let prompt: [Int32] = [128, 456]
         _ = prompt.withUnsafeBufferPointer { core.predictNext($0.baseAddress!, count: 2) }
@@ -1238,6 +1477,19 @@ private final class BadAppleANEShardCore {
             }
         }
         layers = loadedLayers
+        // Split-FFN tails: one stateless model per layer shard, loaded with
+        // the same configuration (they hold the projection weights; ANE
+        // runs them because the conv/matmul ops are the ANE-friendly kind).
+        var loadedFfn: [BadAppleANEFFNShard?] = []
+        loadedFfn.reserveCapacity(manifest.layers.count)
+        for spec in manifest.layers {
+            if let ffnPath = spec.ffnPath {
+                loadedFfn.append(try BadAppleANEFFNShard(path: ffnPath, configuration: configuration))
+            } else {
+                loadedFfn.append(nil)
+            }
+        }
+        ffnShards = loadedFfn
         var loadedHeads: [BadAppleANELMHeadShard] = []
         loadedHeads.reserveCapacity(manifest.heads.count)
         for spec in manifest.heads {
@@ -1279,37 +1531,57 @@ private final class BadAppleANEShardCore {
             }
         }
         prefillShards = loadedPrefill
+        var loadedPrefillFfn: [BadAppleANEFFNShard?] = []
+        if !loadedPrefill.isEmpty {
+            for (index, spec) in manifest.prefillLayers.enumerated() {
+                if index < loadedPrefill.count, let ffnPath = spec.ffnPath {
+                    loadedPrefillFfn.append(try BadAppleANEFFNShard(
+                        path: ffnPath,
+                        configuration: prefillConfiguration
+                    ))
+                } else {
+                    loadedPrefillFfn.append(nil)
+                }
+            }
+        }
+        prefillFfnShards = loadedPrefillFfn
         if !prefillShards.isEmpty {
             let chunk = manifest.prefillChunk
             let headsPerKV = prefillShards[0].headsPerKV
+            let ropeRows = manifest.ropeLocalFrequencyBase != nil ? 2 : 1
             prefillX = try MLMultiArray(
                 shape: [1, NSNumber(value: manifest.hiddenSize), 1, NSNumber(value: chunk)],
                 dataType: .float16
             )
             prefillRopeCos = try MLMultiArray(
-                shape: [1, 1, NSNumber(value: manifest.ropeDimension / 2), NSNumber(value: chunk)],
+                shape: [NSNumber(value: ropeRows), 1, NSNumber(value: manifest.ropeDimension / 2), NSNumber(value: chunk)],
                 dataType: .float16
             )
             prefillRopeSin = try MLMultiArray(
-                shape: [1, 1, NSNumber(value: manifest.ropeDimension / 2), NSNumber(value: chunk)],
+                shape: [NSNumber(value: ropeRows), 1, NSNumber(value: manifest.ropeDimension / 2), NSNumber(value: chunk)],
                 dataType: .float16
             )
             prefillAttnMask = try MLMultiArray(
                 shape: [1, 1, NSNumber(value: headsPerKV * chunk), NSNumber(value: manifest.sequenceLength)],
                 dataType: .float16
             )
+            prefillSlideMask = prefillShards.contains(where: { $0.usesSlideMask }) ? try MLMultiArray(
+                shape: [1, 1, NSNumber(value: headsPerKV * chunk), NSNumber(value: manifest.sequenceLength)],
+                dataType: .float16
+            ) : nil
             prefillWriteMask = prefillShards[0].usesPosInput ? nil : try MLMultiArray(
                 shape: [1, 1, NSNumber(value: manifest.sequenceLength), NSNumber(value: chunk)],
                 dataType: .float16
             )
         }
+        let ropeRows = manifest.ropeLocalFrequencyBase != nil ? 2 : 1
         let ropeHalf = manifest.ropeDimension / 2
         ropeCos = try MLMultiArray(
-            shape: [1, NSNumber(value: ropeHalf)],
+            shape: [NSNumber(value: ropeRows), NSNumber(value: ropeHalf)],
             dataType: .float16
         )
         ropeSin = try MLMultiArray(
-            shape: [1, NSNumber(value: ropeHalf)],
+            shape: [NSNumber(value: ropeRows), NSNumber(value: ropeHalf)],
             dataType: .float16
         )
         // The decode shard may declare a padded attn_mask row axis (the
@@ -1320,10 +1592,44 @@ private final class BadAppleANEShardCore {
             shape: [1, 1, NSNumber(value: maskRows), NSNumber(value: manifest.sequenceLength)],
             dataType: .float16
         )
+        attentionMaskSlide = layers.contains(where: { $0.usesSlideMask }) ? try MLMultiArray(
+            shape: [1, 1, NSNumber(value: maskRows), NSNumber(value: manifest.sequenceLength)],
+            dataType: .float16
+        ) : nil
         writeMask = layers[0].usesPosInput ? nil : try MLMultiArray(
             shape: [1, 1, NSNumber(value: manifest.sequenceLength), 1],
             dataType: .float16
         )
+        let shardWidth = layers.first?.slotCount ?? 1
+        decodeWidth = (shardWidth > 1 && !layers[0].usesPosInput) ? shardWidth : 1
+        if decodeWidth > 1 {
+            let w = NSNumber(value: decodeWidth)
+            batchX = try MLMultiArray(
+                shape: [1, NSNumber(value: manifest.hiddenSize), 1, w],
+                dataType: .float16
+            )
+            batchRopeCos = try MLMultiArray(
+                shape: [NSNumber(value: ropeRows), 1, NSNumber(value: ropeHalf), w],
+                dataType: .float16
+            )
+            batchRopeSin = try MLMultiArray(
+                shape: [NSNumber(value: ropeRows), 1, NSNumber(value: ropeHalf), w],
+                dataType: .float16
+            )
+            batchWriteMask = try MLMultiArray(
+                shape: [1, 1, NSNumber(value: manifest.sequenceLength), w],
+                dataType: .float16
+            )
+            headSlot = try MLMultiArray(
+                shape: [1, NSNumber(value: manifest.hiddenSize), 1, 1],
+                dataType: .float16
+            )
+        }
+        let base = manifest.ropeFrequencyBase
+        invFreq = (0..<ropeHalf).map { 1.0 / pow(base, Double($0) / Double(ropeHalf)) }
+        if let localBase = manifest.ropeLocalFrequencyBase {
+            invFreqLocal = (0..<ropeHalf).map { 1.0 / pow(localBase, Double($0) / Double(ropeHalf)) }
+        }
         resetUnlocked()
     }
 
@@ -1334,6 +1640,27 @@ private final class BadAppleANEShardCore {
         let rows = attentionMask.count / seq
         for row in 0..<rows {
             attentionMask[row * seq + keyIndex] = value
+        }
+    }
+
+    /// Mirror of `setAttentionMask` for the sliding-window band mask —
+    /// every row carries the identical [q-w+1, q] band.
+    private func setSlideMask(at keyIndex: Int, to value: NSNumber) {
+        guard let slide = attentionMaskSlide else { return }
+        let seq = manifest.sequenceLength
+        let rows = slide.count / seq
+        for row in 0..<rows {
+            slide[row * seq + keyIndex] = value
+        }
+    }
+
+    /// Zero-based band fill: marks slide-mask zeros at [hi-w+1, hi].
+    private func fillSlideBand(upTo hi: Int) {
+        guard attentionMaskSlide != nil else { return }
+        let seq = manifest.sequenceLength
+        let w = manifest.slidingWindow > 0 ? manifest.slidingWindow : seq
+        for index in 0..<seq {
+            setSlideMask(at: index, to: NSNumber(value: index <= hi && index > hi - w ? 0 : -10_000))
         }
     }
 
@@ -1451,18 +1778,29 @@ private final class BadAppleANEShardCore {
             }
         }
 
-        // rope cos/sin [1,1,rope_half,P] for absolute positions pos..pos+P-1.
+        // rope cos/sin [R,1,rope_half,P] for absolute positions pos..pos+P-1.
+        // Row 0 = global base, row 1 = local base (Gemma3 sliding layers).
         cosArr.withUnsafeMutableBytes { cbuf, _ in
             sinArr.withUnsafeMutableBytes { sbuf, _ in
-                guard let cp = cbuf.baseAddress?.bindMemory(to: Float16.self, capacity: ropeHalf * chunk),
-                      let sp = sbuf.baseAddress?.bindMemory(to: Float16.self, capacity: ropeHalf * chunk) else { return }
+                guard let cp = cbuf.baseAddress?.bindMemory(to: Float16.self, capacity: cosArr.count),
+                      let sp = sbuf.baseAddress?.bindMemory(to: Float16.self, capacity: sinArr.count) else { return }
+                let rowStride = ropeHalf * chunk
                 for index in 0..<ropeHalf {
-                    let exponent = Double(index) / Double(ropeHalf)
-                    let inverseFrequency = 1.0 / pow(manifest.ropeFrequencyBase, exponent)
+                    let inverseFrequency = invFreq[index]
                     for j in 0..<chunk {
                         let angle = Double(pos + j) * inverseFrequency
                         cp[index * chunk + j] = Float16(cos(angle))
                         sp[index * chunk + j] = Float16(sin(angle))
+                    }
+                }
+                if let local = invFreqLocal {
+                    for index in 0..<ropeHalf {
+                        let inverseFrequency = local[index]
+                        for j in 0..<chunk {
+                            let angle = Double(pos + j) * inverseFrequency
+                            cp[rowStride + index * chunk + j] = Float16(cos(angle))
+                            sp[rowStride + index * chunk + j] = Float16(sin(angle))
+                        }
                     }
                 }
             }
@@ -1478,6 +1816,24 @@ private final class BadAppleANEShardCore {
                     let row = mp.advanced(by: (slot * hpk + j) * seq)
                     for key in 0..<seq {
                         row[key] = Float16(key <= allowed ? 0 : -10_000)
+                    }
+                }
+            }
+        }
+
+        // attn_mask_slide (sliding-window shards only): same row layout,
+        // zeros on the [allowed-w+1, allowed] band — the added lower bound.
+        if let pSlide = prefillSlideMask {
+            let w = manifest.slidingWindow > 0 ? manifest.slidingWindow : seq
+            pSlide.withUnsafeMutableBytes { mbuf, _ in
+                guard let mp = mbuf.baseAddress?.bindMemory(to: Float16.self, capacity: hpk * chunk * seq) else { return }
+                for slot in 0..<chunk {
+                    let allowed = slot < realCount ? pos + slot : -1
+                    for j in 0..<hpk {
+                        let row = mp.advanced(by: (slot * hpk + j) * seq)
+                        for key in 0..<seq {
+                            row[key] = Float16(key <= allowed && key > allowed - w ? 0 : -10_000)
+                        }
                     }
                 }
             }
@@ -1503,10 +1859,14 @@ private final class BadAppleANEShardCore {
                     ropeCos: cosArr,
                     ropeSin: sinArr,
                     attentionMask: pMask,
+                    slideMask: prefillSlideMask,
                     writeMask: pWrite,
                     pos: pos,
                     state: layers[index].state
                 )
+                if index < prefillFfnShards.count, let ffn = prefillFfnShards[index] {
+                    hidden = try ffn.predict(hidden: hidden)
+                }
             }
         }
 
@@ -1514,6 +1874,9 @@ private final class BadAppleANEShardCore {
         for index in 0..<position {
             setAttentionMask(at: index, to: 0)
         }
+        // Slide band for the next query at `position` — keys aged out of
+        // the window must stay masked even though causal just opened them.
+        fillSlideBand(upTo: position - 1)
         // Decode writeMask must stay all-zero: the next token's
         // updatePositionInputs clears [position-1] (already 0) and sets
         // [position] — bookkeeping identical to the token loop.
@@ -1541,12 +1904,30 @@ private final class BadAppleANEShardCore {
             NSLog("%@", "🏴‍☠️  BAD APPLE // Prewarm QoS elevated to userInteractive")
         }
 
-        var token: Int32 = 0
-        let result = withUnsafePointer(to: &token) { pointer in
-            do {
-                return try processToken(pointer.pointee, project: true)
-            } catch {
-                return nil
+        var result: Int32? = nil
+        if decodeWidth > 1 {
+            // s>1 shards reject the [1,d,1,1] token path — warm the real
+            // batched seam instead: one real row + masked pad slots through
+            // every layer shard and the head.
+            let d = manifest.hiddenSize
+            var zeros = [UInt8](repeating: 0, count: d * MemoryLayout<Float16>.size)
+            result = zeros.withUnsafeMutableBytes { buf in
+                guard let base = buf.baseAddress else { return nil }
+                do {
+                    let out = try runBatchedChunk(src: base, realCount: 1)
+                    return try argmaxWide(hidden: out, slot: 0)
+                } catch {
+                    return nil
+                }
+            }
+        } else {
+            var token: Int32 = 0
+            result = withUnsafePointer(to: &token) { pointer in
+                do {
+                    return try processToken(pointer.pointee, project: true)
+                } catch {
+                    return nil
+                }
             }
         }
         resetUnlocked()
@@ -1560,6 +1941,7 @@ private final class BadAppleANEShardCore {
         }
         for index in 0..<manifest.sequenceLength {
             setAttentionMask(at: index, to: NSNumber(value: Float(-10_000)))
+            setSlideMask(at: index, to: NSNumber(value: Float(-10_000)))
             writeMask?[index] = 0
         }
     }
@@ -1579,6 +1961,9 @@ private final class BadAppleANEShardCore {
         for index in target..<position {
             setAttentionMask(at: index, to: NSNumber(value: Float(-10_000)))
         }
+        // Rebuild the slide band for the rewound frontier: keys that slid
+        // out under the old position but re-enter the window must reopen.
+        fillSlideBand(upTo: target - 1)
         position = target
         return true
     }
@@ -1613,15 +1998,19 @@ private final class BadAppleANEShardCore {
         var next: Int32?
         try DispatchQueue.global(qos: .userInteractive).sync { [self] in
             var hidden = embedding
-            for layer in layers {
+            for (index, layer) in layers.enumerated() {
                 hidden = try layer.predict(
                     hidden: hidden,
                     ropeCos: ropeCos,
                     ropeSin: ropeSin,
                     attentionMask: attentionMask,
+                    slideMask: attentionMaskSlide,
                     writeMask: writeMask,
                     pos: position
                 )
+                if index < ffnShards.count, let ffn = ffnShards[index] {
+                    hidden = try ffn.predict(hidden: hidden)
+                }
             }
             position += 1
             if project {
@@ -1634,17 +2023,344 @@ private final class BadAppleANEShardCore {
     private func updatePositionInputs() {
         let ropeHalf = manifest.ropeDimension / 2
         for index in 0..<ropeHalf {
-            let exponent = Double(index) / Double(ropeHalf)
-            let inverseFrequency = 1.0 / pow(manifest.ropeFrequencyBase, exponent)
-            let angle = Double(position) * inverseFrequency
+            let angle = Double(position) * invFreq[index]
             ropeCos[index] = NSNumber(value: cos(angle))
             ropeSin[index] = NSNumber(value: sin(angle))
+        }
+        if let local = invFreqLocal {
+            for index in 0..<ropeHalf {
+                let angle = Double(position) * local[index]
+                ropeCos[ropeHalf + index] = NSNumber(value: cos(angle))
+                ropeSin[ropeHalf + index] = NSNumber(value: sin(angle))
+            }
         }
         if position > 0 {
             writeMask?[position - 1] = 0
         }
         setAttentionMask(at: position, to: 0)
+        setSlideMask(at: position, to: 0)
+        // Band for the query at `position` is [position-w+1, position] —
+        // the key that aged out of the window gets masked.
+        let aged = position - manifest.slidingWindow
+        if manifest.slidingWindow > 0, aged >= 0 {
+            setSlideMask(at: aged, to: NSNumber(value: Float(-10_000)))
+        }
         writeMask?[position] = 1
+    }
+
+    /// Mesh-brain tail-rank seam: accept hidden-state rows [n, hidden] fp16
+    /// from an upstream rank instead of looking up embeddings locally.
+    /// Each row advances the KV frontier; the last row is projected to a
+    /// token. Returns nil when the payload is malformed or a shard throws.
+    func forwardHidden(_ bytes: UnsafeRawPointer, count: Int) -> Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        let d = manifest.hiddenSize
+        let rowBytes = d * MemoryLayout<Float16>.size
+        guard count > 0, count % rowBytes == 0 else { return nil }
+        let rows = count / rowBytes
+        // Overrunning the mask/KV horizon throws an NSException inside CoreML,
+        // which no Swift catch can intercept — it would unwind across the FFI
+        // and abort the host. Reject oversized batches as a clean nil instead.
+        guard rows <= manifest.sequenceLength - position else { return nil }
+        if decodeWidth > 1 {
+            do {
+                var consumed = 0
+                var hidden: MLMultiArray?
+                var lastReal = 0
+                while consumed < rows {
+                    let r = min(decodeWidth, rows - consumed)
+                    hidden = try runBatchedChunk(
+                        src: bytes.advanced(by: consumed * rowBytes), realCount: r)
+                    lastReal = r
+                    consumed += r
+                }
+                guard let last = hidden else { return nil }
+                return try argmaxWide(hidden: last, slot: lastReal - 1)
+            } catch {
+                NSLog("%@", "🏴‍☠️  BAD APPLE // Batched ANE forward failed: \(error)")
+                return nil
+            }
+        }
+        var next: Int32?
+        do {
+            for row in 0..<rows {
+                let hidden = try MLMultiArray(
+                    shape: [1, NSNumber(value: d), 1, 1],
+                    dataType: .float16
+                )
+                memcpy(
+                    hidden.dataPointer,
+                    bytes.advanced(by: row * rowBytes),
+                    rowBytes
+                )
+                updatePositionInputs()
+                try DispatchQueue.global(qos: .userInteractive).sync { [self] in
+                    var h = hidden
+                    for (index, layer) in layers.enumerated() {
+                        h = try layer.predict(
+                            hidden: h,
+                            ropeCos: ropeCos,
+                            ropeSin: ropeSin,
+                            attentionMask: attentionMask,
+                            slideMask: attentionMaskSlide,
+                            writeMask: writeMask,
+                            pos: position
+                        )
+                        if index < ffnShards.count, let ffn = ffnShards[index] {
+                            h = try ffn.predict(hidden: h)
+                        }
+                    }
+                    position += 1
+                    if row == rows - 1 {
+                        next = try argmax(hidden: h)
+                    }
+                }
+            }
+        } catch {
+            return nil
+        }
+        return next
+    }
+
+    /// Speculative-verify seam: like `forwardHidden` but writes the argmax of
+    /// EVERY row into `out` — the K per-position predictions the verifier
+    /// compares against the draft continuation. Returns the number of rows
+    /// processed (== tokens written, capped at `out.count`), or -1 when the
+    /// payload is malformed, exceeds the KV horizon, or a shard throws.
+    func forwardHiddenTokens(
+        _ bytes: UnsafeRawPointer,
+        count: Int,
+        out: UnsafeMutableBufferPointer<Int32>
+    ) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let d = manifest.hiddenSize
+        let rowBytes = d * MemoryLayout<Float16>.size
+        guard count > 0, count % rowBytes == 0,
+              let outBase = out.baseAddress, !out.isEmpty else { return -1 }
+        let rows = count / rowBytes
+        guard rows <= manifest.sequenceLength - position else { return -1 }
+        let writable = min(rows, out.count)
+        do {
+            if decodeWidth > 1 {
+                // When the head shards were emitted at the same decode width
+                // the whole chunk's argmax is one head call per vocab slice —
+                // no per-slot gather, no 32-dispatch logits pass.
+                let batchedHead = heads.allSatisfy { $0.width == decodeWidth }
+                var row = 0
+                while row < rows {
+                    let r = min(decodeWidth, rows - row)
+                    let hidden = try runBatchedChunk(
+                        src: bytes.advanced(by: row * rowBytes), realCount: r)
+                    let limit = min(r, writable - row)
+                    if batchedHead {
+                        let toks = try argmaxBatched(hidden: hidden, slots: limit)
+                        for slot in 0..<limit {
+                            outBase[row + slot] = toks[slot]
+                        }
+                    } else {
+                        for slot in 0..<limit {
+                            outBase[row + slot] = try argmaxWide(
+                                hidden: hidden, slot: slot)
+                        }
+                    }
+                    row += r
+                }
+                return rows
+            }
+            for row in 0..<rows {
+                let hidden = try MLMultiArray(
+                    shape: [1, NSNumber(value: d), 1, 1],
+                    dataType: .float16
+                )
+                memcpy(hidden.dataPointer, bytes.advanced(by: row * rowBytes), rowBytes)
+                updatePositionInputs()
+                try DispatchQueue.global(qos: .userInteractive).sync { [self] in
+                    var h = hidden
+                    for (index, layer) in layers.enumerated() {
+                        h = try layer.predict(
+                            hidden: h,
+                            ropeCos: ropeCos,
+                            ropeSin: ropeSin,
+                            attentionMask: attentionMask,
+                            slideMask: attentionMaskSlide,
+                            writeMask: writeMask,
+                            pos: position
+                        )
+                        if index < ffnShards.count, let ffn = ffnShards[index] {
+                            h = try ffn.predict(hidden: h)
+                        }
+                    }
+                    position += 1
+                    if row < writable {
+                        outBase[row] = try argmax(hidden: h)
+                    }
+                }
+            }
+            return rows
+        } catch {
+            NSLog("%@", "🏴‍☠️  BAD APPLE // Batched ANE verify failed: \(error)")
+            return -1
+        }
+    }
+
+    /// One batched decode call: `realCount` rows (<= decodeWidth) starting at
+    /// `src` run through every layer shard in a single dispatch each. Slot j
+    /// writes KV at position+j, sees keys 0...position+j (strictly causal —
+    /// slots never attend to later same-call writes), and gets position+j's
+    /// RoPE angle. Pad slots (j >= realCount) get zero write columns, a
+    /// fully-masked attention row, and are ignored downstream.
+    private func runBatchedChunk(src: UnsafeRawPointer, realCount: Int) throws -> MLMultiArray {
+        let d = manifest.hiddenSize
+        let seq = manifest.sequenceLength
+        let width = decodeWidth
+        let pos = position
+        let ropeHalf = manifest.ropeDimension / 2
+        let maskRows = attentionMask.count / seq
+        let hpk = max(1, maskRows / width)
+        guard let x = batchX, let cosArr = batchRopeCos, let sinArr = batchRopeSin,
+              let wm = batchWriteMask else {
+            throw NSError(domain: "BadAppleANEShard", code: 20)
+        }
+        // x [1, hidden, 1, W]: scatter row j into stride-W lanes. Incoming
+        // rows are contiguous [r, hidden] fp16; the shard wants channel-major.
+        let dst = x.dataPointer.assumingMemoryBound(to: Float16.self)
+        memset(dst, 0, d * width * MemoryLayout<Float16>.size)
+        let srcF = src.assumingMemoryBound(to: Float16.self)
+        for slot in 0..<realCount {
+            for c in 0..<d {
+                dst[c * width + slot] = srcF[slot * d + c]
+            }
+        }
+        // kv_write_mask [1, 1, seq, W]: column j one-hot at key pos+j.
+        let wmPtr = wm.dataPointer.assumingMemoryBound(to: Float16.self)
+        memset(wmPtr, 0, seq * width * MemoryLayout<Float16>.size)
+        for slot in 0..<realCount {
+            wmPtr[(pos + slot) * width + slot] = 1
+        }
+        // attn_mask [1, 1, maskRows, seq]: row slot*hpk+h allows keys <= pos+j
+        // (pad slots see nothing — output ignored, values stay finite).
+        let amPtr = attentionMask.dataPointer.assumingMemoryBound(to: Float16.self)
+        for slot in 0..<width {
+            let limit = slot < realCount ? pos + slot : -1
+            for h in 0..<hpk {
+                let base = (slot * hpk + h) * seq
+                var key = 0
+                while key <= limit { amPtr[base + key] = 0; key += 1 }
+                while key < seq { amPtr[base + key] = -10_000; key += 1 }
+            }
+        }
+        // attn_mask_slide: same row layout, zeros on [limit-w+1, limit].
+        if let slide = attentionMaskSlide {
+            let w = manifest.slidingWindow > 0 ? manifest.slidingWindow : seq
+            let smPtr = slide.dataPointer.assumingMemoryBound(to: Float16.self)
+            for slot in 0..<width {
+                let limit = slot < realCount ? pos + slot : -1
+                for h in 0..<hpk {
+                    let base = (slot * hpk + h) * seq
+                    var key = 0
+                    while key < seq {
+                        smPtr[base + key] = (key <= limit && key > limit - w) ? 0 : -10_000
+                        key += 1
+                    }
+                }
+            }
+        }
+        // rope_cos/sin [R, 1, ropeHalf, W]: slot j angled at pos+j.
+        // Row 0 = global base, row 1 = local base (Gemma3 sliding layers).
+        let cosPtr = cosArr.dataPointer.assumingMemoryBound(to: Float16.self)
+        let sinPtr = sinArr.dataPointer.assumingMemoryBound(to: Float16.self)
+        let rowStride = ropeHalf * width
+        for slot in 0..<width {
+            let p = pos + min(slot, realCount - 1)
+            for i in 0..<ropeHalf {
+                let angle = Double(p) * invFreq[i]
+                cosPtr[i * width + slot] = Float16(cos(angle))
+                sinPtr[i * width + slot] = Float16(sin(angle))
+            }
+            if let local = invFreqLocal {
+                for i in 0..<ropeHalf {
+                    let angle = Double(p) * local[i]
+                    cosPtr[rowStride + i * width + slot] = Float16(cos(angle))
+                    sinPtr[rowStride + i * width + slot] = Float16(sin(angle))
+                }
+            }
+        }
+        var thrown: Error?
+        var output: MLMultiArray?
+        DispatchQueue.global(qos: .userInteractive).sync { [self] in
+            var h: MLMultiArray = x
+            do {
+                for (index, layer) in layers.enumerated() {
+                    h = try layer.predict(
+                        hidden: h,
+                        ropeCos: cosArr,
+                        ropeSin: sinArr,
+                        attentionMask: attentionMask,
+                        slideMask: attentionMaskSlide,
+                        writeMask: wm,
+                        pos: pos
+                    )
+                    if index < ffnShards.count, let ffn = ffnShards[index] {
+                        h = try ffn.predict(hidden: h)
+                    }
+                }
+                output = h
+            } catch {
+                thrown = error
+            }
+        }
+        if let thrown { throw thrown }
+        guard let output else { throw NSError(domain: "BadAppleANEShard", code: 20) }
+        position += realCount
+        return output
+    }
+
+    /// Slot-aware argmax for W>1 artifacts: width-matched heads read the
+    /// whole [1, d, 1, W] output in one pass; width-1 heads keep the
+    /// gather-and-scan path. `slot` is the position whose token is wanted.
+    private func argmaxWide(hidden: MLMultiArray, slot: Int) throws -> Int32 {
+        if heads.allSatisfy({ $0.width == decodeWidth }) {
+            return try argmaxBatched(hidden: hidden, slots: slot + 1)[slot]
+        }
+        return try argmax(hidden: gatherSlot(hidden, slot: slot))
+    }
+
+    /// Gather slot j of a batched shard output into `headSlot` — the LM head
+    /// shards take [1, hidden, 1, 1] so each position's argmax is a separate
+    /// head pass. Handles [1, d, 1, W] outputs and the flat [1, d*W, 1, 1]
+    /// stop-state shape (row-major c*W + j either way).
+    private func gatherSlot(_ output: MLMultiArray, slot j: Int) throws -> MLMultiArray {
+        let d = manifest.hiddenSize
+        let width = decodeWidth
+        guard let dst = headSlot else {
+            throw NSError(domain: "BadAppleANEShard", code: 21)
+        }
+        let dstPtr = dst.dataPointer.assumingMemoryBound(to: Float16.self)
+        var badShape = false
+        output.withUnsafeMutableBytes { buf, strides in
+            guard let base = buf.baseAddress else {
+                badShape = true
+                return
+            }
+            let src = base.assumingMemoryBound(to: Float16.self)
+            let dims = output.shape.map { $0.intValue }
+            if output.count == d {
+                let s1 = strides.count > 1 ? strides[1] : 1
+                for c in 0..<d { dstPtr[c] = src[c * s1] }
+            } else if dims.count == 4, dims[1] == d, dims[3] == width {
+                let s1 = strides.count > 1 ? strides[1] : 1
+                let s3 = strides.count > 3 ? strides[3] : 1
+                for c in 0..<d { dstPtr[c] = src[c * s1 + j * s3] }
+            } else if output.count == d * width {
+                for c in 0..<d { dstPtr[c] = src[c * width + j] }
+            } else {
+                badShape = true
+            }
+        }
+        if badShape { throw NSError(domain: "BadAppleANEShard", code: 21) }
+        return dst
     }
 
     private func argmax(hidden: MLMultiArray) throws -> Int32 {
@@ -1721,6 +2437,60 @@ private final class BadAppleANEShardCore {
             throw NSError(domain: "BadAppleANEShard", code: 17)
         }
         return Int32(bestToken)
+    }
+
+    /// Batched argmax over a [1, vsz, 1, W] head output: one head pass per
+    /// vocab slice, then a strided scan picks the best column per slot.
+    /// `slots` may be less than the compiled width (final partial chunk) —
+    /// pad slots are ignored.
+    private func argmaxBatched(hidden: MLMultiArray, slots: Int) throws -> [Int32] {
+        var bestValue = [Float](repeating: -.infinity, count: slots)
+        var bestToken = [Int32](repeating: -1, count: slots)
+        for head in heads {
+            let logits = try head.logitsBatched(hidden: hidden)
+            let vsz = head.vocabEnd - head.vocabStart
+            logits.withUnsafeMutableBytes { buf, strides in
+                guard let base = buf.baseAddress else { return }
+                let elemSize = logits.dataType == .float32 ? 4 : 2
+                // dims [1, vsz, 1, W]: vocab stride = strides[1],
+                // slot stride = strides[3]; fall back to dense packing.
+                let sV = strides.count > 1 ? strides[1] : decodeWidth
+                let sW = strides.count > 3 ? strides[3] : 1
+                for j in 0..<slots {
+                    var localBest = -Float.infinity
+                    var localToken = -1
+                    if logits.dataType == .float32 {
+                        for i in 0..<vsz {
+                            let v = base.load(
+                                fromByteOffset: (i * sV + j * sW) * elemSize,
+                                as: Float.self)
+                            if v > localBest {
+                                localBest = v
+                                localToken = head.vocabStart + i
+                            }
+                        }
+                    } else {
+                        for i in 0..<vsz {
+                            let v = base.load(
+                                fromByteOffset: (i * sV + j * sW) * elemSize,
+                                as: Float16.self)
+                            if Float(v) > localBest {
+                                localBest = Float(v)
+                                localToken = head.vocabStart + i
+                            }
+                        }
+                    }
+                    if localToken >= 0, localBest > bestValue[j] {
+                        bestValue[j] = localBest
+                        bestToken[j] = Int32(localToken)
+                    }
+                }
+            }
+        }
+        for t in bestToken where t < 0 {
+            throw NSError(domain: "BadAppleANEShard", code: 17)
+        }
+        return bestToken
     }
 }
 
@@ -2203,6 +2973,27 @@ private enum BadAppleANEBackend {
         case .fixedFull(let core): (core.selectedLoadLatency, core.selectedPrewarmLatency)
         }
     }
+
+    /// Mesh-brain tail-rank seam — only the sharded backend can consume
+    /// upstream hidden states; monolithic/fixed cores own their embedding.
+    func forwardHidden(_ bytes: UnsafeRawPointer, count: Int) -> Int32? {
+        switch self {
+        case .sharded(let core): core.forwardHidden(bytes, count: count)
+        case .monolithic, .fixedFull: nil
+        }
+    }
+
+    /// Speculative-verify seam — per-row argmaxes. Sharded backend only.
+    func forwardHiddenTokens(
+        _ bytes: UnsafeRawPointer,
+        count: Int,
+        out: UnsafeMutableBufferPointer<Int32>
+    ) -> Int {
+        switch self {
+        case .sharded(let core): core.forwardHiddenTokens(bytes, count: count, out: out)
+        case .monolithic, .fixedFull: -1
+        }
+    }
 }
 
 @available(macOS 15.0, *)
@@ -2265,6 +3056,41 @@ public func badAppleANEPredictNext(
     guard #available(macOS 15.0, *), let handle, let tokens, count > 0 else { return -1 }
     let core = Unmanaged<BadAppleANEHandle>.fromOpaque(handle).takeUnretainedValue()
     return core.backend.predictNext(tokens, count: count) ?? -1
+}
+
+/// Mesh-brain tail-rank seam: `bytes` is `count` fp16 bytes forming
+/// [n, hidden] rows of upstream hidden states. Each row advances the KV
+/// frontier; the last row is projected to a token. -1 on failure.
+@_cdecl("bad_apple_ane_forward_hidden")
+public func badAppleANEForwardHidden(
+    _ handle: UnsafeMutableRawPointer?,
+    _ bytes: UnsafeRawPointer?,
+    _ count: Int
+) -> Int32 {
+    guard #available(macOS 15.0, *), let handle, let bytes, count > 0 else { return -1 }
+    let core = Unmanaged<BadAppleANEHandle>.fromOpaque(handle).takeUnretainedValue()
+    return core.backend.forwardHidden(bytes, count: count) ?? -1
+}
+
+/// Speculative-verify seam: same input contract as `bad_apple_ane_forward_hidden`
+/// but writes the per-row argmax into `outTokens` (capacity `outCapacity`
+/// i32s). Returns the row count processed, or -1 on failure.
+@_cdecl("bad_apple_ane_forward_hidden_multi")
+public func badAppleANEForwardHiddenMulti(
+    _ handle: UnsafeMutableRawPointer?,
+    _ bytes: UnsafeRawPointer?,
+    _ count: Int,
+    _ outTokens: UnsafeMutablePointer<Int32>?,
+    _ outCapacity: Int
+) -> Int32 {
+    guard #available(macOS 15.0, *), let handle, let bytes, count > 0,
+          let outTokens, outCapacity > 0 else { return -1 }
+    let core = Unmanaged<BadAppleANEHandle>.fromOpaque(handle).takeUnretainedValue()
+    return Int32(core.backend.forwardHiddenTokens(
+        bytes,
+        count: count,
+        out: UnsafeMutableBufferPointer(start: outTokens, count: outCapacity)
+    ))
 }
 
 @_cdecl("bad_apple_ane_reset")

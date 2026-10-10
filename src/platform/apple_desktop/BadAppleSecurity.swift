@@ -787,15 +787,23 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
 
         // Hardware fast-path: when the ANE automaton sees no pattern
         // boundary the text is clean and the software scan is skipped.
+        // The shared MLState is mutated under `lock` — concurrent
+        // predictions on one state object are not safe, so the whole
+        // reset+feed+verdict sequence is one critical section.
+        lock.lock()
         if let auto = ane(for: snapshot) {
             auto.reset()
             _ = auto.feed(text.utf8)
-            if !auto.broken, !auto.hit {
+            let (ok, hit) = (!auto.broken, auto.hit)
+            lock.unlock()
+            if ok, !hit {
                 hardwareScans += 1
                 return text
             }
             // hit → software scan produces the exact replacement ranges;
             // broken → fail closed into software.
+        } else {
+            lock.unlock()
         }
         softwareScans += 1
 
@@ -840,21 +848,30 @@ final class BadAppleOutputFirewall: @unchecked Sendable {
         // Hardware automaton: the DFA's MLState is the accumulated scan —
         // steady-state cost is one predict per new byte. A caller whose
         // `accumulated` doesn't continue this stream triggers a reset and
-        // replay, which keeps interleaved responses correct.
+        // replay, which keeps interleaved responses correct. Serialized
+        // under `lock`: the shared state object is not safe for
+        // concurrent prediction.
+        lock.lock()
         if let auto = ane(for: snapshot) {
             let acc = Data(accumulated.utf8)
             if auto.consumed != acc {
                 auto.reset()
                 _ = auto.feed(acc)
             }
-            if !auto.broken {
+            if auto.broken {
+                lock.unlock()
+            } else {
                 _ = auto.feed(chunk.utf8)
-                if !auto.broken {
+                let (ok, hit) = (!auto.broken, auto.hit)
+                lock.unlock()
+                if ok {
                     hardwareScans += 1
-                    return auto.hit ? (Self.blockedMarker, true) : (chunk, false)
+                    return hit ? (Self.blockedMarker, true) : (chunk, false)
                 }
             }
             // broken → fail closed into software below
+        } else {
+            lock.unlock()
         }
         softwareScans += 1
 

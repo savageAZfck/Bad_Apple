@@ -8,7 +8,9 @@
 //! isolated library calls, or in-memory data. No probe attacks a live user
 //! daemon or user data unless explicitly configured to do so.
 
+pub mod generated;
 pub mod probes;
+pub mod propose;
 pub mod runner;
 
 pub use runner::{RedTeamLoop, RedTeamRunner};
@@ -125,17 +127,18 @@ pub(crate) fn now_ms() -> u64 {
 
 /// A single probe implementation.
 pub trait Probe: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn category(&self) -> &'static str;
+    fn id(&self) -> &str;
+    fn category(&self) -> &str;
     fn severity(&self) -> Severity;
-    fn title(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn title(&self) -> &str;
+    fn description(&self) -> &str;
     fn run(&self) -> ProbeResult;
 }
 
-/// Default registry of all built-in probes.
+/// Default registry: the built-in probes plus every valid model-authored
+/// probe persisted under the generated-probes dir.
 pub fn default_registry() -> Vec<Box<dyn Probe>> {
-    vec![
+    let mut registry: Vec<Box<dyn Probe>> = vec![
         Box::new(probes::cage::PathTraversalProbe),
         Box::new(probes::cage::SymlinkEscapeProbe),
         Box::new(probes::cage::CreateDirectoryTraversalProbe),
@@ -148,5 +151,7 @@ pub fn default_registry() -> Vec<Box<dyn Probe>> {
         Box::new(probes::policy::PolicyCoversShellProbe),
         Box::new(probes::policy::PolicyCoversAppleScriptProbe),
         Box::new(probes::audit::LedgerSecretRedactionProbe),
-    ]
+    ];
+    registry.extend(generated::load_registry());
+    registry
 }

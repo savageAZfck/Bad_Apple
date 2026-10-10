@@ -20,6 +20,11 @@ type ComputeUnitsFn = unsafe extern "C" fn(*mut c_void) -> i32;
 type SelectionLatencyFn = unsafe extern "C" fn(*mut c_void, *mut u64, *mut u64) -> bool;
 type ArtifactRatioFn = unsafe extern "C" fn(*const c_char, i32) -> f64;
 type ProbeShardFn = unsafe extern "C" fn(*const c_char, i32, usize, *mut u64) -> bool;
+type ForwardHiddenFn = unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> i32;
+type ForwardHiddenMultiFn =
+    unsafe extern "C" fn(*mut c_void, *const c_void, usize, *mut i32, usize) -> i32;
+type RewindFn = unsafe extern "C" fn(*mut c_void, i32) -> bool;
+type PositionFn = unsafe extern "C" fn(*mut c_void) -> i32;
 
 struct BridgeSymbols {
     library: Library,
@@ -33,6 +38,10 @@ struct BridgeSymbols {
     selection_latency: SelectionLatencyFn,
     artifact_ratio: ArtifactRatioFn,
     probe_shard: ProbeShardFn,
+    forward_hidden: Option<ForwardHiddenFn>,
+    forward_hidden_multi: Option<ForwardHiddenMultiFn>,
+    rewind: Option<RewindFn>,
+    position: Option<PositionFn>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,6 +204,10 @@ pub struct AneCore {
     ane_ratio: AneRatioFn,
     compute_units: ComputeUnitsFn,
     selection_latency: SelectionLatencyFn,
+    forward_hidden: Option<ForwardHiddenFn>,
+    forward_hidden_multi: Option<ForwardHiddenMultiFn>,
+    rewind: Option<RewindFn>,
+    position: Option<PositionFn>,
     tokenizer: Tokenizer,
     max_context_tokens: usize,
     chat_template: Option<ChatTemplate>,
@@ -263,6 +276,10 @@ impl AneCore {
             ane_ratio: symbols.ane_ratio,
             compute_units: symbols.compute_units,
             selection_latency: symbols.selection_latency,
+            forward_hidden: symbols.forward_hidden,
+            forward_hidden_multi: symbols.forward_hidden_multi,
+            rewind: symbols.rewind,
+            position: symbols.position,
             tokenizer,
             max_context_tokens,
             chat_template,
@@ -307,6 +324,70 @@ impl AneCore {
             (self.selection_latency)(self.handle.as_ptr(), &raw mut load, &raw mut prewarm)
                 .then_some((load, prewarm))
         }
+    }
+
+    /// Mesh-brain tail-rank seam: push fp16 hidden-state rows `[n, hidden]`
+    /// through this core's layer chain; the last row projects to a token id.
+    /// Returns None when the loaded bridge lacks the seam or the prediction
+    /// fails.
+    pub fn forward_hidden(&mut self, hidden_f16: &[u8]) -> Option<i32> {
+        let f = self.forward_hidden?;
+        // SAFETY: `f` is a verified C function pointer. `self.handle` is a
+        // valid NonNull from create. `hidden_f16` is a valid byte slice that
+        // outlives the call; the bridge copies the rows it consumes.
+        let token = unsafe {
+            f(
+                self.handle.as_ptr(),
+                hidden_f16.as_ptr().cast::<c_void>(),
+                hidden_f16.len(),
+            )
+        };
+        (token >= 0).then_some(token)
+    }
+
+    /// Speculative-verify seam: push `[n, hidden]` fp16 rows and receive the
+    /// per-row argmax for every position — the K predictions the verifier
+    /// compares against the drafted continuation. Returns None when the
+    /// bridge lacks the export or the batch fails.
+    pub fn forward_hidden_multi(&mut self, hidden_f16: &[u8]) -> Option<Vec<i32>> {
+        let f = self.forward_hidden_multi?;
+        let mut out = vec![0i32; self.seq_len.max(1)];
+        // SAFETY: `f` is a verified C function pointer; `self.handle` is a
+        // valid NonNull; `out` has `seq_len` i32s of writable capacity, which
+        // is >= any row count the bridge can accept (bounded by the KV
+        // horizon). The bridge writes at most min(rows, capacity) tokens.
+        let n = unsafe {
+            f(
+                self.handle.as_ptr(),
+                hidden_f16.as_ptr().cast::<c_void>(),
+                hidden_f16.len(),
+                out.as_mut_ptr(),
+                out.len(),
+            )
+        };
+        if n < 0 {
+            return None;
+        }
+        out.truncate(n as usize);
+        Some(out)
+    }
+
+    /// Rewind the KV frontier to `pos` — prefix-continuity for the mesh
+    /// tail: a new prompt that shares its head with the last one only needs
+    /// the delta rows, not a full re-prefill. Returns false when the loaded
+    /// bridge lacks the export or the target is out of range.
+    pub fn rewind(&mut self, pos: i32) -> bool {
+        let Some(f) = self.rewind else { return false };
+        // SAFETY: `f` is a verified C function pointer and `self.handle` is a
+        // valid NonNull obtained at load time; we hold &mut self exclusively.
+        unsafe { f(self.handle.as_ptr(), pos) }
+    }
+
+    /// Current KV frontier position, or None when the bridge lacks the export.
+    pub fn position(&mut self) -> Option<i32> {
+        // SAFETY: `self.position` is a verified C function pointer when present
+        // and `self.handle` is a valid NonNull obtained at load time.
+        self.position.map(|f| unsafe { f(self.handle.as_ptr()) })
     }
 
     pub fn generate(
@@ -617,6 +698,22 @@ fn load_bridge_symbols() -> Result<BridgeSymbols, AneCoreError> {
             let artifact_ratio =
                 library.get::<ArtifactRatioFn>(b"bad_apple_coreml_placement_ratio\0");
             let probe_shard = library.get::<ProbeShardFn>(b"bad_apple_ane_probe_shard\0");
+            let forward_hidden = library
+                .get::<ForwardHiddenFn>(b"bad_apple_ane_forward_hidden\0")
+                .ok()
+                .map(|s| *s);
+            let forward_hidden_multi = library
+                .get::<ForwardHiddenMultiFn>(b"bad_apple_ane_forward_hidden_multi\0")
+                .ok()
+                .map(|s| *s);
+            let rewind = library
+                .get::<RewindFn>(b"bad_apple_ane_rewind\0")
+                .ok()
+                .map(|s| *s);
+            let position = library
+                .get::<PositionFn>(b"bad_apple_ane_position\0")
+                .ok()
+                .map(|s| *s);
             if let (
                 Ok(create),
                 Ok(destroy),
@@ -651,6 +748,10 @@ fn load_bridge_symbols() -> Result<BridgeSymbols, AneCoreError> {
                     selection_latency: *selection_latency,
                     artifact_ratio: *artifact_ratio,
                     probe_shard: *probe_shard,
+                    forward_hidden,
+                    forward_hidden_multi,
+                    rewind,
+                    position,
                     library,
                 };
                 return Ok(symbols);

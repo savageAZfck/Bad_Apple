@@ -627,7 +627,13 @@ fn forward_v2_to_mlx(
         .map_or_else(|| PathBuf::from(MLX_SOCKET_PATH), PathBuf::from);
     let mut mlx_stream =
         UnixStream::connect(&mlx_path).context("unable to connect to MLX daemon for v2 proxy")?;
-    mlx_stream.set_read_timeout(Some(Duration::from_mins(15)))?;
+    // Mesh-backed generations can legitimately outrun a short read budget
+    // (cold system-prompt prefill on the ANE tail), so the cap is tunable.
+    let upstream_mins: u64 = std::env::var("BADAPPLE_CALL_TIMEOUT_MINS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(45);
+    mlx_stream.set_read_timeout(Some(Duration::from_mins(upstream_mins)))?;
     mlx_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     let mut mlx_reader = BufReader::new(mlx_stream.try_clone()?);

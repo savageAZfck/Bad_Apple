@@ -158,6 +158,9 @@ fn main() -> Result<()> {
         Some("explain") => {
             return run_explain_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("redteam") => {
+            return run_redteam_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         Some("thermal") => {
             return run_thermal_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
@@ -331,7 +334,7 @@ fn main() -> Result<()> {
     }
 
     let prompt = if prompt_parts.is_empty() && !benchmark_mode {
-        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>>\n       badapple status\n       badapple receipts\n       badapple tool <name> [key=value ...]\n       badapple export-proof [dir]\n       badapple demo [full]\n       badapple cert");
+        bail!("usage: badapple [OPTIONS] \"query\"\n       badapple model <list|scan|info|use|verify|add|remove> [args]\n       badapple p2p <peers|sync|sync-doc <kind>|sync-personas|sync-prompt|sync-settings|sync-models|receive-mesh [timeout_ms]|models|pull <peer_id> <model_id>|send <peer_id> <model_id>|receive [peer_id model_id]>\n       badapple vault <get|set|remove|list|import> [args]\n       badapple workspace <get|set <path>|index|watch [path]>\n       badapple mcp <list|add <id> <command> [args...]|remove <id>|install <id>|uninstall <id>|start <id>|stop <id>|status <id>>\n       badapple redteam <run|watch|status|category <category>|probe <id>|generated|propose [--focus <x>] [--dry-run]|findings>\n       badapple status\n       badapple receipts\n       badapple tool <name> [key=value ...]\n       badapple export-proof [dir]\n       badapple demo [full]\n       badapple cert");
     } else {
         prompt_parts.join(" ")
     };
@@ -1224,11 +1227,14 @@ fn run_model_subcommand(args: &[String]) -> Result<()> {
         }
         "add" => {
             if args.len() < 2 {
-                bail!("usage: badapple model add <path> [model-id]");
+                bail!("usage: badapple model add <path> [model-id] [repo-id]");
             }
             params.insert("path".to_string(), Value::String(args[1].clone()));
             if args.len() >= 3 {
                 params.insert("model_id".to_string(), Value::String(args[2].clone()));
+            }
+            if args.len() >= 4 {
+                params.insert("repo_id".to_string(), Value::String(args[3].clone()));
             }
             let result = call_agent("add_model", Some(Value::Object(params)), 512)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1788,7 +1794,79 @@ fn run_redteam_subcommand(args: &[String]) -> Result<()> {
                 std::process::exit(1);
             }
         }
-        _ => bail!("unknown redteam subcommand: {sub}\nusage: badapple redteam <run|watch|status|category <category>|probe <id>>"),
+        "generated" => {
+            let probes = bad_apple::red_team::generated::load_registry();
+            let specs: Vec<_> = probes
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "id": p.id(),
+                        "severity": format!("{:?}", p.severity()).to_lowercase(),
+                        "title": p.title(),
+                        "hypothesis": p.description(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "generated_probes": specs,
+                    "count": specs.len(),
+                }))?
+            );
+        }
+        "findings" => {
+            let path = bad_apple::red_team::generated::findings_log_path();
+            let verified = bad_apple::red_team::propose::verify_findings_log(&path);
+            let mut entries: Vec<serde_json::Value> = Vec::new();
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                for line in text.lines() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                        entries.push(v);
+                    }
+                }
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "log": path,
+                    "chain": match &verified { Ok(n) => serde_json::json!({"valid": true, "records": n}), Err(e) => serde_json::json!({"valid": false, "error": e.to_string()}) },
+                    "entries": entries,
+                }))?
+            );
+            if verified.is_err() {
+                std::process::exit(1);
+            }
+        }
+        "propose" => {
+            let mut focus: Option<&str> = None;
+            let mut dry_run = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--focus" => {
+                        focus = args.get(i + 1).map(String::as_str);
+                        i += 1;
+                    }
+                    "--dry-run" => dry_run = true,
+                    other => bail!("unknown propose flag: {other}"),
+                }
+                i += 1;
+            }
+            let outcome = bad_apple::red_team::propose::propose(focus, dry_run)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "spec": outcome.spec,
+                    "result": outcome.result,
+                    "persisted_to": outcome.persisted_to,
+                }))?
+            );
+            if !outcome.result.mitigated {
+                std::process::exit(1);
+            }
+        }
+        _ => bail!("unknown redteam subcommand: {sub}\nusage: badapple redteam <run|watch|status|category <category>|probe <id>|generated|propose [--focus <x>] [--dry-run]|findings>"),
     }
     Ok(())
 }

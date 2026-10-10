@@ -682,7 +682,21 @@ private func handleAgentRequest(_ raw: String, fd: Int32, writeQueue: DispatchQu
             return
         }
         let matched = BadAppleEngine.shared.modelManager.listProfiles().first { $0.repoId == repoId }
-        BadAppleEngine.shared.modelManager.markLoaded(modelId: matched?.id ?? repoId, localPath: nil)
+        // Custom models (e.g. mesh rank dirs) may not live in HF-cache repo
+        // layout — resolveCachePath would fail and mark them error.
+        let loadedPath = matched.flatMap {
+            BadAppleEngine.shared.modelManager.modelStatus(modelId: $0.id)?["local_path"] as? String
+        }.flatMap { $0.isEmpty ? nil : $0 }
+        let manager = BadAppleEngine.shared.modelManager
+        // One main brain at a time: anything else still marked loaded is
+        // stale — switching fully replaces the previous model.
+        let newId = matched?.id ?? repoId
+        for other in manager.listProfiles() where other.id != newId {
+            if (manager.modelStatus(modelId: other.id)?["status"] as? String) == "loaded" {
+                manager.markUnloaded(modelId: other.id)
+            }
+        }
+        manager.markLoaded(modelId: newId, localPath: loadedPath)
         agentRespond(fd, writeQueue: writeQueue, reqId: reqId, result: [
             "result": "Switched to \(repoId)",
             "model": repoId,
@@ -1267,9 +1281,10 @@ private func printUsage() {
       BADAPPLE_FAST_MODEL           Fast tier model id (default: mlx-community/Qwen2.5-0.5B-Instruct-4bit)
       BADAPPLE_SPECULATIVE_DRAFT    Draft model id for speculative decoding (empty = disabled)
       BADAPPLE_NUM_DRAFT_TOKENS     Draft tokens per step (default: 2)
-      BADAPPLE_MAX_KV_SIZE          Max KV cache size (default: 4096; installer lowers it on 8/16 GB Macs)
+      BADAPPLE_MAX_KV_SIZE          Max KV cache size (default: 8192; installer lowers it on <8 GB Macs)
       BADAPPLE_PREFILL_STEP_SIZE    Prefill step size (default: 4096; installer lowers it on 8/16 GB Macs)
       BADAPPLE_VRAM_BUDGET_GB       VRAM budget in GB (default: 80% of physical memory)
+      BADAPPLE_VRAM_ADMISSION       set to 0 to skip the model-load admission check
     """)
 }
 
@@ -1411,6 +1426,13 @@ func runDaemonMain() {
        let gb = UInt64(budgetGB), gb > 0 {
         Task { await BadAppleEngine.shared.setVRAMBudgetGB(gb) }
         log("VRAM budget set to \(gb) GB (BADAPPLE_VRAM_BUDGET_GB)")
+    }
+
+    // The admission gate can be pinned off on hosts whose proven resident
+    // working set exceeds the snapshot's conservative free-memory count.
+    if ProcessInfo.processInfo.environment["BADAPPLE_VRAM_ADMISSION"] == "0" {
+        Task { await BadAppleEngine.shared.setVRAMAdmission(enabled: false) }
+        log("VRAM admission check disabled (BADAPPLE_VRAM_ADMISSION=0)")
     }
 
     let lazy = ProcessInfo.processInfo.environment["BADAPPLE_LAZY_MAIN_MODEL"]?.trimmingCharacters(in: .whitespacesAndNewlines) != "0"

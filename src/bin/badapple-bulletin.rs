@@ -143,7 +143,7 @@ fn ceremony_tip() -> String {
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter_map(|e| e.get("hash").and_then(|h| h.as_str()).map(String::from))
-        .last()
+        .next_back()
         .unwrap_or_else(|| "genesis".into())
 }
 
@@ -204,7 +204,7 @@ fn check_key_ceremony() -> Option<String> {
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|e| e.get("action").and_then(|a| a.as_str()) != Some("revoked"))
         .filter_map(|e| e.get("key_id").and_then(|k| k.as_str()).map(String::from))
-        .last();
+        .next_back();
 
     match last_key_id {
         None => {

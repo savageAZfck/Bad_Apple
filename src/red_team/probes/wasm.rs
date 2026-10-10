@@ -43,19 +43,19 @@ fn oversized_memory_module() -> Vec<u8> {
 pub struct WasmFuelExhaustionProbe;
 
 impl Probe for WasmFuelExhaustionProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "wasm.fuel_exhaustion"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "wasm"
     }
     fn severity(&self) -> Severity {
         Severity::High
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "WASM cage halts infinite loop via fuel metering"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Compiles a guest module with an infinite loop and verifies execution exhausts fuel instead of hanging."
     }
     fn run(&self) -> ProbeResult {
@@ -104,19 +104,19 @@ impl Probe for WasmFuelExhaustionProbe {
 pub struct WasmMemoryPolicyProbe;
 
 impl Probe for WasmMemoryPolicyProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "wasm.memory_policy"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "wasm"
     }
     fn severity(&self) -> Severity {
         Severity::High
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "WASM cage rejects modules exceeding the memory policy"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Compiles a module that declares 100 initial pages and verifies it is rejected by the memory policy."
     }
     fn run(&self) -> ProbeResult {

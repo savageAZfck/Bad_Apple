@@ -668,7 +668,7 @@ impl CausalGraph {
             ("mesh", CausalRelation::Enables, "delegated_inference"),
         ];
         for (src, rel, dst) in runtime {
-            g.add_relation(src, rel.clone(), dst);
+            g.add_relation(src, *rel, dst);
         }
         g
     }

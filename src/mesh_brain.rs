@@ -25,7 +25,7 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -772,6 +772,309 @@ pub fn ask(host: &str, prompt: &str, max_tokens: usize) -> Result<String> {
         bail!("mesh-brain error: {e}");
     }
     resp.text.context("generate response missing text")
+}
+
+/// Send a single `step` frame (hidden-state rows) to a rank and return its
+/// `(token, done)` result. Debug/bisect client for the tail seam — the
+/// production driver is the rank-0 shard engine.
+pub fn step(host: &str, hidden: &[u8], shape: &[usize], dtype: &str) -> Result<(i64, bool)> {
+    let (mut s, cipher) = connect(host, 120)?;
+    let mut f = MeshBrainFrame {
+        op: "step".into(),
+        prompt: None,
+        max_tokens: None,
+        token: None,
+        done: None,
+        text: None,
+        error: None,
+        shape: Some(shape.to_vec()),
+        dtype: Some(dtype.into()),
+        layer_start: None,
+        layer_end: None,
+    };
+    write_packet(&mut s, &f, hidden, cipher.as_ref())?;
+    f.op.clear();
+    let (resp, _) = read_packet(&mut s, cipher.as_ref())?;
+    if let Some(e) = resp.error {
+        bail!("step error: {e}");
+    }
+    Ok((resp.token.unwrap_or(-1), resp.done.unwrap_or(false)))
+}
+
+/// Send a `reset` frame — clears the rank's KV state. Probe/debug client.
+pub fn reset(host: &str) -> Result<()> {
+    let (mut s, cipher) = connect(host, 30)?;
+    write_packet(
+        &mut s,
+        &MeshBrainFrame {
+            op: "reset".into(),
+            prompt: None,
+            max_tokens: None,
+            token: None,
+            done: None,
+            text: None,
+            error: None,
+            shape: None,
+            dtype: None,
+            layer_start: None,
+            layer_end: None,
+        },
+        &[],
+        cipher.as_ref(),
+    )?;
+    let (resp, _) = read_packet(&mut s, cipher.as_ref())?;
+    if let Some(e) = resp.error {
+        bail!("reset error: {e}");
+    }
+    Ok(())
+}
+
+/// Send a `vstep` frame — the speculative-verify op — and decode the reply
+/// payload as little-endian i32 per-row argmaxes. Falls back to reporting
+/// `resp.token` when the payload is absent (old tails).
+pub fn vstep(host: &str, hidden: &[u8], shape: &[usize], dtype: &str) -> Result<Vec<i32>> {
+    let (mut s, cipher) = connect(host, 120)?;
+    let f = MeshBrainFrame {
+        op: "vstep".into(),
+        prompt: None,
+        max_tokens: None,
+        token: None,
+        done: None,
+        text: None,
+        error: None,
+        shape: Some(shape.to_vec()),
+        dtype: Some(dtype.into()),
+        layer_start: None,
+        layer_end: None,
+    };
+    write_packet(&mut s, &f, hidden, cipher.as_ref())?;
+    let (resp, payload) = read_packet(&mut s, cipher.as_ref())?;
+    if let Some(e) = resp.error {
+        bail!("vstep error: {e}");
+    }
+    if !payload.is_empty() {
+        return Ok(payload
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect());
+    }
+    Ok(resp.token.map(|t| vec![t as i32]).unwrap_or_default())
+}
+
+// ---------------------------------------------------------------------------
+// ANE tail rank — serve the sharded ANE core on the mesh wire so an upstream
+// GPU prefix rank can offload its suffix to the Neural Engine. Protocol
+// mirrors BadAppleShard.swift's rank server: nonce handshake, optional
+// AES-GCM packets, ping/reset/step ops. `step` payloads are hidden-state
+// rows that bypass the ANE core's embedding via `forward_hidden`.
+// ---------------------------------------------------------------------------
+
+fn frame(op: &str) -> MeshBrainFrame {
+    MeshBrainFrame {
+        op: op.into(),
+        prompt: None,
+        max_tokens: None,
+        token: None,
+        done: None,
+        text: None,
+        error: None,
+        shape: None,
+        dtype: None,
+        layer_start: None,
+        layer_end: None,
+    }
+}
+
+/// Server side of the mutual-auth handshake, mirroring
+/// `MeshBrainAuth.serverHandshake`: challenge with a nonce, verify the
+/// client's `mb-c:` HMAC, counter-prove with `mb-s:`.
+fn ane_tail_handshake(s: &mut TcpStream, key: &[u8]) -> Result<()> {
+    if !mesh_auth_enabled() {
+        return Ok(());
+    }
+    let mut raw = [0u8; 32];
+    fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+    let nonce: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let mut challenge = frame("auth");
+    challenge.text = Some(nonce.clone());
+    write_frame(s, &challenge)?;
+    let resp = read_frame(s)?;
+    let expected = hmac_hex(key, &format!("mb-c:{nonce}"));
+    if resp.op != "auth" || resp.text.as_deref() != Some(expected.as_str()) {
+        bail!("peer auth failed");
+    }
+    let mut ok = frame("auth-ok");
+    ok.text = Some(hmac_hex(key, &format!("mb-s:{nonce}")));
+    write_frame(s, &ok)
+}
+
+/// Convert a step payload to fp16 bytes. `dtype` arrives as the wire dtype
+/// name; element size is implied by the payload length versus the declared
+/// hidden size, so callers pass raw bytes and we normalize.
+fn normalize_hidden(dtype: &str, payload: &[u8]) -> Result<Vec<u8>> {
+    match dtype {
+        "float16" => Ok(payload.to_vec()),
+        "float32" => {
+            if payload.len() % 4 != 0 {
+                bail!("f32 payload not multiple of 4");
+            }
+            let mut out = Vec::with_capacity(payload.len() / 2);
+            for c in payload.chunks_exact(4) {
+                let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                out.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+            }
+            Ok(out)
+        }
+        "bfloat16" => {
+            if payload.len() % 2 != 0 {
+                bail!("bf16 payload not multiple of 2");
+            }
+            let mut out = Vec::with_capacity(payload.len());
+            for c in payload.chunks_exact(2) {
+                let v = half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]]));
+                out.extend_from_slice(&half::f16::from_f32(v.to_f32()).to_le_bytes());
+            }
+            Ok(out)
+        }
+        other => bail!("unsupported hidden dtype {other}"),
+    }
+}
+
+/// Serve an ANE shard core as a mesh-brain tail rank on `listen`. Handles one
+/// connection at a time — the upstream rank reconnects on transport breaks.
+/// `eos` marks the done flag; the driver still checks EOS itself.
+pub fn serve_ane_tail(
+    listen: &str,
+    core: &mut crate::ane_core::AneCore,
+    rank: usize,
+    world: usize,
+    layer_start: usize,
+    layer_end: usize,
+    eos: i64,
+) -> Result<()> {
+    let secret = resolve_mesh_secret()?;
+    let cipher = if mesh_enc_enabled() {
+        Some(session_cipher(&secret)?)
+    } else {
+        None
+    };
+    let listener = TcpListener::bind(listen)
+        .with_context(|| format!("failed to bind ANE tail rank at {listen}"))?;
+    eprintln!("mesh-brain ANE tail rank {rank}/{world} serving {listen} (layers {layer_start}..{layer_end})");
+    for conn in listener.incoming() {
+        let mut s = match conn {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ane-rank accept failed: {e}");
+                continue;
+            }
+        };
+        let _ = s.set_nodelay(true);
+        if let Err(e) = ane_tail_handshake(&mut s, &secret) {
+            eprintln!("ane-rank handshake failed: {e}");
+            let mut r = frame("error");
+            r.error = Some("authentication failed".into());
+            let _ = write_frame(&mut s, &r);
+            continue;
+        }
+        loop {
+            let (header, payload) = match read_packet(&mut s, cipher.as_ref()) {
+                Ok(v) => v,
+                Err(_) => break, // transport broke — wait for the next peer
+            };
+            let mut reply_payload: Vec<u8> = Vec::new();
+            let reply = match header.op.as_str() {
+                "ping" => {
+                    let mut r = frame("result");
+                    r.token = Some(rank as i64);
+                    r.layer_start = Some(layer_start);
+                    r.layer_end = Some(layer_end);
+                    r
+                }
+                "reset" => {
+                    core.reset();
+                    frame("result")
+                }
+                // Prefix-continuity: `token` carries the target KV frontier.
+                // Rank 0 trims its own caches to the same point, so the next
+                // step only carries the prompt delta — not a full re-prefill.
+                "rewind" => {
+                    let target = header.token.unwrap_or(0) as i32;
+                    if core.rewind(target) {
+                        let mut r = frame("result");
+                        r.token = core.position().map(i64::from);
+                        r
+                    } else {
+                        let mut r = frame("result");
+                        r.error = Some(format!("rewind to {target} rejected"));
+                        r
+                    }
+                }
+                "step" => {
+                    let dtype = header.dtype.as_deref().unwrap_or("float16");
+                    match normalize_hidden(dtype, &payload)
+                        .map_err(|e| e.to_string())
+                        .and_then(|h| {
+                            core.forward_hidden(&h)
+                                .ok_or_else(|| "forward_hidden failed".to_string())
+                        }) {
+                        Ok(tok) => {
+                            let mut r = frame("result");
+                            r.token = Some(tok as i64);
+                            r.done = Some(tok as i64 == eos);
+                            r
+                        }
+                        Err(e) => {
+                            let mut r = frame("result");
+                            r.error = Some(e);
+                            r
+                        }
+                    }
+                }
+                // Speculative verify: like `step` but returns the per-row
+                // argmax for every input row (the K target predictions the
+                // verifier compares against the drafted continuation). The
+                // tokens ride in the reply payload as little-endian i32.
+                "vstep" => {
+                    let dtype = header.dtype.as_deref().unwrap_or("float16");
+                    match normalize_hidden(dtype, &payload)
+                        .map_err(|e| e.to_string())
+                        .and_then(|h| {
+                            core.forward_hidden_multi(&h)
+                                .ok_or_else(|| "forward_hidden_multi failed".to_string())
+                        }) {
+                        Ok(toks) => {
+                            let mut r = frame("result");
+                            let last = toks.last().copied().unwrap_or(-1);
+                            r.token = Some(last as i64);
+                            r.done = Some(last as i64 == eos);
+                            r.shape = Some(vec![toks.len()]);
+                            r.dtype = Some("int32".into());
+                            reply_payload = Vec::with_capacity(toks.len() * 4);
+                            for t in &toks {
+                                reply_payload.extend_from_slice(&t.to_le_bytes());
+                            }
+                            r
+                        }
+                        Err(e) => {
+                            let mut r = frame("result");
+                            r.error = Some(e);
+                            r
+                        }
+                    }
+                }
+                other => {
+                    let mut r = frame("result");
+                    r.error = Some(format!("unsupported op {other}"));
+                    r
+                }
+            };
+            if write_packet(&mut s, &reply, &reply_payload, cipher.as_ref()).is_err() {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

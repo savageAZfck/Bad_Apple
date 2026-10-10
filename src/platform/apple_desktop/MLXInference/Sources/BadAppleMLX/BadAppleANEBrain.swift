@@ -119,7 +119,8 @@ public actor BadAppleANEBrain {
     }
 
     public nonisolated static var enabled: Bool {
-        ProcessInfo.processInfo.environment["BADAPPLE_ANE_MODEL"] != nil
+        if ProcessInfo.processInfo.environment["BADAPPLE_ANE_BRAIN"] == "0" { return false }
+        return ProcessInfo.processInfo.environment["BADAPPLE_ANE_MODEL"] != nil
             || FileManager.default.fileExists(atPath: controlFile.path)
     }
 

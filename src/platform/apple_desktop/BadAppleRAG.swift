@@ -268,7 +268,37 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         if prompt.range(
             of: #"\b[A-Za-z0-9_-]*[A-Fa-f0-9]{6,}[A-Za-z0-9_-]*\b"#,
             options: .regularExpression) != nil { return false }
+        if isDegenerateResponse(response) { return false }
         return true
+    }
+
+    /// A degenerate generation — a repetition loop like "I'm a person who is
+    /// me; I'm a person who is me; ..." — must never be stored, and because
+    /// this gate also runs at lookup, entries written by older builds stop
+    /// being served without a cache wipe. Two detectors, both tuned to need
+    /// three repeats before firing so legitimate restatements survive:
+    /// a >=4-word clause occurring >=3 times, or a 6-gram occurring >=3 times.
+    private static func isDegenerateResponse(_ response: String) -> Bool {
+        let lower = response.lowercased()
+        guard lower.count > 100 else { return false }
+        var clauseCounts: [String: Int] = [:]
+        for raw in lower.split(whereSeparator: { ".!?;\n".contains($0) }) {
+            let clause = raw.trimmingCharacters(in: .whitespaces)
+            guard clause.split(separator: " ").count >= 4 else { continue }
+            clauseCounts[clause, default: 0] += 1
+            if clauseCounts[clause, default: 0] >= 3 { return true }
+        }
+        let words = lower.split(separator: " ")
+        guard words.count > 24 else { return false }
+        var gramCounts: [String: Int] = [:]
+        var i = 0
+        while i + 6 <= words.count {
+            let gram = words[i..<(i + 6)].joined(separator: " ")
+            gramCounts[gram, default: 0] += 1
+            if gramCounts[gram, default: 0] >= 3 { return true }
+            i += 1
+        }
+        return false
     }
 
     // MARK: - Lookup / store
@@ -300,7 +330,46 @@ final class BadAppleSemanticCache: @unchecked Sendable {
             ? self.threshold
             : threshold
 
-        return lookupSync(queryEmbedding: queryEmbedding, persona: persona, cutoff: cutoff)
+        return lookupSync(queryEmbedding: queryEmbedding,
+                          queryPrompt: prompt,
+                          persona: persona,
+                          cutoff: cutoff)
+    }
+
+    /// Lexical/sentence embeddings score "prime bigger than 100" and "prime
+    /// bigger than 200" as near-identical — they encode the shape of the
+    /// question, not the values inside it. A cached entry is therefore only
+    /// eligible when it agrees with the query on every token that carries
+    /// parameter identity: numerals, quoted spans, and path/URL/address-shaped
+    /// words. Paraphrases still hit; questions whose answer changes with a
+    /// changed number never replay a stale answer.
+    private static func salientTokens(_ text: String) -> Set<String> {
+        var out = Set<String>()
+        let lower = text.lowercased()
+        for match in lower.matches(of: #/\d+(?:[.,:/-]\d+)*/#) {
+            out.insert(String(match.output))
+        }
+        // Quoted spans carry literal parameters ("translate 'x'"). Extracted
+        // with a hand scan rather than a regex literal — a single quote inside
+        // /.../ lexes as a character literal and breaks the build.
+        var quote: Character? = nil
+        var span = ""
+        for ch in lower {
+            if let q = quote {
+                span.append(ch)
+                if ch == q { out.insert(span); quote = nil; span = "" }
+            } else if ch == "\"" || ch == "'" || ch == "`" {
+                quote = ch
+                span = String(ch)
+            }
+        }
+        for token in lower.split(whereSeparator: { $0.isWhitespace }) {
+            let t = String(token)
+            if t.contains("/") || t.contains("@") {
+                out.insert(t)
+            }
+        }
+        return out
     }
 
     /// Synchronous, lock-protected scan used by `lookup` after the prompt
@@ -308,6 +377,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
     /// section never spans an `await` and is not acquired from an async context
     /// (which Swift 6 concurrency checking flags).
     private func lookupSync(queryEmbedding: [Float],
+                            queryPrompt: String,
                             persona: String,
                             cutoff: Float) -> String? {
         lock.lock()
@@ -318,6 +388,7 @@ final class BadAppleSemanticCache: @unchecked Sendable {
         reloadIfChangedLocked()
 
         guard !entries.isEmpty else { return nil }
+        let queryTokens = Self.salientTokens(queryPrompt)
         var bestScore: Float = -1.0
         var bestIndex: Int = -1
         for (index, entry) in entries.enumerated() where entry.persona == persona {
@@ -325,6 +396,8 @@ final class BadAppleSemanticCache: @unchecked Sendable {
             // markup-bearing or gate-shaped poison written by older builds.
             guard Self.isCacheable(prompt: entry.prompt, response: entry.response)
             else { continue }
+            // Embeddings cannot see parameter drift — enforce it structurally.
+            guard Self.salientTokens(entry.prompt) == queryTokens else { continue }
             let score = cosineSimilarity(queryEmbedding, entry.embedding)
             if score > bestScore {
                 bestScore = score

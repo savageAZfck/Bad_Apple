@@ -23,11 +23,11 @@ CONSOLE_GROUP="$(id -gn "${CONSOLE_USER}")"
 # of the box on 8 GB Macs without manual tuning.
 RAM_GB=$(($(sysctl -n hw.memsize) / 1024 / 1024 / 1024))
 if [[ "$RAM_GB" -ge 16 ]]; then
-    BADAPPLE_MAX_KV_SIZE=2048
+    BADAPPLE_MAX_KV_SIZE=8192
     BADAPPLE_PREFILL_STEP_SIZE=2048
     BADAPPLE_NUM_DRAFT_TOKENS=2
 elif [[ "$RAM_GB" -ge 8 ]]; then
-    BADAPPLE_MAX_KV_SIZE=2048
+    BADAPPLE_MAX_KV_SIZE=8192
     BADAPPLE_PREFILL_STEP_SIZE=2048
     BADAPPLE_NUM_DRAFT_TOKENS=2
 else
@@ -35,6 +35,7 @@ else
     BADAPPLE_PREFILL_STEP_SIZE=1024
     BADAPPLE_NUM_DRAFT_TOKENS=0
 fi
+BADAPPLE_CURIOUS_INTERVAL=3600
 
 MODE="--dry-run"
 UNSIGNED=0
@@ -101,6 +102,7 @@ render_plist() {
         -e "s|__BADAPPLE_MAX_KV_SIZE__|${BADAPPLE_MAX_KV_SIZE}|g" \
         -e "s|__BADAPPLE_PREFILL_STEP_SIZE__|${BADAPPLE_PREFILL_STEP_SIZE}|g" \
         -e "s|__BADAPPLE_NUM_DRAFT_TOKENS__|${BADAPPLE_NUM_DRAFT_TOKENS}|g" \
+        -e "s|__BADAPPLE_CURIOUS_INTERVAL__|${BADAPPLE_CURIOUS_INTERVAL}|g" \
         "${src}" > "${dst}"
 }
 

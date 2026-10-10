@@ -1,4 +1,23 @@
 (function () {
+  // Bearer token bootstrap: the menu bar opens the dashboard with the token in
+  // the URL fragment (`#token=...`), which is never sent over the wire or
+  // logged. It is moved to sessionStorage and the fragment is scrubbed. If the
+  // dashboard is opened without a fragment (direct URL/bookmark), API calls
+  // return 401 and the user is asked to paste the token once per tab.
+  function captureFragmentToken() {
+    if (location.hash.indexOf('#token=') === 0) {
+      const t = decodeURIComponent(location.hash.slice('#token='.length));
+      try { sessionStorage.setItem('badapple_dashboard_token', t); } catch (e) {}
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  }
+  captureFragmentToken();
+
+  function dashboardToken() {
+    try { return sessionStorage.getItem('badapple_dashboard_token') || ''; } catch (e) { return ''; }
+  }
+  window.dashboardToken = dashboardToken;
+
   function cookieToken() {
     const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
     return match ? decodeURIComponent(match[1]) : '';
@@ -41,15 +60,37 @@
     const options = init || {};
     const method = (options.method || 'GET').toUpperCase();
     const sameOrigin = new URL(url, window.location.href).origin === window.location.origin;
-    if (sameOrigin && method !== 'GET' && method !== 'HEAD') {
+    if (sameOrigin) {
       const headers = new Headers(options.headers || {});
-      const token = csrfToken();
-      if (token && !headers.get('X-CSRF-Token')) {
-        headers.set('X-CSRF-Token', token);
+      const bearer = dashboardToken();
+      if (bearer && !headers.get('Authorization')) {
+        headers.set('Authorization', 'Bearer ' + bearer);
+      }
+      if (method !== 'GET' && method !== 'HEAD') {
+        const token = csrfToken();
+        if (token && !headers.get('X-CSRF-Token')) {
+          headers.set('X-CSRF-Token', token);
+        }
       }
       options.headers = headers;
     }
-    return originalFetch(url, options);
+    return originalFetch(url, options).then(function (res) {
+      if (res.status === 401 && sameOrigin && !options._dashboardRetried) {
+        const t = window.prompt(
+          'Bad Apple dashboard is locked. Paste the dashboard token\n' +
+          '(see /var/lib/bad_apple/dashboard.token, or reopen via the menu bar):'
+        );
+        if (t) {
+          try { sessionStorage.setItem('badapple_dashboard_token', t.trim()); } catch (e) {}
+          options._dashboardRetried = true;
+          const headers = new Headers(options.headers || {});
+          headers.set('Authorization', 'Bearer ' + t.trim());
+          options.headers = headers;
+          return originalFetch(url, options);
+        }
+      }
+      return res;
+    });
   };
 
   function setupMobileNav() {

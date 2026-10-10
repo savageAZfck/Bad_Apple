@@ -200,6 +200,14 @@ public actor BadAppleANEDrafter {
         loadTask = Task { await self.load() }
     }
 
+    /// Kick a load if needed and await readiness — used by the mesh shard
+    /// rank, which never goes through `startIfEnabled` at boot.
+    public func ensureReady() async -> Bool {
+        startIfEnabled()
+        _ = await loadTask?.value
+        return state == .ready
+    }
+
     public func unload(reason: String) {
         guard let current = handle else { return }
         handle = nil

@@ -292,9 +292,22 @@ final class BadAppleControlCenter: NSObject, NSWindowDelegate {
     }
 
     @objc private func openDashboard() {
-        if let url = URL(string: "http://127.0.0.1:8787") {
+        if let url = controlCenterDashboardURL() {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// Same fragment bootstrap as the menu bar — the bearer token rides in
+    /// `#token=` so it is never transmitted or logged.
+    private func controlCenterDashboardURL() -> URL? {
+        var raw = "http://127.0.0.1:8787"
+        if let token = try? String(contentsOf: URL(fileURLWithPath: "/var/lib/bad_apple/dashboard.token"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty,
+           let encoded = token.addingPercentEncoding(withAllowedCharacters: .alphanumerics) {
+            raw += "#token=" + encoded
+        }
+        return URL(string: raw)
     }
 
     private func send(prompt: String) {

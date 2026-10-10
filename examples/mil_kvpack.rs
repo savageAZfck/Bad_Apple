@@ -136,7 +136,7 @@ fn main() -> Result<(), String> {
         &[1, 2, 2048, 128],
         "k_full",
     );
-    let v_full = blk.slice(
+    let _v_full = blk.slice(
         &kv2,
         &[1, 0, 0, 0],
         &[2, 2, 2048, 128],

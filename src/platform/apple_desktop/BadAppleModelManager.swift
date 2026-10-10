@@ -661,24 +661,38 @@ final class BadAppleModelManager {
     // MARK: - Load / Unload Tracking
 
     func markLoaded(modelId: String, localPath: String? = nil) {
-        lock.lock(); defer { lock.unlock() }
-        guard isSafeModelId(modelId), let profile = profiles[modelId], let state = self.state[modelId] else { return }
-        var path = localPath
-        if path == nil || path!.isEmpty {
-            path = resolveCachePath(repoId: profile.repoId, allowDownload: false)
+        var resolvedPath: String?
+        lock.lock()
+        if isSafeModelId(modelId), let profile = profiles[modelId], let state = self.state[modelId] {
+            var path = localPath
+            if path == nil || path!.isEmpty {
+                path = resolveCachePath(repoId: profile.repoId, allowDownload: false)
+            }
+            if let p = path, let _ = safeLocalPath(p, mustExist: false) {
+                resolvedPath = p
+                state.localPath = p
+                state.status = .loaded
+                state.progress = 1.0
+                state.error = ""
+            } else {
+                state.status = .error
+                state.error = "could not resolve local path for loaded model"
+            }
+            state.lastUpdated = Date().timeIntervalSince1970
+            saveState()
         }
-        if let p = path, let _ = safeLocalPath(p, mustExist: false) {
-            state.localPath = p
-            state.status = .loaded
-            state.progress = 1.0
-            state.error = ""
-            state.verified = verifyProvenance(modelId: modelId, localPath: p)["status"] as? String == "verified"
-        } else {
-            state.status = .error
-            state.error = "could not resolve local path for loaded model"
+        lock.unlock()
+
+        // verifyProvenance acquires `lock` internally — it must run after release.
+        guard let p = resolvedPath else { return }
+        let verified = verifyProvenance(modelId: modelId, localPath: p)["status"] as? String == "verified"
+        lock.lock()
+        if let state = self.state[modelId], state.verified != verified {
+            state.verified = verified
+            state.lastUpdated = Date().timeIntervalSince1970
+            saveState()
         }
-        state.lastUpdated = Date().timeIntervalSince1970
-        saveState()
+        lock.unlock()
     }
 
     func markUnloaded(modelId: String) {
@@ -1026,29 +1040,44 @@ final class BadAppleModelManager {
 
     // MARK: - Persistence
 
+    private struct PersistedState: Codable {
+        var state: [String: ModelState]
+        var profiles: [String: ModelProfile]?
+    }
+
     private func loadState() {
         guard FileManager.default.fileExists(atPath: statusFile.path) else { return }
         do {
             let data = try Data(contentsOf: statusFile)
-            let payload = try JSONDecoder().decode([String: [String: ModelState]].self, from: data)
-            if let saved = payload["state"] {
-                for (mid, s) in saved where state[mid] != nil {
-                    // A download that was queued/downloading in a previous process
-                    // was interrupted; do not claim it is still active.
-                    if s.status == .downloading || s.status == .queued {
-                        if !s.localPath.isEmpty && FileManager.default.fileExists(atPath: s.localPath) {
-                            s.status = .cached
-                            s.progress = 1.0
-                            s.error = ""
-                        } else {
-                            s.status = .missing
-                            s.progress = 0.0
-                            s.localPath = ""
-                            s.error = ""
-                        }
+            let payload = try JSONDecoder().decode(PersistedState.self, from: data)
+            // Custom-registered profiles (e.g. mesh rank dirs added with
+            // `model add`) persist alongside state so they survive restart.
+            for (mid, profile) in payload.profiles ?? [:] where profiles[mid] == nil {
+                profiles[mid] = profile
+            }
+            // State written before profiles were persisted can carry custom
+            // models without a profile — synthesize one from local_path.
+            for (mid, s) in payload.state where profiles[mid] == nil && !s.localPath.isEmpty {
+                profiles[mid] = ModelProfile(
+                    id: mid, name: mid, repoId: mid,
+                    sizeGB: 0, kind: "text", loadedIn: "mlx_server")
+            }
+            for (mid, s) in payload.state where profiles[mid] != nil {
+                // A download that was queued/downloading in a previous process
+                // was interrupted; do not claim it is still active.
+                if s.status == .downloading || s.status == .queued {
+                    if !s.localPath.isEmpty && FileManager.default.fileExists(atPath: s.localPath) {
+                        s.status = .cached
+                        s.progress = 1.0
+                        s.error = ""
+                    } else {
+                        s.status = .missing
+                        s.progress = 0.0
+                        s.localPath = ""
+                        s.error = ""
                     }
-                    state[mid] = s
                 }
+                state[mid] = s
             }
         } catch {
             NSLog("[BadAppleModelManager] could not load state: %@", error.localizedDescription)
@@ -1056,7 +1085,11 @@ final class BadAppleModelManager {
     }
 
     private func saveState() {
-        let payload: [String: [String: ModelState]] = ["state": state]
+        let knownIds = Set(Self.knownProfiles.map { $0.id })
+        let payload = PersistedState(
+            state: state,
+            profiles: profiles.filter { !knownIds.contains($0.key) }
+        )
         do {
             let data = try JSONEncoder().encode(payload)
             let tmp = statusFile.appendingPathExtension("tmp")

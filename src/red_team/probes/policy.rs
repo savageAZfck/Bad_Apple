@@ -34,19 +34,19 @@ fn tool_approval(tool: &str) -> bool {
 pub struct PolicyCoversShellProbe;
 
 impl Probe for PolicyCoversShellProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "policy.covers_shell"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "policy"
     }
     fn severity(&self) -> Severity {
         Severity::Medium
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "Policy covers run_shell with approval or denials"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Verifies that policy.yaml explicitly covers the run_shell tool with approval gates or denied patterns."
     }
     fn run(&self) -> ProbeResult {
@@ -71,19 +71,19 @@ impl Probe for PolicyCoversShellProbe {
 pub struct PolicyCoversAppleScriptProbe;
 
 impl Probe for PolicyCoversAppleScriptProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "policy.covers_applescript"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "policy"
     }
     fn severity(&self) -> Severity {
         Severity::Medium
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "Policy covers run_applescript with approval or denials"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Verifies that policy.yaml explicitly covers the run_applescript tool with approval gates or denied patterns."
     }
     fn run(&self) -> ProbeResult {

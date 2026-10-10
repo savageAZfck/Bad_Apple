@@ -40,7 +40,7 @@ fn load_identity() -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("identity.key must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex::encode(id.seed()))?;
     Ok(id)
@@ -74,8 +74,7 @@ fn chain_tip(path: &PathBuf) -> Result<String> {
     let text = fs::read_to_string(path)?;
     let last = text
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .last()
+        .rfind(|l| !l.trim().is_empty())
         .context("empty chain")?;
     let v: Value = serde_json::from_str(last)?;
     if let Some(h) = v.get("hash").and_then(|x| x.as_str()) {

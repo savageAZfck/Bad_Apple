@@ -4,6 +4,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 import MLXLLM
 import MLXLMCommon
 import HuggingFace
@@ -156,6 +157,8 @@ public final class BadAppleInference: @unchecked Sendable {
         /// `hit` = reused warmed prefix KV, `warm` = built it this turn,
         /// `off` = disabled or prefix mismatch.
         public let prefixCache: String
+        /// Tokenized length of the assembled prompt the model saw.
+        public let promptTokenCount: Int
 
         public init(
             text: String,
@@ -165,7 +168,8 @@ public final class BadAppleInference: @unchecked Sendable {
             toolCalls: [ToolCall] = [],
             draftProposedTokens: Int = 0,
             draftAcceptedTokens: Int = 0,
-            prefixCache: String = "off"
+            prefixCache: String = "off",
+            promptTokenCount: Int = 0
         ) {
             self.text = text
             self.tokensPerSecond = tokensPerSecond
@@ -175,6 +179,7 @@ public final class BadAppleInference: @unchecked Sendable {
             self.draftProposedTokens = draftProposedTokens
             self.draftAcceptedTokens = draftAcceptedTokens
             self.prefixCache = prefixCache
+            self.promptTokenCount = promptTokenCount
             self.draftAcceptPct = if draftProposedTokens > 0 {
                 Float(draftAcceptedTokens) / Float(draftProposedTokens) * 100.0
             } else {
@@ -218,6 +223,7 @@ public final class BadAppleInference: @unchecked Sendable {
         case modelNotLoaded
         case modelLoadFailed(String)
         case generationFailed(String)
+        case adapterGeometryMismatch(adapterIns: Set<Int>, targetIns: Set<Int>)
 
         public var errorDescription: String? {
             switch self {
@@ -227,6 +233,10 @@ public final class BadAppleInference: @unchecked Sendable {
                 return "Could not load the AI model: \(detail)"
             case .generationFailed(let detail):
                 return "The AI could not generate a response: \(detail)"
+            case .adapterGeometryMismatch(let adapterIns, let targetIns):
+                return "LoRA adapter trained for a different geometry "
+                    + "(adapter input dims \(adapterIns.sorted()), "
+                    + "model layer input dims \(targetIns.sorted())) — refusing to apply."
             }
         }
     }
@@ -244,6 +254,14 @@ public final class BadAppleInference: @unchecked Sendable {
             self.isLoading = false
         }
 
+        /// Mesh-brain mode: no local container — a rank-0 engine process owns
+        /// the weights and serves `generate` over the mesh protocol.
+        func setMeshReady() {
+            self.container = nil
+            self.isLoaded = true
+            self.isLoading = false
+        }
+
         func setLoading() -> Bool {
             guard !isLoaded && !isLoading else { return false }
             isLoading = true
@@ -256,6 +274,21 @@ public final class BadAppleInference: @unchecked Sendable {
 
     private let state = ModelState()
     private let config: ModelConfig
+
+    // MARK: - Mesh-brain backend
+    //
+    // A model directory carrying a rank-0 `mesh_brain_rank.json` loads no
+    // local weights: the GPU prefix engine (BADAPPLE_SHARD_DIR=dir) owns them
+    // and serves `generate` on spec.host; downstream ranks take `step` frames.
+    // The daemon treats the whole pipeline as one swappable brain.
+
+    private var meshHost: String?
+    private var meshTokenizer: (any MLXLMCommon.Tokenizer)?
+
+    /// True when the active brain is a mesh rank set rather than a local
+    /// MLX container. Secondary tiers (fast model, ANE drafter, speculative
+    /// draft) stay off — the mesh is the whole brain.
+    public var isMeshBacked: Bool { meshHost != nil }
 
     // MARK: - Prompt-prefix KV cache
     //
@@ -286,21 +319,27 @@ public final class BadAppleInference: @unchecked Sendable {
     private static let prefixSentinel = "\u{7}\u{7}BA_PREFIX_SENTINEL\u{7}\u{7}"
 
     /// One turn's prefix-cache handoff: boundary + sliced inputs going in,
-    /// the warmed/reused cache coming back out.
+    /// a per-layer state snapshot (not a live cache) to restore from.
     private final class PrefixTicket {
         var key = ""
         var boundary = 0
         var prefixText: LMInput.Text!
         var suffixInput: LMInput!
-        var checkedOut: [KVCache]?
-        var cacheUsed: [KVCache]?
+        var snapshot: [(state: [MLXArray], meta: [String])]?
         var draftCacheUsed: [KVCache]?
     }
 
     private let prefixCacheLock = NSLock()
     private var prefixCacheKey = ""
     private var prefixCacheBoundary = 0
-    private var prefixCache: [KVCache]?
+    /// Checkpoint protocol: the pooled artifact is a frozen per-layer state
+    /// snapshot taken at the prefix boundary — never a live cache object.
+    /// Rotating (sliding-window) caches cannot rewind — a ring buffer's
+    /// earlier bytes are gone — but every cache type can be teleported back
+    /// to a frozen state. Each turn gets fresh cache objects restored to
+    /// post-head; generation mutates only the fresh objects, so the shared
+    /// snapshot is never touched and nothing needs trimming.
+    private var prefixSnapshot: [(state: [MLXArray], meta: [String])]?
 
     private static func firstIndex(of needle: [Int32], in haystack: [Int32]) -> Int? {
         guard !needle.isEmpty, haystack.count >= needle.count else { return nil }
@@ -310,28 +349,40 @@ public final class BadAppleInference: @unchecked Sendable {
         return nil
     }
 
-    /// Takes the stored cache for this prefix (if valid) so the turn owns it
-    /// exclusively; `returnPrefixCache` puts it back once it's trimmed.
-    private func checkoutPrefixCache(key: String, boundary: Int) -> [KVCache]? {
+    /// Hands the stored snapshot for this prefix (if any) to a turn.
+    /// The snapshot is shared read-only state — it is never taken out of
+    /// the pool, so concurrent turns can all restore from it.
+    private func checkoutPrefixSnapshot(key: String, boundary: Int)
+        -> [(state: [MLXArray], meta: [String])]?
+    {
         prefixCacheLock.lock(); defer { prefixCacheLock.unlock() }
-        guard let cache = prefixCache,
-              prefixCacheKey == key, prefixCacheBoundary == boundary,
-              cache.first?.offset == boundary,
-              canTrimPromptCache(cache) else { return nil }
-        prefixCache = nil
-        prefixCacheKey = ""
-        return cache
+        guard let layers = prefixSnapshot,
+              prefixCacheKey == key, prefixCacheBoundary == boundary else { return nil }
+        return layers
     }
 
-    private func returnPrefixCache(_ ticket: PrefixTicket) {
-        guard let cache = ticket.cacheUsed else { return }
-        let extra = (cache.first?.offset ?? 0) - ticket.boundary
-        if extra > 0 { trimPromptCache(cache, numTokens: extra) }
-        guard extra >= 0, cache.first?.offset == ticket.boundary else { return }
+    /// Freezes the just-warmed cache's per-layer state into the pool.
+    private func storePrefixSnapshot(key: String, boundary: Int, cache: [KVCache]) {
+        let layers: [(state: [MLXArray], meta: [String])] = cache.map { layer in
+            let s = layer.state
+            s.forEach { eval($0) }
+            return (s, layer.metaState)
+        }
         prefixCacheLock.lock(); defer { prefixCacheLock.unlock() }
-        prefixCacheKey = ticket.key
-        prefixCacheBoundary = ticket.boundary
-        prefixCache = cache
+        prefixCacheKey = key
+        prefixCacheBoundary = boundary
+        prefixSnapshot = layers
+    }
+
+    /// Teleports a fresh cache to the frozen post-head state.
+    private func restorePrefixSnapshot(
+        _ layers: [(state: [MLXArray], meta: [String])], into cache: [KVCache]
+    ) {
+        for i in cache.indices where i < layers.count {
+            var layer = cache[i]
+            layer.state = layers[i].state
+            layer.metaState = layers[i].meta
+        }
     }
 
     /// Sendable probe result — the async half of prefix matching. The caller
@@ -352,7 +403,11 @@ public final class BadAppleInference: @unchecked Sendable {
             prompt: "", systemPrompt: head + Self.prefixSentinel, history: [], tools: nil, container: container
         ) else { return nil }
         let probeTokens = probe.text.tokens.asType(.int32).asArray(Int32.self)
-        let sentinelTokens = (await container.tokenizer).encode(text: Self.prefixSentinel).map { Int32($0) }
+        // Content tokens only — BOS-prepending tokenizers (Gemma & family)
+        // would otherwise inject an id that can never occur mid-render,
+        // silently disabling prefix reuse on every such model.
+        let sentinelTokens = (await container.tokenizer)
+            .encode(text: Self.prefixSentinel, addSpecialTokens: false).map { Int32($0) }
         guard !sentinelTokens.isEmpty,
               let boundary = Self.firstIndex(of: sentinelTokens, in: probeTokens),
               boundary > 0 else { return nil }
@@ -374,7 +429,7 @@ public final class BadAppleInference: @unchecked Sendable {
         ticket.boundary = probe.boundary
         ticket.prefixText = LMInput.Text(tokens: MLXArray(probe.prefixTokens))
         ticket.suffixInput = LMInput(tokens: MLXArray(Array(fullTokens[probe.boundary...])))
-        ticket.checkedOut = checkoutPrefixCache(key: probe.key, boundary: probe.boundary)
+        ticket.snapshot = checkoutPrefixSnapshot(key: probe.key, boundary: probe.boundary)
         return ticket
     }
 
@@ -484,6 +539,35 @@ public final class BadAppleInference: @unchecked Sendable {
     public func loadModel(from localDirectory: URL, admission: @Sendable (UInt64) async throws -> Void = { _ in }) async throws {
         guard await state.setLoading() else { return }
 
+        // Mesh-brain rank dir: wire up the pipeline client instead of loading
+        // weights — the rank-0 engine process owns them. Probe the endpoint
+        // now so a dead mesh fails the load instead of the first query.
+        if let spec = Self.meshRankSpec(in: localDirectory), spec.rank == 0, spec.hasEmbed {
+            do {
+                let link = try await MeshBrainLink(host: spec.host)
+                let (resp, _) = try await link.request(
+                    MeshBrainFrame(op: "ping"), payload: nil)
+                link.close()
+                if let err = resp.error {
+                    throw InferenceError.modelLoadFailed("mesh rank 0 ping: \(err)")
+                }
+            } catch let error as InferenceError {
+                throw error
+            } catch {
+                throw InferenceError.modelLoadFailed(
+                    "mesh rank 0 at \(spec.host) unreachable: \(error.localizedDescription)")
+            }
+            meshHost = spec.host
+            meshTokenizer = try? await TokenizersLoader().load(from: localDirectory)
+            await state.setMeshReady()
+            // The old local container is gone — drop any residual MLX/Metal
+            // buffers so the mesh ranks keep the memory budget to themselves.
+            Memory.clearCache()
+            return
+        }
+
+        meshHost = nil
+        meshTokenizer = nil
         do {
             try await admission(Self.estimatedModelMemory(in: localDirectory))
             let container = try await LLMModelFactory.shared.loadContainer(
@@ -522,6 +606,9 @@ public final class BadAppleInference: @unchecked Sendable {
         }
         let fm = FileManager.default
         let directory = directory.resolvingSymlinksInPath().standardizedFileURL
+        // Mesh rank dirs hold a prefix's weights for the rank process, not the
+        // caller — admission only needs tokenizer + connection headroom.
+        if meshRankSpec(in: directory) != nil { return 256 * 1024 * 1024 }
         let configURL = directory.appendingPathComponent("config.json")
         guard let configSize = try configURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
               configSize <= 1_048_576,
@@ -641,6 +728,91 @@ public final class BadAppleInference: @unchecked Sendable {
         if let array = value as? [Any] { return array.map { Self.sendableValue(from: $0) } }
         if let dict = value as? [String: Any] { return dict.mapValues { Self.sendableValue(from: $0) } }
         return String(describing: value)
+    }
+
+    /// Parse `mesh_brain_rank.json` if `directory` is a mesh shard dir.
+    private static func meshRankSpec(in directory: URL) -> MeshBrainRankSpec? {
+        let url = directory.appendingPathComponent("mesh_brain_rank.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(MeshBrainRankSpec.self, from: data)
+    }
+
+    /// Render chat messages to raw prompt text for the mesh `generate` op —
+    /// rank 0 re-tokenizes, so the rendered string round-trips through encode.
+    private func renderMeshPrompt(
+        prompt: String,
+        systemPrompt: String?,
+        history: [ChatMessage]
+    ) -> String {
+        let messages = buildRawMessages(
+            prompt: prompt, systemPrompt: systemPrompt, history: history)
+        if let tok = meshTokenizer,
+           let ids = try? tok.applyChatTemplate(
+               messages: messages, tools: nil,
+               additionalContext: ["enable_thinking": false])
+        {
+            return tok.decode(tokenIds: ids, skipSpecialTokens: false)
+        }
+        var text = systemPrompt.map { $0 + "\n\n" } ?? ""
+        for m in history.suffix(12) { text += "\(m.role): \(m.content)\n" }
+        text += prompt
+        return text
+    }
+
+    /// Drive the mesh pipeline: connect to the rank-0 engine, send one
+    /// `generate` frame, stream the result back as a single chunk.
+    private func generateViaMesh(
+        prompt: String,
+        systemPrompt: String?,
+        history: [ChatMessage],
+        tools: [[String: any Sendable]]?,
+        maxTokens: Int?,
+        host: String,
+        onToken: @escaping @Sendable (String) -> Void,
+        onComplete: @escaping @Sendable (GenerationResult) -> Void,
+        onError: @escaping @Sendable (Error) -> Void
+    ) async {
+        do {
+            let rendered = renderMeshPrompt(
+                prompt: prompt, systemPrompt: systemPrompt, history: history)
+            let link = try await MeshBrainLink(host: host)
+            var frame = MeshBrainFrame(op: "generate")
+            frame.prompt = rendered
+            frame.maxTokens = maxTokens ?? config.maxTokens
+            let started = ProcessInfo.processInfo.systemUptime
+            // One frame carries the whole generation — and the prefill
+            // dominates: a multi-thousand-token system prompt costs
+            // ~0.15 s/row through the serial ANE tail. Scale the wire
+            // budget by prompt rows + generation tokens, not tokens alone.
+            let promptTokens = meshTokenizer?
+                .encode(text: rendered, addSpecialTokens: false).count
+                ?? rendered.count / 4
+            let budget = meshTimeout
+                + TimeInterval(promptTokens) * 0.5
+                + TimeInterval(frame.maxTokens ?? 0) * 30
+            let (resp, _) = try await link.request(
+                frame, payload: nil, timeout: budget)
+            link.close()
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            if let err = resp.error { throw MeshBrainError.transport(err) }
+            let text = resp.text ?? ""
+            if !text.isEmpty { onToken(text) }
+            // token count is approximated from the tokenizer when available —
+            // the wire only carries the finished string.
+            let count = meshTokenizer?.encode(text: text, addSpecialTokens: false).count ?? 0
+            onComplete(GenerationResult(
+                text: text,
+                tokensPerSecond: elapsed > 0 ? Float(count) / Float(elapsed) : 0,
+                tokenCount: count,
+                tier: "mesh",
+                toolCalls: parseToolCalls(text),
+                prefixCache: "off"
+            ))
+        } catch {
+            // localizedDescription on a bridged enum hides the message —
+            // CustomStringConvertible carries it ("transport: downstream …").
+            onError(InferenceError.generationFailed("\(error)"))
+        }
     }
 
     private func prepareInput(
@@ -770,6 +942,20 @@ public final class BadAppleInference: @unchecked Sendable {
     ) {
         Task {
             do {
+                if let meshHost {
+                    await generateViaMesh(
+                        prompt: prompt,
+                        systemPrompt: systemPrompt,
+                        history: history,
+                        tools: tools,
+                        maxTokens: maxTokens,
+                        host: meshHost,
+                        onToken: onToken,
+                        onComplete: onComplete,
+                        onError: onError
+                    )
+                    return
+                }
                 guard let container = await state.getContainer() else {
                     onError(InferenceError.modelNotLoaded)
                     return
@@ -805,20 +991,23 @@ public final class BadAppleInference: @unchecked Sendable {
                 if let ticket {
                     stream = try await container.perform(nonSendable: (ticket, params)) { context, payload in
                         let (ticket, params) = payload
-                        // Deliberately unbounded (parameters: nil): the
-                        // prefix must survive whole, and per-turn growth is
-                        // trimmed back to the boundary when the turn ends.
-                        let cache = ticket.checkedOut
-                            ?? makePromptCache(model: context.model, parameters: nil)
-                        if ticket.checkedOut == nil {
+                        // Fresh cache objects every turn — restored from the
+                        // checkpoint when present, warmed + checkpointed
+                        // otherwise. Deliberately unbounded (parameters:
+                        // nil): the prefix must survive whole.
+                        let cache = makePromptCache(model: context.model, parameters: nil)
+                        if let snapshot = ticket.snapshot {
+                            restorePrefixSnapshot(snapshot, into: cache)
+                        } else {
                             // First turn for this prefix — warm the cache by
-                            // evaluating just the stable head. Tokens are
-                            // 1-D; the model expects a batch axis.
+                            // evaluating just the stable head, then freeze.
+                            // Tokens are 1-D; the model expects a batch axis.
                             _ = context.model(
                                 ticket.prefixText[text: .newAxis], cache: cache, state: nil)
                             eval(cache)
+                            storePrefixSnapshot(
+                                key: ticket.key, boundary: ticket.boundary, cache: cache)
                         }
-                        ticket.cacheUsed = cache
                         return try MLXLMCommon.generate(
                             input: ticket.suffixInput, cache: cache,
                             parameters: params, context: context)
@@ -834,6 +1023,7 @@ public final class BadAppleInference: @unchecked Sendable {
                 var draftAccepted = 0
                 var detectedToolCalls: [BadAppleInference.ToolCall] = []
                 var stop = false
+                var promptTokens = 0
 
                 for await event in stream {
                     switch event {
@@ -843,6 +1033,7 @@ public final class BadAppleInference: @unchecked Sendable {
                     case .info(let info):
                         tps = Float(info.tokensPerSecond)
                         tokenCount = info.generationTokenCount
+                        promptTokens = info.promptTokenCount
                         draftProposed = info.proposedDraftTokens ?? 0
                         draftAccepted = info.acceptedDraftTokens ?? 0
                     case .toolCall(let call):
@@ -864,9 +1055,6 @@ public final class BadAppleInference: @unchecked Sendable {
                 }
 
                 let finalToolCalls = detectedToolCalls.isEmpty ? parseToolCalls(fullText) : detectedToolCalls
-                // Restore the prefix cache for the next turn — trimmed back to
-                // the warmed boundary, or dropped if anything drifted.
-                if let ticket { returnPrefixCache(ticket) }
                 onComplete(GenerationResult(
                     text: fullText,
                     tokensPerSecond: tps,
@@ -875,7 +1063,8 @@ public final class BadAppleInference: @unchecked Sendable {
                     toolCalls: finalToolCalls,
                     draftProposedTokens: draftProposed,
                     draftAcceptedTokens: draftAccepted,
-                    prefixCache: ticket.map { $0.checkedOut != nil ? "hit" : "warm" } ?? "off"
+                    prefixCache: ticket.map { $0.snapshot != nil ? "hit" : "warm" } ?? "off",
+                    promptTokenCount: promptTokens
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))
@@ -936,6 +1125,10 @@ public final class BadAppleInference: @unchecked Sendable {
     }
 
     /// Generate a complete response (non-streaming).
+    /// Acceptance rate of the most recent speculative generation — the
+    /// draft-depth adapter's feedback signal. 0 until a spec turn lands.
+    private var lastSpecAcceptancePct: Float = 0
+
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
@@ -944,7 +1137,47 @@ public final class BadAppleInference: @unchecked Sendable {
         maxTokens: Int? = nil,
         temperature: Float? = nil
     ) async throws -> GenerationResult {
-        try await withCheckedThrowingContinuation { continuation in
+        // Plain-text turns can run through a drafting path: the spec verify
+        // loop emits identical tokens to serial greedy (argmax-checked), so
+        // output is unchanged — just cheaper. Tool-calling turns stay on the
+        // streaming path (it parses .toolCall events; spec doesn't yet).
+        if tools == nil, !isMeshBacked {
+            let numDrafts = Self.adaptiveNumDraftTokens(
+                acceptPct: lastSpecAcceptancePct, envDefault: Self.envNumDraftTokens)
+            if let aneSession = await BadAppleANEDrafter.shared.acquire() {
+                return try await withCheckedThrowingContinuation { continuation in
+                    generateWithANEDrafting(
+                        prompt: prompt, systemPrompt: systemPrompt, history: history,
+                        session: aneSession, numDraftTokens: numDrafts,
+                        maxTokens: maxTokens,
+                        onToken: { _ in },
+                        onComplete: { result in
+                            if result.draftProposedTokens > 0 {
+                                self.lastSpecAcceptancePct = result.draftAcceptPct
+                            }
+                            continuation.resume(returning: result)
+                        },
+                        onError: { continuation.resume(throwing: $0) })
+                }
+            }
+            if let draftId = Self.envSpeculativeDraftModel {
+                return try await withCheckedThrowingContinuation { continuation in
+                    generateWithSpeculativeDecoding(
+                        prompt: prompt, systemPrompt: systemPrompt, history: history,
+                        draftModelId: draftId, numDraftTokens: numDrafts,
+                        maxTokens: maxTokens, temperature: temperature,
+                        onToken: { _ in },
+                        onComplete: { result in
+                            if result.draftProposedTokens > 0 {
+                                self.lastSpecAcceptancePct = result.draftAcceptPct
+                            }
+                            continuation.resume(returning: result)
+                        },
+                        onError: { continuation.resume(throwing: $0) })
+                }
+            }
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             generateStreamingTokens(
                 prompt: prompt,
                 systemPrompt: systemPrompt,
@@ -1135,15 +1368,17 @@ public final class BadAppleInference: @unchecked Sendable {
                     var draftCache: [KVCache]? = nil
                     var genInput = input
                     if let ticket {
-                        let warmed = ticket.checkedOut
-                            ?? makePromptCache(model: mainContext.model, parameters: nil)
-                        if ticket.checkedOut == nil {
+                        let warmed = makePromptCache(model: mainContext.model, parameters: nil)
+                        if let snapshot = ticket.snapshot {
+                            restorePrefixSnapshot(snapshot, into: warmed)
+                        } else {
                             // Tokens are 1-D; the model expects a batch axis.
                             _ = mainContext.model(
                                 ticket.prefixText[text: .newAxis], cache: warmed, state: nil)
                             eval(warmed)
+                            storePrefixSnapshot(
+                                key: ticket.key, boundary: ticket.boundary, cache: warmed)
                         }
-                        ticket.cacheUsed = warmed
                         cache = warmed
                         genInput = ticket.suffixInput
 
@@ -1174,6 +1409,7 @@ public final class BadAppleInference: @unchecked Sendable {
                 var tokenCount = 0
                 var draftProposed = 0
                 var draftAccepted = 0
+                var promptTokens = 0
 
                 for await event in stream {
                     switch event {
@@ -1183,27 +1419,34 @@ public final class BadAppleInference: @unchecked Sendable {
                     case .info(let info):
                         tps = Float(info.tokensPerSecond)
                         tokenCount = info.generationTokenCount
-                        draftProposed = info.proposedDraftTokens ?? 0
-                        draftAccepted = info.acceptedDraftTokens ?? 0
+                        promptTokens = info.promptTokenCount
+                        if let spec = info.speculativeDecodingTelemetry {
+                            draftProposed = spec.draftTokenCount
+                            draftAccepted = spec.acceptedDraftTokenCount
+                        } else {
+                            draftProposed = info.proposedDraftTokens ?? 0
+                            draftAccepted = info.acceptedDraftTokens ?? 0
+                        }
                     case .toolCall:
                         break
                     }
                 }
 
-                if let ticket {
-                    returnPrefixCache(ticket)
-                    if let draftCache = ticket.draftCacheUsed {
-                        returnDraftPrefix(key: ticket.key, boundary: ticket.boundary, cache: draftCache)
-                    }
+                if let ticket, let draftCache = ticket.draftCacheUsed {
+                    returnDraftPrefix(key: ticket.key, boundary: ticket.boundary, cache: draftCache)
                 }
+                let prefixDesc = ticket.map { $0.snapshot != nil ? "hit" : "warm" } ?? "off"
+                NSLog("[BadAppleSpec] prompt=%d tokens gen=%d tps=%.1f drafts=%d accepted=%d prefix=%@",
+                      promptTokens, tokenCount, tps, draftProposed, draftAccepted, prefixDesc)
                 onComplete(GenerationResult(
                     text: fullText,
                     tokensPerSecond: tps,
                     tokenCount: tokenCount,
-                    tier: "main",
+                    tier: "main+spec",
                     draftProposedTokens: draftProposed,
                     draftAcceptedTokens: draftAccepted,
-                    prefixCache: ticket.map { $0.checkedOut != nil ? "hit" : "warm" } ?? "off"
+                    prefixCache: prefixDesc,
+                    promptTokenCount: promptTokens
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))
@@ -1466,7 +1709,8 @@ public final class BadAppleInference: @unchecked Sendable {
                     tier: "main+ane-draft",
                     draftProposedTokens: outcome.proposed,
                     draftAcceptedTokens: outcome.accepted,
-                    prefixCache: "ane:\(outcome.rounds)r"
+                    prefixCache: "ane:\(outcome.rounds)r",
+                    promptTokenCount: promptIds.count
                 ))
             } catch {
                 onError(InferenceError.generationFailed(error.localizedDescription))
@@ -1502,11 +1746,37 @@ public final class BadAppleInference: @unchecked Sendable {
         }
         try await container.perform { context in
             let adapter = try LoRAContainer.from(directory: directory)
+            // Preflight geometry: update(parameters:) assigns adapter weights
+            // by name with no shape check, so a stale adapter (trained on a
+            // model with different dims) injects cleanly and then traps the
+            // first matmul. Reject before the weights touch the model: every
+            // lora_a input dim must match the input dim of the layer it
+            // targets by name.
+            if let lora = context.model as? LoRAModel {
+                let targetIns = lora.loraLayers
+                    .flatMap { $0.namedModules() }
+                    .compactMap { ($0.1 as? Linear)?.shape.1 }
+                let adapterIns = adapter.parameters.flattened()
+                    .filter { $0.0.hasSuffix("lora_a") }
+                    .map { $0.1.dim(0) }
+                let illegal = adapterIns.filter { !targetIns.contains($0) }
+                guard illegal.isEmpty else {
+                    throw InferenceError.adapterGeometryMismatch(
+                        adapterIns: Set(adapterIns), targetIns: Set(targetIns))
+                }
+            }
             try adapter.load(into: context.model)
         }
     }
 
     public func unload() async {
+        meshHost = nil
+        meshTokenizer = nil
+        prefixCacheLock.withLock {
+            prefixCacheKey = ""
+            prefixCacheBoundary = 0
+            prefixSnapshot = nil
+        }
         await state.setContainer(nil)
         Memory.clearCache()
     }
@@ -1542,13 +1812,13 @@ public extension BadAppleInference {
         BadAppleInference(config: defaultConfig)
     }
 
-    /// Read `BADAPPLE_MAX_KV_SIZE` from the environment (default 4096).
+    /// Read `BADAPPLE_MAX_KV_SIZE` from the environment (default 8192).
     public static var envKVSize: Int {
         if let raw = ProcessInfo.processInfo.environment["BADAPPLE_MAX_KV_SIZE"],
            let val = Int(raw), val > 0 {
             return val
         }
-        return 4096
+        return 8192
     }
 
     /// Read `BADAPPLE_PREFILL_STEP_SIZE` from the environment (default 4096).
@@ -1587,5 +1857,22 @@ public extension BadAppleInference {
             return val
         }
         return 2
+    }
+
+    /// Scale draft depth to the measured acceptance rate. Open prose
+    /// lands ~30-65% per-position — a single-token draft minimizes the
+    /// verification window's wasted work — while structured output
+    /// (lists, code, counting) runs ≥75% and profits from deeper chains.
+    /// `acceptPct <= 0` means no signal yet; fall back to the env value.
+    /// Env is the initial depth only — adaptation ranges 1...5.
+    public static func adaptiveNumDraftTokens(acceptPct: Float, envDefault: Int) -> Int {
+        // Measured on Qwen3-14B-4bit + Qwen3-0.6B-4bit (M-series, 16 GB):
+        // prose at 63% acceptance ran 16.8 tok/s with n=1 but 12.7 with
+        // n=2 — every extra draft slot costs a full draft step and widens
+        // the verify window, so depth only pays once acceptance is high.
+        if acceptPct <= 0 { return max(envDefault, 1) }
+        if acceptPct < 80 { return 1 }
+        if acceptPct < 92 { return 2 }
+        return 4
     }
 }

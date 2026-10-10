@@ -8,19 +8,19 @@ use std::time::Instant;
 pub struct ReplayCacheProbe;
 
 impl Probe for ReplayCacheProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "slicks.replay_cache"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "slicks"
     }
     fn severity(&self) -> Severity {
         Severity::Critical
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "SLICKS replay cache rejects reused nonce pairs"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Inserts a valid nonce pair into the replay cache and then attempts to reuse it."
     }
     fn run(&self) -> ProbeResult {
@@ -51,19 +51,19 @@ impl Probe for ReplayCacheProbe {
 pub struct ClientProofTamperingProbe;
 
 impl Probe for ClientProofTamperingProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "slicks.client_proof_tampering"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "slicks"
     }
     fn severity(&self) -> Severity {
         Severity::High
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "SLICKS client proof verification rejects tampered signatures"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Generates a valid client proof, mutates one hex character, and verifies the mutated proof is rejected."
     }
     fn run(&self) -> ProbeResult {

@@ -31,6 +31,7 @@ fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null || fail "curl is required"
 command -v unzip >/dev/null || fail "unzip is required"
 command -v shasum >/dev/null || fail "shasum is required; updates cannot proceed without SHA-256 verification"
+command -v cosign >/dev/null || fail "cosign is required for release signature verification (brew install cosign); refusing to update with checksums alone"
 
 installed_version() {
     if [[ ! -d "${APP}" ]]; then
@@ -63,12 +64,7 @@ verify_signature() {
     name="$(basename "${out}")"
     bundle="${work}/${name}.sigstore.json"
     if ! curl -fsSL "https://github.com/${REPO}/releases/download/${tag}/${name}.sigstore.json" -o "${bundle}"; then
-        echo "warning: no signature bundle for ${name}; falling back to checksum-only verification" >&2
-        return 0
-    fi
-    if ! command -v cosign >/dev/null; then
-        echo "warning: cosign not installed; checksum verified but signature not checked (brew install cosign for full verification)" >&2
-        return 0
+        fail "no signature bundle for ${name} on ${tag}; refusing to install an unsigned artifact"
     fi
     pubkey_file="${work}/cosign.pub.pinned"
     printf '%s\n' "${COSIGN_PUBKEY}" > "${pubkey_file}"
@@ -82,6 +78,10 @@ download_asset() {
     local tried=()
     local checksums_file="${work}/checksums.txt"
     curl -fsSL "https://github.com/${REPO}/releases/download/${tag}/checksums.txt" -o "${checksums_file}" || fail "checksums.txt is unavailable for ${tag}; refusing an unverified update. Older releases require a separately verified manual installation"
+    # The checksum file is itself a trust root for every asset below — it must
+    # carry the pinned-key signature too, or an attacker who can publish assets
+    # only needs to replace both files on the release.
+    verify_signature "${checksums_file}" "${tag}"
     for name in "Bad_Apple-${version}-unsigned.zip" "Bad_Apple-${tag}-unsigned.zip" "Bad_Apple-${version}.zip" "Bad_Apple-${tag}.zip"; do
         url="https://github.com/${REPO}/releases/download/${tag}/${name}"
         out="${work}/${name}"

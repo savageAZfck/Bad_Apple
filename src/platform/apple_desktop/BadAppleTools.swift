@@ -2747,7 +2747,13 @@ enum CustomToolExecutor {
     /// Run an interpolated shell command via `/bin/sh -c`. Rejects command
     /// chaining metacharacters as a defensive boundary.
     static func runShellCommand(_ command: String) -> String {
-        if command.contains(";") || command.contains("&&") || command.contains("||") || command.contains(">") {
+        // The template is interpolated with model-supplied args and handed to
+        // `sh -c`, so every shell metachar must be refused — pipes, redirects,
+        // command substitution, globbing, backgrounding, and newline injection.
+        let deniedChars: Set<Character> = [
+            ";", "&", "|", ">", "<", "$", "`", "\n", "\r", "{", "}", "(", ")",
+        ]
+        if command.contains(where: { deniedChars.contains($0) }) {
             return "Error: custom shell command contains disallowed metacharacters"
         }
 

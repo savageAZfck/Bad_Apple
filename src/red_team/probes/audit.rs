@@ -8,19 +8,19 @@ use std::time::Instant;
 pub struct LedgerSecretRedactionProbe;
 
 impl Probe for LedgerSecretRedactionProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "audit.ledger_secret_redaction"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "audit"
     }
     fn severity(&self) -> Severity {
         Severity::High
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "Audit ledger does not contain unredacted secret patterns"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Scans the live ledger for common secret prefixes and reports any unredacted matches."
     }
     fn run(&self) -> ProbeResult {

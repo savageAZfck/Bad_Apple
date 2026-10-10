@@ -41,7 +41,7 @@ fn load_identity() -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("identity.key must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex::encode(id.seed()))?;
     Ok(id)
@@ -57,7 +57,7 @@ fn load_book() -> Result<TreatyBook> {
 }
 
 fn save_book(book: &TreatyBook) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(
         root().join("book.json"),
         serde_json::to_string_pretty(book)?,

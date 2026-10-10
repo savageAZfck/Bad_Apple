@@ -9,19 +9,19 @@ use std::time::Instant;
 pub struct PathTraversalProbe;
 
 impl Probe for PathTraversalProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "cage.path_traversal"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "cage"
     }
     fn severity(&self) -> Severity {
         Severity::Critical
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "Automation cage rejects path traversal via CreateFile"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Attempts to create a file outside the allowlisted root using ../ sequences."
     }
     fn run(&self) -> ProbeResult {
@@ -76,19 +76,19 @@ impl Probe for PathTraversalProbe {
 pub struct CreateDirectoryTraversalProbe;
 
 impl Probe for CreateDirectoryTraversalProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "cage.create_directory_traversal"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "cage"
     }
     fn severity(&self) -> Severity {
         Severity::Critical
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "Automation cage rejects directory creation traversal"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Attempts to create a directory outside the allowlisted root using ../ sequences."
     }
     fn run(&self) -> ProbeResult {
@@ -143,19 +143,19 @@ impl Probe for CreateDirectoryTraversalProbe {
 pub struct SymlinkEscapeProbe;
 
 impl Probe for SymlinkEscapeProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "cage.symlink_escape"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "cage"
     }
     fn severity(&self) -> Severity {
         Severity::Critical
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "Automation cage rejects symlink escape"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Creates a symlink inside the allowlisted root that points outside, then attempts to write through it."
     }
     fn run(&self) -> ProbeResult {

@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Request, State},
     http::header::AUTHORIZATION,
     http::{Method, StatusCode},
-    middleware::{from_fn_with_state, Next},
+    middleware::{self, from_fn_with_state, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
@@ -100,16 +100,13 @@ fn main() -> Result<()> {
     }
 
     let helpers = helper_paths();
-    let token = std::env::var("BADAPPLE_DASHBOARD_TOKEN")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let token = dashboard_token();
     let csrf_token = generate_csrf_token();
     let state = Arc::new(DashboardState {
         web_root: web_root.clone(),
         helpers,
         ocular: Arc::new(RwLock::new(OcularState::new())),
-        token,
+        token: Some(token),
         csrf_token,
     });
 
@@ -127,6 +124,86 @@ fn generate_csrf_token() -> Option<String> {
             .map(char::from)
             .collect(),
     )
+}
+
+/// Resolve the dashboard bearer token. `BADAPPLE_DASHBOARD_TOKEN` wins; else
+/// the persisted token at `<var_dir>/dashboard.token` (mode 0600) is reused or
+/// minted. The token is never served over HTTP — the browser gets it via the
+/// `#token=` URL fragment the menu bar appends when opening the dashboard, or
+/// by manual paste. Any process that can read the file already runs as this
+/// user; the boundary this draws is other UIDs, remote callers, DNS-rebinding
+/// web content, and same-user processes that never touch the filesystem path.
+fn dashboard_token() -> String {
+    if let Ok(t) = std::env::var("BADAPPLE_DASHBOARD_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let path = bad_apple_var_dir().join("dashboard.token");
+    let fresh = || {
+        use rand::distributions::Alphanumeric;
+        use rand::Rng;
+        rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(48)
+            .map(char::from)
+            .collect::<String>()
+    };
+    let token = match std::fs::read_to_string(&path) {
+        Ok(t) if t.trim().len() >= 32 => t.trim().to_string(),
+        _ => {
+            let t = fresh();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+            {
+                Ok(_) => {
+                    let _ = std::fs::write(&path, format!("{t}\n"));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "cannot persist dashboard token to {}: {e}; this run uses an ephemeral token",
+                        path.display()
+                    );
+                }
+            }
+            t
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    token
+}
+
+/// Reject any request whose Host header is not a loopback name. The listener
+/// is loopback-only, but a public hostname that resolves to 127.0.0.1 (DNS
+/// rebinding) would let arbitrary web pages drive the API from a browser —
+/// the browser sends the hostile Host even though the bytes stay local.
+async fn host_allowlist(req: Request, next: Next) -> Result<Response, StatusCode> {
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    match bare {
+        "127.0.0.1" | "localhost" | "::1" => Ok(next.run(req).await),
+        _ => Err(StatusCode::FORBIDDEN),
+    }
 }
 
 fn helper_paths() -> HelperPaths {
@@ -292,6 +369,7 @@ async fn run_server(port: u16, state: Arc<DashboardState>) -> Result<()> {
         .nest("/api", api)
         .nest_service("/static", ServeDir::new(state.web_root.join("static")))
         .fallback(static_handler)
+        .layer(middleware::from_fn(host_allowlist))
         .with_state(state);
 
     // Bind to loopback only. The cert suite treats an all-interfaces listener

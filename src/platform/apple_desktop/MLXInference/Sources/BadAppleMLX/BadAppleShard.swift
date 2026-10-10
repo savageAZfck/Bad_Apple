@@ -331,7 +331,7 @@ actor AsyncSemaphore {
 
 // MARK: - Downstream link (rank i -> rank i+1)
 
-private var meshTimeout: TimeInterval {
+var meshTimeout: TimeInterval {
     TimeInterval(
         ProcessInfo.processInfo.environment["BADAPPLE_MESH_TIMEOUT"] ?? "120")
         ?? 120
@@ -384,12 +384,19 @@ final class MeshBrainLink: @unchecked Sendable {
         sessionKey = MeshBrainAuth.sessionKey()
     }
 
-    func request(_ header: MeshBrainFrame, payload: Data?) async throws
+    func close() {
+        conn.stateUpdateHandler = nil
+        conn.cancel()
+    }
+
+    func request(_ header: MeshBrainFrame, payload: Data?,
+                 timeout: TimeInterval? = nil) async throws
         -> (MeshBrainFrame, Data)
     {
         let flag = TimeoutFlag()
+        let budget = timeout ?? meshTimeout
         let watchdog = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(meshTimeout * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
             guard !Task.isCancelled, !flag.done else { return }
             self?.conn.cancel()  // wakes pending send/receive with an error
         }
@@ -424,6 +431,9 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
         var output: MLXArray?
         var logits: MLXArray?
         var tokenIds: [Int] = []
+        /// Last prompt actually prefilled into local + downstream KV — the
+        /// prefix-continuity anchor for the next generate.
+        var prefilledIds: [Int] = []
         var sampledToken: Int = -1
         var outputText: String = ""
     }
@@ -508,6 +518,50 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
         return box.sampledToken
     }
 
+    /// Prompt-lookup self-drafter: scan the confirmed context for the most
+    /// recent earlier occurrence of the longest feasible suffix n-gram and
+    /// propose its continuation. Zero model cost — verification decides.
+    static func proposeDrafts(context: [Int], count: Int) -> [Int] {
+        guard count > 0, context.count > 6 else { return [] }
+        let n = context.count
+        var gram = min(6, n - 2)
+        while gram >= 2 {
+            let keyStart = n - gram
+            var i = keyStart - 1
+            scan: while i >= 0 {
+                for k in 0..<gram where context[i + k] != context[keyStart + k] {
+                    i -= 1
+                    continue scan
+                }
+                var draft: [Int] = []
+                var j = i + gram
+                while draft.count < count && j < n {
+                    draft.append(context[j])
+                    j += 1
+                }
+                if !draft.isEmpty { return draft }
+                i -= 1
+            }
+            gram -= 1
+        }
+        return []
+    }
+
+    /// vstep reply payload: little-endian i32 per-row argmaxes.
+    static func parseTokenPayload(_ payload: Data) throws -> [Int] {
+        guard payload.count % 4 == 0 else {
+            throw MeshBrainError.badFrame("vstep payload \(payload.count) not i32-aligned")
+        }
+        var out = [Int]()
+        out.reserveCapacity(payload.count / 4)
+        payload.withUnsafeBytes { buf in
+            for i in 0..<(payload.count / 4) {
+                out.append(Int(buf.load(fromByteOffset: i * 4, as: Int32.self)))
+            }
+        }
+        return out
+    }
+
     // MARK: pipeline
 
     /// Handle one `step` frame: run local layers, then either hand the hidden
@@ -557,6 +611,7 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
         await container.perform { _ in
             b.caches = b.model!.newCache(parameters: nil)
         }
+        b.prefilledIds = []
     }
 
     // MARK: server
@@ -697,27 +752,279 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
         }
         await stepGate.wait()
         defer { Task { await stepGate.signal() } }
-        try await resetPipeline()
         let b = box
-        b.tokenIds = []
         try await container.perform { ctx in
             b.tokenIds = ctx.tokenizer.encode(text: prompt)
         }
-        // Prefill: embed the whole prompt, run local layers over it.
-        try await embed(b.tokenIds)
+        let newIds = b.tokenIds
+        // Prefix-continuity: when the new prompt shares a head with the last
+        // prefilled one, rewind both KV frontiers to the shared point and
+        // prefill only the delta — the ANE tail runs ~0.15 s/row, so a
+        // multi-thousand-token system prompt is the difference between
+        // minutes and seconds per turn.
+        let prev = b.prefilledIds
+        var shared = 0
+        while shared < min(prev.count, newIds.count),
+              prev[shared] == newIds[shared] { shared += 1 }
+        // Always leave at least one delta row — the tail produces the first
+        // sampled token from the last row it receives.
+        shared = max(0, min(shared, newIds.count - 1))
+        let reusable = shared >= 64
+            && (b.caches?.allSatisfy { $0.isTrimmable && $0.offset >= shared }
+                ?? false)
+        if reusable {
+            if let next = spec.nextHost {
+                if link == nil { link = try await MeshBrainLink(host: next) }
+                var f = MeshBrainFrame(op: "rewind")
+                f.token = shared
+                let (resp, _) = try await link!.request(f, payload: nil)
+                if let err = resp.error {
+                    throw MeshBrainError.transport("rewind \(shared): \(err)")
+                }
+            }
+            let keep = shared
+            await container.perform { _ in
+                b.caches?.forEach { _ = $0.trim($0.offset - keep) }
+            }
+        } else {
+            try await resetPipeline()
+        }
+        let delta = reusable ? Array(newIds.dropFirst(shared)) : newIds
+        try await embed(delta)
         box.input = box.output
         try await runLayers()
+        b.prefilledIds = newIds
         var outTokens: [Int] = []
         var steps = 0
+        // Speculative-verify state: `context` is the confirmed token history
+        // (prompt + accepted generations) feeding the n-gram proposer;
+        // `frontier` counts KV positions committed on BOTH ranks, so a
+        // rejected draft batch rewinds to `frontier + accepted`.
+        var context = newIds
+        var frontier = newIds.count
+        let maxDrafts = max(
+            0,
+            Int(ProcessInfo.processInfo.environment["BADAPPLE_SPEC_DRAFTS"] ?? "7") ?? 7)
+        var specOK = spec.nextHost != nil && maxDrafts > 0
+        let specDebug = ProcessInfo.processInfo.environment["BADAPPLE_SPEC_DEBUG"] != nil
+        // ANE drafter: the 0.6B same-vocab model proposes continuations far
+        // more accurately than the n-gram fallback. Its KV is a rolling tail
+        // of the confirmed context; `draftSynced`/`draftBase` track how much
+        // of `context` it has consumed so each cycle feeds only the delta.
+        var drafterSession: BadAppleANEDrafter.Session? = nil
+        var draftSynced = 0
+        var draftBase = 0
+        if specOK {
+            let ready = await BadAppleANEDrafter.shared.ensureReady()
+            if specDebug {
+                FileHandle.standardError.write(
+                    "drafter ensureReady=\(ready) enabled=\(BadAppleANEDrafter.enabled)\n"
+                        .data(using: .utf8)!)
+            }
+            if ready, let s = await BadAppleANEDrafter.shared.acquire() {
+            _ = s.reset()
+            let room = max(0, s.contextLimit - maxDrafts - 8)
+            let feedCount = min(context.count, room)
+            draftBase = context.count - feedCount
+            if s.prefill(context[draftBase...].map { Int32($0) }) {
+                drafterSession = s
+                draftSynced = context.count
+                if specDebug {
+                    FileHandle.standardError.write(
+                        "drafter primed: fed=\(feedCount) pos=\(s.position)\n"
+                            .data(using: .utf8)!)
+                }
+            } else {
+                await BadAppleANEDrafter.shared.release()
+            }
+            }
+        }
+        defer {
+            if drafterSession != nil {
+                Task { await BadAppleANEDrafter.shared.release() }
+            }
+        }
+        // `nextTok` is the confirmed next token that has not yet been pushed
+        // through the ranks (model argmax, or the accepted verify seed).
+        var nextTok: Int? = nil
         while steps < maxTokens {
-            let tok: Int
+            if nextTok == nil {
+                // The prefill hidden batch is still in box.output — push it
+                // and read the model's first token.
+                if let next = spec.nextHost {
+                    if link == nil { link = try await MeshBrainLink(host: next) }
+                    var (frame, payload) = try MeshBrainWire.packArray(box.output!)
+                    frame.op = "step"
+                    let resp: MeshBrainFrame
+                    do {
+                        // A prefill step carries N hidden rows; the tail runs a
+                        // full forward per row (~3 s at 20 ANE shards), so the
+                        // fixed wire budget kills long prompts mid-prefill.
+                        let rows = frame.shape?.count == 3 ? frame.shape![1] : 1
+                        (resp, _) = try await link!.request(
+                            frame, payload: payload,
+                            timeout: meshTimeout + Double(rows) * 4)
+                    } catch {
+                        link = nil
+                        throw MeshBrainError.transport("downstream \(next): \(error)")
+                    }
+                    if let err = resp.error { throw MeshBrainError.transport(err) }
+                    guard let t = resp.token else {
+                        throw MeshBrainError.badFrame("missing token")
+                    }
+                    nextTok = t
+                } else {
+                    box.input = box.output
+                    try await logits()
+                    nextTok = try await sampleNextToken(temperature: 0)
+                }
+                continue
+            }
+            let tok = nextTok!
+            if tok == box.eosTokenId { break }
+            if specOK, let next = spec.nextHost {
+                // ---- speculative verify cycle ----
+                // cand[0] is the confirmed token; drafts propose the rest.
+                let cycleStartMark = ProcessInfo.processInfo.systemUptime
+                var cand = [tok]
+                if let s = drafterSession {
+                    // Feed confirmed tokens the drafter hasn't consumed plus
+                    // the anchor, then chain proposals — each predictNext
+                    // consumes its input and returns the next argmax.
+                    var feed = context[draftSynced...].map { Int32($0) }
+                    feed.append(Int32(tok))
+                    if Int(s.position) + feed.count + maxDrafts >= s.contextLimit {
+                        // Window exhausted: reset and re-prime the tail.
+                        _ = s.reset()
+                        let room = max(0, s.contextLimit - maxDrafts - 8)
+                        let feedCount = min(context.count, room)
+                        draftBase = context.count - feedCount
+                        _ = s.prefill(context[draftBase...].map { Int32($0) })
+                        draftSynced = context.count
+                        feed = [Int32(tok)]
+                    }
+                    var d = s.predictNext(feed)
+                    var drafted = 0
+                    while d >= 0 && drafted < maxDrafts {
+                        cand.append(Int(d))
+                        drafted += 1
+                        if drafted < maxDrafts { d = s.predictNext([d]) }
+                    }
+                    if d < 0 && drafted == 0 {
+                        // Dead session — stop paying for it.
+                        drafterSession = nil
+                        Task { await BadAppleANEDrafter.shared.release() }
+                    }
+                }
+                if cand.count == 1 {
+                    cand.append(contentsOf: Self.proposeDrafts(
+                        context: context + [tok], count: maxDrafts))
+                }
+                let cycleStart = ProcessInfo.processInfo.systemUptime
+                let draftMs = (cycleStart - cycleStartMark) * 1000
+                try await embed(cand)
+                box.input = box.output
+                try await runLayers()
+                let gpuMs = (ProcessInfo.processInfo.systemUptime - cycleStart) * 1000
+                if link == nil { link = try await MeshBrainLink(host: next) }
+                var (frame, payload) = try MeshBrainWire.packArray(box.output!)
+                frame.op = "vstep"
+                let resp: MeshBrainFrame
+                let respPayload: Data
+                do {
+                    (resp, respPayload) = try await link!.request(
+                        frame, payload: payload,
+                        timeout: meshTimeout + Double(cand.count) * 4)
+                } catch {
+                    link = nil
+                    throw MeshBrainError.transport("downstream \(next): \(error)")
+                }
+                if let err = resp.error {
+                    // Un-commit the candidate rows on this rank, realign the
+                    // tail frontier, then either drop to serial (old tail)
+                    // or surface a real transport failure.
+                    let drop = cand.count
+                    await container.perform { _ in
+                        b.caches?.forEach { _ = $0.trim(drop) }
+                    }
+                    var rf = MeshBrainFrame(op: "rewind")
+                    rf.token = frontier
+                    _ = try? await link?.request(rf, payload: nil)
+                    if err.contains("unsupported op")
+                        || err.contains("forward_hidden_multi") {
+                        specOK = false
+                        continue
+                    }
+                    throw MeshBrainError.transport(err)
+                }
+                let q = try Self.parseTokenPayload(respPayload)
+                guard q.count == cand.count else {
+                    throw MeshBrainError.badFrame(
+                        "vstep returned \(q.count) tokens for \(cand.count) rows")
+                }
+                // Accept the longest draft prefix the target confirms:
+                // q[i] is the argmax after cand[i], so cand[i+1] survives
+                // iff q[i] == cand[i+1]. The final accepted slot's argmax
+                // (q[m]) is the next confirmed token — the bonus.
+                var m = 0
+                while m < cand.count - 1 && q[m] == cand[m + 1] { m += 1 }
+                var hitEos = false
+                for i in 0...m {
+                    let t = cand[i]
+                    if t == box.eosTokenId { hitEos = true; break }
+                    outTokens.append(t)
+                    context.append(t)
+                    steps += 1
+                }
+                let dropped = cand.count - (m + 1)
+                if dropped > 0 {
+                    var rf = MeshBrainFrame(op: "rewind")
+                    rf.token = frontier + m + 1
+                    let (rresp, _) = try await link!.request(rf, payload: nil)
+                    if let err = rresp.error {
+                        throw MeshBrainError.transport(
+                            "rewind \(frontier + m + 1): \(err)")
+                    }
+                    await container.perform { _ in
+                        b.caches?.forEach { _ = $0.trim(dropped) }
+                    }
+                }
+                frontier += m + 1
+                nextTok = q[m]
+                if let s = drafterSession {
+                    // Drop consumed-but-rejected drafts; keep confirmed
+                    // tokens. An accepted-but-unconsumed proposal stays
+                    // uncovered — next cycle's feed resyncs the gap.
+                    let want = Int32(context.count - draftBase)
+                    if s.position > want { _ = s.rewind(to: want) }
+                    draftSynced = draftBase + Int(s.position)
+                }
+                if specDebug {
+                    let tailMs = (ProcessInfo.processInfo.systemUptime - cycleStart) * 1000 - gpuMs
+                    let ms = (ProcessInfo.processInfo.systemUptime - cycleStartMark) * 1000
+                    FileHandle.standardError.write(
+                        "spec cycle: K=\(cand.count) accepted=\(m + 1) cycle=\(ms)ms draft=\(draftMs)ms gpu=\(gpuMs)ms tail=\(tailMs)ms\n"
+                            .data(using: .utf8)!)
+                }
+                if hitEos { break }
+                continue
+            }
+            // ---- serial step: feed the confirmed token, read the next ----
+            outTokens.append(tok)
+            context.append(tok)
+            steps += 1
+            try await embed([tok])
+            box.input = box.output
+            try await runLayers()
+            frontier += 1
             if let next = spec.nextHost {
                 if link == nil { link = try await MeshBrainLink(host: next) }
                 var (frame, payload) = try MeshBrainWire.packArray(box.output!)
                 frame.op = "step"
                 let resp: MeshBrainFrame
                 do {
-                    (resp, _) = try await link!.request(frame, payload: payload)
+                    (resp, _) = try await link!.request(
+                        frame, payload: payload, timeout: meshTimeout + 4)
                 } catch {
                     link = nil
                     throw MeshBrainError.transport("downstream \(next): \(error)")
@@ -726,19 +1033,12 @@ public final class BadAppleShardRuntime: @unchecked Sendable {
                 guard let t = resp.token else {
                     throw MeshBrainError.badFrame("missing token")
                 }
-                tok = t
+                nextTok = t
             } else {
                 box.input = box.output
                 try await logits()
-                tok = try await sampleNextToken(temperature: 0)
+                nextTok = try await sampleNextToken(temperature: 0)
             }
-            if tok == box.eosTokenId { break }
-            outTokens.append(tok)
-            steps += 1
-            // feed the sampled token back through embed -> local layers
-            try await embed([tok])
-            box.input = box.output
-            try await runLayers()
         }
         b.tokenIds = outTokens
         await container.perform { ctx in

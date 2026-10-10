@@ -8,19 +8,19 @@ use std::time::Instant;
 pub struct P2PTamperingProbe;
 
 impl Probe for P2PTamperingProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "p2p.tampered_ciphertext"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "p2p"
     }
     fn severity(&self) -> Severity {
         Severity::High
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "P2P crypto rejects tampered ciphertext"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Encrypts a message, flips the last byte of the ciphertext, and verifies decryption fails."
     }
     fn run(&self) -> ProbeResult {
@@ -54,19 +54,19 @@ impl Probe for P2PTamperingProbe {
 pub struct P2PWrongKeyProbe;
 
 impl Probe for P2PWrongKeyProbe {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "p2p.wrong_key"
     }
-    fn category(&self) -> &'static str {
+    fn category(&self) -> &str {
         "p2p"
     }
     fn severity(&self) -> Severity {
         Severity::High
     }
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         "P2P crypto rejects decryption with wrong key"
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Encrypts with one key and attempts to decrypt with another derived key."
     }
     fn run(&self) -> ProbeResult {

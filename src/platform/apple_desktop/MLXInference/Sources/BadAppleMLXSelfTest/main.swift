@@ -4,6 +4,10 @@ import Foundation
 @main
 struct BadAppleMLXSelfTest {
     static func main() async {
+        if CommandLine.arguments.contains("--specbench") {
+            await specBench()
+            return
+        }
         let inference = BadAppleInference.defaultConfig
         check(
             inference.modelId == "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
@@ -320,6 +324,147 @@ struct BadAppleMLXSelfTest {
         reject(sevenB, containing: "size overflow", kv: Int.max)
         reject(sevenB, containing: "size overflow", prefill: Int.max)
         print("BadAppleMLX model memory estimation tests passed")
+    }
+
+    /// `BadAppleMLXSelfTest --specbench [prompt]`: load the main model plus
+    /// the draft model and run MLXLMCommon's speculative generate, printing
+    /// text, tok/s, and draft acceptance. Env overrides:
+    ///   SPEC_BENCH_MAIN   main model id   (default mlx-community/Qwen3-14B-4bit)
+    ///   SPEC_BENCH_DRAFT  draft model id  (default mlx-community/Qwen2.5-0.5B-Instruct-4bit)
+    ///   SPEC_BENCH_DRAFTS drafts/cycle    (default 5)
+    ///   SPEC_BENCH_TOKENS max tokens      (default 60)
+    private static func specBench() async {
+        let env = ProcessInfo.processInfo.environment
+        let mainId = env["SPEC_BENCH_MAIN"] ?? "mlx-community/Qwen3-14B-4bit"
+        let draftId = env["SPEC_BENCH_DRAFT"] ?? "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        let numDrafts = Int(env["SPEC_BENCH_DRAFTS"] ?? "5") ?? 5
+        let maxTok = Int(env["SPEC_BENCH_TOKENS"] ?? "60") ?? 60
+        let args = CommandLine.arguments
+        let prompt = args.drop(while: { $0 != "--specbench" }).dropFirst()
+            .first { !$0.hasPrefix("--") }
+            ?? "Write a short note to a colleague explaining the plan for tomorrow's migration."
+        let inference = BadAppleInference(
+            config: .init(modelId: mainId, maxTokens: maxTok, temperature: 0))
+        print("[specbench] loading \(mainId) ...")
+        do {
+            if mainId.hasPrefix("/") || mainId.hasPrefix("file://") {
+                try await inference.loadModel(from: URL(fileURLWithPath: mainId))
+            } else {
+                try await inference.loadModel()
+            }
+        } catch {
+            fail("main model load failed: \(error.localizedDescription)")
+        }
+        let t0 = Date()
+        if draftId == "ane" {
+            print("[specbench] ANE drafter path (0.6B on ANE → 14B verify on GPU) n=\(numDrafts)")
+            // Bridge symbols resolve via RTLD_DEFAULT — dlopen the dylib.
+            let bridgePath = env["SPEC_BENCH_BRIDGE"]
+                ?? "/Users/savag3/bad_apple/target/release/libBadAppleBridge.dylib"
+            // The bridge flat-namespaces into the Rust core — load it first.
+            let rustPath = env["SPEC_BENCH_RUST"]
+                ?? "/Users/savag3/bad_apple/target/release/libbad_apple.dylib"
+            guard dlopen(rustPath, RTLD_NOW | RTLD_GLOBAL) != nil else {
+                fail("dlopen(\(rustPath)) failed: \(String(cString: dlerror()))")
+            }
+            guard dlopen(bridgePath, RTLD_NOW | RTLD_GLOBAL) != nil else {
+                fail("dlopen(\(bridgePath)) failed: \(String(cString: dlerror()))")
+            }
+            setenv("BADAPPLE_ANE_DRAFT", "1", 1)
+            let ready = await BadAppleANEDrafter.shared.ensureReady()
+            guard ready else {
+                let lastError = await BadAppleANEDrafter.shared.lastError
+                fputs("[specbench] drafter not ready: \(lastError ?? "?")\n", stderr)
+                fail("ANE drafter ensureReady=false")
+            }
+            guard let session = await BadAppleANEDrafter.shared.acquire() else {
+                fail("ANE drafter acquire declined")
+            }
+            print("[specbench] drafter session acquired (context \(session.contextLimit))")
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                inference.generateWithANEDrafting(
+                    prompt: prompt,
+                    session: session,
+                    numDraftTokens: numDrafts,
+                    maxTokens: maxTok,
+                    onToken: { _ in },
+                    onComplete: { result in
+                        let wall = Date().timeIntervalSince(t0)
+                        let pct = result.draftProposedTokens > 0
+                            ? 100.0 * Double(result.draftAcceptedTokens) / Double(result.draftProposedTokens)
+                            : 0
+                        print("[specbench] === OUTPUT ===")
+                        print(result.text)
+                        print("[specbench] === STATS ===")
+                        print(String(format:
+                            "wall=%.1fs tokens=%d tps=%.2f drafts=%d accepted=%d (%.0f%%) cache=%s",
+                            wall, result.tokenCount, result.tokensPerSecond,
+                            result.draftProposedTokens, result.draftAcceptedTokens,
+                            pct, result.prefixCache))
+                        cont.resume()
+                    },
+                    onError: { err in
+                        fputs("[specbench] generation failed: \(err.localizedDescription)\n", stderr)
+                        cont.resume()
+                    }
+                )
+            }
+            return
+        }
+        if draftId == "none" {
+            print("[specbench] serial baseline (no draft)")
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                inference.generateStreamingTokens(
+                    prompt: prompt,
+                    maxTokens: maxTok,
+                    temperature: 0,
+                    onToken: { _ in },
+                    onComplete: { result in
+                        let wall = Date().timeIntervalSince(t0)
+                        print("[specbench] === OUTPUT ===")
+                        print(result.text)
+                        print(String(format:
+                            "[specbench] wall=%.1fs tokens=%d tps=%.2f (serial)",
+                            wall, result.tokenCount, result.tokensPerSecond))
+                        cont.resume()
+                    },
+                    onError: { err in
+                        fputs("[specbench] generation failed: \(err.localizedDescription)\n", stderr)
+                        cont.resume()
+                    }
+                )
+            }
+            return
+        }
+        print("[specbench] loaded; generating with draft=\(draftId) n=\(numDrafts)")
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            inference.generateWithSpeculativeDecoding(
+                prompt: prompt,
+                draftModelId: draftId,
+                numDraftTokens: numDrafts,
+                maxTokens: maxTok,
+                temperature: 0,
+                onToken: { _ in },
+                onComplete: { result in
+                    let wall = Date().timeIntervalSince(t0)
+                    let pct = result.draftProposedTokens > 0
+                        ? 100.0 * Double(result.draftAcceptedTokens) / Double(result.draftProposedTokens)
+                        : 0
+                    print("[specbench] === OUTPUT ===")
+                    print(result.text)
+                    print("[specbench] === STATS ===")
+                    print(String(format:
+                        "wall=%.1fs tokens=%d tps=%.2f drafts=%d accepted=%d (%.0f%%)",
+                        wall, result.tokenCount, result.tokensPerSecond,
+                        result.draftProposedTokens, result.draftAcceptedTokens, pct))
+                    cont.resume()
+                },
+                onError: { err in
+                    fputs("[specbench] generation failed: \(err.localizedDescription)\n", stderr)
+                    cont.resume()
+                }
+            )
+        }
     }
 
     private static func check(_ condition: @autoclosure () -> Bool, _ message: String) {

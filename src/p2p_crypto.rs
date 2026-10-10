@@ -10,10 +10,9 @@
 //! derived from the SLICKS secret already shared between trusted peers.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadCore, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
-use rand::RngCore;
 
 /// Length of the random nonce prepended to each ciphertext.
 const NONCE_LEN: usize = 12;
@@ -36,17 +35,15 @@ impl P2PCipher {
 
     /// Encrypt `plaintext` and return `[nonce || ciphertext || tag]`.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Aes256Gcm::generate_nonce(&mut rand::thread_rng());
 
         let ciphertext = self
             .cipher
-            .encrypt(nonce, Payload::from(plaintext))
+            .encrypt(&nonce, Payload::from(plaintext))
             .map_err(|e| format!("AES-256-GCM encrypt failed: {:?}", e))?;
 
         let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&nonce);
         out.extend_from_slice(&ciphertext);
         Ok(out)
     }
@@ -57,10 +54,13 @@ impl P2PCipher {
             return Err("ciphertext too short for nonce".to_string());
         }
         let (nonce_bytes, body) = ciphertext.split_at(NONCE_LEN);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce_arr: [u8; NONCE_LEN] = nonce_bytes
+            .try_into()
+            .map_err(|_| "malformed nonce".to_string())?;
+        let nonce = Nonce::from(nonce_arr);
 
         self.cipher
-            .decrypt(nonce, Payload::from(body))
+            .decrypt(&nonce, Payload::from(body))
             .map_err(|e| format!("AES-256-GCM decrypt failed: {:?}", e))
     }
 }

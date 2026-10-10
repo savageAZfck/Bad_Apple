@@ -2,7 +2,7 @@ use respawned::revert;
 use respawned::snapshot;
 use respawned::store::Store;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 fn usage() -> ! {
@@ -66,7 +66,7 @@ fn parse_args() -> Args {
     a
 }
 
-fn snapshot_dir(dir: &PathBuf, message: &str) -> Result<(), Box<dyn Error>> {
+fn snapshot_dir(dir: &Path, message: &str) -> Result<(), Box<dyn Error>> {
     if !dir.is_dir() {
         // Fresh installs have no state dir yet; a scheduled run with
         // nothing to version is a no-op, not a failure.

@@ -46,7 +46,7 @@ fn load_identity() -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("identity.key must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex_encode(id.seed()))?;
     Ok(id)
@@ -56,7 +56,7 @@ fn hex_encode(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         bail!("odd-length hex");
     }
     (0..s.len())
@@ -77,7 +77,7 @@ fn load_chain() -> Result<Chain> {
 }
 
 fn save_chain(chain: &Chain) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(
         root().join("chain.json"),
         serde_json::to_string_pretty(chain)?,

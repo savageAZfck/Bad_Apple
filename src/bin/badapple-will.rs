@@ -48,7 +48,7 @@ fn load_owner() -> Result<Identity> {
             .map_err(|_| anyhow::anyhow!("owner.key must be 32 bytes"))?;
         return Ok(Identity::from_bytes(&bytes));
     }
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     let id = Identity::generate();
     fs::write(&path, hex::encode(id.seed()))?;
     Ok(id)
@@ -64,7 +64,7 @@ fn load_will() -> Result<Will> {
 }
 
 fn save_will(will: &Will) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(will_path(), serde_json::to_string_pretty(will)?)?;
     Ok(())
 }
@@ -80,7 +80,7 @@ fn load_executor() -> Result<Executor> {
 }
 
 fn save_executor(ex: &Executor) -> Result<()> {
-    fs::create_dir_all(&root())?;
+    fs::create_dir_all(root())?;
     fs::write(
         root().join("execution.json"),
         serde_json::to_string_pretty(&ex.log)?,
@@ -142,7 +142,7 @@ fn main() -> Result<()> {
             let owner = load_owner()?;
             let hb = Heartbeat::sign(&owner);
             hb.verify()?;
-            fs::create_dir_all(&root())?;
+            fs::create_dir_all(root())?;
             fs::write(
                 root().join("last_heartbeat.json"),
                 serde_json::to_string_pretty(&hb)?,
