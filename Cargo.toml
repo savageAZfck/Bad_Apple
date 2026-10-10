@@ -145,7 +145,7 @@ mictlan = { path = "../mictlan" }
 germline = { path = "../germline" }
 tabula = { path = "../tabula", package = "tabula-rasa" }
 potlatch = { path = "../potlatch" }
-haruspex = { path = "../haruspex", package = "haruspex-macho" }
+haruspex = { package = "haruspex-macho", version = "0.3" }
 
 [patch.crates-io]
 mil_spec = { path = "../mil_spec" }
