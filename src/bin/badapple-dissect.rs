@@ -12,14 +12,19 @@
 //!   badapple-dissect strings <binary> [--min N] [--grep <pat>]
 //!   badapple-dissect audit <binary> [--save]
 //!   badapple-dissect diff <old> <new>
+//!   badapple-dissect cache list [grep]           dyld cache image index
+//!   badapple-dissect cache audit <name> [--save] carve + audit a cached image
 //!   badapple-dissect status
 
 use anyhow::{Context, Result};
-use haruspex::{audit_file, diff, strings, Report};
+use haruspex::{audit_bytes, audit_file, cache::SharedCache, diff, strings, Report};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ROOT: &str = "/var/lib/bad_apple/dissect";
+// Darwin 27 keeps the cache inside the OS cryptex, not /System/Library.
+const DYLD_CACHE: &str =
+    "/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
 
 fn root() -> PathBuf {
     std::env::var("BADAPPLE_DISSECT_DIR")
@@ -42,6 +47,8 @@ fn usage() -> ! {
          strings <binary> [--min N] [--grep <pat>]\n\
          audit <binary> [--save]        full report + flags (--save keeps it)\n\
          diff <old> <new>               what changed between two binaries\n\
+         cache list [grep]              images inside the dyld shared cache\n\
+         cache audit <name> [--save]    carve + audit a cached framework\n\
          status                         report inventory"
     );
     std::process::exit(2);
@@ -131,6 +138,57 @@ fn main() -> Result<()> {
             let a = audit_file(std::path::Path::new(old))?;
             let b = audit_file(std::path::Path::new(new))?;
             println!("{}", serde_json::to_string_pretty(&diff(&a, &b))?);
+            Ok(())
+        }
+        "cache" => {
+            let mut cache = SharedCache::open(Path::new(
+                std::env::var("BADAPPLE_DYLD_CACHE").as_deref().unwrap_or(DYLD_CACHE),
+            ))?;
+            match args.get(1).map(|s| s.as_str()) {
+                Some("list") => {
+                    cache.enumerate_images()?;
+                    let grep = args.get(2).map(|s| s.as_str());
+                    for img in &cache.images {
+                        if let Some(g) = grep {
+                            if !img.path.contains(g) {
+                                continue;
+                            }
+                        }
+                        println!("{}", img.path);
+                    }
+                }
+                Some("audit") => {
+                    let name = args.get(2).context("cache audit needs an image name")?;
+                    let (path, bytes) = cache.extract(name)?;
+                    eprintln!("carved {} ({} bytes)", path, bytes.len());
+                    let r = audit_bytes(&bytes, &path)?;
+                    println!("{}", serde_json::to_string_pretty(&r)?);
+                    if args.iter().any(|a| a == "--save") {
+                        let saved = save_report(&r)?;
+                        eprintln!("saved {}", saved.display());
+                    }
+                }
+                Some("extract") => {
+                    let name = args.get(2).context("cache extract needs an image name")?;
+                    let out = args
+                        .windows(2)
+                        .find(|w| w[0] == "-o")
+                        .map(|w| w[1].clone())
+                        .unwrap_or_else(|| {
+                            format!(
+                                "/tmp/{}.carved",
+                                name.rsplit('/').next().unwrap_or("image")
+                            )
+                        });
+                    let (path, bytes) = cache.extract(name)?;
+                    fs::write(&out, &bytes)?;
+                    eprintln!("{} -> {} ({} bytes)", path, out, bytes.len());
+                }
+                _ => {
+                    eprintln!("cache needs 'list [grep]' or 'audit <name>'");
+                    usage();
+                }
+            }
             Ok(())
         }
         "status" => {
