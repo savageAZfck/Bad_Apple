@@ -195,6 +195,7 @@ fi
     -o "${SCRATCH_DIR}/native/BadAppleMenuBar" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBar.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleTasksWindow.swift" \
+    "${REPO_ROOT}/src/platform/apple_desktop/BadAppleMenuBarChrome.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleEars.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleEyes.swift" \
     "${REPO_ROOT}/src/platform/apple_desktop/BadAppleASR.swift" \
