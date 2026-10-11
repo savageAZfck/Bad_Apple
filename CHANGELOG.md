@@ -2,6 +2,38 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.9.1] — 2026-10-11
+
+### Fixed
+- **Factual questions no longer answered with tool-call JSON**: asking
+  "what's the capital of japan?" could return a truncated
+  `{"name":"say_hello",...}` frame instead of an answer. Workshop-tool
+  routing keywords were derived from free-text descriptions, so a
+  description like "Use this whenever the user asks to greet" made
+  `the`, `use`, `for`, and `asks` routing keywords — and `the`
+  substring-matched nearly every English prompt, forcing ordinary
+  questions into tool mode (and disabling the fast tier). Derived
+  keywords now pass a stopword filter.
+- **Bare tool-call frames are sanitized**: the untagged
+  `{"name":"x","arguments":{…}}` dialect — complete or cut off by the
+  token cap — is stripped before display, history, and caching, like the
+  tagged `<tool_call>` form already was. Semantic-cache hits that are
+  entirely markup fall through to real generation instead of serving the
+  frame, and stored conversation turns are re-sanitized on replay so old
+  poisoned entries stop teaching the model to echo the format.
+- **Tool contract scoped in the system prompt**: tool calls are for
+  explicit action requests; questions, facts, and conversation are
+  answered in prose, and tool names are never invented.
+
+### Conformance
+- `touchstone/0.2` battery against the live 0.9.1 organism:
+  **conformant**. The badapple adapter now probes `perception.screen`
+  for a meaningful answer rather than a long one, and drives
+  `action.tool_ledgered` through the governed `write_file` tool into
+  `~/.bad_apple/notes` (the only directory policy allows) — the old
+  probe asked for a write outside `notes_dir`, which her governance
+  correctly refuses.
+
 ## [0.9.0] — 2026-10-10
 
 ### Added
