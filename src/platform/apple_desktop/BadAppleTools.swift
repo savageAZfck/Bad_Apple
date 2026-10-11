@@ -1166,7 +1166,7 @@ final class BadAppleToolRouter: @unchecked Sendable {
             let descWords = tool.description
                 .lowercased()
                 .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { !$0.isEmpty && $0.count > 2 }
+                .filter { !$0.isEmpty && $0.count > 2 && !Self.customKeywordStopwords.contains($0) }
             let keywords = Array(Set(nameWords + descWords)).sorted()
             return (keywords: keywords, toolNames: [tool.name])
         }
@@ -1194,6 +1194,29 @@ final class BadAppleToolRouter: @unchecked Sendable {
     }
 
     // MARK: - Keyword Maps
+
+    /// Glue words that must never become routing keywords. Custom-tool
+    /// keywords are derived from free-text descriptions ("use this whenever
+    /// the user asks to greet"); without a stopword filter a word like "the"
+    /// becomes a keyword and substring-matches nearly every English prompt,
+    /// hijacking ordinary questions into forced tool mode.
+    private static let customKeywordStopwords: Set<String> = [
+        "the", "and", "for", "that", "this", "with", "you", "your", "yours",
+        "are", "was", "were", "use", "used", "uses", "using", "user", "users",
+        "when", "whenever", "ask", "asks", "asked", "asking", "will", "would",
+        "can", "could", "should", "from", "out", "not", "all", "any", "has",
+        "have", "had", "its", "per", "via", "but", "who", "what", "how",
+        "why", "where", "which", "them", "they", "their", "there", "here",
+        "into", "onto", "than", "then", "too", "also", "just", "only",
+        "some", "someone", "something", "one", "get", "got", "make", "makes",
+        "made", "say", "says", "said", "tell", "tells", "told", "give",
+        "gives", "print", "prints", "call", "calls", "person", "name",
+        "tool", "tools", "thing", "things", "way", "new", "each", "every",
+        "about", "after", "before", "off", "own", "same", "such", "very",
+        "more", "most", "other", "another", "much", "many", "now", "always",
+        "never", "ever", "still", "again", "once", "while", "during",
+        "because", "until", "unless", "whether", "both", "either", "neither",
+    ]
 
     /// Keywords that signal the user's prompt may benefit from tool use.
     private let toolKeywords: [String] = [

@@ -8,6 +8,16 @@ final class BadAppleEngine {
     func triggerCuriousAutopilot(reason: String) {}
     func updateCuriousAutopilotLoop() {}
     func generateForSelfImprovement(prompt: String, maxTokens: Int = 500) async -> String { "" }
+    func auditDaemonEvent(type: String, data: [String: String]) {}
+    func auditProvenanceRecord(modelId: String, recordSHA256: String, signed: Bool) {}
+    func auditSpanRecord(modelId: String, recordSHA256: String,
+                         tokenStart: Int, tokenEnd: Int, signed: Bool) {}
+}
+
+enum BadAppleNotify {
+    static func push(kind: String, title: String, body: String,
+                     voice: Bool = false, debounceSeconds: TimeInterval = 300,
+                     referenceID: String? = nil) {}
 }
 
 extension NSAttributedString {
@@ -225,6 +235,18 @@ enum BadAppleNativeLogicTests {
               router.toolsForPrompt(text: "switch conversation")?.contains("[switch_conversation_thread]") == true,
               router.toolsForPrompt(text: "close conversation")?.contains("[close_conversation_thread]") == true else {
             fail("native tool keyword routing")
+        }
+
+        // Factual questions must never route into tool mode. Regression:
+        // a workshop tool whose description contained "the user asks"
+        // derived "the" as a keyword and substring-matched nearly every
+        // English prompt, forcing tool calls on knowledge questions.
+        guard router.toolsForPrompt(text: "what is the capital of japan? one word") == nil,
+              router.toolsForPrompt(text: "what's the capital of japan?") == nil,
+              router.toolsForPrompt(text: "capital of japan please") == nil,
+              router.toolsForPrompt(text: "who wrote the declaration of independence") == nil,
+              router.toolsForPrompt(text: "explain the difference between TCP and UDP") == nil else {
+            fail("factual prompts must not route to tools")
         }
 
         let policy = BadApplePolicyEngine()

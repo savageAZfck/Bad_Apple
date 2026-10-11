@@ -1148,7 +1148,11 @@ final class BadAppleEngine: @unchecked Sendable {
         conversation.loadConversation(sessionId: sessionID)
             .suffix(Self.maxHistoryTurns * 2)
             .map {
-                BadAppleInference.ChatMessage(role: $0.role, content: $0.content)
+                // Sanitize stored assistant turns at replay time too — turns
+                // written before sanitizeToolMarkup learned a dialect still
+                // carry it on disk and would teach the model to echo it.
+                let content = $0.role == "assistant" ? sanitizeToolMarkup($0.content) : $0.content
+                return BadAppleInference.ChatMessage(role: $0.role, content: content)
             }
     }
 
@@ -1699,6 +1703,13 @@ final class BadAppleEngine: @unchecked Sendable {
         var result = raw
         result = strip(#"<tool_call>[\s\S]*?</tool_call>"#, in: result)
         result = strip(#"</?tool_call>"#, in: result)
+        // Bare, untagged tool-call dialect: a {"name":"tool","arguments":{…}}
+        // object — complete or truncated by the token cap — is the model
+        // mimicking the call format, not an answer. Strip whole frames and
+        // trailing frame fragments so they can't reach the display layer or
+        // get stored into history where the model would learn to echo them.
+        result = strip(#"\{\s*"name"\s*:\s*"[A-Za-z0-9_\-]+"\s*,\s*"arguments"\s*:\s*\{[\s\S]*?\}\s*\}"#, in: result)
+        result = strip(#"\{\s*"name"\s*:\s*"[A-Za-z0-9_\-]+"\s*[,{][\s\S]*$"#, in: result)
         for name in toolRouter.registeredToolNames() {
             let escaped = NSRegularExpression.escapedPattern(for: name)
             result = strip("</?\(escaped)[^<>]*>?", in: result)
@@ -1706,10 +1717,16 @@ final class BadAppleEngine: @unchecked Sendable {
         }
         result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         if result.isEmpty && !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "I tried to run a tool but couldn't complete the call — nothing was executed."
+            return Self.toolMarkupFallback
         }
         return result
     }
+
+    /// Answer that was entirely unexecuted tool markup — kept as a named
+    /// constant so callers can tell "stripped to nothing" apart from a real
+    /// answer that happens to share the wording.
+    private static let toolMarkupFallback =
+        "I tried to run a tool but couldn't complete the call — nothing was executed."
 
     /// True when generated text mimics the approval-gate phrasing without a
     /// real pending approval behind it. The model learned this format from
@@ -2410,7 +2427,14 @@ final class BadAppleEngine: @unchecked Sendable {
             await refreshAmbientContext()
 
             let history = inferenceHistory(sessionID: sessionID)
+            var cachedResponse: String? = nil
             if !privateMode, let cached = await semanticCache.lookup(prompt: prompt, persona: persona) {
+                let sanitized = sanitizeToolMarkup(cached)
+                if sanitized != Self.toolMarkupFallback {
+                    cachedResponse = sanitized
+                }
+            }
+            if let cached = cachedResponse {
                 stateLock.withLock { _lastCacheHit = true; _lastResponseTier = "cache" }
                 auditLedger.append(
                     eventType: "cache_hit",
@@ -2418,7 +2442,10 @@ final class BadAppleEngine: @unchecked Sendable {
                     persona: persona
                 )
                 // Re-check stored text against the live firewall — content
-                // blocked after it was cached must not keep serving.
+                // blocked after it was cached must not keep serving. Same
+                // for tool-call dialects: entries written before the
+                // sanitizer learned them are dropped above rather than
+                // served as frames or fallback lines.
                 let served = outputFirewall.check(cached)
                 saveTurn(prompt: prompt, response: served, sessionID: sessionID)
                 await runtime.recordQuery(
