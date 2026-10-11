@@ -1145,15 +1145,33 @@ final class BadAppleEngine: @unchecked Sendable {
     }
 
     private func inferenceHistory(sessionID: String) -> [BadAppleInference.ChatMessage] {
-        conversation.loadConversation(sessionId: sessionID)
-            .suffix(Self.maxHistoryTurns * 2)
-            .map {
-                // Sanitize stored assistant turns at replay time too — turns
-                // written before sanitizeToolMarkup learned a dialect still
-                // carry it on disk and would teach the model to echo it.
-                let content = $0.role == "assistant" ? sanitizeToolMarkup($0.content) : $0.content
-                return BadAppleInference.ChatMessage(role: $0.role, content: content)
+        // Sanitize stored assistant turns at replay time too — turns written
+        // before sanitizeToolMarkup learned a dialect still carry it on disk.
+        // Turns that were nothing but markup (or empty) are dropped with the
+        // user turn that prompted them: replayed, a run of truncated
+        // `{"name":"x` answers teaches the model that an assistant turn ends
+        // right after the tool name, and it stops there on every call.
+        var out: [BadAppleInference.ChatMessage] = []
+        for message in conversation.loadConversation(sessionId: sessionID) {
+            guard message.role == "assistant" else {
+                out.append(BadAppleInference.ChatMessage(role: message.role, content: message.content))
+                continue
             }
+            let content = sanitizeToolMarkup(message.content)
+            if Self.isDeadToolTurn(content) {
+                if out.last?.role == "user" { out.removeLast() }
+                continue
+            }
+            out.append(BadAppleInference.ChatMessage(role: "assistant", content: content))
+        }
+        return Array(out.suffix(Self.maxHistoryTurns * 2))
+    }
+
+    /// An assistant turn that carries no answer: empty, or only unexecuted
+    /// tool markup that sanitized down to the fallback line.
+    private static func isDeadToolTurn(_ sanitized: String) -> Bool {
+        let trimmed = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == toolMarkupFallback
     }
 
     private func saveTurn(prompt: String, response: String, sessionID: String) {
@@ -1170,6 +1188,9 @@ final class BadAppleEngine: @unchecked Sendable {
         } else {
             stored = sanitizeToolMarkup(response)
         }
+        // A turn with no answer in it (empty, or a tool call that never ran)
+        // stays on the ledger but out of model-facing history.
+        if Self.isDeadToolTurn(stored) { return }
         let trimmedPrompt = prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let storedPrompt = trimmedPrompt.hasPrefix("approve ")
             || trimmedPrompt.hasPrefix("deny ")
@@ -1710,6 +1731,11 @@ final class BadAppleEngine: @unchecked Sendable {
         // get stored into history where the model would learn to echo them.
         result = strip(#"\{\s*"name"\s*:\s*"[A-Za-z0-9_\-]+"\s*,\s*"arguments"\s*:\s*\{[\s\S]*?\}\s*\}"#, in: result)
         result = strip(#"\{\s*"name"\s*:\s*"[A-Za-z0-9_\-]+"\s*[,{][\s\S]*$"#, in: result)
+        // A whole answer that is a frame: complete zero-arg
+        // `{"name":"list_watchers"}`, or cut off mid-name/after the name
+        // (`{"name":"list_schedules`). Anchored to the entire answer so JSON
+        // a user asked for inside prose is never touched.
+        result = strip(#"^\s*\{\s*"name"\s*:\s*"[A-Za-z0-9_\-]*"?\s*\}?\s*$"#, in: result)
         for name in toolRouter.registeredToolNames() {
             let escaped = NSRegularExpression.escapedPattern(for: name)
             result = strip("</?\(escaped)[^<>]*>?", in: result)
@@ -1773,6 +1799,15 @@ final class BadAppleEngine: @unchecked Sendable {
             } else {
                 calls = lastResult.toolCalls.map { (name: $0.name, args: $0.arguments) }
             }
+            // Pre-sanitize trail: what the brain actually emitted, before
+            // markup stripping and post-processing rewrite it for display.
+            auditLedger.append(
+                eventType: "tool_loop_raw",
+                data: ["iteration": iteration, "tokens": lastResult.tokenCount,
+                       "stream_calls": lastResult.toolCalls.count, "parsed_calls": calls.count,
+                       "text": String(lastResult.text.prefix(400))],
+                persona: persona
+            )
             if calls.isEmpty {
                 if iteration == 0, toolRouter.requiresHumanToolExecution(prompt) {
                     return BadAppleInference.GenerationResult(
@@ -1980,8 +2015,16 @@ final class BadAppleEngine: @unchecked Sendable {
             currentHistory.append(BadAppleInference.ChatMessage(role: "user", content: currentPrompt))
             // Strip tool markup before the model sees its own output again —
             // raw <tool_call>/<tool> text in history teaches it to echo tags.
+            // A turn that was nothing but the call must not become the
+            // sanitizer's "couldn't complete the call" line: the call ran,
+            // and telling the model otherwise right before its results makes
+            // it ignore them. Record what actually happened instead.
+            let spoken = sanitizeToolMarkup(lastResult.text)
+            let assistantTurn = spoken == Self.toolMarkupFallback
+                ? "[I called: \(calls.map(\.name).joined(separator: ", "))]"
+                : spoken
             currentHistory.append(BadAppleInference.ChatMessage(
-                role: "assistant", content: sanitizeToolMarkup(lastResult.text)))
+                role: "assistant", content: assistantTurn))
             currentPrompt = "Tool results:\n\(outputs.joined(separator: "\n"))\n\nAnswer the user's original request using these results."
         }
 
@@ -2252,7 +2295,8 @@ final class BadAppleEngine: @unchecked Sendable {
                     data: ["name": introspection.name, "result": toolOutput],
                     persona: persona
                 )
-                if ["human_home", "list_people", "conversation_threads"].contains(introspection.name) {
+                if ["human_home", "list_people", "conversation_threads",
+                    "list_watchers", "list_schedules"].contains(introspection.name) {
                     let filtered = outputFirewall.check(toolOutput)
                     auditLedger.append(
                         eventType: "response",
@@ -3161,15 +3205,23 @@ final class BadAppleEngine: @unchecked Sendable {
         VERDICT: proceed | refuse | defer — one-sentence reason
         """
 
-        let result = await generateRaw(
-            prompt: "Council question: \(question)",
-            systemPrompt: systemPrompt,
-            maxTokens: 700,
-            temperature: 0.7
-        )
+        // An empty transcript is a dead generation, not a council verdict —
+        // retry once, and keep the attempt count on the trail.
+        var result = ""
+        var attempts = 0
+        while attempts < 2, result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            attempts += 1
+            result = await generateRaw(
+                prompt: "Council question: \(question)",
+                systemPrompt: systemPrompt,
+                maxTokens: 700,
+                temperature: 0.7
+            )
+        }
         auditLedger.append(
             eventType: "council_deliberation",
-            data: ["mode": "semantic", "question": question, "transcript": result],
+            data: ["mode": "semantic", "question": question, "transcript": result,
+                   "attempts": attempts],
             persona: activePersona
         )
         return result
@@ -3323,6 +3375,28 @@ final class BadAppleEngine: @unchecked Sendable {
             "conversation threads", "list conversations", "show conversations",
         ].contains(where: { lower.contains($0) }) {
             return ("conversation_threads", [:])
+        }
+        // Read-only phrasings only: "save this to your working memory" or
+        // "clear your watchers" are writes and must reach the model/tools.
+        if [
+            "list_watchers", "list watchers", "list your watchers", "show watchers",
+            "show your watchers", "what are you watching",
+        ].contains(where: { lower.contains($0) }) {
+            return ("list_watchers", [:])
+        }
+        if [
+            "list_schedules", "list schedules", "list your schedules", "show schedules",
+            "show your schedules", "what's scheduled", "whats scheduled",
+        ].contains(where: { lower.contains($0) }) {
+            return ("list_schedules", [:])
+        }
+        if [
+            "read_working_memory", "read working memory", "read your working memory",
+            "what's in your working memory", "whats in your working memory",
+            "show your working memory", "read your scratchpad",
+            "what's in your scratchpad", "whats in your scratchpad",
+        ].contains(where: { lower.contains($0) }) {
+            return ("read_working_memory", [:])
         }
         if [
             "your history", "self history", "self-history", "what happened",
@@ -4178,6 +4252,10 @@ final class BadAppleEngine: @unchecked Sendable {
         // Rows bearing tool markup teach the adapter to *emit* markup —
         // including unterminated fragments that survived output sanitizing.
         if text.contains("<tool_call") || text.contains("</tool") { return true }
+        // Bare, untagged frames (`{"name":"say_hello",…`, often truncated)
+        // and the sanitizer's fallback line are unexecuted calls, not answers.
+        if text.range(of: #"\{\s*"name"\s*:"#, options: .regularExpression) != nil { return true }
+        if text.hasPrefix("I tried to run a tool") { return true }
         for name in toolRouter.registeredToolNames()
             where text.contains("<\(name)") || text.contains("[\(name) ") { return true }
         return false
