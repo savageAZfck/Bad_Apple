@@ -2,6 +2,51 @@
 
 All notable changes to Bad Apple are documented in this file.
 
+## [0.9.2] — 2026-10-11
+
+### Added
+- **New face — the rotten apple**: a custom-drawn rotten-apple mark (rot
+  spot, crooked stem, two drips) replaces the 🍎 emoji in the menu bar,
+  the boot splash, and the welcome screens. The menu bar glyph is a
+  template image that follows light/dark mode, with a live status dot.
+- **Cinematic boot splash**: the rotten apple strokes on in red, its drips
+  grow and fall, "BAD APPLE" types in, and a terminal boot log reports
+  real load state for the daemon, GPU brain, Neural Engine brain,
+  embeddings, governance, and the kill switch — then "> she's awake."
+  No fake progress percentages.
+- **Live status header in the menu**: a terminal-style panel showing both
+  brains, mode, autopilot, private mode, voice, memory, and query counts,
+  updating in place while the menu is open.
+- **Ask the Council…** and **Run Cert Suite…** in the menu.
+
+### Changed
+- Menu reorganized into talk / brains / governance / organs / system and
+  sized to fit a 13" screen without scrolling. Removed stale entries
+  ("Local AI Operating System", a hardcoded "Qwen 3.5 9B"), duplicate
+  items, and the duplicate ⌘, binding.
+
+### Fixed
+- **Conversational tool calls were cut off mid-frame**
+  (`{"name":"read_working_memory` and stop), so nothing ran. The nightly
+  dream adapter had trained on ledger pairs whose answers were truncated
+  bare tool frames, and replayed history full of the same fragments
+  reinforced it. Dream curation now skips bare frames and fallback lines;
+  history replay drops dead tool turns; the sanitizer catches whole-answer
+  zero-arg and cut-off frames; and the tool loop no longer tells the brain
+  its executed call "couldn't complete" right before handing it the
+  results. If your organism's answers stop after one line or mid-tool-
+  call, set `/var/lib/bad_apple/lora_adapters/dream` aside and let the
+  next dream retrain on clean data.
+- Read-only questions about watchers, schedules, and working memory run
+  the real tool directly.
+- The council retries an empty transcript once.
+- The boot splash never saw "ready" (it read status fields the daemon
+  doesn't report) and only closed on a 90-second timer.
+
+### Audit
+- New `tool_loop_raw` ledger event records what the brain emitted before
+  sanitizing, so tool-call failures are traceable.
+
 ## [0.9.1] — 2026-10-11
 
 ### Fixed
