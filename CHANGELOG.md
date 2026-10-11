@@ -34,6 +34,16 @@ All notable changes to Bad Apple are documented in this file.
   emits a declarative `ProbeSpec`, and the harness validates, persists
   (0600, ≤64 FIFO), executes, and appends to the hash-chained findings
   log. Specs are interpreted, never compiled.
+- **Dissect learns code analysis and cache carving**: `badapple-dissect`
+  grows `funcs`/`disasm`/`hunt` over standalone Mach-O files and over
+  private frameworks carved directly out of the dyld shared cache — she
+  can read the closed frameworks she runs on without external tools.
+- **ANE conformance harness for the direct e5rt path**
+  (`tools/ane_conform.swift`, `tools/ane_layer_probe.swift`): the
+  e5rt-routed decode of the sharded 4B ANE brain is verified
+  token-for-token against the CoreML `MLModel` path — identical hidden
+  states across all 36 layers and identical argmax sequences once
+  head-output strides are honored.
 - Dashboard and Control Center updates; mesh step/reset/vstep probe
   examples.
 
@@ -42,6 +52,8 @@ All notable changes to Bad Apple are documented in this file.
   picks up shape ranges, the corrected `MLComputeUnits` mapping, the
   `MLComputePlan` reader, sharded-bundle conversion, and fused KV
   state writes from the published toolchain.
+- `haruspex-macho` now builds from the published crates.io 0.3.0
+  release (path dependency dropped).
 
 ## [0.8.0] — 2026-10-07
 
