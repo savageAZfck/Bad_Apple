@@ -115,7 +115,8 @@ ciborium = "0.2"
 libc = "0.2"
 memmap2 = "0.9.11"
 half = "2"
-mil_spec = "0.4.1"
+mil_spec = "0.4.2"
+mil_infer = "0.5.0"
 mil_machines = "0.2.0"
 mil_compile = "0.2.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -130,9 +131,9 @@ hf-chat-template = "1.0.0"
 ureq = "3.4"
 urlencoding = "2.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
-sovereign_ledger = "0.3.1"
-respawned = "0.3"
-flight_tape = "0.1"
+sovereign_ledger = "0.3.3"
+respawned = "0.4.1"
+flight_tape = "0.1.6"
 nagi = { path = "../nagi", package = "nagi-escrow" }
 wolakota = { path = "../wolakota" }
 kola = { path = "../kola", package = "kola-witness" }
@@ -149,6 +150,9 @@ haruspex = { package = "haruspex-macho", version = "0.3" }
 
 [patch.crates-io]
 mil_spec = { path = "../mil_spec" }
+mil_infer = { path = "../mil_spec/crates/mil_infer" }
+mil_machines = { path = "../mil_spec/crates/mil_machines" }
+mil_compile = { path = "../mil_spec/crates/mil_compile" }
 
 [build-dependencies]
 cbindgen = "0.29"

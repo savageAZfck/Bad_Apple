@@ -19,7 +19,12 @@ cask "bad-apple" do
   postflight_steps do
     # Keep a pristine, persistent copy of the platform per version so the
     # LaunchDaemons and menu bar app continue to work after Homebrew cleans
-    # up the staged download.
+    # up the staged download. Create the versioned state root first: on a
+    # cold install ~/.bad_apple does not exist yet and the copy fails.
+    run "/bin/mkdir",
+        args: ["-p", "#{Dir.home}/.bad_apple/versions/{{version}}"],
+        must_succeed: true
+
     copy "Bad_Apple-{{version}}-unsigned",
          ".bad_apple/versions/{{version}}/Bad_Apple-{{version}}-unsigned",
          source_base: :staged_path,

@@ -650,6 +650,9 @@ fn is_stop_token(token: &str) -> bool {
 
 fn bridge_paths() -> Vec<PathBuf> {
     let mut paths = vec![
+        PathBuf::from("libBadAppleANEBridge.dylib"),
+        PathBuf::from("target/release/libBadAppleANEBridge.dylib"),
+        PathBuf::from("../mil_spec/target/release/libBadAppleANEBridge.dylib"),
         PathBuf::from("libBadAppleBridge.dylib"),
         PathBuf::from("target/release/libBadAppleBridge.dylib"),
         PathBuf::from("target/debug/libBadAppleBridge.dylib"),
@@ -660,6 +663,7 @@ fn bridge_paths() -> Vec<PathBuf> {
     if let Ok(executable) = std::env::current_exe() {
         if let Some(parent) = executable.parent() {
             paths.insert(0, parent.join("libBadAppleBridge.dylib"));
+            paths.insert(0, parent.join("libBadAppleANEBridge.dylib"));
         }
     }
     paths

@@ -1468,7 +1468,12 @@ and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.
 - `BadAppleTools.runShell` blocks execution-spawning `find` arguments (`-exec`, `-ok`, `;`, `{}`, `-delete`, `xargs`), and `runAppleScript` rejects additional bypass patterns (`do javascript`, `open location`, `keystroke`, `key code`, `current application`, `current application's`).
 - `BadAppleModelManager` no longer forces `HF_HUB_OFFLINE=0` during downloads; the daemon's `set_allow_downloads` handler defaults to off and respects the configured policy.
 
-## ANE 14B split-brain (this session)
+## ANE 14B split-brain (experiment — superseded)
+
+> Historical: the 14B GPU+ANE split was an experiment. The live setup is the
+> Qwen3-8B (GPU, MLX) + Qwen3-4B (ANE) dual brain — see "Lessons from the
+> Qwen3-8B + Qwen3-4B two-brain rollout" above. Notes below are kept as
+> reference for the mesh/ANE-tail machinery.
 
 - `src/bin/badapple-aneconvert-legacy.rs` — write-mask (ios19-protocol) emit grafted with a dequant read path for MLX 4-bit checkpoints. This emit (commit `5467846` lineage) is the one that plan-builds reliably and produced the deployed `qwen3b_v2` artifacts.
 - **Quant scales/biases are BF16, not F16** — `dequant_mlx_q4` must decode them with `half::bf16`. Reading as f16 silently poisons every weight (deterministic garbage logits). Nibble order is LSB-first (`(word >> 4*j) & 0xF`), `w = scale*q + bias`, `scales[r][i/group]`.
@@ -1497,5 +1502,5 @@ and set `BADAPPLE_MODEL_REVISION` to it, then restart the daemon.
 - Switching to `q14_mesh` is a full exchange, not an overlay: `unloadModels()` drops the prior local `ModelContainer` + fast tier, `setMeshReady` + `Memory.clearCache()` release MLX/Metal buffers, `runtime.releaseModelMemory` frees the reservation, and `unload()` now also clears `meshHost`/`meshTokenizer`/prefix cache so switching back to a local model is clean.
 - `inference.isMeshBacked` (`meshHost != nil`) gates secondary tiers OFF: fast-tier routing, the ANE drafter session, and speculative-draft dispatch are skipped — no local secondary model can engage while the mesh is the brain. `switchMainModel` also calls `BadAppleANEDrafter.shared.unload` when landing on a mesh model.
 - `model use` now `markUnloaded`s every other `loaded` profile before `markLoaded` — the registry can't show two resident mains anymore.
-- `BADAPPLE_MAIN_MODEL=q14_mesh` is the daemon default in `com.badapple.mlx.plist` (installed plist too): boot goes straight to the mesh and never loads the 7B. Startup `loadModel()` resolves custom `local_path` the same way `switchMainModel` does (`modelDirectory(for:)`). Caveat: if ranks are down at boot the eager/lazy load fails — bring ranks up (`tools/mesh14_up.sh`) then `badapple model use q14_mesh` or issue any query to retry.
+- (Superseded: the installed plist now sets `BADAPPLE_MAIN_MODEL=mlx-community/Qwen3-8B-4bit` with `BADAPPLE_ANE_BRAIN=1`.) During the 14B experiment, `BADAPPLE_MAIN_MODEL=q14_mesh` was the daemon default in `com.badapple.mlx.plist` (installed plist too): boot goes straight to the mesh and never loads the 7B. Startup `loadModel()` resolves custom `local_path` the same way `switchMainModel` does (`modelDirectory(for:)`). Caveat: if ranks are down at boot the eager/lazy load fails — bring ranks up (`tools/mesh14_up.sh`) then `badapple model use q14_mesh` or issue any query to retry.
 - The daemon's residual ~2.7 GB resident while mesh-backed is the ANE organisms (sentinel/council/drafter brain ~1.9 GiB) + embedding model — NOT the old 7B. Verify with `vmmap <pid> | grep -c Qwen2.5-Coder` (expect 0).

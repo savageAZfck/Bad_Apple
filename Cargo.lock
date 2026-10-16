@@ -300,6 +300,7 @@ dependencies = [
  "metal",
  "mictlan",
  "mil_compile",
+ "mil_infer",
  "mil_machines",
  "mil_spec",
  "nagi-escrow",
@@ -311,7 +312,7 @@ dependencies = [
  "rand 0.8.8",
  "redb",
  "regex",
- "respawned",
+ "respawned 0.4.1",
  "safetensors 0.7.0",
  "serde",
  "serde_json",
@@ -1393,9 +1394,9 @@ dependencies = [
 
 [[package]]
 name = "flight_tape"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "332544c9bc7fea99daa7357b7b1fac982772bb916c90e652e1f7fed98c6f39b8"
+checksum = "077996e70052a86cd8a6665abb6f73969c37f89bb7b8fb36ed9ebfe6e95ac7bb"
 dependencies = [
  "chrono",
  "clap",
@@ -1404,7 +1405,7 @@ dependencies = [
  "libc",
  "rand 0.8.8",
  "regex",
- "respawned",
+ "respawned 0.3.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2408,24 +2409,30 @@ dependencies = [
 [[package]]
 name = "mil_compile"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1601a7ca3495f4daea961d0db304e8a4df36a1f41501433263fff7a96005fd01"
 dependencies = [
  "mil_spec",
 ]
 
 [[package]]
+name = "mil_infer"
+version = "0.5.0"
+dependencies = [
+ "half",
+ "mil_compile",
+ "mil_spec",
+ "serde_json",
+]
+
+[[package]]
 name = "mil_machines"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7619370f4c2bfe4169b35230a84681a93b34141405d052b2cd0ec0f7d129ce6"
 dependencies = [
  "mil_spec",
 ]
 
 [[package]]
 name = "mil_spec"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "half",
 ]
@@ -3305,6 +3312,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "respawned"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fac02b1d8561e3b20d83fd6531fd48ab917f6a8f0dc9c4b9be9aaf9fe933aca2"
+dependencies = [
+ "blake3",
+ "clap",
+ "ed25519-dalek",
+ "fastcdc",
+ "fs2",
+ "getrandom 0.2.17",
+ "hex",
+ "notify",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "snow",
+ "walkdir",
+ "zstd",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3701,9 +3730,9 @@ dependencies = [
 
 [[package]]
 name = "sovereign_ledger"
-version = "0.3.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8865c3add00b521376725c6f44036bc21a3ed5c5111c8129785b7d1f1415505"
+checksum = "92fd82a6568d84f49fed6a710eeaa22571d821cee4e80b90620de7ce3778a15a"
 dependencies = [
  "base64 0.22.1",
  "chrono",

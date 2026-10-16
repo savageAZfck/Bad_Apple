@@ -23,6 +23,7 @@ pub mod benchmark;
 pub mod cert;
 pub mod config;
 pub mod firewall_machine;
+pub use mil_infer;
 pub use mil_spec;
 
 pub mod ify;
