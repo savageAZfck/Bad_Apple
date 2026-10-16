@@ -36,6 +36,7 @@ BINS=(
 
 # Libraries required at runtime.
 LIBS=(
+    libBadAppleANEBridge.dylib
     libBadAppleBridge.dylib
     libBadAppleMLX.dylib
     libbad_apple.dylib
