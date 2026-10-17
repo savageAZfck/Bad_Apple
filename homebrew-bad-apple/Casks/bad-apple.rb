@@ -79,9 +79,9 @@ cask "bad-apple" do
     quarantine flag during install, but if you see a warning, run:
       xattr -dr com.apple.quarantine "/Applications/Bad Apple.app"
 
-    The system daemons are installed during this cask. The 7B model is
-    downloaded on first use only if you allow downloads in the menu bar or set
-    BADAPPLE_ALLOW_DOWNLOADS=1. For an air-gap install, seed the model cache
-    before the first query.
+    The system daemons are installed during this cask. The main GPU brain
+    (Qwen3-8B-4bit by default) is downloaded on first use only if you allow
+    downloads in the menu bar or set BADAPPLE_ALLOW_DOWNLOADS=1. For an
+    air-gap install, seed the model cache before the first query.
   EOS
 end
