@@ -134,25 +134,19 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 sovereign_ledger = "0.3.3"
 respawned = "0.4.1"
 flight_tape = "0.1.6"
-nagi = { path = "../nagi", package = "nagi-escrow" }
-wolakota = { path = "../wolakota" }
-kola = { path = "../kola", package = "kola-witness" }
-bicameral = { path = "../bicameral" }
-axon = { path = "../axon", package = "axon-reflex" }
-nagual = { path = "../nagual" }
-eidolon = { path = "../eidolon", package = "eidolon-replay" }
-sibyl = { path = "../sibyl", package = "sibyl-gate" }
-mictlan = { path = "../mictlan" }
-germline = { path = "../germline" }
-tabula = { path = "../tabula", package = "tabula-rasa" }
-potlatch = { path = "../potlatch" }
+nagi = { version = "0.1.1", package = "nagi-escrow" }
+wolakota = "0.1.1"
+kola = { version = "0.1.0", package = "kola-witness" }
+bicameral = "0.1.1"
+axon = { version = "0.1.1", package = "axon-reflex" }
+nagual = "0.1.0"
+eidolon = { version = "0.1.1", package = "eidolon-replay" }
+sibyl = { version = "0.1.0", package = "sibyl-gate" }
+mictlan = "0.1.0"
+germline = "0.1.0"
+tabula = { version = "0.1.0", package = "tabula-rasa" }
+potlatch = "0.1.0"
 haruspex = { package = "haruspex-macho", version = "0.3" }
-
-[patch.crates-io]
-mil_spec = { path = "../mil_spec" }
-mil_infer = { path = "../mil_spec/crates/mil_infer" }
-mil_machines = { path = "../mil_spec/crates/mil_machines" }
-mil_compile = { path = "../mil_spec/crates/mil_compile" }
 
 [build-dependencies]
 cbindgen = "0.29"

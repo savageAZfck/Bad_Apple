@@ -1789,8 +1789,10 @@ public final class BadAppleInference: @unchecked Sendable {
 // MARK: - Convenience
 
 public extension BadAppleInference {
-    /// Default launchd model: Qwen2.5-Coder-7B 4-bit. The 9B is a switchable
-    /// option via `badapple model use` or `BADAPPLE_MAIN_MODEL`.
+    /// Code-level default: Qwen2.5-Coder-7B 4-bit, used when
+    /// `BADAPPLE_MAIN_MODEL` is unset. The shipped launchd plist pins
+    /// `mlx-community/Qwen3-8B-4bit` as the live GPU brain; other models are
+    /// switchable via `badapple model use` or `BADAPPLE_MAIN_MODEL`.
     public static let defaultConfig = ModelConfig(
         modelId: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
         revision: "main",

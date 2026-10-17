@@ -13,7 +13,7 @@ say() {
   sleep 1.5
 }
 
-cd /Users/savag3/bad_apple
+cd "$(dirname "$0")"
 
 say target/release/badapple status
 say target/release/badapple "who are you and what do you run on"

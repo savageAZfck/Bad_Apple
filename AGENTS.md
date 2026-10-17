@@ -4,7 +4,7 @@ This file captures the project-specific commands and conventions learned while w
 
 ## Project layout
 
-- `target/release/badapple-engine` — Native Swift MLX daemon. Loads the 7B Qwen 2.5 Coder model and serves the SLICKS Unix socket.
+- `target/release/badapple-engine` — Native Swift MLX daemon. Loads the GPU brain (`mlx-community/Qwen3-8B-4bit` per the shipped launchd plist; `BADAPPLE_MAIN_MODEL` overrides, code-level default is `Qwen2.5-Coder-7B-Instruct-4bit`) and serves the SLICKS Unix socket.
 - `src/bin/badapple.rs` + `src/` — Rust CLI client that talks to the daemon.
 - `src/platform/apple_bridge/com.badapple.mlx.plist` — launchd daemon config.
 - `prompt.txt` — Hot-reloadable system prompt. Edits take effect on the next query without restarting the model.

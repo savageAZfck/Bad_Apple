@@ -359,11 +359,12 @@ struct BadAppleMLXSelfTest {
         if draftId == "ane" {
             print("[specbench] ANE drafter path (0.6B on ANE → 14B verify on GPU) n=\(numDrafts)")
             // Bridge symbols resolve via RTLD_DEFAULT — dlopen the dylib.
+            let repoDir = env["BADAPPLE_REPO"] ?? FileManager.default.currentDirectoryPath
             let bridgePath = env["SPEC_BENCH_BRIDGE"]
-                ?? "/Users/savag3/bad_apple/target/release/libBadAppleBridge.dylib"
+                ?? "\(repoDir)/target/release/libBadAppleBridge.dylib"
             // The bridge flat-namespaces into the Rust core — load it first.
             let rustPath = env["SPEC_BENCH_RUST"]
-                ?? "/Users/savag3/bad_apple/target/release/libbad_apple.dylib"
+                ?? "\(repoDir)/target/release/libbad_apple.dylib"
             guard dlopen(rustPath, RTLD_NOW | RTLD_GLOBAL) != nil else {
                 fail("dlopen(\(rustPath)) failed: \(String(cString: dlerror()))")
             }

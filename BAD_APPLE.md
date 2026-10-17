@@ -1,6 +1,6 @@
 # Bad Apple — Bare-Metal AI Operating System for macOS
 
-Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. It runs a 7B Qwen 2.5 Coder as the default model on Apple Silicon using MLX, with a 9B Qwen 3.5 model as a switchable option. It answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
+Bad Apple is a self-hosted, air-gapped personal AGI operating system for macOS. It runs Qwen3-8B 4-bit as the shipped launchd default on Apple Silicon using MLX (the code-level default remains Qwen2.5-Coder-7B 4-bit), with additional models — such as a 9B Qwen 3.5 — switchable at runtime through the model registry. It answers questions, runs local tools, indexes your files, and speaks responses through a local neural TTS server — all without sending anything to the cloud after the models are downloaded once.
 
 Internally it is built as a supervised **actor OS**: every major subsystem — resources, circuit breakers, workspace, persona, P2P, MCP, health, audit, cache, and model registry — runs as a dedicated actor. The Rust CLI, the menu bar, and any MCP client authenticate to the daemon through **SLICKS v2**, a hardware-bound challenge/response protocol signed by the Apple Secure Enclave.
 
@@ -10,12 +10,13 @@ Bad Apple is also a **continuity-of-self layer**: identity is bound to owner-hel
 
 ## Brains / Models
 
-The runtime now uses a 7B Qwen 2.5 Coder 4-bit brain as the default for both text and voice, with a 9B Qwen 3.5 4-bit brain available as a switchable option. There is no separate voice bundle to swap in and out, which removes the old multi-second mode-switching lag.
+The shipped daemon plist pins `BADAPPLE_MAIN_MODEL=mlx-community/Qwen3-8B-4bit` as the live GPU brain for both text and voice. The code-level default remains the 7B Qwen 2.5 Coder 4-bit brain (used when the env var is unset), and other models — such as a 9B Qwen 3.5 4-bit — remain switchable via `badapple model use` / `BADAPPLE_MAIN_MODEL`. There is no separate voice bundle to swap in and out, which removes the old multi-second mode-switching lag.
 
 | Component | Model | Size | Role |
 |---|---|---|---|
-| Target LLM (default) | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | ~4.2 GB | Coding, general chat, and tool reasoning |
-| Target LLM (switchable) | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | Heavier general reasoning: `badapple model use main_9b` |
+| Target LLM (shipped launchd default) | `mlx-community/Qwen3-8B-4bit` | ~4.7 GB | General chat, tool reasoning, voice |
+| Target LLM (code default / fallback) | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | ~4.2 GB | Coding, general chat, and tool reasoning |
+| Target LLM (switchable) | `caiovicentino1/Qwen3.5-9B-HLWQ-MLX-4bit` | ~6.2 GB | Heavier general reasoning: `badapple model use <ref>` |
 | Speculative draft (armed) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Resident draft model — proposes tokens, the 7B verifies; `BADAPPLE_SPECULATIVE_DRAFT` in the daemon plist |
 | Fast tier (config-gated) | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` | ~0.3 GB | Optional instant-answer tier; needs `BADAPPLE_FAST_TIER=1` + `BADAPPLE_FAST_MODEL` set |
 | RAG embeddings | `BAAI/bge-small-en-v1.5` | small | Local sentence-transformer on CPU |
@@ -27,9 +28,9 @@ All models are downloaded and cached on the Mac. At runtime, **no prompt, respon
 
 ## Speed / Token Throughput
 
-Live numbers from the daemon log on a 16 GB Apple Silicon M-series Mac. The default is the 7B brain; the 9B numbers are from the optional `main_9b` profile.
+Live numbers from the daemon log on a 16 GB Apple Silicon M-series Mac. These runs were measured on the 7B Coder brain (the code-level default); the shipped launchd default is now Qwen3-8B-4bit — treat the table below as representative of the 7B-class tier rather than a re-measurement of the 8B.
 
-### Text mode (7B, default)
+### Text mode (7B-class, measured)
 
 Observed ranges on a 16 GB Apple Silicon Mac with the 7B Coder brain loaded:
 
@@ -45,7 +46,7 @@ Observed ranges on a 16 GB Apple Silicon Mac with the 7B Coder brain loaded:
 - Typical decode throughput: **~16–23 tok/s**, with a suite average of **19.6 tok/s** on this quant once the model is warm and no build is running.
 - Peak memory stays **~4.1 GB** (main brain) plus ~0.3 GB for the resident draft.
 - **Prompt-prefix KV cache (new):** the stable persona/identity head of the system prompt is evaluated once and reused every turn — measured **~47% lower wall time per query** (median 9.5 s vs 17.9 s on short answers). Token-exact boundary verification, auto-invalidates on persona/model change, `BADAPPLE_PREFIX_CACHE=0` disables.
-- **Speculative decoding (armed):** the resident 0.5B drafts tokens, the 7B verifies in one pass. `BADAPPLE_NUM_DRAFT_TOKENS` tunes proposals per round.
+- **Speculative decoding (armed):** the resident 0.5B drafts tokens, the main brain verifies in one pass. `BADAPPLE_NUM_DRAFT_TOKENS` tunes proposals per round.
 - **Important:** running `cargo build`, `swift build`, or packaging immediately before benchmarking will increase swap and can drop tok/s by 25-40%. Run the benchmark after the build has finished and the system has had ~30-60 s to settle.
 
 ### Text mode (9B, switchable)
@@ -81,11 +82,11 @@ When `BADAPPLE_FAST_TIER=1`, simple queries route through `mlx-community/Qwen2.5
 - Typical decode throughput: **~90–235 tok/s**.
 - Peak memory: **~0.33 GB**.
 
-Fast tier handles greetings, identity, time, simple math, and other deterministic/patterned queries. Non-trivial reasoning falls through to the 7B Coder brain by default, or to the 9B brain if it is active.
+Fast tier handles greetings, identity, time, simple math, and other deterministic/patterned queries. Non-trivial reasoning falls through to the main GPU brain, whichever model is active.
 
 ### Voice mode
 
-Voice uses the 7B brain by default. When fast tier is on, short voice greetings and commands can also hit the 0.5B model. Switch to the 9B brain with `badapple model use main_9b`.
+Voice uses the main GPU brain (shipped default: Qwen3-8B-4bit). When fast tier is on, short voice greetings and commands can also hit the 0.5B model. Switch brains with `badapple model use <ref>`.
 
 ### Inference tuning
 
@@ -94,13 +95,13 @@ Voice uses the 7B brain by default. When fast tier is on, short voice greetings 
 - `BADAPPLE_PREFIX_CACHE=1` — on by default: the stable persona/identity head of the system prompt is evaluated once and reused each turn (token-exact verified, model-keyed, fails closed to plain prefill). Set `0` to disable.
 - `BADAPPLE_FAST_TIER=1` — the 0.5B fast model is enabled for appropriate queries; also requires `BADAPPLE_FAST_MODEL` to be set (empty by default).
 - `prefill_step_size=2048` and `max_kv_size=2048` are the installer defaults on a 16 GB Mac; they keep prompt encoding in one or two shots and bound KV-cache growth. Set them higher if you have 32 GB+ and need longer context.
-- `prompt.txt` is hot-reloaded and kept compact; the 7B/9B chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
+- `prompt.txt` is hot-reloaded and kept compact; the chat template only receives a focused subset of tool schemas per query, cutting prefill latency for tool-heavy prompts.
 
 ---
 
 ## What Bad Apple can do
 
-Bad Apple is a private, on-device personal AGI for macOS. It runs a 7B Qwen 2.5 Coder brain on Apple Silicon using MLX — accelerated by a resident 0.5B speculative draft and a reusable prompt-prefix KV cache — with a 9B Qwen 3.5 brain as a switchable option. It answers questions, runs local tools, indexes files, watches conditions, holds standing orders, anticipates your calendar, guards the machine's perimeter, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
+Bad Apple is a private, on-device personal AGI for macOS. It runs an 8B Qwen 3 brain on Apple Silicon using MLX (code-level default: 7B Qwen 2.5 Coder) — accelerated by a resident 0.5B speculative draft and a reusable prompt-prefix KV cache — with other brains such as a 9B Qwen 3.5 switchable via the model registry. It answers questions, runs local tools, indexes files, watches conditions, holds standing orders, anticipates your calendar, guards the machine's perimeter, and speaks responses through a native AVFoundation TTS server. After the models are downloaded once, **no prompt, response, or action leaves the Mac**.
 
 When asked, it can say:
 
@@ -110,7 +111,7 @@ When asked, it can say:
 
 ### Core
 
-- **Local Qwen 2.5 Coder 7B inference** on Apple Silicon GPU (MLX); 9B Qwen 3.5 switchable
+- **Local Qwen 3 8B inference** on Apple Silicon GPU (MLX; Qwen 2.5 Coder 7B code default, 9B Qwen 3.5 and others switchable)
 - **0.5B fast tier** for instant greetings, identity, time, simple math, and deterministic queries
 - **Single main brain** for both text and voice, no dual-model swap
 - **Streaming token output** to terminal or TTS
@@ -318,7 +319,7 @@ New flags:
 ┌───────────────────────────────────────┐
 │  com.badapple.mlx                     │
 │  badapple-engine (Swift MLX)          │
-│  - loads single 9B target + optional small draft │
+│  - loads single main brain + optional small draft │
 │  - actor-ized subsystems              │
 │  - runs tools, memory, RAG, TTS, P2P, │
 │    MCP marketplace                    │

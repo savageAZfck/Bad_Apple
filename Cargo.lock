@@ -175,6 +175,8 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "axon-reflex"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10b3d55a170d11164920b19c813ed7fd1c8b463c3167328d9ed085fc2d23b92c"
 dependencies = [
  "hex",
  "serde",
@@ -371,6 +373,8 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "bicameral"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5026ef876d546f3bf961e59d129c380042462ccc1a4e4df749d75ab1b235b243"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -1259,6 +1263,8 @@ dependencies = [
 [[package]]
 name = "eidolon-replay"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15bf6a80147ad6b69873881c3278612363f3b798b6fbc32a3265ae79ba76e1ba"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -1795,6 +1801,8 @@ dependencies = [
 [[package]]
 name = "germline"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7565ec4c38eff9335816f8917d68c2faf61832da2c1b54325f4d67955d1a475d"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2198,6 +2206,8 @@ dependencies = [
 [[package]]
 name = "kola-witness"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed880b8b9588a5f9ff11d1300fbe13138496168fbb26a60487524dfbf83659d2"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2397,6 +2407,8 @@ dependencies = [
 [[package]]
 name = "mictlan"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e34c0fe5dc5c5a2a8f84421dda8f9b3b96c32239b2d781eb83fb9a700b3bf16"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2409,13 +2421,17 @@ dependencies = [
 [[package]]
 name = "mil_compile"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1601a7ca3495f4daea961d0db304e8a4df36a1f41501433263fff7a96005fd01"
 dependencies = [
  "mil_spec",
 ]
 
 [[package]]
 name = "mil_infer"
-version = "0.5.0"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a82e5e1427e43c23548e84e57525953b9a000843ad51db0bb0d2eef6e9514e0f"
 dependencies = [
  "half",
  "mil_compile",
@@ -2426,6 +2442,8 @@ dependencies = [
 [[package]]
 name = "mil_machines"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7619370f4c2bfe4169b35230a84681a93b34141405d052b2cd0ec0f7d129ce6"
 dependencies = [
  "mil_spec",
 ]
@@ -2433,6 +2451,8 @@ dependencies = [
 [[package]]
 name = "mil_spec"
 version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d571e389a61a72d727787602db5699b2c1dae2215eabb43966d43c3866959ab0"
 dependencies = [
  "half",
 ]
@@ -2545,6 +2565,8 @@ checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 [[package]]
 name = "nagi-escrow"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25b03258e8e089039d6b15c56857311bf094525b54f751101ba816aba8c3a208"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2557,6 +2579,8 @@ dependencies = [
 [[package]]
 name = "nagual"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f78891f2fcbeac573f1077273ce6be53f42682e3d9a5bdfcfe60da0486dd6ec1"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2992,6 +3016,8 @@ checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 [[package]]
 name = "potlatch"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1e4592817b23fd7e467232c3e43959ed29f34a942279c0b1a85ee9f291181d9"
 dependencies = [
  "ed25519-dalek",
  "rand 0.8.8",
@@ -3644,6 +3670,8 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "sibyl-gate"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "224f7d81d69433cc89267188a1fba35ccece9f9fae6dd68db8dc04f597626357"
 dependencies = [
  "aes-gcm",
  "ed25519-dalek",
@@ -3914,6 +3942,8 @@ dependencies = [
 [[package]]
 name = "tabula-rasa"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "583ddb6fe1c08716ac3becf690f4b52e33c702c1d08562bd8f542e5e7952e3bc"
 dependencies = [
  "ed25519-dalek",
  "rand 0.8.8",
@@ -4884,6 +4914,8 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wolakota"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d18186fb9ab1cb28a8ee4c3db5a3df906beab66999affedec4d99b82c512febb"
 dependencies = [
  "ed25519-dalek",
  "hex",

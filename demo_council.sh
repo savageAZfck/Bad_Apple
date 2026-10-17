@@ -13,7 +13,7 @@ say() {
   sleep 1.5
 }
 
-cd /Users/savag3/bad_apple
+cd "$(dirname "$0")"
 
 say target/release/badapple "council"
 say target/release/badapple "list the files in /tmp"

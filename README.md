@@ -22,7 +22,7 @@ bar — with the parts a creature needs, not just the parts a demo needs:
 
 | Organ | Implementation |
 |---|---|
-| **Main brain** | Qwen2.5-Coder-7B, 4-bit, MLX, on the **GPU** (~16–23 tok/s warm) |
+| **Main brain** | Qwen3-8B, 4-bit, MLX, on the **GPU** (launchd default; Qwen2.5-Coder-7B remains the code-level fallback, switchable via `badapple model use`/`BADAPPLE_MAIN_MODEL`) |
 | **Second brain** | Qwen3-4B, int8, sharded stateful CoreML, on the **Neural Engine** (~7–10 tok/s at <1% CPU — 100% of runtime ops prefer ANE) |
 | **Reflexes** | Qwen2.5-0.5B fast tier for simple queries — answers without waking a big brain |
 | **Eyes** | Screen capture → Qwen2-VL-2B change-narration → `Saw:` percepts |
@@ -176,7 +176,7 @@ badapple CLI / menu bar / voice / dashboard (127.0.0.1:8787)
               │
               ▼
    badapple-engine  (Swift daemon — the organism's body)
-   ├─ Brain GPU:  Qwen2.5-Coder-7B 4-bit via MLX
+   ├─ Brain GPU:  Qwen3-8B 4-bit via MLX (Qwen2.5-Coder-7B fallback)
    │              + resident 0.5B fast tier
    │              + reusable prompt-prefix KV cache
    ├─ Brain ANE:  Qwen3-4B int8 via sharded stateful CoreML
@@ -249,7 +249,7 @@ The short version:
   that keeps your data home keeps remote control out.
 - **Unsigned binaries.** Until notarization lands, first install shows a
   Gatekeeper warning. That is a real UX cost, stated plainly.
-- **Local model ceiling.** The brains are 7B/4B-class open weights — not
+- **Local model ceiling.** The brains are 8B/4B-class open weights — not
   frontier cloud scale. The organism's answer is swappable brains and mesh
   federation: better open models drop in without touching memory, identity,
   or governance.
