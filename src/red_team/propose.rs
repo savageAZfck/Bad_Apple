@@ -392,6 +392,7 @@ mod tests {
         record_result(&r()).unwrap();
         record_result(&r()).unwrap();
         let n = verify_findings_log(&path);
+        std::env::remove_var("BADAPPLE_RED_TEAM_DIR");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(n.unwrap(), 2);
     }

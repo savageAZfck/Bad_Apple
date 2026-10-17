@@ -973,6 +973,10 @@ pub fn unexpected_frame(frame: &ClientFrame) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate the process-global BADAPPLE_SERVER_KEY_PATH.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn slicks_handshake_proofs_are_bound_to_prompt_and_nonces() {
@@ -1181,6 +1185,7 @@ mod tests {
     /// Verify TOFU returns None when no trust store file exists.
     #[test]
     fn v2_pinned_server_pubkey_returns_none_when_missing() {
+        let _g = ENV_LOCK.lock().unwrap();
         // Point to a path in a nonexistent directory.
         std::env::set_var(
             "BADAPPLE_SERVER_KEY_PATH",
@@ -1197,6 +1202,7 @@ mod tests {
     /// Pin a server public key, then verify it is returned by v2_pinned_server_pubkey.
     #[test]
     fn v2_pin_and_verify_server_pubkey() {
+        let _g = ENV_LOCK.lock().unwrap();
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
 

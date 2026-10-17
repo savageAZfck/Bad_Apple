@@ -457,9 +457,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate process-global BADAPPLE_WATCH_PATHS/CLI.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn index_refresh_empty_registry_is_noop() {
+        let _g = ENV_LOCK.lock().unwrap();
         let file = std::env::temp_dir().join(format!("ba-sup-watch-{}", std::process::id()));
         std::fs::write(&file, "").unwrap();
         std::env::set_var("BADAPPLE_WATCH_PATHS", &file);
@@ -472,6 +477,7 @@ mod tests {
 
     #[test]
     fn index_refresh_missing_cli_reports_error() {
+        let _g = ENV_LOCK.lock().unwrap();
         let file = std::env::temp_dir().join(format!("ba-sup-watch2-{}", std::process::id()));
         let dir = std::env::temp_dir().join(format!("ba-sup-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

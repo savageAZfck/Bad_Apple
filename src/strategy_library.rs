@@ -676,6 +676,10 @@ mod tests {
 #[cfg(test)]
 mod library_tests {
     use super::{Strategy, StrategyLibrary};
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate the process-global BADAPPLE_STRATEGY_PROPOSALS.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_lib(name: &str) -> (StrategyLibrary, std::path::PathBuf) {
         let path =
@@ -723,6 +727,7 @@ mod library_tests {
 
     #[tokio::test]
     async fn repair_writes_proposal_not_library_entry() {
+        let _g = ENV_LOCK.lock().unwrap();
         let prop_dir = std::env::temp_dir().join(format!("ba-strat-props-{}", std::process::id()));
         std::env::set_var("BADAPPLE_STRATEGY_PROPOSALS", &prop_dir);
         let (lib, path) = temp_lib("repair");
@@ -764,6 +769,7 @@ mod library_tests {
 
     #[tokio::test]
     async fn weak_contradiction_writes_no_proposal() {
+        let _g = ENV_LOCK.lock().unwrap();
         let prop_dir =
             std::env::temp_dir().join(format!("ba-strat-props-weak-{}", std::process::id()));
         std::env::set_var("BADAPPLE_STRATEGY_PROPOSALS", &prop_dir);

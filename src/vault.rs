@@ -128,6 +128,11 @@ impl BadAppleVault {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate the process-global BADAPPLE_VAULT_KEY,
+    // which race under cargo's parallel test harness.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tmp_vault_path() -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -138,6 +143,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
+        let _g = ENV_LOCK.lock().unwrap();
         let path = tmp_vault_path();
         env::set_var("BADAPPLE_VAULT_KEY", "test-key-for-vault");
         let vault = BadAppleVault::open(&path).unwrap();
@@ -151,6 +157,7 @@ mod tests {
 
     #[test]
     fn wrong_key_fails() {
+        let _g = ENV_LOCK.lock().unwrap();
         let path = tmp_vault_path();
         env::set_var("BADAPPLE_VAULT_KEY", "test-key-for-vault");
         let vault = BadAppleVault::open(&path).unwrap();
@@ -164,6 +171,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_keys() {
+        let _g = ENV_LOCK.lock().unwrap();
         let path = tmp_vault_path();
         env::set_var("BADAPPLE_VAULT_KEY", "test-key-for-vault");
         let vault = BadAppleVault::open(&path).unwrap();
@@ -175,6 +183,7 @@ mod tests {
 
     #[test]
     fn remove_and_list() {
+        let _g = ENV_LOCK.lock().unwrap();
         let path = tmp_vault_path();
         env::set_var("BADAPPLE_VAULT_KEY", "test-key-for-vault");
         let vault = BadAppleVault::open(&path).unwrap();
@@ -190,6 +199,7 @@ mod tests {
 
     #[test]
     fn missing_key_returns_none() {
+        let _g = ENV_LOCK.lock().unwrap();
         let path = tmp_vault_path();
         env::set_var("BADAPPLE_VAULT_KEY", "test-key-for-vault");
         let vault = BadAppleVault::open(&path).unwrap();

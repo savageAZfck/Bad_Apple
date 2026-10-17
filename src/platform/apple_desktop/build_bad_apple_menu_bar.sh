@@ -456,9 +456,14 @@ if [[ "${BADAPPLE_NO_SIGN:-0}" == "1" ]]; then
     # cdhash on every rebuild, which invalidates every TCC grant keyed to the
     # previous binary (screen recording, mic, accessibility). A stable cert
     # keeps the designated requirement constant so user grants survive builds.
-    if security find-identity -v -p codesigning | grep -q "Bad Apple Dev"; then
-        codesign --force --deep --sign "Bad Apple Dev (savag3)" "${APP_DIR}"
-        echo "Applied stable local signature (Bad Apple Dev) — TCC grants persist across rebuilds."
+    IDENTITY="${BADAPPLE_SIGN_IDENTITY:-}"
+    if [[ -z "$IDENTITY" ]]; then
+        IDENTITY="$(security find-identity -v -p codesigning \
+            | sed -n 's/.*"\(Bad Apple Dev[^"]*\)".*/\1/p' | head -1)"
+    fi
+    if [[ -n "$IDENTITY" ]]; then
+        codesign --force --deep --sign "$IDENTITY" "${APP_DIR}"
+        echo "Applied stable local signature (${IDENTITY}) — TCC grants persist across rebuilds."
     else
         codesign --force --deep --sign - "${APP_DIR}"
         echo "Applied local ad-hoc signature (BADAPPLE_NO_SIGN=1). Note: ad-hoc changes cdhash per build, breaking TCC grants."
