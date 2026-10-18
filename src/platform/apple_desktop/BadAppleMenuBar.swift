@@ -431,6 +431,20 @@ final class BadAppleRelationshipOnboardingWindow: NSObject, NSTextFieldDelegate 
 
 private let badAppleVoiceLogPath = "/tmp/badapple_voice_debug.log"
 
+/// High-frequency voice diagnostics (audio tap, partial transcripts) only
+/// log when BADAPPLE_VOICE_DEBUG=1 — they run ~10x/sec and write actual
+/// speech text to /tmp, so they are off by default in normal operation.
+private let badAppleVoiceVerbose: Bool = {
+    ProcessInfo.processInfo.environment["BADAPPLE_VOICE_DEBUG"] == "1"
+}()
+
+/// badAppleVoiceLog variant for high-volume diagnostics. No-ops unless
+/// BADAPPLE_VOICE_DEBUG=1 was set at launch.
+private func badAppleVoiceLogVerbose(_ message: String) {
+    guard badAppleVoiceVerbose else { return }
+    badAppleVoiceLog(message)
+}
+
 /// Compile a regex pattern without crashing. Returns nil on an invalid pattern
 /// so the caller can fail gracefully.
 private func badAppleRegex(_ pattern: String) -> NSRegularExpression? {
@@ -1584,7 +1598,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
                 let ptr = outputBuffer.int16ChannelData?[0]
                 let first = ptr.map { $0[0] } ?? 0
                 let last = ptr.map { $0[Int(outputBuffer.frameLength - 1)] } ?? 0
-                badAppleVoiceLog("audio tap: in=\(buffer.frameLength) out=\(outputBuffer.frameLength) expected=\(expectedFrames) first=\(first) last=\(last)")
+                badAppleVoiceLogVerbose("audio tap: in=\(buffer.frameLength) out=\(outputBuffer.frameLength) expected=\(expectedFrames) first=\(first) last=\(last)")
                 request.append(outputBuffer)
             }
         }
@@ -1623,7 +1637,7 @@ private final class BadAppleVoiceHost: NSObject, AVSpeechSynthesizerDelegate, @u
                 lastTranscript = transcript
                 onTranscript?(lastTranscript)
             }
-            badAppleVoiceLog("consume: isFinal=\(result.isFinal) transcript='\(transcript)' last='\(lastTranscript)' awaitingNextUtterance=\(awaitingNextUtterance)")
+            badAppleVoiceLogVerbose("consume: isFinal=\(result.isFinal) transcript='\(transcript)' last='\(lastTranscript)' awaitingNextUtterance=\(awaitingNextUtterance)")
 
             if awaitingNextUtterance {
                 let prompt = (wakeSuffix(in: transcript) ?? transcript)
