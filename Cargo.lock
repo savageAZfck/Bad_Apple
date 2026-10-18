@@ -2429,9 +2429,9 @@ dependencies = [
 
 [[package]]
 name = "mil_infer"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a82e5e1427e43c23548e84e57525953b9a000843ad51db0bb0d2eef6e9514e0f"
+checksum = "a977ac42d3bdcacc34c2130ecbc3946e6c84b856fdf3826cdb5b11f1e79c1cd3"
 dependencies = [
  "half",
  "mil_compile",
