@@ -1,87 +1,31 @@
-//! badapple-reflex — the organism's audited reflex arc.
+//! badapple-reflex — the organism's audited reflex arc, running through Coyote on the ANE.
 //!
-//! Thin wrapper over the public `axon` crate. Reflexes fire below the
-//! council and the policy engine — they can brake, alert, or quarantine,
-//! never steer. Every firing lands on the arc's own hash-chained log.
-//!
-//! State under /var/lib/bad_apple/reflex/:
-//!   arc.json — installed reflexes, firing state, hash-chained arc log
-//!
-//!   badapple-reflex install <id> --trigger <spec> --action <brake|alert|quarantine>
-//!       [--cooldown-ms <n>] [--max-firings <n>]
-//!     trigger specs: kind:<glob>  field:<name>=<glob>  gt:<field>=<n>  lt|ge|le:<field>=<n>
-//!   badapple-reflex remove <id>
-//!   badapple-reflex list
-//!   badapple-reflex sense <kind> [--data <json>]
-//!   badapple-reflex clear-freeze
-//!   badapple-reflex rearm <id>
-//!   badapple-reflex status
-//!   badapple-reflex verify
+//! Executes `coyote/badapple_organs.cy` via `bad_apple::coyote_organs` on the
+//! Apple Neural Engine. Reflexes fire below the council and the policy engine —
+//! they can brake, alert, or quarantine, never steer. Every firing lands on the
+//! organism's hash-chained witness and arc ledger.
 
 use anyhow::{bail, Context, Result};
-use axon::{Reflex, ReflexAction, ReflexArc, SenseEvent, ThresholdOp, Trigger};
-use serde_json::Value;
-use std::fs;
-use std::path::PathBuf;
+use bad_apple::coyote_organs;
+use serde_json::{json, Value};
 
-const ROOT: &str = "/var/lib/bad_apple/reflex";
-
-fn root() -> PathBuf {
-    std::env::var("BADAPPLE_REFLEX_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| ROOT.into())
-}
-
-fn arc_path() -> PathBuf {
-    root().join("arc.json")
-}
-
-fn load_arc() -> Result<ReflexArc> {
-    let path = arc_path();
-    if path.exists() {
-        Ok(serde_json::from_str(&fs::read_to_string(&path)?)?)
-    } else {
-        Ok(ReflexArc::new())
+fn sync_env_dir() {
+    if std::env::var_os("BADAPPLE_ORGANS_DIR").is_none() {
+        if let Some(dir) = std::env::var_os("BADAPPLE_REFLEX_DIR") {
+            std::env::set_var("BADAPPLE_ORGANS_DIR", dir);
+        }
     }
 }
 
-fn save_arc(arc: &ReflexArc) -> Result<()> {
-    fs::create_dir_all(root())?;
-    fs::write(arc_path(), serde_json::to_string_pretty(arc)?)?;
-    Ok(())
-}
-
-fn parse_trigger(spec: &str) -> Result<Trigger> {
-    let (kind, rest) = spec.split_once(':').context(
-        "trigger spec must be kind:<glob> | field:<name>=<glob> | gt|lt|ge|le:<field>=<n>",
-    )?;
-    Ok(match kind {
-        "kind" => Trigger::KindIs(rest.to_string()),
-        "field" => {
-            let (name, pattern) = rest.split_once('=').context("field:<name>=<glob>")?;
-            Trigger::FieldMatch {
-                field: name.to_string(),
-                pattern: pattern.to_string(),
-            }
-        }
-        op @ ("gt" | "lt" | "ge" | "le") => {
-            let (field, n) = rest.split_once('=').context("op:<field>=<n>")?;
-            Trigger::Threshold {
-                field: field.to_string(),
-                op: match op {
-                    "gt" => ThresholdOp::Gt,
-                    "lt" => ThresholdOp::Lt,
-                    "ge" => ThresholdOp::Ge,
-                    _ => ThresholdOp::Le,
-                },
-                value: n.parse().context("threshold value must be numeric")?,
-            }
-        }
-        other => bail!("unknown trigger kind: {other}"),
-    })
+fn check_ok(res: String) -> Result<String> {
+    if let Some(err) = res.strip_prefix("error=") {
+        bail!("{err}");
+    }
+    Ok(res)
 }
 
 fn main() -> Result<()> {
+    sync_env_dir();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         bail!(
@@ -99,89 +43,123 @@ fn main() -> Result<()> {
         "install" => {
             let id = args.get(1).context("install <id>")?;
             let spec = named("--trigger").context("--trigger required")?;
-            let action = match named("--action").as_deref() {
-                Some("brake") => ReflexAction::Brake,
-                Some("alert") | None => ReflexAction::Alert,
-                Some("quarantine") => ReflexAction::Quarantine,
-                Some(other) => bail!("unknown action: {other}"),
-            };
-            let cooldown = named("--cooldown-ms")
+            let action = named("--action").unwrap_or_else(|| "alert".to_string());
+            let cooldown: i64 = named("--cooldown-ms")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let max = named("--max-firings")
+            let max: i64 = named("--max-firings")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let mut arc = load_arc()?;
-            arc.install(Reflex::new(id, parse_trigger(&spec)?, action).with_bounds(cooldown, max))?;
-            save_arc(&arc)?;
-            println!("{}", serde_json::json!({"status":"installed","reflex":id}));
+            check_ok(coyote_organs::arc_install(
+                id, &spec, &action, cooldown, max,
+            )?)?;
+            println!("{}", json!({"status":"installed","reflex":id}));
         }
         "remove" => {
             let id = args.get(1).context("remove <id>")?;
-            let mut arc = load_arc()?;
-            if !arc.remove(id) {
-                bail!("no such reflex: {id}");
-            }
-            save_arc(&arc)?;
-            println!("{}", serde_json::json!({"status":"removed","reflex":id}));
+            check_ok(coyote_organs::arc_remove(id)?)?;
+            println!("{}", json!({"status":"removed","reflex":id}));
         }
         "list" => {
-            let arc = load_arc()?;
-            println!("{}", serde_json::to_string_pretty(&arc.reflexes)?);
+            let res = coyote_organs::arc_list()?;
+            let inner = res
+                .strip_prefix("reflexes=[")
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or("");
+            let mut items = Vec::new();
+            for row in inner.split(", ").filter(|r| !r.is_empty()) {
+                let p: Vec<&str> = row.split('|').collect();
+                if p.len() == 8 {
+                    items.push(json!({
+                        "id": p[1],
+                        "trigger": p[2],
+                        "action": p[3],
+                        "cooldown_ms": p[4].parse::<i64>().unwrap_or(0),
+                        "max_firings": p[5].parse::<i64>().unwrap_or(0),
+                        "last_fired_ms": p[6].parse::<i64>().unwrap_or(0),
+                        "firings": p[7].parse::<i64>().unwrap_or(0),
+                    }));
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&items)?);
         }
         "sense" => {
             let kind = args.get(1).context("sense <kind>")?;
             let data: Value = named("--data")
                 .map(|s| serde_json::from_str(&s).unwrap_or(Value::Null))
                 .unwrap_or(Value::Null);
-            let mut arc = load_arc()?;
-            let fired = arc.sense(&SenseEvent::new(kind, data));
-            save_arc(&arc)?;
+            let res = coyote_organs::arc_sense(kind, &data)?;
+            let mut fired = Vec::new();
+            let mut frozen = false;
+            for part in res.split('|') {
+                if let Some(f) = part.strip_prefix("fired=") {
+                    for entry in f.split(',').filter(|s| !s.is_empty()) {
+                        if let Some((rid, act)) = entry.split_once(':') {
+                            fired
+                                .push(json!({"reflex_id": rid, "action": act, "event_kind": kind}));
+                        }
+                    }
+                } else if let Some(frz) = part.strip_prefix("frozen=") {
+                    frozen = frz == "1" || frz == "true";
+                }
+            }
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                serde_json::to_string_pretty(&json!({
                     "fired": fired,
-                    "frozen": arc.frozen,
+                    "frozen": frozen,
                 }))?
             );
         }
         "clear-freeze" => {
-            let mut arc = load_arc()?;
-            let was = arc.clear_freeze();
-            save_arc(&arc)?;
-            println!(
-                "{}",
-                serde_json::json!({"status":"cleared","was_frozen":was})
-            );
+            let res = coyote_organs::arc_clear_freeze()?;
+            let was = res.ends_with("true");
+            println!("{}", json!({"status":"cleared","was_frozen":was}));
         }
         "rearm" => {
             let id = args.get(1).context("rearm <id>")?;
-            let mut arc = load_arc()?;
-            if !arc.rearm(id) {
-                bail!("no such reflex: {id}");
-            }
-            save_arc(&arc)?;
-            println!("{}", serde_json::json!({"status":"rearmed","reflex":id}));
+            check_ok(coyote_organs::arc_rearm(id)?)?;
+            println!("{}", json!({"status":"rearmed","reflex":id}));
         }
         "status" => {
-            let arc = load_arc()?;
+            let res = coyote_organs::arc_status()?;
+            let mut reflexes = 0i64;
+            let mut firings = 0i64;
+            let mut frozen = false;
+            let mut tip: Option<String> = None;
+            for part in res.split('|') {
+                if let Some(v) = part.strip_prefix("reflexes=") {
+                    reflexes = v.parse().unwrap_or(0);
+                } else if let Some(v) = part.strip_prefix("firings=") {
+                    firings = v.parse().unwrap_or(0);
+                } else if let Some(v) = part.strip_prefix("frozen=") {
+                    frozen = v == "true" || v == "1";
+                } else if let Some(v) = part.strip_prefix("tip=") {
+                    if v != "genesis" && !v.chars().all(|c| c == '0') {
+                        tip = Some(v.to_string());
+                    }
+                }
+            }
             println!(
                 "{}",
-                serde_json::json!({
-                    "reflexes": arc.reflexes.len(),
-                    "firings": arc.log.len(),
-                    "frozen": arc.frozen,
-                    "tip": arc.log.last().map(|f| f.hash.clone()),
+                json!({
+                    "reflexes": reflexes,
+                    "firings": firings,
+                    "frozen": frozen,
+                    "tip": tip,
                 })
             );
         }
         "verify" => {
-            let arc = load_arc()?;
-            arc.verify()?;
-            println!(
-                "{}",
-                serde_json::json!({"status":"verified","firings":arc.log.len()})
-            );
+            let res = coyote_organs::arc_verify()?;
+            if res.starts_with("BROKEN:") {
+                bail!("arc chain broken: {res}");
+            }
+            let firings: i64 = res
+                .strip_prefix("verified=")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            println!("{}", json!({"status":"verified","firings":firings}));
         }
         other => bail!("unknown command: {other}"),
     }

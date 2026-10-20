@@ -7,7 +7,7 @@ use bad_apple::bad_apple_ipc::{
     socket_path, validate_request, verify_client_proof, verify_server_proof, ClientFrame,
     ReplayCache, ServerFrame, MAX_FRAME_BYTES, SLICKS_VERSION, SLICKS_VERSION_2,
 };
-use bad_apple::tensor_brain::{text_to_grounded_embedding, CandleBrain};
+use bad_apple::coyote_organs;
 use bad_apple::wasm_cage::WasmCage;
 use base64::{engine::general_purpose, Engine as _};
 use rand::Rng;
@@ -18,7 +18,6 @@ use std::os::unix::fs::{chown, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,95 +26,40 @@ const LOW_COMPLEXITY_THRESHOLD: f64 = 0.62;
 const REPLAY_CACHE_MAX: usize = 4096;
 const MAX_CONNECTIONS: usize = 128;
 
-/// One classification request sent to the brain worker thread.
-struct ClassifyRequest {
-    text: String,
-    reply: Sender<f64>,
-}
-
-/// Native semantic router. The 576-D Candle transformer produces a brain state
-/// and the conscience head projects it to a 2-class logit (low / high).
+/// Coyote ANE semantic router — executes `gatekeeper_classify` -> `organ_encode`
+/// on the Apple Neural Engine inside the resident Coyote organism VM.
 #[derive(Clone)]
-struct SemanticRouter {
-    request_tx: Sender<ClassifyRequest>,
-}
+struct SemanticRouter;
 
 impl SemanticRouter {
     fn new() -> Result<Self> {
-        let (request_tx, request_rx) = channel::<ClassifyRequest>();
-
-        std::thread::spawn(move || {
-            let mut brain =
-                match CandleBrain::new("gatekeeper", 2, &bad_apple::tensor_brain::layer_dims()) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("[gatekeeper] failed to initialize CandleBrain: {e}");
-                        std::process::exit(1);
-                    }
-                };
-
-            let env_path = std::env::var("BADAPPLE_GATEKEEPER_WEIGHTS")
-                .map(std::path::PathBuf::from)
-                .ok();
-            let exe_path = std::env::current_exe().ok().and_then(|exe| {
-                exe.parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.parent())
-                    .map(|root| root.join("data").join("gatekeeper.safetensors"))
-            });
-            let default_path =
-                std::path::PathBuf::from("/var/lib/bad_apple/data/gatekeeper.safetensors");
-            let weights_path = env_path.or(exe_path).unwrap_or(default_path);
-            if let Err(e) = brain.load_weights(&weights_path) {
-                eprintln!("[gatekeeper] no trained weights at {weights_path:?}: {e} (using untrained brain)");
-            } else {
-                eprintln!("[gatekeeper] loaded trained weights from {weights_path:?}");
-            }
-            // Keep System 2 active so the full Transformer participates in classification.
-            brain.set_system2_active(true);
-
-            let axes = [0.0, 0.0, 0.0, 0.0];
-
-            while let Ok(req) = request_rx.recv() {
-                let score = classifier_score(&brain, &req.text, &axes);
-                let _ = req.reply.send(score);
-            }
+        let env_path = std::env::var("BADAPPLE_GATEKEEPER_WEIGHTS")
+            .map(std::path::PathBuf::from)
+            .ok();
+        let exe_path = std::env::current_exe().ok().and_then(|exe| {
+            exe.parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|root| root.join("data").join("gatekeeper_ane.bin"))
         });
-
-        Ok(Self { request_tx })
+        let default_path = std::path::PathBuf::from("/var/lib/bad_apple/data/gatekeeper_ane.bin");
+        let weights_path = env_path.or(exe_path).unwrap_or(default_path);
+        if weights_path.is_file() {
+            if let Err(e) = coyote_organs::gatekeeper_load_weights(&weights_path) {
+                eprintln!(
+                    "[gatekeeper] could not load Coyote ANE weights at {weights_path:?}: {e}"
+                );
+            } else {
+                eprintln!("[gatekeeper] loaded Coyote ANE weights from {weights_path:?}");
+            }
+        }
+        let is_ane = coyote_organs::is_ane_resident();
+        eprintln!("[gatekeeper] Coyote organism VM resident (ane_silicon={is_ane})");
+        Ok(Self)
     }
 
     fn classify(&self, text: &str) -> Result<f64> {
-        let (tx, rx) = channel();
-        self.request_tx
-            .send(ClassifyRequest {
-                text: text.to_string(),
-                reply: tx,
-            })
-            .context("brain worker thread is dead")?;
-        rx.recv().context("brain worker did not respond")
-    }
-}
-
-fn softmax_1(logits: &[f64]) -> f64 {
-    let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let exps: Vec<f64> = logits.iter().map(|v| (v - max).exp()).collect();
-    let sum: f64 = exps.iter().sum();
-    if sum > 0.0 {
-        exps[1] / sum
-    } else {
-        0.5
-    }
-}
-
-fn classifier_score(brain: &CandleBrain, text: &str, axes: &[f64; 4]) -> f64 {
-    let emb = text_to_grounded_embedding(text, axes);
-    match brain.classify(&emb) {
-        Ok(logits) => softmax_1(&logits),
-        Err(e) => {
-            eprintln!("[gatekeeper] classify failed: {e}");
-            0.5
-        }
+        coyote_organs::gatekeeper_classify_text(text)
     }
 }
 
@@ -580,10 +524,16 @@ fn execute_wasm_blocks(text: &str, cage: &AutomationCage) -> String {
     }
 }
 
-/// Combine cage and wasm post-processing.
+/// Combine cage, wasm, and Coyote ANE output firewall post-processing.
 fn post_process_response(text: &str, cage: &AutomationCage) -> String {
     let text = execute_cage_blocks(text, cage);
-    execute_wasm_blocks(&text, cage)
+    let text = execute_wasm_blocks(&text, cage);
+    if let Ok(scan) = coyote_organs::firewall_scan(&text) {
+        if !scan.starts_with("hit=-1|") {
+            return "[Output firewall: blocked by Coyote ANE organ]".to_string();
+        }
+    }
+    text
 }
 
 /// Forward an execute request to the Python MLX server and stream back responses.
@@ -1074,13 +1024,44 @@ fn handle_client(
     }
 
     let start = Instant::now();
+    if let Ok(sense) = coyote_organs::arc_sense(
+        "query",
+        &serde_json::json!({ "prompt": prompt, "len": prompt.len() }),
+    ) {
+        if sense.contains("frozen=1") || sense.contains(":brake") || sense.contains(":quarantine") {
+            write_frame(
+                &mut stream,
+                &ServerFrame::Error {
+                    message: format!("Coyote reflex arc halted request ({sense})"),
+                },
+            )?;
+            return Ok(());
+        }
+    }
     let score = router.classify(&prompt)?;
     let classify_us = start.elapsed().as_micros();
-    eprintln!("[gatekeeper] '{prompt}' -> complexity {score:.3} (classify {classify_us} us)");
+    eprintln!("[gatekeeper] '{prompt}' -> complexity {score:.3} (coyote-ane {classify_us} us)");
 
     if score < LOW_COMPLEXITY_THRESHOLD {
         if let Some(action) = resolver.resolve(&prompt) {
             let (action_verb, action_target) = fast_action_label(&action);
+            if let Ok(sense) = coyote_organs::arc_sense(
+                "tool_dispatch",
+                &serde_json::json!({ "tool": action_verb, "target": action_target }),
+            ) {
+                if sense.contains("frozen=1")
+                    || sense.contains(":brake")
+                    || sense.contains(":quarantine")
+                {
+                    write_frame(
+                        &mut stream,
+                        &ServerFrame::Error {
+                            message: format!("Coyote reflex arc blocked fast action ({sense})"),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            }
             match execute_fast(action, cage) {
                 Ok(reply) if reply == "new chat" => {
                     // The deep core is responsible for clearing state; fall through.

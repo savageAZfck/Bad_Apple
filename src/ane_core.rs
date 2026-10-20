@@ -57,8 +57,25 @@ pub struct AneCoreConfig {
 
 impl AneCoreConfig {
     pub fn from_env() -> Option<Self> {
-        let model_path: PathBuf = std::env::var_os("BADAPPLE_ANE_MODEL")?.into();
-        let tokenizer_path: PathBuf = std::env::var_os("BADAPPLE_ANE_TOKENIZER")?.into();
+        let model_path: PathBuf = std::env::var_os("BADAPPLE_ANE_MODEL")
+            .or_else(|| {
+                std::env::var_os("BADAPPLE_ANE_COYOTE").and_then(|v| {
+                    if v == "1" {
+                        Some("/Users/savag3/coyote/examples/qwenorg.cy".into())
+                    } else if v != "0" {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+            })?
+            .into();
+        let tokenizer_path: PathBuf = std::env::var_os("BADAPPLE_ANE_TOKENIZER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tokenizer.json"));
+        if !tokenizer_path.is_file() {
+            return None;
+        }
         let max_context_tokens = std::env::var("BADAPPLE_ANE_MAX_CONTEXT")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -119,6 +136,9 @@ impl AneCoreConfig {
 }
 
 fn read_seq_len_from_manifest(path: &Path) -> usize {
+    if path.extension().is_some_and(|e| e == "cy") {
+        return 64;
+    }
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
@@ -194,7 +214,7 @@ impl std::fmt::Display for AneCoreError {
 
 impl std::error::Error for AneCoreError {}
 
-pub struct AneCore {
+struct BridgeAneDecoder {
     _library: Library,
     handle: NonNull<c_void>,
     destroy: DestroyFn,
@@ -208,6 +228,53 @@ pub struct AneCore {
     forward_hidden_multi: Option<ForwardHiddenMultiFn>,
     rewind: Option<RewindFn>,
     position: Option<PositionFn>,
+}
+
+impl Drop for BridgeAneDecoder {
+    fn drop(&mut self) {
+        unsafe { (self.destroy)(self.handle.as_ptr()) };
+    }
+}
+
+struct CoyoteAneDecoder {
+    vm: coyote::vm::Vm,
+    pos: usize,
+    load_us: u64,
+    prewarm_us: u64,
+}
+
+impl CoyoteAneDecoder {
+    fn load(cy_path: &Path) -> Result<Self, AneCoreError> {
+        let stem = cy_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("coyote_ane");
+        let warm = PathBuf::from("/Users/savag3/coyote/out").join(stem);
+        let out_dir = if warm.is_dir() {
+            warm
+        } else {
+            std::env::temp_dir().join(format!("badapple_coyote_{stem}"))
+        };
+        let t0 = Instant::now();
+        let vm = coyote::load_vm(cy_path, &out_dir, false, false, true)
+            .map_err(|e| AneCoreError::Bridge(format!("coyote load {}: {e}", cy_path.display())))?;
+        let load_us = t0.elapsed().as_micros() as u64;
+        Ok(Self {
+            vm,
+            pos: 0,
+            load_us,
+            prewarm_us: 0,
+        })
+    }
+}
+
+enum AneBackend {
+    Coyote(CoyoteAneDecoder),
+    Bridge(BridgeAneDecoder),
+}
+
+pub struct AneCore {
+    backend: AneBackend,
     tokenizer: Tokenizer,
     max_context_tokens: usize,
     chat_template: Option<ChatTemplate>,
@@ -219,20 +286,34 @@ pub struct AneCore {
     config: AneCoreConfig,
 }
 
-// SAFETY: AneCore owns a NonNull<c_void> handle obtained from the C bridge and the
-// function pointers loaded from the dylib. The handle is only mutated through &mut self
-// methods guarded by the global `ENGINE` Mutex, so there is no concurrent shared access.
-// The C bridge itself is not reentrant across threads, but the Mutex serializes all calls.
+// SAFETY: AneCore owns its backend exclusively and is only mutated through
+// &mut self methods guarded by the global `ENGINE` Mutex.
 unsafe impl Send for AneCore {}
 
-impl Drop for AneCore {
-    fn drop(&mut self) {
-        // SAFETY: `self.handle` is a valid NonNull obtained from a successful `create` call
-        // at load time and is still owned exclusively by this instance (no clones of the
-        // handle exist). `self.destroy` is a verified C function pointer from the loaded
-        // dylib. Drop runs once and the handle is not used afterward.
-        unsafe { (self.destroy)(self.handle.as_ptr()) };
+fn resolve_coyote_model(model_path: &Path) -> Option<PathBuf> {
+    if model_path.extension().is_some_and(|e| e == "cy") && model_path.is_file() {
+        return Some(model_path.to_path_buf());
     }
+    if let Ok(env_cy) = std::env::var("BADAPPLE_ANE_COYOTE") {
+        if env_cy == "1" {
+            let def = PathBuf::from("/Users/savag3/coyote/examples/qwenorg.cy");
+            if def.is_file() {
+                return Some(def);
+            }
+        } else if env_cy != "0" {
+            let p = PathBuf::from(env_cy);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if let Some(parent) = model_path.parent() {
+        let sib = parent.join("model.cy");
+        if sib.is_file() {
+            return Some(sib);
+        }
+    }
+    None
 }
 
 impl AneCore {
@@ -250,36 +331,48 @@ impl AneCore {
             && tokenizer.token_to_id("<|im_start|>").is_some()
             && tokenizer.token_to_id("<|im_end|>").is_some();
         let eos_tokens = collect_eos_tokens(&tokenizer, tokenizer_config.as_ref());
+
+        if let Some(cy_path) = resolve_coyote_model(&config.model_path) {
+            let dec = CoyoteAneDecoder::load(&cy_path)?;
+            let seq_len = dec.vm.decoder_seq_len().max(1);
+            let max_context_tokens = config.max_context_tokens.min(seq_len).max(1);
+            return Ok(Self {
+                backend: AneBackend::Coyote(dec),
+                tokenizer,
+                max_context_tokens,
+                chat_template,
+                qwen_chat_fallback,
+                eos_tokens,
+                seq_len,
+                config: config.clone(),
+            });
+        }
+
         let symbols = load_bridge_symbols()?;
         let model_path = CString::new(config.model_path.to_string_lossy().as_bytes())
             .map_err(|error| AneCoreError::Bridge(error.to_string()))?;
-        let handle = NonNull::new(unsafe {
-            // SAFETY: `symbols.create` is a verified C function pointer loaded from the
-            // bridge dylib. `model_path` is a valid NUL-terminated CString that outlives
-            // the call. The returned pointer is checked for null immediately below.
-            (symbols.create)(model_path.as_ptr())
-        })
-        .ok_or_else(|| AneCoreError::Bridge("model load returned null".to_string()))?;
+        let handle = NonNull::new(unsafe { (symbols.create)(model_path.as_ptr()) })
+            .ok_or_else(|| AneCoreError::Bridge("model load returned null".to_string()))?;
 
-        // The compiled model's max_seq_len is an upper bound on context length.
-        // The runtime cap is the smaller of the user's preference and the model.
         let seq_len = read_seq_len_from_manifest(&config.model_path).max(1);
         let max_context_tokens = config.max_context_tokens.min(seq_len).max(1);
 
         Ok(Self {
-            _library: symbols.library,
-            handle,
-            destroy: symbols.destroy,
-            predict: symbols.predict,
-            reset: symbols.reset,
-            prewarm: symbols.prewarm,
-            ane_ratio: symbols.ane_ratio,
-            compute_units: symbols.compute_units,
-            selection_latency: symbols.selection_latency,
-            forward_hidden: symbols.forward_hidden,
-            forward_hidden_multi: symbols.forward_hidden_multi,
-            rewind: symbols.rewind,
-            position: symbols.position,
+            backend: AneBackend::Bridge(BridgeAneDecoder {
+                _library: symbols.library,
+                handle,
+                destroy: symbols.destroy,
+                predict: symbols.predict,
+                reset: symbols.reset,
+                prewarm: symbols.prewarm,
+                ane_ratio: symbols.ane_ratio,
+                compute_units: symbols.compute_units,
+                selection_latency: symbols.selection_latency,
+                forward_hidden: symbols.forward_hidden,
+                forward_hidden_multi: symbols.forward_hidden_multi,
+                rewind: symbols.rewind,
+                position: symbols.position,
+            }),
             tokenizer,
             max_context_tokens,
             chat_template,
@@ -291,103 +384,186 @@ impl AneCore {
     }
 
     pub fn prewarm(&mut self) -> bool {
-        // SAFETY: `self.prewarm` is a verified C function pointer and `self.handle` is a
-        // valid NonNull obtained at load time. We hold &mut self so the call is exclusive.
-        unsafe { (self.prewarm)(self.handle.as_ptr()) }
+        match &mut self.backend {
+            AneBackend::Coyote(c) => {
+                let t0 = Instant::now();
+                let ok = c.vm.step_decoder_token(0, 0, false).is_ok();
+                c.vm.reset_states();
+                c.pos = 0;
+                c.prewarm_us = t0.elapsed().as_micros() as u64;
+                ok
+            }
+            AneBackend::Bridge(b) => unsafe { (b.prewarm)(b.handle.as_ptr()) },
+        }
     }
 
     pub fn reset(&mut self) -> bool {
-        // SAFETY: `self.reset` is a verified C function pointer and `self.handle` is a
-        // valid NonNull obtained at load time. We hold &mut self so the call is exclusive.
-        unsafe { (self.reset)(self.handle.as_ptr()) }
+        match &mut self.backend {
+            AneBackend::Coyote(c) => {
+                c.vm.reset_states();
+                c.pos = 0;
+                true
+            }
+            AneBackend::Bridge(b) => unsafe { (b.reset)(b.handle.as_ptr()) },
+        }
     }
 
     pub fn ane_placement_ratio(&mut self) -> f64 {
-        // SAFETY: `self.ane_ratio` is a verified C function pointer and `self.handle` is a
-        // valid NonNull obtained at load time. We hold &mut self so the call is exclusive.
-        unsafe { (self.ane_ratio)(self.handle.as_ptr()) }
+        match &mut self.backend {
+            AneBackend::Coyote(c) => {
+                if c.vm.is_ane() {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            AneBackend::Bridge(b) => unsafe { (b.ane_ratio)(b.handle.as_ptr()) },
+        }
     }
 
     pub fn compute_units_raw_value(&self) -> i32 {
-        // SAFETY: `self.compute_units` is a verified C function pointer and `self.handle`
-        // is a valid NonNull obtained at load time. The call only reads model state.
-        unsafe { (self.compute_units)(self.handle.as_ptr()) }
+        match &self.backend {
+            AneBackend::Coyote(_) => 2,
+            AneBackend::Bridge(b) => unsafe { (b.compute_units)(b.handle.as_ptr()) },
+        }
     }
 
     pub fn selection_latency_us(&self) -> Option<(u64, u64)> {
-        let mut load = 0;
-        let mut prewarm = 0;
-        // SAFETY: `self.selection_latency` is a verified C function pointer. `self.handle`
-        // is a valid NonNull. `load` and `prewarm` are stack u64s whose addresses are
-        // passed as out-parameters; the bridge writes through them only on success.
-        unsafe {
-            (self.selection_latency)(self.handle.as_ptr(), &raw mut load, &raw mut prewarm)
-                .then_some((load, prewarm))
+        match &self.backend {
+            AneBackend::Coyote(c) => Some((c.load_us, c.prewarm_us)),
+            AneBackend::Bridge(b) => {
+                let mut load = 0;
+                let mut prewarm = 0;
+                unsafe {
+                    (b.selection_latency)(b.handle.as_ptr(), &raw mut load, &raw mut prewarm)
+                        .then_some((load, prewarm))
+                }
+            }
         }
     }
 
     /// Mesh-brain tail-rank seam: push fp16 hidden-state rows `[n, hidden]`
     /// through this core's layer chain; the last row projects to a token id.
-    /// Returns None when the loaded bridge lacks the seam or the prediction
-    /// fails.
     pub fn forward_hidden(&mut self, hidden_f16: &[u8]) -> Option<i32> {
-        let f = self.forward_hidden?;
-        // SAFETY: `f` is a verified C function pointer. `self.handle` is a
-        // valid NonNull from create. `hidden_f16` is a valid byte slice that
-        // outlives the call; the bridge copies the rows it consumes.
-        let token = unsafe {
-            f(
-                self.handle.as_ptr(),
-                hidden_f16.as_ptr().cast::<c_void>(),
-                hidden_f16.len(),
-            )
-        };
-        (token >= 0).then_some(token)
+        match &mut self.backend {
+            AneBackend::Coyote(c) => {
+                let hidden = c.vm.decoder_hidden_size();
+                let row_bytes = hidden * 2;
+                if row_bytes == 0 || hidden_f16.is_empty() || hidden_f16.len() % row_bytes != 0 {
+                    return None;
+                }
+                let rows = hidden_f16.len() / row_bytes;
+                let mut last_tok = None;
+                for r in 0..rows {
+                    let slice = &hidden_f16[r * row_bytes..(r + 1) * row_bytes];
+                    let row_f32: Vec<f32> = slice
+                        .chunks_exact(2)
+                        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+                        .collect();
+                    match c.vm.step_decoder_hidden(&row_f32, c.pos, r + 1 == rows) {
+                        Ok(Some(tok)) => {
+                            c.pos += 1;
+                            last_tok = Some(tok as i32);
+                        }
+                        Ok(None) => {
+                            c.pos += 1;
+                        }
+                        Err(_) => return None,
+                    }
+                }
+                last_tok
+            }
+            AneBackend::Bridge(b) => {
+                let f = b.forward_hidden?;
+                let token = unsafe {
+                    f(
+                        b.handle.as_ptr(),
+                        hidden_f16.as_ptr().cast::<c_void>(),
+                        hidden_f16.len(),
+                    )
+                };
+                (token >= 0).then_some(token)
+            }
+        }
     }
 
     /// Speculative-verify seam: push `[n, hidden]` fp16 rows and receive the
-    /// per-row argmax for every position — the K predictions the verifier
-    /// compares against the drafted continuation. Returns None when the
-    /// bridge lacks the export or the batch fails.
+    /// per-row argmax for every position.
     pub fn forward_hidden_multi(&mut self, hidden_f16: &[u8]) -> Option<Vec<i32>> {
-        let f = self.forward_hidden_multi?;
-        let mut out = vec![0i32; self.seq_len.max(1)];
-        // SAFETY: `f` is a verified C function pointer; `self.handle` is a
-        // valid NonNull; `out` has `seq_len` i32s of writable capacity, which
-        // is >= any row count the bridge can accept (bounded by the KV
-        // horizon). The bridge writes at most min(rows, capacity) tokens.
-        let n = unsafe {
-            f(
-                self.handle.as_ptr(),
-                hidden_f16.as_ptr().cast::<c_void>(),
-                hidden_f16.len(),
-                out.as_mut_ptr(),
-                out.len(),
-            )
-        };
-        if n < 0 {
-            return None;
+        match &mut self.backend {
+            AneBackend::Coyote(c) => {
+                let hidden = c.vm.decoder_hidden_size();
+                let row_bytes = hidden * 2;
+                if row_bytes == 0 || hidden_f16.is_empty() || hidden_f16.len() % row_bytes != 0 {
+                    return None;
+                }
+                let rows = hidden_f16.len() / row_bytes;
+                let mut out = Vec::with_capacity(rows);
+                for r in 0..rows {
+                    let slice = &hidden_f16[r * row_bytes..(r + 1) * row_bytes];
+                    let row_f32: Vec<f32> = slice
+                        .chunks_exact(2)
+                        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+                        .collect();
+                    match c.vm.step_decoder_hidden(&row_f32, c.pos, true) {
+                        Ok(Some(tok)) => {
+                            c.pos += 1;
+                            out.push(tok as i32);
+                        }
+                        _ => return None,
+                    }
+                }
+                Some(out)
+            }
+            AneBackend::Bridge(b) => {
+                let f = b.forward_hidden_multi?;
+                let mut out = vec![0i32; self.seq_len.max(1)];
+                let n = unsafe {
+                    f(
+                        b.handle.as_ptr(),
+                        hidden_f16.as_ptr().cast::<c_void>(),
+                        hidden_f16.len(),
+                        out.as_mut_ptr(),
+                        out.len(),
+                    )
+                };
+                if n < 0 {
+                    return None;
+                }
+                out.truncate(n as usize);
+                Some(out)
+            }
         }
-        out.truncate(n as usize);
-        Some(out)
     }
 
-    /// Rewind the KV frontier to `pos` — prefix-continuity for the mesh
-    /// tail: a new prompt that shares its head with the last one only needs
-    /// the delta rows, not a full re-prefill. Returns false when the loaded
-    /// bridge lacks the export or the target is out of range.
+    /// Rewind the KV frontier to `pos`.
     pub fn rewind(&mut self, pos: i32) -> bool {
-        let Some(f) = self.rewind else { return false };
-        // SAFETY: `f` is a verified C function pointer and `self.handle` is a
-        // valid NonNull obtained at load time; we hold &mut self exclusively.
-        unsafe { f(self.handle.as_ptr(), pos) }
+        if pos < 0 {
+            return false;
+        }
+        match &mut self.backend {
+            AneBackend::Coyote(c) => {
+                let target = pos as usize;
+                if target > c.pos {
+                    return false;
+                }
+                c.vm.rewind_states(c.pos, target);
+                c.pos = target;
+                true
+            }
+            AneBackend::Bridge(b) => {
+                let Some(f) = b.rewind else { return false };
+                unsafe { f(b.handle.as_ptr(), pos) }
+            }
+        }
     }
 
-    /// Current KV frontier position, or None when the bridge lacks the export.
+    /// Current KV frontier position.
     pub fn position(&mut self) -> Option<i32> {
-        // SAFETY: `self.position` is a verified C function pointer when present
-        // and `self.handle` is a valid NonNull obtained at load time.
-        self.position.map(|f| unsafe { f(self.handle.as_ptr()) })
+        match &self.backend {
+            AneBackend::Coyote(c) => Some(c.pos as i32),
+            AneBackend::Bridge(b) => b.position.map(|f| unsafe { f(b.handle.as_ptr()) }),
+        }
     }
 
     pub fn generate(
@@ -525,14 +701,45 @@ impl AneCore {
     }
 
     fn predict_tokens(&mut self, tokens: &[i32]) -> Result<i32, AneCoreError> {
-        // Token IDs are tiny (1–1024 × 4 bytes) and only read by the bridge.
-        // A plain CPU slice avoids the per-token `new_buffer` overhead and the
-        // command-encoder synchronization of a dedicated Metal allocation.
         let start = Instant::now();
-        // SAFETY: `self.predict` is a verified C function pointer. `self.handle` is a valid
-        // NonNull. `tokens` is a &[i32] whose pointer and length are valid for the duration
-        // of the call; the bridge only reads from it and does not retain the pointer.
-        let output = unsafe { (self.predict)(self.handle.as_ptr(), tokens.as_ptr(), tokens.len()) };
+        let output = match &mut self.backend {
+            AneBackend::Coyote(c) => {
+                if tokens.is_empty() {
+                    -1
+                } else {
+                    let mut last_tok = -1i32;
+                    let mut ok = true;
+                    for (i, &t) in tokens.iter().enumerate() {
+                        if t < 0 {
+                            ok = false;
+                            break;
+                        }
+                        let project = i + 1 == tokens.len();
+                        match c.vm.step_decoder_token(t as u32, c.pos, project) {
+                            Ok(Some(tok)) => {
+                                c.pos += 1;
+                                last_tok = tok as i32;
+                            }
+                            Ok(None) => {
+                                c.pos += 1;
+                            }
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        last_tok
+                    } else {
+                        -1
+                    }
+                }
+            }
+            AneBackend::Bridge(b) => unsafe {
+                (b.predict)(b.handle.as_ptr(), tokens.as_ptr(), tokens.len())
+            },
+        };
         LAST_TOKEN_LATENCY_US.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         TOKEN_COUNT.fetch_add(1, Ordering::Relaxed);
         if output < 0 {
@@ -650,6 +857,8 @@ fn is_stop_token(token: &str) -> bool {
 
 fn bridge_paths() -> Vec<PathBuf> {
     let mut paths = vec![
+        PathBuf::from("/Users/savag3/coyote/target/release/libcoyote.dylib"),
+        PathBuf::from("../coyote/target/release/libcoyote.dylib"),
         PathBuf::from("libBadAppleANEBridge.dylib"),
         PathBuf::from("target/release/libBadAppleANEBridge.dylib"),
         PathBuf::from("../mil_spec/target/release/libBadAppleANEBridge.dylib"),

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bad_apple::tensor_brain::{text_to_grounded_embedding, CandleBrain};
+use bad_apple::coyote_organs;
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::fs;
@@ -222,16 +222,11 @@ fn main() -> Result<()> {
         corpus_file.write_all(b"\n")?;
     }
     println!("Corpus written to {}", corpus_path.display());
+    println!(
+        "Coyote ANE backend resident: {}",
+        coyote_organs::is_ane_resident()
+    );
 
-    let mut brain = CandleBrain::new("gatekeeper", 2, &bad_apple::tensor_brain::layer_dims())?;
-
-    // Train the full 576-D brain end-to-end. System 2 enables the Transformer
-    // blocks and the AdamW optimizer updates all weights.
-    brain.set_system2_active(true);
-    brain.set_learning_rate(0.0001);
-    brain.set_ortho_lambda(0.0);
-
-    let axes = [0.0, 0.0, 0.0, 0.0];
     let mut rng = StdRng::seed_from_u64(SEED);
     let mut all: Vec<(&str, usize)> = fast
         .iter()
@@ -240,39 +235,37 @@ fn main() -> Result<()> {
         .collect();
 
     let mut prev_loss = f64::INFINITY;
-    for epoch in 0..150 {
+    for epoch in 0..30 {
         all.shuffle(&mut rng);
         let mut total_loss = 0.0;
         for (text, label) in &all {
-            let emb = text_to_grounded_embedding(text, &axes);
-            total_loss += brain.train_step(&emb, *label)?;
+            total_loss += coyote_organs::gatekeeper_train_text(text, *label)?;
         }
         let avg = total_loss / all.len() as f64;
-        if epoch % 50 == 0 || (epoch > 0 && (prev_loss - avg).abs() > 0.01) {
-            println!("epoch {epoch:3} avg loss {avg:.4}");
+        if epoch % 5 == 0 || (epoch > 0 && (prev_loss - avg).abs() > 0.01) {
+            println!("epoch {epoch:3} avg ANE mse loss {avg:.4}");
         }
         prev_loss = avg;
-        if avg < 0.01 {
-            println!("Converged at epoch {epoch}");
+        if avg < 0.02 {
+            println!("Converged on ANE at epoch {epoch}");
             break;
         }
     }
 
-    // Evaluate.
+    // Evaluate on ANE (`organ_encode`).
     let mut correct = 0;
     for (text, label) in &all {
-        let emb = text_to_grounded_embedding(text, &axes);
-        let logits = brain.classify(&emb)?;
-        let high = logits[1] > logits[0];
+        let score = coyote_organs::gatekeeper_classify_text(text)?;
+        let high = score > 0.5;
         if (high && *label == 1) || (!high && *label == 0) {
             correct += 1;
         }
     }
-    println!("Training accuracy: {}/{}", correct, all.len());
+    println!("Coyote ANE training accuracy: {}/{}", correct, all.len());
 
-    let weights_path: PathBuf = "data/gatekeeper.safetensors".into();
-    brain.save_weights(&weights_path)?;
-    println!("Weights saved to {}", weights_path.display());
+    let weights_path: PathBuf = "data/gatekeeper_ane.bin".into();
+    coyote_organs::gatekeeper_save_weights(&weights_path)?;
+    println!("Coyote ANE weights saved to {}", weights_path.display());
 
     Ok(())
 }

@@ -76,23 +76,21 @@ pub struct BuildReport {
     pub fingerprint_path: PathBuf,
 }
 
-/// Emit the DFA package and compile it to the machine's .mlmodelc.
+/// Emit the Coyote DFA + ANE organ binaries (`0xBEEFFACE` `.macho`) directly
+/// into `dir/firewall.mlmodelc` through the Coyote compiler and ANE runtime.
 pub fn compile_to(dir: &Path) -> Result<BuildReport> {
     let patterns = merged_patterns();
     let lowered: Vec<String> = patterns.iter().map(|p| p.to_lowercase()).collect();
-    let refs: Vec<&[u8]> = lowered.iter().map(|p| p.as_bytes()).collect();
-    let ac = mil_machines::Automaton::build(&refs);
-    let states = ac.states();
+    let dfa = coyote::vm::DfaMachine::compile(lowered);
+    let states = dfa.out.len();
 
     let package = dir.join(PACKAGE_NAME);
-    mil_machines::write_dfa_package(&package, &ac)
-        .with_context(|| format!("emit {}", package.display()))?;
-
-    // mil_compile takes an output *directory* and names the bundle after
-    // the package — firewall.mlpackage → dir/firewall.mlmodelc.
-    mil_compile::compile(&package, dir)
-        .with_context(|| format!("compile {}", package.display()))?;
     let compiled = dir.join(COMPILED_NAME);
+    std::fs::create_dir_all(&package).with_context(|| format!("mkdir {}", package.display()))?;
+    std::fs::create_dir_all(&compiled).with_context(|| format!("mkdir {}", compiled.display()))?;
+
+    crate::coyote_organs::compile_to_dir(&compiled)
+        .with_context(|| format!("coyote ANE compile {}", compiled.display()))?;
 
     let fingerprint_path = dir.join(FINGERPRINT_NAME);
     std::fs::write(&fingerprint_path, fingerprint(&patterns))

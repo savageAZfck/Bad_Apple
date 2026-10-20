@@ -2885,16 +2885,161 @@ private final class BadAppleANEFixedCore {
 }
 
 @available(macOS 15.0, *)
+private final class BadAppleCoyoteANECore {
+    private typealias CreateFn = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutableRawPointer?
+    private typealias DestroyFn = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    private typealias PredictFn = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Int32>?, Int) -> Int32
+    private typealias PrefillFn = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Int32>?, Int32) -> Bool
+    private typealias ResetFn = @convention(c) (UnsafeMutableRawPointer?) -> Bool
+    private typealias PrewarmFn = @convention(c) (UnsafeMutableRawPointer?) -> Bool
+    private typealias RatioFn = @convention(c) (UnsafeMutableRawPointer?) -> Double
+    private typealias UnitsFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
+    private typealias LatFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<UInt64>?, UnsafeMutablePointer<UInt64>?) -> Bool
+    private typealias FwdFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeRawPointer?, Int) -> Int32
+    private typealias FwdMultiFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeRawPointer?, Int, UnsafeMutablePointer<Int32>?, Int) -> Int32
+    private typealias RewindFn = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Bool
+    private typealias PosFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
+
+    private let rawHandle: UnsafeMutableRawPointer
+    private let destroyFn: DestroyFn
+    private let predictFn: PredictFn
+    private let prefillFn: PrefillFn
+    private let resetFn: ResetFn
+    private let prewarmFn: PrewarmFn
+    private let ratioFn: RatioFn
+    private let unitsFn: UnitsFn
+    private let latFn: LatFn
+    private let fwdFn: FwdFn
+    private let fwdMultiFn: FwdMultiFn
+    private let rewindFn: RewindFn
+    private let posFn: PosFn
+
+    private static let dylibHandle: UnsafeMutableRawPointer? = {
+        let candidates = [
+            "/Users/savag3/coyote/target/release/libcoyote.dylib",
+            "/Users/savag3/bad_apple/target/release/libcoyote.dylib",
+        ]
+        for p in candidates where FileManager.default.fileExists(atPath: p) {
+            if let h = dlopen(p, RTLD_NOW | RTLD_LOCAL) { return h }
+        }
+        return nil
+    }()
+
+    static func load(url: URL) throws -> BadAppleCoyoteANECore {
+        guard let lib = dylibHandle else {
+            throw NSError(domain: "BadAppleCoyoteANE", code: 1, userInfo: [NSLocalizedDescriptionKey: "libcoyote.dylib not found"])
+        }
+        func sym<T>(_ name: String, _: T.Type) throws -> T {
+            guard let s = dlsym(lib, name) else {
+                throw NSError(domain: "BadAppleCoyoteANE", code: 2, userInfo: [NSLocalizedDescriptionKey: "missing symbol \(name)"])
+            }
+            return unsafeBitCast(s, to: T.self)
+        }
+        let create = try sym("bad_apple_ane_create", CreateFn.self)
+        let destroy = try sym("bad_apple_ane_destroy", DestroyFn.self)
+        let predict = try sym("bad_apple_ane_predict_next", PredictFn.self)
+        let prefill = try sym("bad_apple_ane_prefill", PrefillFn.self)
+        let reset = try sym("bad_apple_ane_reset", ResetFn.self)
+        let prewarm = try sym("bad_apple_ane_prewarm", PrewarmFn.self)
+        let ratio = try sym("bad_apple_ane_placement_ratio", RatioFn.self)
+        let units = try sym("bad_apple_ane_compute_units_raw_value", UnitsFn.self)
+        let lat = try sym("bad_apple_ane_selection_latency_us", LatFn.self)
+        let fwd = try sym("bad_apple_ane_forward_hidden", FwdFn.self)
+        let fwdMulti = try sym("bad_apple_ane_forward_hidden_multi", FwdMultiFn.self)
+        let rewind = try sym("bad_apple_ane_rewind", RewindFn.self)
+        let pos = try sym("bad_apple_ane_position", PosFn.self)
+
+        guard let raw = url.path.withCString({ create($0) }) else {
+            throw NSError(domain: "BadAppleCoyoteANE", code: 3, userInfo: [NSLocalizedDescriptionKey: "coyote bad_apple_ane_create returned nil"])
+        }
+        return BadAppleCoyoteANECore(
+            rawHandle: raw, destroyFn: destroy, predictFn: predict, prefillFn: prefill,
+            resetFn: reset, prewarmFn: prewarm, ratioFn: ratio, unitsFn: units,
+            latFn: lat, fwdFn: fwd, fwdMultiFn: fwdMulti, rewindFn: rewind, posFn: pos
+        )
+    }
+
+    private init(
+        rawHandle: UnsafeMutableRawPointer, destroyFn: @escaping DestroyFn,
+        predictFn: @escaping PredictFn, prefillFn: @escaping PrefillFn,
+        resetFn: @escaping ResetFn, prewarmFn: @escaping PrewarmFn,
+        ratioFn: @escaping RatioFn, unitsFn: @escaping UnitsFn,
+        latFn: @escaping LatFn, fwdFn: @escaping FwdFn,
+        fwdMultiFn: @escaping FwdMultiFn, rewindFn: @escaping RewindFn,
+        posFn: @escaping PosFn
+    ) {
+        self.rawHandle = rawHandle
+        self.destroyFn = destroyFn
+        self.predictFn = predictFn
+        self.prefillFn = prefillFn
+        self.resetFn = resetFn
+        self.prewarmFn = prewarmFn
+        self.ratioFn = ratioFn
+        self.unitsFn = unitsFn
+        self.latFn = latFn
+        self.fwdFn = fwdFn
+        self.fwdMultiFn = fwdMultiFn
+        self.rewindFn = rewindFn
+        self.posFn = posFn
+    }
+
+    deinit {
+        destroyFn(rawHandle)
+    }
+
+    func predictNext(_ tokens: UnsafePointer<Int32>, count: Int) -> Int32? {
+        let r = predictFn(rawHandle, tokens, count)
+        return r >= 0 ? r : nil
+    }
+    func prefill(_ tokens: UnsafePointer<Int32>, count: Int) -> Bool {
+        prefillFn(rawHandle, tokens, Int32(count))
+    }
+    func reset() {
+        _ = resetFn(rawHandle)
+    }
+    func rewind(to newPosition: Int32) -> Bool {
+        rewindFn(rawHandle, newPosition)
+    }
+    var position: Int32 {
+        posFn(rawHandle)
+    }
+    func prewarm() -> Bool {
+        prewarmFn(rawHandle)
+    }
+    var placementRatio: Double {
+        ratioFn(rawHandle)
+    }
+    var computeUnitsRawValue: Int32 {
+        unitsFn(rawHandle)
+    }
+    var selectionLatencies: (TimeInterval, TimeInterval) {
+        var l: UInt64 = 0
+        var p: UInt64 = 0
+        _ = latFn(rawHandle, &l, &p)
+        return (Double(l) / 1_000_000.0, Double(p) / 1_000_000.0)
+    }
+    func forwardHidden(_ bytes: UnsafeRawPointer, count: Int) -> Int32? {
+        let r = fwdFn(rawHandle, bytes, count)
+        return r >= 0 ? r : nil
+    }
+    func forwardHiddenTokens(_ bytes: UnsafeRawPointer, count: Int, out: UnsafeMutableBufferPointer<Int32>) -> Int {
+        Int(fwdMultiFn(rawHandle, bytes, count, out.baseAddress, out.count))
+    }
+}
+
+@available(macOS 15.0, *)
 private enum BadAppleANEBackend {
     case monolithic(BadAppleANECore)
     case sharded(BadAppleANEShardCore)
     case fixedFull(BadAppleANEFixedCore)
+    case coyote(BadAppleCoyoteANECore)
 
     func predictNext(_ tokens: UnsafePointer<Int32>, count: Int) -> Int32? {
         switch self {
         case .monolithic(let core): core.predictNext(tokens, count: count)
         case .sharded(let core): core.predictNext(tokens, count: count)
         case .fixedFull(let core): core.predictNext(tokens, count: count)
+        case .coyote(let core): core.predictNext(tokens, count: count)
         }
     }
 
@@ -2903,6 +3048,7 @@ private enum BadAppleANEBackend {
         case .monolithic(let core): core.reset()
         case .sharded(let core): core.reset()
         case .fixedFull(let core): core.reset()
+        case .coyote(let core): core.reset()
         }
     }
 
@@ -2911,6 +3057,7 @@ private enum BadAppleANEBackend {
     func prefill(_ tokens: UnsafePointer<Int32>, count: Int) -> Bool {
         switch self {
         case .sharded(let core): return core.prefill(tokens, count: count)
+        case .coyote(let core): return core.prefill(tokens, count: count)
         case .monolithic(let core):
             for index in 0..<count {
                 if core.predictNext(tokens.advanced(by: index), count: 1) == nil { return false }
@@ -2931,6 +3078,7 @@ private enum BadAppleANEBackend {
         case .monolithic: return false
         case .sharded(let core): return core.rewind(to: newPosition)
         case .fixedFull(let core): return core.rewind(to: newPosition)
+        case .coyote(let core): return core.rewind(to: newPosition)
         }
     }
 
@@ -2939,6 +3087,7 @@ private enum BadAppleANEBackend {
         case .monolithic: return -1
         case .sharded(let core): return Int32(core.position)
         case .fixedFull(let core): return Int32(core.position)
+        case .coyote(let core): return core.position
         }
     }
 
@@ -2947,6 +3096,7 @@ private enum BadAppleANEBackend {
         case .monolithic(let core): core.prewarm()
         case .sharded(let core): core.prewarm()
         case .fixedFull(let core): core.prewarm()
+        case .coyote(let core): core.prewarm()
         }
     }
 
@@ -2955,6 +3105,7 @@ private enum BadAppleANEBackend {
         case .monolithic(let core): core.placementRatio
         case .sharded(let core): core.placementRatio
         case .fixedFull(let core): core.placementRatio
+        case .coyote(let core): core.placementRatio
         }
     }
 
@@ -2963,6 +3114,7 @@ private enum BadAppleANEBackend {
         case .monolithic(let core): Int32(core.configuration.computeUnits.rawValue)
         case .sharded(let core): Int32(core.configuration.computeUnits.rawValue)
         case .fixedFull(let core): Int32(core.configuration.computeUnits.rawValue)
+        case .coyote(let core): core.computeUnitsRawValue
         }
     }
 
@@ -2971,6 +3123,7 @@ private enum BadAppleANEBackend {
         case .monolithic(let core): (core.selectedLoadLatency, core.selectedPrewarmLatency)
         case .sharded(let core): (core.selectedLoadLatency, core.selectedPrewarmLatency)
         case .fixedFull(let core): (core.selectedLoadLatency, core.selectedPrewarmLatency)
+        case .coyote(let core): core.selectionLatencies
         }
     }
 
@@ -2979,6 +3132,7 @@ private enum BadAppleANEBackend {
     func forwardHidden(_ bytes: UnsafeRawPointer, count: Int) -> Int32? {
         switch self {
         case .sharded(let core): core.forwardHidden(bytes, count: count)
+        case .coyote(let core): core.forwardHidden(bytes, count: count)
         case .monolithic, .fixedFull: nil
         }
     }
@@ -2991,6 +3145,7 @@ private enum BadAppleANEBackend {
     ) -> Int {
         switch self {
         case .sharded(let core): core.forwardHiddenTokens(bytes, count: count, out: out)
+        case .coyote(let core): core.forwardHiddenTokens(bytes, count: count, out: out)
         case .monolithic, .fixedFull: -1
         }
     }
@@ -3011,7 +3166,10 @@ public func badAppleANECreate(_ path: UnsafePointer<CChar>?) -> UnsafeMutableRaw
     do {
         let url = URL(fileURLWithPath: String(cString: path))
         let backend: BadAppleANEBackend
-        if url.pathExtension.lowercased() == "json" {
+        let forceCoreML = ProcessInfo.processInfo.environment["BADAPPLE_ANE_COREML"] == "1"
+        if !forceCoreML, let core = try? BadAppleCoyoteANECore.load(url: url) {
+            backend = .coyote(core)
+        } else if url.pathExtension.lowercased() == "json" {
             let root = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any]
             if root?["fixed_model"] != nil {
                 backend = .fixedFull(try BadAppleANEFixedCore.load(manifestURL: url))

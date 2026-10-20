@@ -553,46 +553,41 @@ private final class AhoCorasickAutomaton {
     }
 }
 
-// MARK: - ANE Output Automaton
+// MARK: - ANE Output Automaton (Coyote ANE Organ Backend)
 
-/// Aho-Corasick output firewall compiled to a stateful CoreML program by
-/// `badapple firewall compile` (mil_machines) and executed on the ANE.
+/// Aho-Corasick output firewall + ANE `organ_encode` compiled from
+/// `coyote/badapple_organs.cy` (`0xBEEFFACE` `.macho`) and executed on the
+/// Apple Neural Engine via `libcoyote.dylib`.
 ///
 /// The artifact lives at `/var/lib/bad_apple/firewall.mlmodelc` with a
 /// SHA-256 fingerprint of the pattern set at `firewall.patterns.sha`.
-/// The automaton answers "did any pattern end here" per byte — detection
-/// only — so verdicts are hardware; range replacement stays in software.
 /// Every failure mode returns nil and the caller falls back to the Swift
 /// automaton, so a missing/stale/corrupt model never weakens the firewall.
 final class ANEOutputAutomaton {
-    /// Why the last init attempt bailed — diagnostics for the fallback path.
     static var lastInitFailure = ""
     static let modelPath = "/var/lib/bad_apple/firewall.mlmodelc"
     static let fingerprintPath = "/var/lib/bad_apple/firewall.patterns.sha"
+    static let coyoteCyPath = "/Users/savag3/bad_apple/coyote/badapple_organs.cy"
+    static let coyoteDylibPaths = [
+        "/Users/savag3/coyote/target/release/libcoyote.dylib",
+        "/Users/savag3/bad_apple/target/release/libcoyote.dylib",
+    ]
 
-    private var model: MLModel?
-    private var state: MLState?
+    private typealias OpenFn = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, Bool) -> UnsafeMutableRawPointer?
+    private typealias CloseFn = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    private typealias CallStrFn = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafeMutablePointer<CChar>?, Int) -> Int
+
+    private var dylib: UnsafeMutableRawPointer?
+    private var vm: UnsafeMutableRawPointer?
+    private var closeFn: CloseFn?
+    private var callStrFn: CallStrFn?
     private var fingerprint = ""
 
-    /// Every byte pushed through `state` — used to detect whether a
-    /// caller's `accumulated` continues this stream or begins a new one
-    /// (interleaved responses share the firewall object).
     private(set) var consumed = Data()
-    /// Latched "any hit seen in this stream" flag.
     private(set) var hit = false
-    /// A predict failure poisons the automaton — callers must fall back to
-    /// the software path for the remainder of the scan (fail closed).
     private(set) var broken = false
 
-    /// Load the compiled model if its fingerprint matches `snapshot`.
-    /// Returns nil — i.e. caller must use the software path — when the
-    /// artifact is absent, was built from a different pattern set, or the
-    /// model/state machinery fails to initialize.
     init?(snapshot: [String]) {
-        guard #available(macOS 15.0, *) else {
-            Self.lastInitFailure = "macOS<15"
-            return nil
-        }
         let onDisk = (try? String(contentsOfFile: Self.fingerprintPath, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let fp = Self.fingerprint(for: snapshot)
@@ -600,73 +595,90 @@ final class ANEOutputAutomaton {
             Self.lastInitFailure = "fingerprint mismatch (disk='\(onDisk.prefix(8))' live='\(fp.prefix(8))')"
             return nil
         }
-        let url = URL(fileURLWithPath: Self.modelPath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard FileManager.default.fileExists(atPath: Self.modelPath),
+              FileManager.default.fileExists(atPath: Self.coyoteCyPath) else {
             Self.lastInitFailure = "no artifact"
             return nil
         }
-        guard let m = try? MLModel(contentsOf: url) else {
-            Self.lastInitFailure = "MLModel load failed"
+        var handle: UnsafeMutableRawPointer?
+        for p in Self.coyoteDylibPaths where FileManager.default.fileExists(atPath: p) {
+            if let h = dlopen(p, RTLD_NOW | RTLD_LOCAL) {
+                handle = h
+                break
+            }
+        }
+        guard let handle,
+              let openSym = dlsym(handle, "coyote_open"),
+              let closeSym = dlsym(handle, "coyote_close"),
+              let callStrSym = dlsym(handle, "coyote_call_str") else {
+            Self.lastInitFailure = "libcoyote.dylib symbols unavailable"
             return nil
         }
-        model = m
-        fingerprint = fp
-        reset()
-        guard state != nil else {
-            Self.lastInitFailure = "newState failed"
+        let openFn = unsafeBitCast(openSym, to: OpenFn.self)
+        let close = unsafeBitCast(closeSym, to: CloseFn.self)
+        let callStr = unsafeBitCast(callStrSym, to: CallStrFn.self)
+
+        let rawVm = Self.coyoteCyPath.withCString { cyPtr in
+            Self.modelPath.withCString { outPtr in
+                openFn(cyPtr, outPtr, false)
+            }
+        }
+        guard let rawVm else {
+            Self.lastInitFailure = "coyote_open failed"
             return nil
         }
+        self.dylib = handle
+        self.vm = rawVm
+        self.closeFn = close
+        self.callStrFn = callStr
+        self.fingerprint = fp
         Self.lastInitFailure = ""
     }
 
-    /// SHA-256 of the lowercased patterns joined by '\n' — identical to
-    /// `firewall_machine::fingerprint` on the Rust side.
+    deinit {
+        if let vm, let closeFn {
+            closeFn(vm)
+        }
+    }
+
     static func fingerprint(for patterns: [String]) -> String {
         BadAppleSecurity.sha256(
             patterns.map { $0.lowercased() }.joined(separator: "\n")
         )
     }
 
-    /// Fresh MLState — start of a new output stream.
     func reset() {
-        guard #available(macOS 15.0, *), let model else {
+        guard vm != nil else {
             broken = true
             return
         }
-        state = model.__newState()
         consumed = Data()
         hit = false
         broken = false
     }
 
-    /// Feed UTF-8 bytes (ASCII case-folded — patterns compile lowercase);
-    /// returns true the moment any pattern completes and stays true.
     func feed(_ bytes: some Sequence<UInt8>) -> Bool {
-        guard !broken, let model, let state else { return false }
+        guard !broken, let vm, let callStrFn else { return false }
         var chunk = Data()
         for byte in bytes {
             chunk.append(byte)
-            let b: Int32 = byte >= 65 && byte <= 90 ? Int32(byte) + 32 : Int32(byte)
-            autoreleasepool {
-                do {
-                    let arr = try MLMultiArray(shape: [1], dataType: .int32)
-                    arr[0] = NSNumber(value: b)
-                    let provider = try MLDictionaryFeatureProvider(
-                        dictionary: ["byte": MLFeatureValue(multiArray: arr)]
-                    )
-                    let out = try model.prediction(from: provider, using: state)
-                    if let hits = out.featureValue(for: "hit")?.multiArrayValue,
-                       hits.count > 0, hits[0].int32Value != 0 {
-                        hit = true
-                    }
-                } catch {
-                    broken = true
-                }
-            }
-            if broken || hit { break }
         }
-        if !broken, !chunk.isEmpty {
-            consumed.append(chunk)
+        guard !chunk.isEmpty else { return hit }
+        consumed.append(chunk)
+        let text = String(decoding: consumed, as: UTF8.self).lowercased()
+        var outBuf = [CChar](repeating: 0, count: 256)
+        let n = "firewall_scan_live".withCString { fnPtr in
+            text.withCString { argPtr in
+                callStrFn(vm, fnPtr, argPtr, &outBuf, outBuf.count)
+            }
+        }
+        if n < 0 {
+            broken = true
+            return false
+        }
+        let verdict = String(cString: outBuf)
+        if !verdict.hasPrefix("hit=-1|") {
+            hit = true
         }
         return hit
     }

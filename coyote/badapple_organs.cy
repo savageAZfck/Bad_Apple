@@ -25,6 +25,37 @@
 
 cap fs, patch, erase
 invariant reflexes_brake_never_steer
+invariant sealed_keys_unnameable
+
+// ==================================================== ANE silicon programs
+//
+// Two compiled ANE programs live inside the organ VM:
+//   - `organ_encode`: 2-layer 64->64->64 MLP on the Apple Neural Engine
+//     used by the gatekeeper semantic router and organ pulse.
+//   - `organ_train`: on-chip forward + reverse-mode `grad` + in-place
+//     packed weight update (`gk_w1`, `gk_w2`) on the Apple Neural Engine.
+
+param gk_w1: trainable f16[64, 64]
+param gk_w2: trainable f16[64, 64]
+param enclave_root: sealed f16[64]
+
+fn gk_loss<D>(x: f16[D], t: f16[D], gk_w1: f16[D, D], gk_w2: f16[D, D]) -> f32 {
+    let h = sigmoid(x @ gk_w1);
+    let p = h @ gk_w2;
+    mse(p, t)
+}
+
+fn organ_encode(x: f16[64]) -> f16[64] {
+    sigmoid(x @ gk_w1) @ gk_w2
+}
+
+fn organ_train(x: f16[64], t: f16[64]) -> f16[64] {
+    let dw2 = grad(gk_loss(x, t, gk_w1, gk_w2), gk_w2);
+    let dw1 = grad(gk_loss(x, t, gk_w1, gk_w2), gk_w1);
+    gk_w2 -= 0.15 * dw2;
+    gk_w1 -= 0.15 * dw1;
+    sigmoid(x @ gk_w1) @ gk_w2
+}
 
 // ============================================================ helpers
 
@@ -383,6 +414,7 @@ host fn arc_sense(root: str, kind: str, data: {str: str}, now_ms: i64) -> str ca
         st.wcount = 0;
     }
     var fired: [str] = [];
+    let _ane = organ_encode(onehot(len(kind) % 64, 64));
     let evidence = sha256(kind + "|" + map_repr(data) + "|" + str(now_ms));
     if st.frz {
         if st.wcount < 64 {
@@ -636,7 +668,10 @@ host fn marshal_status(root: str) -> str cap fs {
 // firewall_machine::merged_patterns — built-ins first, then each
 // non-comment blocklist line — then macuahuitl's Aho-Corasick scan.
 host fn firewall_scan(blocklist: str, text: str) -> str cap fs {
-    var pats: [str] = ["sk-", "ssh-rsa", "-----BEGIN", "-----END", "BEGIN PRIVATE KEY", "BEGIN OPENSSH PRIVATE KEY"];
+    var pats: [str] = [
+        "sk-", "ssh-rsa", "-----BEGIN", "-----END", "BEGIN PRIVATE KEY", "BEGIN OPENSSH PRIVATE KEY",
+        "-----begin", "-----end", "begin private key", "begin openssh private key"
+    ];
     if len(blocklist) > 0 {
         let lines = split(read_file(blocklist), "\n");
         for i in 0..len(lines) {
@@ -648,8 +683,61 @@ host fn firewall_scan(blocklist: str, text: str) -> str cap fs {
     }
     let fw = dfa_compile(pats);
     let hit = dfa_scan(fw, text);
+    let _ane = organ_encode(onehot(len(text) % 64, 64));
     witness("firewall:scan", "patterns=" + str(len(pats)) + " hit=" + str(hit));
     return "hit=" + str(hit) + "|patterns=" + str(len(pats));
+}
+
+host fn firewall_scan_live(text: str) -> str cap fs {
+    return firewall_scan("/var/lib/bad_apple/blocklist.txt", text);
+}
+
+// =================================================== gatekeeper ANE router
+
+// Classify a 64-D grounded semantic embedding on the ANE (`organ_encode`).
+// Channels 0..32 represent class 0 (fast), channels 32..64 represent class 1 (deep).
+// Returns a probability score in [0.0, 1.0] (> 0.5 => deep).
+host fn gatekeeper_classify(x: f16[64]) -> f64 {
+    let y = organ_encode(x);
+    var s0 = 0.0;
+    var s1 = 0.0;
+    for i in 0..32 {
+        s0 = s0 + y[i];
+        s1 = s1 + y[i + 32];
+    }
+    s0 = s0 / 32.0;
+    s1 = s1 / 32.0;
+    var p = 0.5 + 0.5 * (s1 - s0);
+    if p < 0.0 {
+        p = 0.0;
+    }
+    if p > 1.0 {
+        p = 1.0;
+    }
+    witness("gatekeeper:classify", str(i64(p * 1000.0)));
+    return p;
+}
+
+// On-chip ANE training step (`organ_train`): computes forward + backward `grad`
+// + in-place update of `gk_w1` and `gk_w2` on the Neural Engine and returns MSE.
+host fn gatekeeper_train_step(x: f16[64], label: i64) -> f64 {
+    var t = zeros(64);
+    for i in 0..32 {
+        if label == 1 {
+            t[i] = -1.0;
+            t[i + 32] = 1.0;
+        } else {
+            t[i] = 1.0;
+            t[i + 32] = -1.0;
+        }
+    }
+    let y = organ_train(x, t);
+    var loss = 0.0;
+    for i in 0..64 {
+        let d = y[i] - t[i];
+        loss = loss + d * d;
+    }
+    return loss / 64.0;
 }
 
 // ============================================================= council
@@ -698,5 +786,9 @@ host fn main() -> i64 {
     print(firewall_scan("", "here is sk-livekey material"));
     print(council("deploy", ["A|yes|within bounds", "B|no|need margin", "C|yes|verified"]));
     print(erase_subject("subj_1", "ephemeral transcript"));
+    let x0 = onehot(0, 64);
+    let l0 = gatekeeper_train_step(x0, 1);
+    let p0 = gatekeeper_classify(x0);
+    print("gatekeeper ane train loss=" + str(l0) + " classify=" + str(p0));
     return 0;
 }

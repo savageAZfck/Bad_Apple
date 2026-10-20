@@ -103,8 +103,25 @@ fn config_from_env() -> Option<AneCoreConfig> {
     if std::env::var("BADAPPLE_SENTINEL").ok().as_deref() == Some("0") {
         return None;
     }
-    let model_path: PathBuf = std::env::var_os("BADAPPLE_SENTINEL_MODEL")?.into();
-    let tokenizer_path: PathBuf = std::env::var_os("BADAPPLE_SENTINEL_TOKENIZER")?.into();
+    let model_path: PathBuf = std::env::var_os("BADAPPLE_SENTINEL_MODEL")
+        .or_else(|| {
+            std::env::var_os("BADAPPLE_SENTINEL_COYOTE").and_then(|v| {
+                if v == "1" {
+                    Some("/Users/savag3/coyote/examples/qwenorg.cy".into())
+                } else if v != "0" {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
+        })?
+        .into();
+    let tokenizer_path: PathBuf = std::env::var_os("BADAPPLE_SENTINEL_TOKENIZER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tokenizer.json"));
+    if !tokenizer_path.is_file() {
+        return None;
+    }
     let max_context_tokens = std::env::var("BADAPPLE_SENTINEL_MAX_CONTEXT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -121,6 +138,9 @@ fn config_from_env() -> Option<AneCoreConfig> {
 }
 
 fn read_seq_len(path: &std::path::Path) -> usize {
+    if path.extension().is_some_and(|e| e == "cy") {
+        return 64;
+    }
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
