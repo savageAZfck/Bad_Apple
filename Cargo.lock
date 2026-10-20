@@ -279,6 +279,7 @@ dependencies = [
  "cbindgen",
  "chrono",
  "ciborium",
+ "coyote",
  "crossbeam-channel",
  "crossbeam-queue",
  "crossbeam-utils",
@@ -301,10 +302,10 @@ dependencies = [
  "memmap2",
  "metal",
  "mictlan",
- "mil_compile",
- "mil_infer",
+ "mil_compile 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mil_infer 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "mil_machines",
- "mil_spec",
+ "mil_spec 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nagi-escrow",
  "nagual",
  "ndarray",
@@ -860,6 +861,14 @@ dependencies = [
  "bitflags 1.3.2",
  "core-foundation 0.9.4",
  "libc",
+]
+
+[[package]]
+name = "coyote"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "mil_infer 0.6.0 (git+https://github.com/savageAZfck/mil_spec)",
 ]
 
 [[package]]
@@ -2424,7 +2433,15 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1601a7ca3495f4daea961d0db304e8a4df36a1f41501433263fff7a96005fd01"
 dependencies = [
- "mil_spec",
+ "mil_spec 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "mil_compile"
+version = "0.2.0"
+source = "git+https://github.com/savageAZfck/mil_spec#20f097fb34969cd577342a4d7996fbf5464998c8"
+dependencies = [
+ "mil_spec 0.4.2 (git+https://github.com/savageAZfck/mil_spec)",
 ]
 
 [[package]]
@@ -2434,8 +2451,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a977ac42d3bdcacc34c2130ecbc3946e6c84b856fdf3826cdb5b11f1e79c1cd3"
 dependencies = [
  "half",
- "mil_compile",
- "mil_spec",
+ "mil_compile 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mil_spec 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json",
+]
+
+[[package]]
+name = "mil_infer"
+version = "0.6.0"
+source = "git+https://github.com/savageAZfck/mil_spec#20f097fb34969cd577342a4d7996fbf5464998c8"
+dependencies = [
+ "half",
+ "mil_compile 0.2.0 (git+https://github.com/savageAZfck/mil_spec)",
+ "mil_spec 0.4.2 (git+https://github.com/savageAZfck/mil_spec)",
  "serde_json",
 ]
 
@@ -2445,7 +2473,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7619370f4c2bfe4169b35230a84681a93b34141405d052b2cd0ec0f7d129ce6"
 dependencies = [
- "mil_spec",
+ "mil_spec 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2453,6 +2481,14 @@ name = "mil_spec"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d571e389a61a72d727787602db5699b2c1dae2215eabb43966d43c3866959ab0"
+dependencies = [
+ "half",
+]
+
+[[package]]
+name = "mil_spec"
+version = "0.4.2"
+source = "git+https://github.com/savageAZfck/mil_spec#20f097fb34969cd577342a4d7996fbf5464998c8"
 dependencies = [
  "half",
 ]

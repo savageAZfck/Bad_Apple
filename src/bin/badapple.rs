@@ -167,6 +167,12 @@ fn main() -> Result<()> {
         Some("strategy") => {
             return run_strategy_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("coyote") => {
+            return run_coyote_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
+        Some("organs") => {
+            return run_organs_subcommand(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         _ => {}
     }
     let mut args = std::env::args().skip(1);
@@ -1875,6 +1881,140 @@ fn run_redteam_subcommand(args: &[String]) -> Result<()> {
 /// badapple-tape binary (same dir or PATH) so the daemon wrapper stays thin.
 fn run_tape_subcommand(args: &[String]) -> Result<()> {
     run_sidecar_subcommand("badapple-tape", args)
+}
+
+/// `badapple coyote <check|build|run|cage> <file.cy> [args...]` — Bad Apple's
+/// native Coyote language organ. `cage` compiles `.cy` to WebAssembly (`--wasm`)
+/// and executes it inside her fuel-metered, memory-capped `WasmCage`.
+fn run_coyote_subcommand(args: &[String]) -> Result<()> {
+    let candidates = [
+        "/Users/savag3/coyote/target/release/coyote",
+        "/Users/savag3/coyote/target/debug/coyote",
+        "coyote",
+    ];
+    let bin = candidates
+        .iter()
+        .copied()
+        .find(|p| *p == "coyote" || std::path::Path::new(p).exists())
+        .unwrap_or("coyote");
+    let sub = args.first().map(String::as_str).unwrap_or("help");
+    if sub == "cage" {
+        let cy_file = args
+            .get(1)
+            .context("usage: badapple coyote cage <file.cy> [input]")?;
+        let input = args.get(2).map(String::as_str).unwrap_or("");
+        let out_wasm =
+            std::env::temp_dir().join(format!("badapple_cage_{}.wasm", std::process::id()));
+        let status = std::process::Command::new(bin)
+            .arg("build")
+            .arg(cy_file)
+            .arg("--wasm")
+            .arg("-o")
+            .arg(&out_wasm)
+            .status()
+            .with_context(|| format!("failed to run {bin}"))?;
+        if !status.success() {
+            bail!("coyote --wasm compile failed with {status}");
+        }
+        let wasm_bytes =
+            std::fs::read(&out_wasm).context("cannot read compiled coyote .wasm module")?;
+        let _ = std::fs::remove_file(&out_wasm);
+        let mut cage = bad_apple::wasm_cage::WasmCage::new()
+            .map_err(|e| anyhow::anyhow!("WasmCage init: {}", e.reason))?;
+        cage.compile(&wasm_bytes)
+            .map_err(|e| anyhow::anyhow!("WasmCage compile: {}", e.reason))?;
+        let out = cage
+            .run_with_input(input.as_bytes())
+            .map_err(|e| anyhow::anyhow!("WasmCage run: {}", e.reason))?;
+        print!("{out}");
+        if !out.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+    let status = std::process::Command::new(bin)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to invoke {bin}"))?;
+    if !status.success() {
+        bail!("coyote exited with {status}");
+    }
+    Ok(())
+}
+
+/// `badapple organs <...>` — her organ layer running as Coyote
+/// (`coyote/badapple_organs.cy`) inside one in-process VM. Mirrors the
+/// `badapple-reflex` CLI surface and adds the marshal, firewall scan,
+/// council, and certified erasure organs.
+fn run_organs_subcommand(args: &[String]) -> Result<()> {
+    let named = |flag: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let out = match args.first().map(String::as_str) {
+        Some("install") => {
+            let id = args.get(1).context("install <id>")?;
+            let trigger = named("--trigger").context("--trigger required")?;
+            let action = named("--action").unwrap_or_else(|| "alert".into());
+            let cd = named("--cooldown-ms")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let mx = named("--max-firings")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            bad_apple::coyote_organs::arc_install(id, &trigger, &action, cd, mx)?
+        }
+        Some("remove") => bad_apple::coyote_organs::arc_remove(
+            args.get(1).context("remove <id>")?,
+        )?,
+        Some("list") => bad_apple::coyote_organs::arc_list()?,
+        Some("sense") => {
+            let kind = args.get(1).context("sense <kind>")?;
+            let data: serde_json::Value = named("--data")
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::Value::Null);
+            bad_apple::coyote_organs::arc_sense(kind, &data)?
+        }
+        Some("clear-freeze") => bad_apple::coyote_organs::arc_clear_freeze()?,
+        Some("rearm") => {
+            bad_apple::coyote_organs::arc_rearm(args.get(1).context("rearm <id>")?)?
+        }
+        Some("status") => bad_apple::coyote_organs::arc_status()?,
+        Some("verify") => bad_apple::coyote_organs::arc_verify()?,
+        Some("marshal") => {
+            let surface = args.get(1).context("marshal <surface> <old> <new> <intent>")?;
+            let old = args.get(2).context("marshal <surface> <old> <new> <intent>")?;
+            let new = args.get(3).context("marshal <surface> <old> <new> <intent>")?;
+            let intent = args.get(4).context("marshal <surface> <old> <new> <intent>")?;
+            bad_apple::coyote_organs::marshal_check(surface, old, new, intent)?
+        }
+        Some("marshal-level") => bad_apple::coyote_organs::marshal_set_level(
+            args.get(1)
+                .context("marshal-level <off|suggest|safe-apply|full>")?,
+        )?,
+        Some("marshal-status") => bad_apple::coyote_organs::marshal_status()?,
+        Some("scan") => {
+            bad_apple::coyote_organs::firewall_scan(args.get(1).context("scan <text>")?)?
+        }
+        Some("quorum") => {
+            let topic = args
+                .get(1)
+                .context("quorum <topic> <seat|yes|no|reason> ...")?;
+            bad_apple::coyote_organs::council(topic, &args[2..])?
+        }
+        Some("erase") => {
+            let subject = args.get(1).context("erase <subject> <payload>")?;
+            let payload = args.get(2).context("erase <subject> <payload>")?;
+            bad_apple::coyote_organs::erase_subject(subject, payload)?
+        }
+        _ => bail!(
+            "usage: badapple organs <install|remove|list|sense|clear-freeze|rearm|status|verify|marshal|marshal-level|marshal-status|scan|quorum|erase>"
+        ),
+    };
+    println!("{out}");
+    Ok(())
 }
 
 /// Forward a subcommand to a sibling binary in the same release dir,

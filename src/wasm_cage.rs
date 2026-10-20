@@ -509,4 +509,27 @@ mod tests {
         let output = cage.run_with_input(&input).unwrap();
         assert!(output.is_empty());
     }
+
+    #[test]
+    fn cage_runs_coyote_compiled_wasm_module() {
+        let path = std::path::Path::new("/tmp/cage_tool.wasm");
+        if !path.exists() {
+            return;
+        }
+        let wasm = std::fs::read(path).unwrap();
+        let mut cage = WasmCage::new().unwrap();
+        cage.compile(&wasm)
+            .expect("coyote .wasm must pass WasmCage validation");
+
+        let out_clean = cage.run_with_input(b"hello_bad_apple").unwrap();
+        println!("WasmCage <- coyote (clean):\n{out_clean}");
+        assert!(out_clean.contains("[witness:fib10] 55"));
+        assert!(out_clean.contains("CLEAN:hello_bad_apple:fib=55"));
+
+        let out_block = cage.run_with_input(b"attempt exfil now").unwrap();
+        println!("WasmCage <- coyote (exfil):\n{out_block}");
+        assert!(out_block
+            .contains("[reflex:inspect_payload] Reflex::Quarantine(blocked exfil payload)"));
+        assert!(out_block.contains("QUARANTINED:blocked exfil payload"));
+    }
 }

@@ -158,7 +158,10 @@ impl FastActionResolver {
             delete: Regex::new(r"(?i)\b(delete|remove|trash)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)").context("delete regex")?,
             copy_file: Regex::new(r"(?i)\bcopy\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").context("copy_file regex")?,
             move_file: Regex::new(r"(?i)\b(move)\b(?:\s+\w+){0,3}\s+([~/a-z0-9_\.\-\s/]+)\s+(?:to\s+)?([~/a-z0-9_\.\-\s/]+)").context("move_file regex")?,
-            run_wasm: Regex::new(r"(?i)\b(?:run|execute)\b(?:\s+\w+){0,3}\s+(?:wasm\s+)?script\s+([~/a-z0-9_\.\-\s/]+\.wasm)").context("run_wasm regex")?,
+            run_wasm: Regex::new(
+                r"(?i)\b(?:run|execute)\b(?:\s+\w+){0,3}\s+(?:wasm\s+|coyote\s+)?script\s+([~/a-z0-9_\.\-\s/]+\.(?:wasm|cy))",
+            )
+            .context("run_wasm regex")?,
             time: Regex::new(r"(?i)^(what'?s?\s+(?:the\s+)?time|what\s+time\s+is\s+it|current\s+time|time\s+is\s+it|clock|what\s+hour\s+is\s+it|qu[eé]\s+hora\s+es)\b").context("time regex")?,
         })
     }
@@ -370,8 +373,14 @@ fn execute_fast(action: FastAction, cage: &AutomationCage) -> Result<String> {
             if !is_allowed_path(&expanded, cage) {
                 bail!("wasm path escapes allowlisted automation roots");
             }
-            let wasm_bytes =
-                fs::read(&expanded).with_context(|| format!("cannot read WASM {expanded}"))?;
+            let wasm_bytes = if std::path::Path::new(&expanded)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("cy"))
+            {
+                compile_coyote_file_to_wasm(std::path::Path::new(&expanded))?
+            } else {
+                fs::read(&expanded).with_context(|| format!("cannot read WASM {expanded}"))?
+            };
             let mut cage =
                 WasmCage::new().map_err(|e| anyhow!("WasmCage init failed: {}", e.reason))?;
             cage.compile(&wasm_bytes)
@@ -437,10 +446,56 @@ fn execute_cage_blocks(text: &str, cage: &AutomationCage) -> String {
     }
 }
 
-/// Scan the 8B response for ```badapple-wasm blocks. The block may be a path to
-/// a .wasm file or a base64 blob. Execute in the WasmCage and return outputs.
+/// Compile a `.cy` file to WebAssembly bytes via the `coyote` compiler (`--wasm`)
+/// so the resulting module executes inside `WasmCage`.
+fn compile_coyote_file_to_wasm(cy_path: &std::path::Path) -> Result<Vec<u8>> {
+    let candidates = [
+        "/Users/savag3/coyote/target/release/coyote",
+        "/Users/savag3/coyote/target/debug/coyote",
+        "coyote",
+    ];
+    let bin = candidates
+        .iter()
+        .copied()
+        .find(|p| *p == "coyote" || std::path::Path::new(p).exists())
+        .unwrap_or("coyote");
+    let out_wasm = std::env::temp_dir().join(format!("badapple_cy_{}.wasm", std::process::id()));
+    let status = std::process::Command::new(bin)
+        .arg("build")
+        .arg(cy_path)
+        .arg("--wasm")
+        .arg("-o")
+        .arg(&out_wasm)
+        .output()
+        .with_context(|| format!("failed to invoke coyote compiler ({bin})"))?;
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        bail!(
+            "coyote compile rejected program: {}{}",
+            stderr.trim(),
+            stdout.trim()
+        );
+    }
+    let bytes = fs::read(&out_wasm).context("cannot read compiled coyote .wasm")?;
+    let _ = fs::remove_file(&out_wasm);
+    Ok(bytes)
+}
+
+/// Compile inline `.cy` source text to WebAssembly bytes via `coyote --wasm`.
+fn compile_coyote_src_to_wasm(src: &str) -> Result<Vec<u8>> {
+    let tmp_cy = std::env::temp_dir().join(format!("badapple_inline_{}.cy", std::process::id()));
+    fs::write(&tmp_cy, src).context("cannot stage inline .cy")?;
+    let res = compile_coyote_file_to_wasm(&tmp_cy);
+    let _ = fs::remove_file(&tmp_cy);
+    res
+}
+
+/// Scan the 8B response for ```badapple-wasm or ```badapple-coyote blocks.
+/// The block may be a path to a .wasm/.cy file, inline .cy source, or a base64
+/// WASM blob. Execute in the WasmCage and return outputs.
 fn execute_wasm_blocks(text: &str, cage: &AutomationCage) -> String {
-    let Ok(re) = Regex::new(r"(?s)```badapple-wasm\s*(.*?)\s*```") else {
+    let Ok(re) = Regex::new(r"(?s)```badapple-(wasm|coyote)\s*(.*?)\s*```") else {
         // The pattern is a hardcoded constant; if it ever fails to compile,
         // return the text unchanged rather than panicking.
         return text.to_string();
@@ -449,22 +504,34 @@ fn execute_wasm_blocks(text: &str, cage: &AutomationCage) -> String {
     let mut replaced = text.to_string();
 
     for cap in re.captures_iter(text) {
-        let Some(body_match) = cap.get(1) else {
+        let kind = cap.get(1).map(|m| m.as_str()).unwrap_or("wasm");
+        let Some(body_match) = cap.get(2) else {
             continue;
         };
         let body = body_match.as_str().trim();
         let result: Result<String> = (|| {
-            let bytes = if body.starts_with('/')
+            let bytes = if kind == "coyote" && !body.starts_with('/') && !body.starts_with('~') {
+                compile_coyote_src_to_wasm(body)?
+            } else if body.starts_with('/')
                 || body.starts_with('~')
-                || std::path::Path::new(body)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+                || std::path::Path::new(body).extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("wasm") || ext.eq_ignore_ascii_case("cy")
+                })
             {
                 let path = expand_path(body);
                 if !is_allowed_path(&path, cage) {
                     bail!("wasm path escapes allowlisted automation roots");
                 }
-                fs::read(&path).with_context(|| format!("cannot read WASM {path}"))?
+                if std::path::Path::new(&path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("cy"))
+                {
+                    compile_coyote_file_to_wasm(std::path::Path::new(&path))?
+                } else {
+                    fs::read(&path).with_context(|| format!("cannot read WASM {path}"))?
+                }
+            } else if body.contains("host fn") || body.contains("reflex ") {
+                compile_coyote_src_to_wasm(body)?
             } else {
                 general_purpose::STANDARD
                     .decode(body)
