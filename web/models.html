@@ -106,11 +106,13 @@
       return r.json();
     }
 
+    let availGB = null;
     async function loadStatus() {
       const data = await api('POST', { action: 'status' });
-      render(data);
       const rec = await api('POST', { action: 'recommend' });
-      document.getElementById('recommend-result').innerHTML = `Available ${rec.available_gb} GB · recommended: <strong>${rec.recommended?.name || rec.recommended_id}</strong>`;
+      availGB = rec.available_gb;
+      document.getElementById('recommend-result').innerHTML = `Available ${availGB} GB · recommended: <strong>${rec.recommended?.name || rec.recommended_id}</strong>`;
+      render(data);
     }
 
     async function recommend() {
@@ -136,8 +138,10 @@
     function render(data) {
       list.innerHTML = '';
       for (const m of Object.values(data).filter(x => x.id)) {
+        const fits = availGB == null || m.size_gb == null || m.size_gb <= availGB;
         const card = document.createElement('div');
         card.className = 'card';
+        if (!fits) card.style.opacity = '0.4';
         const progress = Math.round((m.progress || 0) * 100);
         card.innerHTML = `
           <div class="icon">${icons[m.id] || '📦'}</div>
@@ -149,9 +153,10 @@
             ${m.error ? `<div class="error">${m.error}</div>` : ''}
           </div>
           <div class="actions">
+            ${!fits ? `<div class="meta">needs ${m.size_gb} GB — won't fit (${availGB} GB free)</div>` : ''}
             <button class="secondary" onclick="refreshModel('${m.id}')">Refresh</button>
-            <button onclick="downloadModel('${m.id}')" ${m.status !== 'missing' ? 'disabled' : ''}>Download</button>
-            ${m.kind === 'text' ? `<button class="secondary" onclick="switchModel('${m.id}')">Switch</button>` : ''}
+            <button onclick="downloadModel('${m.id}')" ${(m.status !== 'missing' || !fits) ? 'disabled' : ''}>Download</button>
+            ${m.kind === 'text' ? `<button class="secondary" onclick="switchModel('${m.id}')" ${!fits ? 'disabled' : ''}>Switch</button>` : ''}
             <button class="secondary" onclick="admitModel('${m.id}')">Admit</button>
           </div>`;
         list.appendChild(card);
