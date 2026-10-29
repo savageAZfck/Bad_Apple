@@ -200,6 +200,110 @@ BADAPPLE_AIRGAP=1 brew install --cask bad-apple
 On an installed system, the "Allow Bad Apple to download models" checkbox on
 the dashboard Models page controls whether she may fetch new models.
 
+## Command cheat sheet
+
+Everything below is `badapple` — the CLI installed into `/usr/local/bin` at
+install time. Type `badapple` with no arguments to see the built-in usage.
+
+### Talking to her
+
+| Command | What it does |
+| --- | --- |
+| `badapple "what is 2+2"` | Ask a question |
+| `badapple -n 120 "write a poem"` | Same, with a token cap |
+| `badapple --persona wicket "who are you"` | One-shot persona switch |
+| `badapple --roast "what do you think of siri"` | Drill-persona alias |
+| `badapple --speak "tell me a joke"` | Reply out loud |
+| `badapple "switch to cali"` | Change persona until switched back |
+| `badapple "teach the cloud is just hamsters"` | Teach her a custom line |
+| `badapple --benchmark` | Run the prompt benchmark suite |
+
+### Health, proof, and reports
+
+| Command | What it does |
+| --- | --- |
+| `badapple status` | Daemon and organ health |
+| `badapple --doctor` | Full diagnostic report |
+| `badapple --crash-report` | Bundle a bug report (asks consent before sending) |
+| `badapple cert` | Verify the ledger + checkpoint signatures |
+| `badapple receipts` | Signed verdict receipts |
+| `badapple export-proof [dir]` | Export the audit proof bundle |
+| `badapple demo [full]` | Guided walkthrough of the organs |
+
+### Models
+
+| Command | What it does |
+| --- | --- |
+| `badapple model list` | Models in the catalog and what is cached |
+| `badapple model recommend` | What actually fits your memory right now |
+| `badapple model info <id>` | Details on one model |
+| `badapple model use <id>` | Switch the active brain |
+| `badapple model verify` | Check cached weights against checksums |
+| `badapple model scan` | Find models already on disk |
+| `badapple model add <path> [id] [repo]` | Register a local model file |
+| `badapple model remove <id>` | Drop a model from the catalog |
+
+### Organs and governance
+
+| Command | What it does |
+| --- | --- |
+| `badapple organs list` | Installed reflex arcs |
+| `badapple organs install <id> --trigger <t> --action <a>` | Install a reflex |
+| `badapple organs sense <kind>` | Fire a sense event at the arc |
+| `badapple organs status` / `verify` | Arc state + hash-chain check |
+| `badapple organs marshal <s> <old> <new> <i>` | Ask the marshal to rule on a patch |
+| `badapple organs marshal-level <off|suggest|safe-apply|full>` | Set the autonomy level |
+| `badapple organs marshal-status` | Current level |
+| `badapple organs scan <text>` | Run the output firewall on text |
+| `badapple organs quorum <topic> <seat|yes|reason> ...` | Tally a council vote |
+| `badapple organs erase <subject> <payload>` | Certified erasure |
+| `badapple firewall compile` | Build the ANE output-firewall automaton |
+| `badapple firewall status` | Patterns, artifact, freshness |
+| `badapple policy keygen|sign|verify|status` | Policy signing keys |
+| `badapple tool <name> [key=value]` | Run one governed tool by hand |
+
+### Memory, tasks, and mesh
+
+| Command | What it does |
+| --- | --- |
+| `badapple index [dir ...]` | Ground the code index on a directory |
+| `badapple recall [-k N] <query>` | Search what she knows |
+| `badapple workspace get|set|index|watch` | Manage the watched workspace |
+| `badapple vault get|set|remove|list|import` | The secret vault (import takes a .env) |
+| `badapple strategy match <problem>` | Match a stored repair strategy |
+| `badapple strategy learn|record|repair|adopt` | Teach/record/adopt strategies |
+| `badapple task <goal>` | Submit a multi-step task |
+| `badapple tasks` | List tasks |
+| `badapple task status|cancel|pause|resume <id>` | Drive one task |
+| `badapple beacon` | Emit a signed beacon |
+| `badapple p2p peers|sync|models|pull|send|receive` | Peer sync + model transfer |
+| `badapple mesh-brain plan|shard|ping|status|ask|forget` | The multi-machine brain |
+
+### Watchdogs and sidecars
+
+| Command | What it does |
+| --- | --- |
+| `badapple ify status` | Watchdog phase + baseline |
+| `badapple ify once` | Single detect pass |
+| `badapple ify findings [n]` / `proposals` | What the watchdog saw |
+| `badapple tape <verb>` | Flight recorder |
+| `badapple bulletin <verb>` | Bulletin organ |
+| `badapple explain <verb>` | Explain the last decision |
+| `badapple thermal` | Thermal probe |
+| `badapple redteam run|status|propose|findings` | Self red-team |
+
+### Standalone organ binaries
+
+These are their own binaries, installed next to `badapple`:
+
+| Command | What it does |
+| --- | --- |
+| `badapple-respawn --status` | State-snapshot drift report |
+| `badapple-respawn --revert head` | Roll back to the last snapshot |
+| `badapple-dissect audit <binary>` | X-ray a Mach-O (dylibs, imports, strings) |
+| `badapple-sovereign --checkpoint` | Harden + sign the ledger |
+| `badapple-will status` | The will/escrow organ |
+
 ## Troubleshooting
 
 - **Install failed?** The installer asks if you want to file a bug report — it
