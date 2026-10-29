@@ -75,10 +75,12 @@ brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
 brew install --cask bad-apple
 ```
 
-There is also a `bad-apple-native` cask — the same organism with the organ
-layer running natively in Rust instead of through the Coyote VM. Same
-commands, same behavior, pick it if the standard build's organ loader
-rejects on your macOS version:
+If you are on **macOS 26 or lower**, use `bad-apple-native` instead — the
+same organism with the organ layer running natively in Rust instead of
+through the Coyote VM. The standard build's ANE organ emitter is rejected
+by the loader on those versions; the native build runs the same organs on
+the Neural Engine through a different emission path (with CPU classify as
+the fallback). Same commands, same behavior:
 
 ```bash
 brew install --cask bad-apple-native
