@@ -135,6 +135,7 @@ impl McpServer {
         let app = Router::new()
             .route("/sse", get(sse_handler))
             .route("/message", post(message_handler))
+            .route("/rpc", post(rpc_handler))
             .with_state(state);
 
         let rt =
@@ -179,6 +180,36 @@ async fn sse_handler(
 
     let stream = UnboundedReceiverStream::new(rx).map(Ok::<_, Infallible>);
     Sse::new(stream)
+}
+
+/// Plain JSON-RPC-over-HTTP endpoint: request body in, JSON response out.
+/// Unlike `/message`, the response travels in the HTTP body rather than the
+/// SSE stream, so request/response clients (shims, gateways) don't need a
+/// session.
+async fn rpc_handler(body: String) -> impl IntoResponse {
+    if body.len() > MAX_REQUEST_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request too large".to_string(),
+        );
+    }
+    let response = match tokio::task::spawn_blocking(move || handle_request(&body)).await {
+        Ok(Some(resp)) => resp,
+        Ok(None) => return (StatusCode::ACCEPTED, String::new()),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "handler panicked".to_string(),
+            )
+        }
+    };
+    match serde_json::to_string(&response) {
+        Ok(t) => (StatusCode::OK, t),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to serialize response".to_string(),
+        ),
+    }
 }
 
 async fn message_handler(
@@ -286,15 +317,14 @@ fn handle_request(line: &str) -> Option<JsonRpcResponse> {
     if req.jsonrpc != "2.0" {
         return Some(error_response(req.id, -32600, "invalid jsonrpc version"));
     }
+    if req.id.is_none()
+        && (req.method.starts_with("notifications/") || req.method == "initialized")
+    {
+        return None;
+    }
 
     let result = match req.method.as_str() {
         "initialize" => Some(initialize(&req)),
-        "initialized" => Some(JsonRpcResponse {
-            jsonrpc: "2.0",
-            id: req.id,
-            result: Some(Value::Null),
-            error: None,
-        }),
         "tools/list" => Some(list_tools(&req)),
         "tools/call" => call_tool(&req),
         "resources/list" => Some(JsonRpcResponse {
