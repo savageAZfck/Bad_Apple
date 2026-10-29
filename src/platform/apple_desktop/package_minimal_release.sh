@@ -90,6 +90,17 @@ if [[ "${BADAPPLE_SKIP_BUILD:-0}" != 1 ]]; then
     cd "${REPO_ROOT}"
     cargo build --release
 
+    # The Rust dylibs are FFI surfaces the Swift side loads at runtime.
+    # Cargo emits cdylib only when the crate is the primary target —
+    # build them explicitly so releases carry from-source libraries,
+    # not stale artifacts.
+    cargo rustc --release --lib --crate-type cdylib
+    COYOTE_DIR="${COYOTE_DIR:-${REPO_ROOT}/../coyote}"
+    if [[ -f "${COYOTE_DIR}/Cargo.toml" ]]; then
+        cargo build --release --manifest-path "${COYOTE_DIR}/Cargo.toml" --lib
+        install -m 755 "${COYOTE_DIR}/target/release/libcoyote.dylib"             "${BUILD_DIR}/libBadAppleANEBridge.dylib"
+    fi
+
     echo "Building Bad Apple.app..."
     BADAPPLE_NO_SIGN=1 "${REPO_ROOT}/src/platform/apple_desktop/build_bad_apple_menu_bar.sh"
 
