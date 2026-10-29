@@ -64,6 +64,8 @@ BRIDGE_FILES=(
     src/platform/apple_bridge/install_badapple_platform.sh
     src/platform/apple_bridge/install_identity_agent.sh
     src/platform/apple_bridge/install_ane_brain.sh
+    src/platform/apple_bridge/install_ane_brain_agent.sh
+    src/platform/apple_bridge/com.badapple.ane_brain.plist
 )
 
 # LaunchAgent plists and install scripts.

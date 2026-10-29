@@ -57,4 +57,4 @@ rm -f "${ZIP}"
 
 touch "${SENTINEL}"
 chmod 600 "${SENTINEL}" 2>/dev/null || true
-info "Neural Engine brain ready — the engine admits it on the next query."
+info "Neural Engine brain ready — the engine admits it on its next start (Help info "Neural Engine brain ready — the engine admits it on the next query." Fixes → Restart Bad Apple)."
