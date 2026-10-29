@@ -205,6 +205,31 @@ for label in "${AGENTS[@]}"; do
     fi
 done
 
+offer_bug_report() {
+    local report="/tmp/badapple-bug-report-$(date +%Y%m%dT%H%M%S).txt"
+    {
+        echo "== Bad Apple install failure report =="
+        date; sw_vers; echo "model: $(sysctl -n hw.model)  ram: $(sysctl -n hw.memsize)"
+        echo "--- launchd jobs ---"; launchctl list 2>/dev/null | grep -i badapple
+        echo "--- /var/lib/bad_apple ---"; ls -la /var/lib/bad_apple/ 2>/dev/null
+        echo "--- engine log tail ---"; tail -50 /var/lib/bad_apple/mlx_server.log 2>/dev/null
+        echo "--- gatekeeper log tail ---"; tail -50 /var/log/bad_apple_gatekeeper.log 2>/dev/null
+        echo "--- supervisor log tail ---"; tail -30 /var/log/bad_apple_supervisor.log 2>/dev/null
+        echo "--- disk ---"; df -h /
+    } >"${report}" 2>&1
+    echo "diagnostic bundle: ${report}"
+    printf 'installation failed - file a bug report with these diagnostics? [y/N] ' >&2
+    local reply=""
+    read -r reply < /dev/tty 2>/dev/null || reply="n"
+    if [[ "${reply}" =~ ^[yY] ]]; then
+        run_user open "https://github.com/savageAZfck/bad-apple-releases/issues/new" 2>/dev/null
+        run_user open "${report}" 2>/dev/null
+        echo "browser opened - attach ${report} to the new issue."
+    else
+        echo "skipping - the bundle stays at ${report} if you want to file manually."
+    fi
+}
+
 rollback() {
     local status=$?
     trap - EXIT
@@ -238,6 +263,7 @@ rollback() {
         fi
     done
     echo "error: platform installation failed; rollback attempted from ${BACKUP_DIR}. Inspect launchctl/logs if any restore command failed." >&2
+    offer_bug_report || true
     exit "${status}"
 }
 
