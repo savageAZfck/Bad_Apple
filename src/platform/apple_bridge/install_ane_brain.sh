@@ -37,11 +37,11 @@ fi
 
 info "fetching 4B Neural Engine brain (~3.8 GB, 3 parts)..."
 # GitHub caps release assets at 2 GB — the artifact ships as three parts.
-for suffix in aa bb cc; do
+for suffix in aa ab ac ad; do
     curl -fL --retry 3 -o "${ZIP}.${suffix}.tmp" "${URL}.${suffix}" || fail "ANE brain part .${suffix} failed: ${URL}.${suffix}"
 done
-cat "${ZIP}.aa.tmp" "${ZIP}.bb.tmp" "${ZIP}.cc.tmp" > "${ZIP}"
-rm -f "${ZIP}".{aa,bb,cc}.tmp
+cat "${ZIP}.aa.tmp" "${ZIP}.ab.tmp" "${ZIP}.ac.tmp" "${ZIP}.ad.tmp" > "${ZIP}"
+rm -f "${ZIP}".{aa,ab,ac,ad}.tmp
 
 info "installing into ${ANE_DIR}..."
 mkdir -p "${ANE_DIR}"
