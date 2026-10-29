@@ -24,6 +24,7 @@ COMFORT_RAM_GB=16
 MIN_FREE_GB=40
 
 error_count=0
+warn_count=0
 warning_count=0
 
 info "Checking Bad Apple first-run requirements..."
