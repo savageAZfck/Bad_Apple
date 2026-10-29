@@ -78,8 +78,8 @@ fi
 if xcode-select -p &>/dev/null && [[ -d "$(xcode-select -p)" ]]; then
   success "Xcode / Command Line Tools installed at $(xcode-select -p)"
 else
-  fail "Xcode Command Line Tools not found. Run: xcode-select --install"
-  ((error_count++)) || true
+  warn "Xcode Command Line Tools not found — only needed for building from source; the packaged install is fine without them."
+  ((warn_count++)) || true
 fi
 
 # Admin / sudo
