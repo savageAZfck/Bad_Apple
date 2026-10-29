@@ -89,9 +89,10 @@ brew install --cask bad-apple-native
 What happens next:
 
 1. Homebrew downloads the package (~200 MB), then the installer it runs
-   downloads her main brain — about **4–6 GB**. It prints `still installing`
-   progress lines while it works. On a slow connection this can take 20+
-   minutes — do not kill it.
+   downloads her main brain — about **4–6 GB** — plus her Neural Engine
+   brain — about **3.8 GB**, fetched into `~/.bad_apple/ane/` when downloads
+   are allowed. It prints `still installing` progress lines while it works.
+   On a slow connection this can take 20+ minutes — do not kill it.
 2. The first time you open the menu bar app you may see the unsigned-app
    warning covered above.
 
