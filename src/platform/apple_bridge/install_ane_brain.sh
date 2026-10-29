@@ -15,8 +15,7 @@ set -euo pipefail
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*"; }
 
-VERSION="${BADAPPLE_VERSION:-0.9.6}"
-URL="${BADAPPLE_ANE_ARTIFACT_URL:-https://github.com/savageAZfck/bad-apple-releases/releases/download/v${VERSION}/Bad_Apple-ANE-4B.zip}"
+URL="${BADAPPLE_ANE_ARTIFACT_URL:-https://github.com/savageAZfck/bad-apple-releases/releases/download/v0.9.6/Bad_Apple-ANE-4B.zip}"
 HOME_DIR="${HOME:-${CONSOLE_HOME:-$HOME}}"
 STATE_DIR="${HOME_DIR}/.bad_apple"
 ANE_DIR="${STATE_DIR}/ane"
