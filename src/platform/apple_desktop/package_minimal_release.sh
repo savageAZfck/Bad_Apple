@@ -419,7 +419,7 @@ fi
     "${PKG_DIR}/bad_apple/target/release/"* 2>/dev/null || \
     echo "warning: SBOM generation skipped (python3 unavailable)"
 
-( cd "${BUILD_DIR}" && zip -r -y -9 "${ZIP_PATH}" "Bad_Apple-${VERSION}-unsigned" )
+( cd "${BUILD_DIR}" && zip -r -y -9 "${ZIP_PATH}" "$(basename "${PKG_DIR}")" )
 
 cp -R "${PKG_DIR}" "${COMPAT_DIR}"
 ( cd "${BUILD_DIR}" && zip -r -y -9 "${COMPAT_ZIP}" "$(basename "${COMPAT_DIR}")" )
