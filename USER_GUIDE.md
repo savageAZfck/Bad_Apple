@@ -75,6 +75,15 @@ brew tap savageAZfck/bad-apple https://github.com/savageAZfck/homebrew-bad-apple
 brew install --cask bad-apple
 ```
 
+There is also a `bad-apple-native` cask — the same organism with the organ
+layer running natively in Rust instead of through the Coyote VM. Same
+commands, same behavior, pick it if the standard build's organ loader
+rejects on your macOS version:
+
+```bash
+brew install --cask bad-apple-native
+```
+
 What happens next:
 
 1. Homebrew downloads the package (~200 MB), then the installer it runs
