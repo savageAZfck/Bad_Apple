@@ -12,6 +12,8 @@
 
 use anyhow::{bail, Context, Result};
 use axon::{Reflex, ReflexAction, ReflexArc, SenseEvent, ThresholdOp, Trigger};
+use half::f16;
+use mil_infer::graph::{compile_graph, GraphRuntime};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -177,18 +179,13 @@ pub fn arc_verify() -> Result<String> {
 // organ was ported from. `Akicita::check` decides Permit/Hold/Deny over
 // its own state (level, dedupe ring, rate limit, protected surfaces).
 fn marshal() -> &'static std::sync::Mutex<akicita::Akicita> {
-    static M: std::sync::OnceLock<std::sync::Mutex<akicita::Akicita>> =
-        std::sync::OnceLock::new();
+    static M: std::sync::OnceLock<std::sync::Mutex<akicita::Akicita>> = std::sync::OnceLock::new();
     M.get_or_init(|| {
         let level_file = organs_dir().join("marshal_level.txt");
         let _ = ensure_state();
         let level = akicita::Level::load(&level_file);
         let cfg = akicita::Config::default();
-        std::sync::Mutex::new(akicita::Akicita::new(
-            level,
-            cfg,
-            Some(level_file),
-        ))
+        std::sync::Mutex::new(akicita::Akicita::new(level, cfg, Some(level_file)))
     })
 }
 
@@ -334,7 +331,11 @@ pub fn embed_text_64(text: &str) -> Vec<f32> {
             let bg = format!("{w}_{}", words[idx + 1]);
             let hb = fnv1a64(bg.as_bytes());
             let bb = (hb as usize) % 60;
-            let sb = if (hb >> 12) & 1 == 0 { 0.75f32 } else { -0.75f32 };
+            let sb = if (hb >> 12) & 1 == 0 {
+                0.75f32
+            } else {
+                -0.75f32
+            };
             out[bb] += sb;
         }
     }
@@ -506,39 +507,6 @@ fn gk_instance() -> Result<&'static std::sync::Mutex<GkBrain>> {
     }))
 }
 
-/// Classify `text` (`0.0` = fast, `1.0` = deep) through the native MLP.
-pub fn gatekeeper_classify_text(text: &str) -> Result<f64> {
-    let emb = embed_text_64(text);
-    let x: Vec<f64> = emb.iter().map(|v| *v as f64).collect();
-    let brain = gk_instance()?;
-    let brain = brain.lock().map_err(|e| anyhow::anyhow!("gk lock: {e}"))?;
-    let (_, y) = brain.forward(&x);
-    let s0: f64 = y[0..32].iter().sum::<f64>() / 32.0;
-    let s1: f64 = y[32..64].iter().sum::<f64>() / 32.0;
-    let p = (0.5 + 0.5 * (s1 - s0)).clamp(0.0, 1.0);
-    Ok(p)
-}
-
-/// One training step on `text` with `label` (`0` = fast, `1` = deep) —
-/// target channels ±1 per the organ spec — returns step MSE.
-pub fn gatekeeper_train_text(text: &str, label: usize) -> Result<f64> {
-    let emb = embed_text_64(text);
-    let x: Vec<f64> = emb.iter().map(|v| *v as f64).collect();
-    let mut t = vec![0.0f64; GK_DIM];
-    for i in 0..32 {
-        if label == 1 {
-            t[i] = -1.0;
-            t[i + 32] = 1.0;
-        } else {
-            t[i] = 1.0;
-            t[i + 32] = -1.0;
-        }
-    }
-    let brain = gk_instance()?;
-    let mut brain = brain.lock().map_err(|e| anyhow::anyhow!("gk lock: {e}"))?;
-    Ok(brain.train_step(&x, &t))
-}
-
 /// Persist the router weights (`w1`, `w2`) to `path`, mirrored into
 /// `organs_dir()/gatekeeper_ane.bin` — same `CYGKW01` file format.
 pub fn gatekeeper_save_weights(path: &Path) -> Result<()> {
@@ -556,12 +524,287 @@ pub fn gatekeeper_load_weights(path: &Path) -> Result<()> {
 
 // -------------------------------------------------------------- variant
 
-/// The native variant never executes on the Neural Engine.
-pub fn is_ane_resident() -> bool {
-    false
+// The gatekeeper router graph — `y = W2 @ sigmoid(W1 @ x)` — emitted as a
+// `.mil` and compiled through `mil_infer::graph::compile_graph`, the same
+// sovereign HWX path verified on hardware in
+// `graph::tests::ane_onchip_backprop_training_exec`. Weights are runtime
+// externals, not baked constants — training rewrites the SharedSurface.
+const GK_FWD_MIL: &str = r#"program(1.3)
+{
+    func main<ios18>(tensor<fp16, [1, 1, 1, 64]> x,
+                     tensor<fp16, [1, 64, 1, 64]> W1,
+                     tensor<fp16, [1, 64, 1, 64]> W2) {
+        tensor<bool, []> bt = const()[val = bool(true)];
+        tensor<fp16, [1, 64, 1, 1]> z1 = matmul(x = x, y = W1, transpose_y = bt)[name = string("z1")];
+        tensor<fp16, [1, 64, 1, 1]> h = sigmoid(x = z1)[name = string("h")];
+        tensor<fp16, [1, 64, 1, 1]> y = matmul(x = h, y = W2, transpose_y = bt)[name = string("y")];
+    } -> (y);
+}
+"#;
+
+const GK_TRAIN_MIL: &str = r#"program(1.3)
+{
+    func main<ios18>(tensor<fp16, [1, 1, 1, 64]> x,
+                     tensor<fp16, [1, 64, 1, 1]> target,
+                     tensor<fp16, [1, 64, 1, 1]> neg_lr,
+                     tensor<fp16, [1, 64, 1, 1]> one,
+                     tensor<fp16, [1, 64, 1, 64]> W1,
+                     tensor<fp16, [1, 64, 1, 64]> W2) {
+        tensor<bool, []> bt = const()[val = bool(true)];
+        tensor<fp16, [1, 64, 1, 1]> z1 = matmul(x = x, y = W1, transpose_y = bt)[name = string("z1")];
+        tensor<fp16, [1, 64, 1, 1]> h = sigmoid(x = z1)[name = string("h")];
+        tensor<fp16, [1, 64, 1, 1]> y = matmul(x = h, y = W2, transpose_y = bt)[name = string("y")];
+        tensor<fp16, [1, 64, 1, 1]> dy = sub(x = y, y = target)[name = string("dy")];
+        tensor<fp16, [1, 64, 1, 1]> ndy = mul(x = dy, y = neg_lr)[name = string("ndy")];
+        tensor<fp16, [1, 1, 1, 64]> dh = matmul(x = dy, y = W2, transpose_x = bt)[name = string("dh")];
+        tensor<fp16, [1, 64, 1, 1]> omh = sub(x = one, y = h)[name = string("omh")];
+        tensor<fp16, [1, 64, 1, 1]> ds = mul(x = h, y = omh)[name = string("ds")];
+        tensor<fp16, [1, 64, 1, 1]> dz1 = mul(x = dh, y = ds)[name = string("dz1")];
+        tensor<fp16, [1, 64, 1, 1]> ndz1 = mul(x = dz1, y = neg_lr)[name = string("ndz1")];
+        tensor<fp16, [1, 64, 1, 64]> dW2 = matmul(x = ndy, y = h, transpose_x = bt)[name = string("dW2")];
+        tensor<fp16, [1, 64, 1, 64]> W2_new = add(x = W2, y = dW2)[name = string("W2_new")];
+        tensor<fp16, [1, 64, 1, 64]> dW1 = matmul(x = ndz1, y = x, transpose_x = bt)[name = string("dW1")];
+        tensor<fp16, [1, 64, 1, 64]> W1_new = add(x = W1, y = dW1)[name = string("W1_new")];
+    } -> (y, W1_new, W2_new);
+}
+"#;
+
+fn gk_mil_path(name: &str) -> PathBuf {
+    organs_dir().join(name)
 }
 
-/// No `.cy` compile step in the native build — organs are in-process Rust.
-pub fn compile_to_dir(_build_dir: &Path) -> Result<(usize, bool)> {
-    Ok((0, false))
+/// Compile + load a gatekeeper graph into a resident `GraphRuntime`.
+fn gk_runtime(mil_src: &str, mil_name: &str) -> Result<GraphRuntime> {
+    ensure_state()?;
+    let mil_path = gk_mil_path(mil_name);
+    std::fs::write(&mil_path, mil_src)?;
+    let out_dir = organs_dir().join(format!("{mil_name}.hwx"));
+    std::fs::create_dir_all(&out_dir)?;
+    let plan = compile_graph(
+        mil_path.to_str().context("mil path utf8")?,
+        out_dir.to_str().context("out path utf8")?,
+    )
+    .map_err(|e| anyhow::anyhow!("graph compile: {e}"))?;
+    GraphRuntime::load(plan).map_err(|e| anyhow::anyhow!("graph runtime: {e}"))
+}
+
+// `GraphRuntime` holds `Rc<SharedSurface>` — single-threaded by design —
+// so runtimes live thread-local, built lazily on first use.
+thread_local! {
+    static GK_FWD_RT: std::cell::RefCell<Option<GraphRuntime>> =
+        std::cell::RefCell::new(None);
+    static GK_TRAIN_RT: std::cell::RefCell<Option<GraphRuntime>> =
+        std::cell::RefCell::new(None);
+}
+
+fn gk_fwd<F, R>(f: F) -> Result<R>
+where
+    F: FnOnce(&mut GraphRuntime) -> R,
+{
+    GK_FWD_RT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = gk_runtime(GK_FWD_MIL, "gatekeeper_fwd").ok();
+        }
+        slot.as_mut()
+            .map(|rt| f(rt))
+            .ok_or_else(|| anyhow::anyhow!("no ANE forward runtime"))
+    })
+}
+
+fn gk_train<F, R>(f: F) -> Result<R>
+where
+    F: FnOnce(&mut GraphRuntime) -> R,
+{
+    GK_TRAIN_RT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = gk_runtime(GK_TRAIN_MIL, "gatekeeper_train").ok();
+        }
+        slot.as_mut()
+            .map(|rt| f(rt))
+            .ok_or_else(|| anyhow::anyhow!("no ANE training runtime"))
+    })
+}
+
+/// Fill an external input surface with `vals` (fp16 LE), indexing through
+/// the surface's `desc` — `off(i)` maps a linear element index to the
+/// (b, d, c, h, w) tuple `desc.offset` expects.
+fn ext_f16(
+    rt: &mut GraphRuntime,
+    name: &'static str,
+    vals: &[f64],
+    off: fn(usize) -> (u64, u64, u64, u64, u64),
+) {
+    let vals = vals.to_vec();
+    rt.write_ext(name, move |b, desc| {
+        for (i, v) in vals.iter().enumerate() {
+            let (a, d, c, h, w) = off(i);
+            let o = desc.offset(a, d, c, h, w);
+            if o + 1 < b.len() {
+                b[o..o + 2].copy_from_slice(&f16::from_f64(*v).to_le_bytes());
+            }
+        }
+    });
+}
+
+/// Read a named graph output back as `d` f64s — indexing through the
+/// surface's `desc` (outputs are strided, not contiguous). `off(i)` maps a
+/// linear element index to the (b, d, c, h, w) `desc.offset` tuple.
+fn read_out(
+    rt: &GraphRuntime,
+    name: &str,
+    d: usize,
+    off: fn(usize) -> (u64, u64, u64, u64, u64),
+) -> Option<Vec<f64>> {
+    let ni = rt.out_node(name)?;
+    let desc = rt.out_desc(ni);
+    let out = rt.output(ni);
+    let mut v = vec![0.0f64; d];
+    for (i, slot) in v.iter_mut().enumerate() {
+        let (a, dd, c, h, w) = off(i);
+        let o = desc.offset(a, dd, c, h, w);
+        if o + 1 < out.len() {
+            *slot = f16::from_le_bytes([out[o], out[o + 1]]).to_f64();
+        }
+    }
+    Some(v)
+}
+
+/// Classify `text` (`0.0` = fast, `1.0` = deep). Runs the forward graph on
+/// the Neural Engine when the runtime is resident; any emission, load, or
+/// eval failure falls back to the pure-Rust MLP with identical math.
+pub fn gatekeeper_classify_text(text: &str) -> Result<f64> {
+    let emb = embed_text_64(text);
+    let x: Vec<f64> = emb.iter().map(|v| *v as f64).collect();
+    let ane = (|| {
+        let brain = gk_instance().ok()?;
+        let brain = brain.lock().ok()?;
+        let w1 = brain.w1.clone();
+        let w2 = brain.w2.clone();
+        drop(brain);
+        let x = x.clone();
+        gk_fwd(move |rt| {
+            ext_f16(rt, "x", &x, |i| (0, 0, 0, 0, i as u64));
+            ext_f16(rt, "W1", &w1, |i| {
+                (0, 0, (i / 64) as u64, 0, (i % 64) as u64)
+            });
+            ext_f16(rt, "W2", &w2, |i| {
+                (0, 0, (i / 64) as u64, 0, (i % 64) as u64)
+            });
+            rt.run()
+                .ok()
+                .and_then(|_| read_out(rt, "y", GK_DIM, |i| (0, 0, i as u64, 0, 0)))
+        })
+        .ok()
+        .flatten()
+    })();
+    if let Some(y) = ane {
+        let s0: f64 = y[0..32].iter().sum::<f64>() / 32.0;
+        let s1: f64 = y[32..64].iter().sum::<f64>() / 32.0;
+        return Ok((0.5 + 0.5 * (s1 - s0)).clamp(0.0, 1.0));
+    }
+    let brain = gk_instance()?;
+    let brain = brain.lock().map_err(|e| anyhow::anyhow!("gk lock: {e}"))?;
+    let (_, y) = brain.forward(&x);
+    let s0: f64 = y[0..32].iter().sum::<f64>() / 32.0;
+    let s1: f64 = y[32..64].iter().sum::<f64>() / 32.0;
+    Ok((0.5 + 0.5 * (s1 - s0)).clamp(0.0, 1.0))
+}
+
+/// One training step on `text` with `label` (`0` = fast, `1` = deep) —
+/// the full forward+backward+in-place-SGD graph executes on the ANE when
+/// resident; updated `W1`/`W2` are read back into the brain and persisted.
+/// Falls back to the pure-Rust step on any failure. Returns step MSE.
+pub fn gatekeeper_train_text(text: &str, label: usize) -> Result<f64> {
+    let emb = embed_text_64(text);
+    let x: Vec<f64> = emb.iter().map(|v| *v as f64).collect();
+    let mut t = vec![0.0f64; GK_DIM];
+    for i in 0..32 {
+        if label == 1 {
+            t[i] = -1.0;
+            t[i + 32] = 1.0;
+        } else {
+            t[i] = 1.0;
+            t[i + 32] = -1.0;
+        }
+    }
+    let ane = (|| {
+        let brain = gk_instance().ok()?;
+        let brain = brain.lock().ok()?;
+        let w1 = brain.w1.clone();
+        let w2 = brain.w2.clone();
+        drop(brain);
+        let x = x.clone();
+        let t_ext = t.clone();
+        gk_train(move |rt| {
+            ext_f16(rt, "x", &x, |i| (0, 0, 0, 0, i as u64));
+            ext_f16(rt, "target", &t_ext, |i| (0, 0, i as u64, 0, 0));
+            ext_f16(rt, "neg_lr", &[-GK_LR; GK_DIM], |i| (0, 0, i as u64, 0, 0));
+            ext_f16(rt, "one", &[1.0; GK_DIM], |i| (0, 0, i as u64, 0, 0));
+            ext_f16(rt, "W1", &w1, |i| {
+                (0, 0, (i / 64) as u64, 0, (i % 64) as u64)
+            });
+            ext_f16(rt, "W2", &w2, |i| {
+                (0, 0, (i / 64) as u64, 0, (i % 64) as u64)
+            });
+            rt.run().ok()?;
+            let y = read_out(rt, "y", GK_DIM, |i| (0, 0, i as u64, 0, 0))?;
+            let w1n = read_out(rt, "W1_new", GK_DIM * GK_DIM, |i| {
+                (0, 0, (i / 64) as u64, 0, (i % 64) as u64)
+            });
+            let w2n = read_out(rt, "W2_new", GK_DIM * GK_DIM, |i| {
+                (0, 0, (i / 64) as u64, 0, (i % 64) as u64)
+            });
+            Some((y, w1n, w2n))
+        })
+        .ok()
+        .flatten()
+    })();
+    if let Some((y, w1n, w2n)) = ane {
+        let mse = y.iter().zip(&t).map(|(a, b)| (a - b).powi(2)).sum::<f64>() / GK_DIM as f64;
+        let brain = gk_instance()?;
+        let mut brain = brain.lock().map_err(|e| anyhow::anyhow!("gk lock: {e}"))?;
+        if let Some(w) = w1n {
+            brain.w1 = w;
+        }
+        if let Some(w) = w2n {
+            brain.w2 = w;
+        }
+        let _ = brain.save(&GkBrain::weights_path());
+        return Ok(mse);
+    }
+    let brain = gk_instance()?;
+    let mut brain = brain.lock().map_err(|e| anyhow::anyhow!("gk lock: {e}"))?;
+    Ok(brain.train_step(&x, &t))
+}
+
+/// Emit + compile the organ programs into `build_dir` — the installer's
+/// "compile into a directory" contract, through `graph::compile_graph`
+/// (sovereign HWX emission, no Coyote).
+pub fn compile_to_dir(build_dir: &Path) -> Result<(usize, bool)> {
+    std::fs::create_dir_all(build_dir)?;
+    let mut n = 0;
+    for (src, name) in [
+        (GK_FWD_MIL, "gatekeeper_fwd"),
+        (GK_TRAIN_MIL, "gatekeeper_train"),
+    ] {
+        let mil_path = build_dir.join(format!("{name}.mil"));
+        std::fs::write(&mil_path, src)?;
+        let out_dir = build_dir.join(format!("{name}.hwx"));
+        std::fs::create_dir_all(&out_dir)?;
+        compile_graph(
+            mil_path.to_str().context("mil path utf8")?,
+            out_dir.to_str().context("out path utf8")?,
+        )
+        .map_err(|e| anyhow::anyhow!("graph compile: {e}"))?;
+        n += 1;
+    }
+    Ok((n, true))
+}
+
+/// True when the forward graph compiled and the `GraphRuntime` loaded —
+/// the Neural Engine classify path is actually running.
+pub fn is_ane_resident() -> bool {
+    gk_fwd(|_| ()).is_ok()
 }

@@ -10,10 +10,21 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 VERSION="$(cd "${REPO_ROOT}" && grep '^version' Cargo.toml | head -n1 | sed -e 's/.*= *"//' -e 's/".*//')"
 BUILD_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}/release"
-PKG_DIR="${BUILD_DIR}/Bad_Apple-${VERSION}-unsigned"
-ZIP_PATH="${BUILD_DIR}/Bad_Apple-${VERSION}-unsigned.zip"
-COMPAT_DIR="${BUILD_DIR}/Bad_Apple-${VERSION}-full"
-COMPAT_ZIP="${BUILD_DIR}/Bad_Apple-${VERSION}-full-unsigned.zip"
+BADAPPLE_NATIVE="${BADAPPLE_NATIVE:-0}"
+if [[ "${BADAPPLE_NATIVE}" == "1" ]]; then
+    PKG_DIR="${BUILD_DIR}/Bad_Apple-${VERSION}-native"
+    ZIP_PATH="${BUILD_DIR}/Bad_Apple-${VERSION}-native-unsigned.zip"
+else
+    PKG_DIR="${BUILD_DIR}/Bad_Apple-${VERSION}-unsigned"
+    ZIP_PATH="${BUILD_DIR}/Bad_Apple-${VERSION}-unsigned.zip"
+fi
+if [[ "${BADAPPLE_NATIVE:-0}" == "1" ]]; then
+    COMPAT_DIR="${BUILD_DIR}/Bad_Apple-${VERSION}-native-full"
+    COMPAT_ZIP="${BUILD_DIR}/Bad_Apple-${VERSION}-native-full-unsigned.zip"
+else
+    COMPAT_DIR="${BUILD_DIR}/Bad_Apple-${VERSION}-full"
+    COMPAT_ZIP="${BUILD_DIR}/Bad_Apple-${VERSION}-full-unsigned.zip"
+fi
 CHECKSUMS="${BUILD_DIR}/checksums.txt"
 
 # Binaries required at runtime.
@@ -36,11 +47,13 @@ BINS=(
 
 # Libraries required at runtime.
 LIBS=(
-    libBadAppleANEBridge.dylib
     libBadAppleBridge.dylib
     libBadAppleMLX.dylib
     libbad_apple.dylib
 )
+if [[ "${BADAPPLE_NATIVE:-0}" != "1" ]]; then
+    LIBS+=(libBadAppleANEBridge.dylib)
+fi
 
 # LaunchDaemon plists and install scripts.
 BRIDGE_FILES=(
@@ -88,20 +101,30 @@ done
 if [[ "${BADAPPLE_SKIP_BUILD:-0}" != 1 ]]; then
     echo "Building release binaries..."
     cd "${REPO_ROOT}"
-    cargo build --release
+    if [[ "${BADAPPLE_NATIVE}" == "1" ]]; then
+        cargo build --release --no-default-features --features native-organs
+    else
+        cargo build --release
+    fi
 
     # The Rust dylibs are FFI surfaces the Swift side loads at runtime.
     # Cargo emits cdylib only when the crate is the primary target —
     # build them explicitly so releases carry from-source libraries,
     # not stale artifacts.
-    cargo rustc --release --lib --crate-type cdylib
-    COYOTE_DIR="${COYOTE_DIR:-}"
-    if [[ -z "${COYOTE_DIR}" ]]; then
-        COYOTE_DIR="$(sed -n 's|^coyote = { path = "\(.*\)" }.*|\1|p' "${REPO_ROOT}/Cargo.toml" | head -1)"
+    if [[ "${BADAPPLE_NATIVE}" == "1" ]]; then
+        cargo rustc --release --no-default-features --features native-organs --lib --crate-type cdylib
+    else
+        cargo rustc --release --lib --crate-type cdylib
     fi
-    if [[ -f "${COYOTE_DIR}/Cargo.toml" ]]; then
-        cargo build --release --manifest-path "${COYOTE_DIR}/Cargo.toml" --lib
-        install -m 755 "${COYOTE_DIR}/target/release/libcoyote.dylib"             "${BUILD_DIR}/libBadAppleANEBridge.dylib"
+    if [[ "${BADAPPLE_NATIVE}" != "1" ]]; then
+        COYOTE_DIR="${COYOTE_DIR:-}"
+        if [[ -z "${COYOTE_DIR}" ]]; then
+            COYOTE_DIR="$(sed -n 's|^coyote = { path = "\(.*\)" }.*|\1|p' "${REPO_ROOT}/Cargo.toml" | head -1)"
+        fi
+        if [[ -f "${COYOTE_DIR}/Cargo.toml" ]]; then
+            cargo build --release --manifest-path "${COYOTE_DIR}/Cargo.toml" --lib
+            install -m 755 "${COYOTE_DIR}/target/release/libcoyote.dylib"             "${BUILD_DIR}/libBadAppleANEBridge.dylib"
+        fi
     fi
 
     echo "Building Bad Apple.app..."
@@ -163,6 +186,10 @@ for rel in "${BRIDGE_FILES[@]}" "${DESKTOP_FILES[@]}"; do
         *.sh) chmod +x "${PKG_DIR}/bad_apple/${rel}" ;;
     esac
 done
+# Native variant: no .cy organ source — the gatekeeper doesn't need the path.
+if [[ "${BADAPPLE_NATIVE}" == "1" ]]; then
+    /usr/bin/sed -i '' '/BADAPPLE_ORGANS_CY/,+1d' "${PKG_DIR}/bad_apple/src/platform/apple_bridge/com.badapple.gatekeeper.plist" 2>/dev/null || true
+fi
 
 for rel in "${CONFIG_FILES[@]}"; do
     copy_file "${REPO_ROOT}/${rel}" "${PKG_DIR}/bad_apple/${rel}"
@@ -170,8 +197,9 @@ done
 
 # Walkthrough demo + mesh doc — sit at the runtime root so `badapple demo
 # full` finds the script two dirs above target/release/.
-# Organ layer (.cy sources the gatekeeper loads at runtime)
-if [[ -d "${REPO_ROOT}/coyote" ]]; then
+# Organ layer (.cy sources the gatekeeper loads at runtime) —
+# skipped in the native variant: organs run through the Rust crates.
+if [[ "${BADAPPLE_NATIVE}" != "1" && -d "${REPO_ROOT}/coyote" ]]; then
     mkdir -p "${PKG_DIR}/bad_apple/coyote"
     cp -R "${REPO_ROOT}/coyote/." "${PKG_DIR}/bad_apple/coyote/"
 fi
@@ -393,7 +421,7 @@ fi
 ( cd "${BUILD_DIR}" && zip -r -y -9 "${ZIP_PATH}" "Bad_Apple-${VERSION}-unsigned" )
 
 cp -R "${PKG_DIR}" "${COMPAT_DIR}"
-( cd "${BUILD_DIR}" && zip -r -y -9 "${COMPAT_ZIP}" "Bad_Apple-${VERSION}-full" )
+( cd "${BUILD_DIR}" && zip -r -y -9 "${COMPAT_ZIP}" "$(basename "${COMPAT_DIR}")" )
 ( cd "${BUILD_DIR}" && shasum -a 256 "$(basename "${ZIP_PATH}")" "$(basename "${COMPAT_ZIP}")" ) > "${CHECKSUMS}"
 
 # Per-artifact SBOM next to the zips so sign_release.sh picks it up for the

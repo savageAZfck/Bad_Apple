@@ -317,8 +317,7 @@ fn handle_request(line: &str) -> Option<JsonRpcResponse> {
     if req.jsonrpc != "2.0" {
         return Some(error_response(req.id, -32600, "invalid jsonrpc version"));
     }
-    if req.id.is_none()
-        && (req.method.starts_with("notifications/") || req.method == "initialized")
+    if req.id.is_none() && (req.method.starts_with("notifications/") || req.method == "initialized")
     {
         return None;
     }

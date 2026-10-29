@@ -32,7 +32,6 @@ pub use native_organs as coyote_organs;
 #[cfg(feature = "coyote-sys")]
 pub mod coyote_sys;
 pub mod firewall_machine;
-#[cfg(feature = "coyote-sys")]
 pub use mil_infer;
 pub use mil_spec;
 
