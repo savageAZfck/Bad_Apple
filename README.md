@@ -35,6 +35,9 @@ bar — with the parts a creature needs, not just the parts a demo needs:
 | **Governance** | Consent registry, certified erasure, subject vault, provenance manifest, constitutional amendments, signed oversight bulletins |
 | **Hands** | Files, shell, AppleScript, Shortcuts, mail/calendar/reminders, local MCP tools — all under per-tool policy |
 | **X-ray eyes** | `badapple-dissect` (haruspex-macho) — pure-Rust Mach-O autopsy: slices, dylibs, imports, entitlements, strings, update diffs. Evidence-backed, read-only |
+| **Diplomacy** | `badapple-treaty` (wolakota) — scoped consent treaties with foreign owner keys; `badapple-hansard` — bicameral ratification, GPU and ANE chambers must concur, dissent signed; `badapple-potlatch` — inter-organism debt ledger settled on treaty invocations |
+| **Wire** | `badapple-mcp` — MCP over stdio, unix socket, and SSE/HTTP (`/sse`, `/message`, `/rpc`) — the surface a control plane (e.g. kagent) can reach |
+| **Self-authorship** | Curious autopilot — proposes, verifies, applies, and rolls back patches to her own source while you are idle (policy-gated, deduped, council-approved at `full`) |
 
 Both big brains run **at the same time**. Per request, the `brain` field on
 the inference route selects `ane`, `gpu`, or `auto`; the daemon admits or
@@ -81,6 +84,16 @@ Enable the second brain by dropping the manifest path into the control file
 request, the `brain` field on the inference route selects `ane`, `gpu`, or
 `auto` — drive it directly with
 `cargo run --release --example ane_route_probe -- ane`.
+
+Prefer not to build the artifact? A prebuilt `qwen3b` shard bundle ships on
+the release — reassemble and point the control file at it:
+
+```bash
+# in the release downloads dir:
+cat Bad_Apple-*-ane-artifact.zip.* > ane-artifact.zip
+unzip ane-artifact.zip -d ~/.bad_apple/ane/
+echo "$HOME/.bad_apple/ane/qwen3b_v2/conversion_manifest.json" > ~/.bad_apple/ane_brain
+```
 
 ## See it prove itself
 
@@ -159,6 +172,11 @@ osascript -e 'do shell script "cd /path/to/bad_apple && src/platform/apple_bridg
 recommended — both brains resident plus senses fits in 16. ~45 GB free disk
 for models, ANE artifacts, and state.
 
+**First run:** on a machine with no weights cache the daemon automatically
+pulls the GPU brain (~4-6 GB) during install and the readiness check waits
+for it — nothing else to do. `BADAPPLE_AIRGAP=1` preserves the sealed
+posture for fully offline installs (seed `~/.cache/huggingface` instead).
+
 ## Architecture
 
 ```text
@@ -197,6 +215,8 @@ badapple CLI / menu bar / voice / dashboard (127.0.0.1:8787)
    ├─ Streaming output firewall (Aho-Corasick secret redaction)
    ├─ Hash-chained audit ledger (policy_hash on every line)
    ├─ IFY watchdog (brake-only) · Curious autopilot (policy-gated)
+   ├─ Coyote organ layer — organs, gatekeeper, firewall, and reflex
+   │  executing as .cy programs on the Coyote VM, one witness chain
    └─ Air-gap certification self-audit
               │
               ▼
@@ -257,9 +277,10 @@ The short version:
   firewall bound it; they do not eliminate it. See THREAT_MODEL.md §5.
 - **Fail-closed by design.** Denied tools stay denied; approvals are
   explicit, logged, and deniable (`deny <id>`).
-- **ANE artifacts are local builds.** The second brain's shards are
-  generated on your machine from a checkpoint you supply — the converter is
-  open, the artifacts are not shipped.
+- **ANE artifacts are per-model builds.** The second brain's shards are
+  produced by `badapple-aneconvert` (open, pure Rust); a prebuilt `qwen3b`
+  bundle ships as a downloadable release asset, and other checkpoints
+  convert locally.
 
 ## Quick use
 
