@@ -28,6 +28,11 @@ warn_count=0
 warning_count=0
 
 info "Checking Bad Apple first-run requirements..."
+cat <<'NOTE'
+  Bad Apple installs unsigned by choice — no binaries are sent to Apple
+  for notarization. Admin access is needed only to install the system
+  daemons and /var/lib/bad_apple state; everything else stays in user space.
+NOTE
 echo ""
 
 # macOS version

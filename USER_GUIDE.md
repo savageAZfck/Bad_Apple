@@ -19,9 +19,12 @@ A few things worth knowing up front:
 
 ## Installing
 
-Requirements: Apple Silicon Mac (M1 or newer), macOS 14+, ~10 GB free disk, and
+Requirements: Apple Silicon Mac (M1 or newer), macOS 26+, ~10 GB free disk, and
 [Homebrew](https://brew.sh) installed. You will be asked for your Mac's admin
-password during install — that is the daemons being registered with the system.
+password during install — the installer prints a one-paragraph note explaining
+why: the package is unsigned by choice (no binaries are sent to Apple), and
+admin access is only needed to register the background daemons and her state
+directory.
 
 Open the **Terminal** app (Applications → Utilities), then run:
 
