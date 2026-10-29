@@ -154,7 +154,19 @@ fn build_resident(src: &Path, root: &Path) -> Result<ResidentOrganism> {
             .map_err(|e| anyhow::anyhow!("coyote load {}: {e}", src.display()))?
     } else {
         match coyote::load_vm(src, &build, false, false, true) {
-            Ok(vm) => vm,
+            Ok(mut vm) => {
+                // ANE surfaced compiled — verify it actually executes on
+                // this hardware. VMs have no Neural Engine: the build
+                // succeeds but every dispatch fails at call time, which
+                // silently poisons all organ work. Probe once, fall back
+                // to CPU execution when the hardware isn't there.
+                let probe = vm.alloc_tensor(vec![64], vec![0.0; 64]);
+                match vm.call_fn("gatekeeper_classify", vec![probe]) {
+                    Ok(_) => vm,
+                    Err(_) => coyote::load_vm(src, &build, true, false, true)
+                        .map_err(|e| anyhow::anyhow!("coyote load {}: {e}", src.display()))?,
+                }
+            }
             Err(_) => coyote::load_vm(src, &build, true, false, true)
                 .map_err(|e| anyhow::anyhow!("coyote load {}: {e}", src.display()))?,
         }
