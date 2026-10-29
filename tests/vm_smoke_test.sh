@@ -164,7 +164,7 @@ else
   exit 1
 fi
 
-PKG_DIR=$(find "$EXTRACT_DIR" -maxdepth 1 -type d -name 'Bad_Apple-*-full' | head -n1)
+PKG_DIR=$(find "$EXTRACT_DIR" -maxdepth 1 -type d -name 'Bad_Apple-*' ! -name '*.zip' | head -n1)
 if [[ -z "$PKG_DIR" || ! -d "$PKG_DIR" ]]; then
   ko "release package directory not found inside zip"
   exit 1
