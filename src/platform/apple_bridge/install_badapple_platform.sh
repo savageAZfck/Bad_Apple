@@ -136,7 +136,16 @@ fi
 
 install -d -o "${CONSOLE_USER}" -g "${CONSOLE_GROUP}" -m 770 /var/lib/bad_apple /var/run/badapple
 chown -R "${CONSOLE_USER}":"${CONSOLE_GROUP}" /var/lib/bad_apple
-[[ -f /var/lib/bad_apple/slicks.key ]] && chmod 600 /var/lib/bad_apple/slicks.key
+# The SLICKS shared secret authenticates gatekeeper<->engine IPC. It is
+# minted once per machine, owned by the console user (the engine runs as
+# them); root services read it regardless.
+if [[ ! -f /var/lib/bad_apple/slicks.key ]]; then
+    tmpkey="$(mktemp /tmp/slicks.key.XXXXXX)"
+    head -c 32 /dev/urandom | xxd -p -c 64 > "${tmpkey}"
+    install -o "${CONSOLE_USER}" -g staff -m 600 "${tmpkey}" /var/lib/bad_apple/slicks.key
+    rm -f "${tmpkey}"
+fi
+chmod 600 /var/lib/bad_apple/slicks.key
 install -d -o root -g wheel -m 750 "${BACKUP_ROOT}"
 BACKUP_DIR="$(mktemp -d "${BACKUP_ROOT}/${RELEASE_ID}.XXXXXX")"
 chmod 750 "${BACKUP_DIR}"
