@@ -73,6 +73,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "akicita"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53d8a3ae478aa40a3019a856707fbbc29c4a729ef6360fdd93465ce61dad7651"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -268,12 +280,14 @@ name = "bad_apple"
 version = "0.9.6"
 dependencies = [
  "aes-gcm",
+ "akicita",
  "anyhow",
  "axon-reflex",
  "axum",
  "base64 0.22.1",
  "bicameral",
  "bytemuck",
+ "camazotz",
  "candle-core",
  "candle-nn",
  "cbindgen",
@@ -298,6 +312,7 @@ dependencies = [
  "kola-witness",
  "libc",
  "libloading",
+ "macuahuitl",
  "md-5",
  "memmap2",
  "metal",
@@ -326,6 +341,7 @@ dependencies = [
  "starship-battery",
  "sysinfo",
  "tabula-rasa",
+ "tokala",
  "tokenizers",
  "tokio",
  "tokio-stream",
@@ -508,6 +524,21 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "camazotz"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ba3a6c8e3df8fa4ff61c61fb3063278d013e5d35b7cb872563b37927bc44097"
+dependencies = [
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "candle-core"
@@ -2333,6 +2364,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
+name = "macuahuitl"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4ad946d9f7df37520121b1b82479dd064d766137beeb49a2fdb8c4287e6d517"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4078,6 +4118,16 @@ checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tokala"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47393fbfdcceade1384b05af5f2863a03644f129ab37d35ee46e8247e37f3516"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

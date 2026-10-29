@@ -220,6 +220,43 @@ fn parse_verdict(raw: &str) -> (Verdict, String) {
     (verdict, reason)
 }
 
+/// Raw sentinel generation for the .cy sentinel — verdict parsing,
+/// prompt construction, and arg-snipping live in `coyote/sentinel.cy`;
+/// this is only the resident-engine call. Returns
+/// (0, "") unavailable / (1, text) ok / (2, err) live failure.
+pub fn generate_raw(prompt: &str, system: &str, max_tokens: usize, max_ctx: usize) -> (u8, String) {
+    let mut guard = match SENTINEL.lock() {
+        Ok(g) => g,
+        Err(_) => return (2, "sentinel lock poisoned".into()),
+    };
+    match guard.as_mut() {
+        Some(engine) => match engine.generate(prompt, Some(system), max_tokens, max_ctx) {
+            Ok(text) => (1, text),
+            Err(e) => (2, format!("sentinel inference failed: {e}")),
+        },
+        None => (0, String::new()),
+    }
+}
+
+/// Metric tally for the .cy sentinel — verdict arrives already parsed.
+pub fn tally(verdict: &str, latency_us: u64) {
+    CALLS.fetch_add(1, Ordering::Relaxed);
+    match verdict {
+        "allow" => {
+            ALLOWS.fetch_add(1, Ordering::Relaxed);
+        }
+        "deny" => {
+            DENIES.fetch_add(1, Ordering::Relaxed);
+        }
+        "escalate" => {
+            ESCALATES.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+    TOTAL_LATENCY_US.fetch_add(latency_us, Ordering::Relaxed);
+    MAX_LATENCY_US.fetch_max(latency_us, Ordering::Relaxed);
+}
+
 /// Vet one proposed tool call. `policy_verdict` is what the policy
 /// engine already decided ("approved", "needs_approval", "denied") so
 /// the sentinel judges with full context — it can still veto a

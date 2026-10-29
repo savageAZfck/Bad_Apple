@@ -438,55 +438,44 @@ fn send_model(peer_id: &str, model_id: &str) -> Result<()> {
 /// its answer. The peer must serve with `BADAPPLE_P2P_INFER=1`; the action is
 /// attested on the serving machine's ledger under this machine's peer label.
 fn ask_peer(peer_id: &str, prompt: &str) -> Result<()> {
-    let peer_id = peer_id.to_string();
-    let prompt = prompt.to_string();
-    with_runtime(move || {
-        let rt = Runtime::new().context("tokio runtime")?;
-        rt.block_on(async {
-            let svc = transfer_service()?;
-            let peer_addr = if peer_id.contains(':') {
-                peer_id
-            } else {
-                format!("{peer_id}:9878")
-            };
-            match svc.infer(&peer_addr, &prompt, 512, &hostname()).await {
-                Ok(resp) => {
-                    println!("{}", resp.text);
-                    eprintln!(
-                        "\n[served by {peer_addr}{} in {} ms — attested on the serving peer's ledger]",
-                        resp.tier.map(|t| format!(" · tier {t}")).unwrap_or_default(),
-                        resp.elapsed_ms
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    eprintln!("{{\"status\": \"error\", \"message\": \"{e:#}\"}}");
-                    bail!("{e:#}");
-                }
-            }
-        })
-    })
+    // The wire protocol + attestation now run inside the Coyote organism —
+    // p2p.cy::infer drives the socket, frames, crypto, and ledger entries.
+    let peer_addr = if peer_id.contains(':') {
+        peer_id.to_string()
+    } else {
+        format!("{peer_id}:9878")
+    };
+    match bad_apple::coyote_sys::p2p_infer(&peer_addr, prompt, 512, &hostname()) {
+        Ok((text, tier, elapsed_ms)) => {
+            println!("{text}");
+            eprintln!(
+                "\n[served by {peer_addr}{} in {} ms — attested on both ledgers]",
+                tier.map(|t| format!(" · tier {t}")).unwrap_or_default(),
+                elapsed_ms
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("{{\"status\": \"error\", \"message\": \"{e:#}\"}}");
+            bail!("{e:#}");
+        }
+    }
 }
 
 fn receive_model(_peer_id: Option<&str>, _model_id: Option<&str>) -> Result<()> {
-    with_runtime(|| {
-        let rt = Runtime::new().context("tokio runtime")?;
-        rt.block_on(async {
-            let svc = transfer_service()?;
-            svc.scan_and_advertise(hostname()).await?;
-            let port = std::env::var("BADAPPLE_P2P_TRANSFER_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(9878);
-            let (addr, handle) = svc.serve(port).await?;
-            let dir = model_dir()?;
-            println!(
-                "{{\"status\": \"serving\", \"addr\": \"{addr}\", \"model_dir\": \"{}\"}}",
-                dir.display()
-            );
-            handle.await?
-        })
-    })
+    // The serve loop is the Coyote organism now — p2p.cy::serve accepts,
+    // handshakes, and dispatches frames: delegated inference plus the full
+    // model pull/push chunk protocol.
+    let port = std::env::var("BADAPPLE_P2P_TRANSFER_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9878);
+    let dir = model_dir()?;
+    println!(
+        "{{\"status\": \"serving\", \"port\": {port}, \"model_dir\": \"{}\"}}",
+        dir.display()
+    );
+    bad_apple::coyote_sys::p2p_serve(port, dir.to_str().unwrap_or("."))
 }
 
 fn connect_to_peers(cm: &Arc<ConnectionManager>) {

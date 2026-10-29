@@ -12,6 +12,11 @@ default-run = "badapple"
 [lib]
 crate-type = ["rlib"]
 
+[features]
+default = ["coyote-sys"]
+coyote-sys = ["dep:coyote", "dep:mil_infer"]
+native-organs = []
+
 [[bin]]
 name = "badapple"
 path = "src/bin/badapple.rs"
@@ -39,6 +44,22 @@ path = "src/bin/badapple-mcp.rs"
 [[bin]]
 name = "badapple-p2p"
 path = "src/bin/badapple-p2p.rs"
+required-features = ["coyote-sys"]
+
+[[bin]]
+name = "badapple-aneconvert-legacy"
+path = "src/bin/badapple-aneconvert-legacy.rs"
+required-features = ["coyote-sys"]
+
+[[bin]]
+name = "badapple-aneconvert-v060"
+path = "src/bin/badapple-aneconvert-v060.rs"
+required-features = ["coyote-sys"]
+
+[[bin]]
+name = "badapple-ane-rank"
+path = "src/bin/badapple-ane-rank.rs"
+required-features = ["coyote-sys"]
 
 [[bin]]
 name = "badapple-fetch-metallib"
@@ -75,6 +96,7 @@ path = "src/bin/badapple-bulletin.rs"
 [[bin]]
 name = "badapple-aneconvert"
 path = "src/bin/badapple-aneconvert.rs"
+required-features = ["coyote-sys"]
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
@@ -116,8 +138,8 @@ libc = "0.2"
 memmap2 = "0.9.11"
 half = "2"
 mil_spec = "0.4.2"
-mil_infer = "0.6.0"
-coyote = { path = "/Users/savag3/coyote" }
+mil_infer = { version = "0.6.0", optional = true }
+coyote = { path = "/Users/savag3/coyote", optional = true }
 mil_machines = "0.2.0"
 mil_compile = "0.2.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -148,6 +170,10 @@ germline = "0.1.0"
 tabula = { version = "0.1.0", package = "tabula-rasa" }
 potlatch = "0.1.0"
 haruspex = { package = "haruspex-macho", version = "0.3" }
+akicita = "0.1.1"
+tokala = "0.1.1"
+camazotz = "0.1.1"
+macuahuitl = "0.1.1"
 
 [build-dependencies]
 cbindgen = "0.29"

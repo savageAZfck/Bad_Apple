@@ -78,6 +78,12 @@ pub struct BuildReport {
 
 /// Emit the Coyote DFA + ANE organ binaries (`0xBEEFFACE` `.macho`) directly
 /// into `dir/firewall.mlmodelc` through the Coyote compiler and ANE runtime.
+#[cfg(not(feature = "coyote-sys"))]
+pub fn compile_to(_dir: &Path) -> Result<BuildReport> {
+    anyhow::bail!("firewall compile requires the coyote build")
+}
+
+#[cfg(feature = "coyote-sys")]
 pub fn compile_to(dir: &Path) -> Result<BuildReport> {
     let patterns = merged_patterns();
     let lowered: Vec<String> = patterns.iter().map(|p| p.to_lowercase()).collect();

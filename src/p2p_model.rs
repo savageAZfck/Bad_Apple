@@ -758,14 +758,31 @@ impl P2PModelTransfer {
             }),
         )
         .await?;
-        match recv_frame(&mut stream, &cipher).await? {
-            TransferFrame::InferResponse(r) if r.request_id == request_id => Ok(r),
-            TransferFrame::InferResponse(_) => {
-                bail!("infer response request_id mismatch")
+        // Dual attestation — the serving peer ledgers delegated_query/
+        // delegated_response; the asking machine now ledgers the mirror
+        // events through the Coyote ledger organism (coyote/ledger.cy).
+        crate::coyote_sys::attest_delegated_ask(peer_addr, &request_id, prompt);
+        let resp: Result<InferResponseFrame> = match recv_frame(&mut stream, &cipher).await {
+            Ok(TransferFrame::InferResponse(r)) if r.request_id == request_id => Ok(r),
+            Ok(TransferFrame::InferResponse(_)) => {
+                Err(anyhow!("infer response request_id mismatch"))
             }
-            TransferFrame::Error { message } => bail!("peer error: {message}"),
-            other => bail!("expected InferResponse, got {other:?}"),
+            Ok(TransferFrame::Error { message }) => Err(anyhow!("peer error: {message}")),
+            Ok(other) => Err(anyhow!("expected InferResponse, got {other:?}")),
+            Err(e) => Err(e),
+        };
+        match &resp {
+            Ok(r) => {
+                crate::coyote_sys::attest_delegated_answer(peer_addr, &request_id, "ok", &r.text)
+            }
+            Err(e) => crate::coyote_sys::attest_delegated_answer(
+                peer_addr,
+                &request_id,
+                "error",
+                &format!("{e:#}"),
+            ),
         }
+        resp
     }
 
     fn find_model_file(&self, model_id: &str) -> Option<PathBuf> {

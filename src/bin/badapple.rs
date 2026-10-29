@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use bad_apple::bad_apple_ipc::{call_agent, query_with_metrics};
-use bad_apple::cert;
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -248,6 +247,15 @@ fn main() -> Result<()> {
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("p2p") {
         return run_p2p_subcommand(&prompt_parts[1..]);
+    }
+
+    // The organism answers first — cli.cy handles the subcommands it owns
+    // (vault, non-interactive strategy); None falls through to the Rust.
+    #[cfg(feature = "coyote-sys")]
+    if let Some((code, out, err)) = bad_apple::coyote_sys::cli_dispatch(&prompt_parts) {
+        print!("{out}");
+        eprint!("{err}");
+        std::process::exit(code as i32);
     }
 
     if prompt_parts.first().map(std::string::String::as_str) == Some("vault") {
@@ -2033,20 +2041,29 @@ fn run_sidecar_subcommand(name: &str, args: &[String]) -> Result<()> {
 }
 
 fn run_cert() -> Result<()> {
-    let results = cert::run();
+    // The suite is a Coyote program — cert.cy, run on the resident VM with
+    // the organism's extern layer. The organism certifies itself.
+    #[cfg(feature = "coyote-sys")]
+    let results = bad_apple::coyote_sys::run_cert()?;
+    #[cfg(not(feature = "coyote-sys"))]
+    let results: Vec<(String, bool, String)> = Vec::new();
     let mut failures = 0;
-    for r in &results {
-        let status = if r.passed { "PASS" } else { "FAIL" };
-        eprintln!("[cert] [{status}] {}: {}", r.name, r.message);
-        if !r.passed {
+    let mut rendered = Vec::with_capacity(results.len());
+    for (name, passed, message) in &results {
+        let status = if *passed { "PASS" } else { "FAIL" };
+        eprintln!("[cert] [{status}] {name}: {message}");
+        if !passed {
             failures += 1;
         }
+        rendered.push(serde_json::json!({
+            "name": name, "passed": passed, "message": message,
+        }));
     }
     let summary = serde_json::json!({
         "status": if failures == 0 { "ok" } else { "failed" },
         "total": results.len(),
         "failures": failures,
-        "results": results,
+        "results": rendered,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
     if failures > 0 {
@@ -2335,10 +2352,13 @@ fn run_demo() -> Result<()> {
         &tip[..16.min(tip.len())]
     );
 
-    // 2. Air-gap certification — real cert suite.
+    // 2. Air-gap certification — the Coyote suite (cert.cy).
     print!("  Checking my air gap...       ");
-    let results = cert::run();
-    let failures = results.iter().filter(|r| !r.passed).count();
+    #[cfg(feature = "coyote-sys")]
+    let results = bad_apple::coyote_sys::run_cert().unwrap_or_default();
+    #[cfg(not(feature = "coyote-sys"))]
+    let results: Vec<(String, bool, String)> = Vec::new();
+    let failures = results.iter().filter(|r| !r.1).count();
     if failures == 0 {
         println!("{} checks, zero network sockets — clean", results.len());
     } else {
@@ -3033,6 +3053,12 @@ fn run_policy_subcommand(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "coyote-sys"))]
+fn run_mesh_brain_subcommand(_args: &[String]) -> Result<()> {
+    bail!("mesh brain requires the coyote build")
+}
+
+#[cfg(feature = "coyote-sys")]
 fn run_mesh_brain_subcommand(args: &[String]) -> Result<()> {
     use bad_apple::mesh_brain;
     if args.is_empty() {

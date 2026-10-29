@@ -13,6 +13,7 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
 
+#[cfg(feature = "coyote-sys")]
 pub mod ane_core;
 pub mod apple_intelligence;
 pub mod arena;
@@ -22,27 +23,65 @@ pub mod bad_apple_ipc;
 pub mod benchmark;
 pub mod cert;
 pub mod config;
+#[cfg(not(feature = "native-organs"))]
 pub mod coyote_organs;
+#[cfg(feature = "native-organs")]
+pub mod native_organs;
+#[cfg(feature = "native-organs")]
+pub use native_organs as coyote_organs;
+#[cfg(feature = "coyote-sys")]
+pub mod coyote_sys;
 pub mod firewall_machine;
+#[cfg(feature = "coyote-sys")]
 pub use mil_infer;
 pub use mil_spec;
 
 pub mod ify;
 pub mod mcp;
 pub mod mcp_marketplace;
+#[cfg(feature = "coyote-sys")]
 pub mod mesh_brain;
 pub mod mesh_sync;
 pub mod metal_uma;
 pub mod metrics;
 pub mod org_policy;
 pub mod p2p_crypto;
+#[cfg(feature = "coyote-sys")]
 pub mod p2p_model;
 pub mod production_blueprint;
 pub mod protocol;
 pub mod red_team;
 pub mod redb_kv;
+pub mod safetensors;
 pub mod scavenger;
+#[cfg(feature = "coyote-sys")]
 pub mod sentinel;
+#[cfg(not(feature = "coyote-sys"))]
+mod sentinel {
+    pub struct Verdict {
+        s: &'static str,
+    }
+    impl Verdict {
+        pub fn as_str(&self) -> &'static str {
+            self.s
+        }
+    }
+    pub struct SentinelVerdict {
+        pub verdict: Verdict,
+        pub reason: String,
+        pub latency_us: u64,
+    }
+    pub fn is_available() -> bool {
+        false
+    }
+    pub fn vet(_name: &str, _args: &str, _policy: &str) -> SentinelVerdict {
+        SentinelVerdict {
+            verdict: Verdict { s: "unavailable" },
+            reason: "sentinel requires the coyote build".into(),
+            latency_us: 0,
+        }
+    }
+}
 pub mod simd;
 pub mod strategy_library;
 pub mod tensor_brain;
@@ -357,6 +396,7 @@ pub unsafe extern "C" fn bad_apple_generate_text(prompt: *const c_char) -> *mut 
         Ok(s) if !s.is_empty() => s,
         _ => return bad_apple_cstring("invalid prompt"),
     };
+    #[cfg(feature = "coyote-sys")]
     if ane_core::is_available() {
         // Cap output to 64 tokens for speed; 2-3 sentences is all the
         // concise persona needs.
