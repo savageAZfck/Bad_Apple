@@ -291,6 +291,9 @@ for ((i = 0; i < tries; i++)); do
         fail "model weights missing and downloads disabled — seed ~/.cache/huggingface \
 (hf download mlx-community/Qwen3-8B-4bit) or unset BADAPPLE_AIRGAP to allow the first-run download"
     fi
+    if [[ "${downloads_allowed}" == "1" && $((i % 12)) -eq 11 ]]; then
+        echo "  still installing — first-run weight download in progress (~$((i * 5))s elapsed)"
+    fi
     sleep 5
 done
 [[ "${ready}" -eq 1 ]] || fail "native platform readiness check failed"
