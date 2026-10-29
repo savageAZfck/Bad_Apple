@@ -159,6 +159,20 @@ fi
 DAEMONS=(com.badapple.gatekeeper com.badapple.mlx com.badapple.supervisor)
 AGENTS=(com.badapple.identity_agent com.badapple.tts com.badapple.menubar com.badapple.dashboard com.badapple.checkpoint com.badapple.ify com.badapple.respawn com.badapple.tape com.badapple.bulletin)
 AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
+# Whether the daemon may pull model weights on first run. Explicit
+# BADAPPLE_ALLOW_DOWNLOADS=1 wins; otherwise auto-enable when the
+# console user has no weights cache so `brew install` is fully
+# self-contained on a fresh machine. BADAPPLE_AIRGAP=1 keeps the
+# sealed posture for offline installs.
+downloads_allowed=0
+if [[ "${BADAPPLE_ALLOW_DOWNLOADS:-0}" == "1" ]]; then
+    downloads_allowed=1
+elif [[ "${BADAPPLE_AIRGAP:-0}" != "1" ]] \
+    && ! ls "${CONSOLE_HOME}"/.cache/huggingface/hub/models--* >/dev/null 2>&1; then
+    downloads_allowed=1
+    echo "No weights cache found for ${CONSOLE_USER}; first launch will download ~4-6 GB."
+fi
+
 for label in "${DAEMONS[@]}"; do
     target="/Library/LaunchDaemons/${label}.plist"
     [[ ! -f "${target}" ]] || cp -p "${target}" "${BACKUP_DIR}/${label}.plist"
@@ -247,7 +261,7 @@ for label in "${DAEMONS[@]}"; do
     incoming="${BACKUP_DIR}/${label}.incoming"
     render_plist "${REPO_ROOT}/src/platform/apple_bridge/${label}.plist" "${incoming}"
     plutil -lint "${incoming}" >/dev/null
-    if [[ "${label}" == "com.badapple.mlx" && "${BADAPPLE_ALLOW_DOWNLOADS:-0}" == "1" ]]; then
+    if [[ "${label}" == "com.badapple.mlx" && "${downloads_allowed}" == "1" ]]; then
         plutil -insert "EnvironmentVariables.BADAPPLE_ALLOW_DOWNLOADS" -string "1" "${incoming}" 2>/dev/null \
             || plutil -replace "EnvironmentVariables.BADAPPLE_ALLOW_DOWNLOADS" -string "1" "${incoming}"
     fi
@@ -262,7 +276,7 @@ done
 ready=0
 tries=90
 # A first-run model download (~4-6 GB) can far exceed the default window.
-if [[ "${BADAPPLE_ALLOW_DOWNLOADS:-0}" == "1" ]]; then
+if [[ "${downloads_allowed}" == "1" ]]; then
     tries=360
 fi
 for ((i = 0; i < tries; i++)); do
@@ -275,7 +289,7 @@ for ((i = 0; i < tries; i++)); do
     if grep -qiE "downloads are disabled|no model weights|weights.*(missing|not found)" \
         /var/lib/bad_apple/mlx_server.log 2>/dev/null; then
         fail "model weights missing and downloads disabled — seed ~/.cache/huggingface \
-(hf download mlx-community/Qwen3-8B-4bit) or re-run with BADAPPLE_ALLOW_DOWNLOADS=1"
+(hf download mlx-community/Qwen3-8B-4bit) or unset BADAPPLE_AIRGAP to allow the first-run download"
     fi
     sleep 5
 done
