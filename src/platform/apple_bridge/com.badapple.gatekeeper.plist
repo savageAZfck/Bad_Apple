@@ -24,6 +24,8 @@
     <string>__CONSOLE_GROUP__</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>BADAPPLE_ORGANS_CY</key>
+        <string>/var/lib/bad_apple/organs/badapple_organs.cy</string>
         <key>BADAPPLE_SLICKS_KEY_PATH</key>
         <string>/var/lib/bad_apple/slicks.key</string>
         <key>BADAPPLE_SOCKET_PATH</key>

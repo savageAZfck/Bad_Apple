@@ -146,6 +146,12 @@ if [[ ! -f /var/lib/bad_apple/slicks.key ]]; then
     rm -f "${tmpkey}"
 fi
 chmod 600 /var/lib/bad_apple/slicks.key
+
+# Install the Coyote organ layer the gatekeeper loads at runtime.
+if [[ -d "${REPO_ROOT}/coyote" ]]; then
+    mkdir -p /var/lib/bad_apple/organs
+    install -m 644 "${REPO_ROOT}"/coyote/*.cy /var/lib/bad_apple/organs/ 2>/dev/null || true
+fi
 install -d -o root -g wheel -m 750 "${BACKUP_ROOT}"
 BACKUP_DIR="$(mktemp -d "${BACKUP_ROOT}/${RELEASE_ID}.XXXXXX")"
 chmod 750 "${BACKUP_DIR}"

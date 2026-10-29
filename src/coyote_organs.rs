@@ -44,10 +44,13 @@ fn organs_src() -> PathBuf {
     std::env::var("BADAPPLE_ORGANS_CY")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            let candidate =
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("coyote/badapple_organs.cy");
-            if candidate.exists() {
-                return candidate;
+            for candidate in [
+                PathBuf::from("/var/lib/bad_apple/organs/badapple_organs.cy"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("coyote/badapple_organs.cy"),
+            ] {
+                if candidate.exists() {
+                    return candidate;
+                }
             }
             PathBuf::from("/Users/savag3/bad_apple/coyote/badapple_organs.cy")
         })

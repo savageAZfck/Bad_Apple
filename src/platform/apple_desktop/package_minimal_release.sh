@@ -170,6 +170,12 @@ done
 
 # Walkthrough demo + mesh doc — sit at the runtime root so `badapple demo
 # full` finds the script two dirs above target/release/.
+# Organ layer (.cy sources the gatekeeper loads at runtime)
+if [[ -d "${REPO_ROOT}/coyote" ]]; then
+    mkdir -p "${PKG_DIR}/bad_apple/coyote"
+    cp -R "${REPO_ROOT}/coyote/." "${PKG_DIR}/bad_apple/coyote/"
+fi
+
 install -m 755 "${REPO_ROOT}/demo_walkthrough.sh" "${PKG_DIR}/bad_apple/demo_walkthrough.sh"
 install -m 644 "${REPO_ROOT}/MESH_BRAIN.md" "${PKG_DIR}/bad_apple/MESH_BRAIN.md"
 # Grounded code index tokenizer — two dirs above target/release/ so
