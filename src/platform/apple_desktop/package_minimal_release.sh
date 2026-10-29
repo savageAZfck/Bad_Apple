@@ -95,7 +95,10 @@ if [[ "${BADAPPLE_SKIP_BUILD:-0}" != 1 ]]; then
     # build them explicitly so releases carry from-source libraries,
     # not stale artifacts.
     cargo rustc --release --lib --crate-type cdylib
-    COYOTE_DIR="${COYOTE_DIR:-${REPO_ROOT}/../coyote}"
+    COYOTE_DIR="${COYOTE_DIR:-}"
+    if [[ -z "${COYOTE_DIR}" ]]; then
+        COYOTE_DIR="$(sed -n 's|^coyote = { path = "\(.*\)" }.*|\1|p' "${REPO_ROOT}/Cargo.toml" | head -1)"
+    fi
     if [[ -f "${COYOTE_DIR}/Cargo.toml" ]]; then
         cargo build --release --manifest-path "${COYOTE_DIR}/Cargo.toml" --lib
         install -m 755 "${COYOTE_DIR}/target/release/libcoyote.dylib"             "${BUILD_DIR}/libBadAppleANEBridge.dylib"
