@@ -230,6 +230,13 @@ if [[ -n "$BADAPPLE_ALLOW_DOWNLOADS" && -f "$PLIST_TARGET" ]]; then
   fi
 fi
 
+# The installer cleans its extract dir — re-resolve the CLI to the
+# installed runtime so post-install probes hit a binary that exists.
+if [[ ! -x "${BADAPPLE_CLI}" ]]; then
+  installed_cli="$(echo '/Library/Application Support/Bad Apple'/runtimes/*/target/release/badapple 2>/dev/null | awk '{print $1}')"
+  [[ -x "${installed_cli}" ]] && BADAPPLE_CLI="${installed_cli}"
+fi
+
 # --- Wait for daemon readiness ---
 echo ""
 echo "Waiting for Bad Apple daemons..."
