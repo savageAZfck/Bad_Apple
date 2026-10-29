@@ -190,6 +190,10 @@ elif ! ls "${CONSOLE_HOME}"/.cache/huggingface/hub/models--* >/dev/null 2>&1; th
     echo "No weights cache found for ${CONSOLE_USER}; first launch will download ~4-6 GB."
 fi
 
+if [[ "${downloads_allowed}" == "1" ]]; then
+    run_user env "HOME=${CONSOLE_HOME}" bash "${REPO_ROOT}/src/platform/apple_bridge/install_ane_brain.sh" ||         echo "warn: ANE brain download deferred — run src/platform/apple_bridge/install_ane_brain.sh as ${CONSOLE_USER} later."
+fi
+
 for label in "${DAEMONS[@]}"; do
     target="/Library/LaunchDaemons/${label}.plist"
     [[ ! -f "${target}" ]] || cp -p "${target}" "${BACKUP_DIR}/${label}.plist"
