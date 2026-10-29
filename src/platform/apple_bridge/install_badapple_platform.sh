@@ -179,12 +179,14 @@ AGENT_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 # console user has no weights cache so `brew install` is fully
 # self-contained on a fresh machine. BADAPPLE_AIRGAP=1 keeps the
 # sealed posture for offline installs.
-downloads_allowed=0
-if [[ "${BADAPPLE_ALLOW_DOWNLOADS:-0}" == "1" ]]; then
-    downloads_allowed=1
-elif [[ "${BADAPPLE_AIRGAP:-0}" != "1" ]] \
-    && ! ls "${CONSOLE_HOME}"/.cache/huggingface/hub/models--* >/dev/null 2>&1; then
-    downloads_allowed=1
+# Downloads are on by default — a fresh machine cannot pass readiness
+# without weights, so the daemon gets pull rights unless the user
+# explicitly opts into the sealed posture with BADAPPLE_AIRGAP=1.
+downloads_allowed=1
+if [[ "${BADAPPLE_AIRGAP:-0}" == "1" ]]; then
+    downloads_allowed=0
+    echo "BADAPPLE_AIRGAP=1: downloads disabled; seed ${CONSOLE_HOME}/.cache/huggingface manually."
+elif ! ls "${CONSOLE_HOME}"/.cache/huggingface/hub/models--* >/dev/null 2>&1; then
     echo "No weights cache found for ${CONSOLE_USER}; first launch will download ~4-6 GB."
 fi
 
