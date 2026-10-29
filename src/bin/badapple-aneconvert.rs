@@ -12,261 +12,13 @@
 //!
 //! Compilation goes through Xcode's `coremlc` — no Python in the pipeline.
 
+#[cfg(test)]
 use bad_apple::mil_spec::*;
-use serde_json::{json, Map, Value};
-use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use bad_apple::safetensors::*;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 // ======== safetensors (header-only index + on-demand slices) ========
-
-#[derive(Clone, Debug)]
-struct TensorInfo {
-    dtype: String,
-    file: PathBuf,
-    begin: u64,
-    end: u64,
-    shape: Vec<u64>,
-}
-
-struct StIndex {
-    tensors: HashMap<String, TensorInfo>,
-    /// MLX quantization group size (config.json → quantization.group_size).
-    group_size: usize,
-}
-
-impl StIndex {
-    fn load(dir: &Path) -> Result<Self, String> {
-        let mut tensors = HashMap::new();
-        // Index file maps tensor name -> shard file; single-file models work too.
-        let idx_path = dir.join("model.safetensors.index.json");
-        let mut files: Vec<PathBuf> = vec![];
-        if idx_path.is_file() {
-            let idx: Value =
-                serde_json::from_slice(&std::fs::read(&idx_path).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
-            let wm = idx["weight_map"].as_object().ok_or("weight_map missing")?;
-            for f in wm.values() {
-                let p = dir.join(f.as_str().ok_or("bad weight_map entry")?);
-                if !files.contains(&p) {
-                    files.push(p);
-                }
-            }
-        } else {
-            let single = dir.join("model.safetensors");
-            if !single.is_file() {
-                return Err(format!(
-                    "no safetensors index or model.safetensors in {}",
-                    dir.display()
-                ));
-            }
-            files.push(single);
-        }
-        for file in files {
-            let mut fh = std::fs::File::open(&file).map_err(|e| format!("{e} {file:?}"))?;
-            let mut lenb = [0u8; 8];
-            fh.read_exact(&mut lenb).map_err(|e| e.to_string())?;
-            let hlen = u64::from_le_bytes(lenb) as usize;
-            let mut hbuf = vec![0u8; hlen];
-            fh.read_exact(&mut hbuf).map_err(|e| e.to_string())?;
-            let hdr: Value = serde_json::from_slice(&hbuf).map_err(|e| e.to_string())?;
-            let obj = hdr.as_object().ok_or("bad header")?;
-            for (name, meta) in obj {
-                if name == "__metadata__" {
-                    continue;
-                }
-                let dtype = meta["dtype"].as_str().unwrap_or("F16").to_string();
-                let offs = meta["data_offsets"].as_array().ok_or("no data_offsets")?;
-                let begin = offs[0].as_u64().unwrap_or(0);
-                let end = offs[1].as_u64().unwrap_or(0);
-                let shape: Vec<u64> = meta["shape"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
-                    .unwrap_or_default();
-                let base = 8 + hlen as u64;
-                tensors.insert(
-                    name.clone(),
-                    TensorInfo {
-                        dtype,
-                        file: file.clone(),
-                        begin: base + begin,
-                        end: base + end,
-                        shape,
-                    },
-                );
-            }
-        }
-        let group_size = std::fs::read_to_string(dir.join("config.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|c| c["quantization"]["group_size"].as_u64())
-            .unwrap_or(64) as usize;
-        Ok(StIndex {
-            tensors,
-            group_size,
-        })
-    }
-
-    fn get_raw(&self, name: &str) -> Result<Vec<u8>, String> {
-        let t = self
-            .tensors
-            .get(name)
-            .ok_or_else(|| format!("missing tensor {name}"))?;
-        let mut fh = std::fs::File::open(&t.file).map_err(|e| e.to_string())?;
-        fh.seek(SeekFrom::Start(t.begin))
-            .map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; (t.end - t.begin) as usize];
-        fh.read_exact(&mut buf).map_err(|e| e.to_string())?;
-        Ok(buf)
-    }
-
-    /// Read a tensor as fp16 bytes (converting bf16/f32 sources).
-    fn get_f16(&self, name: &str) -> Result<Vec<u8>, String> {
-        let t = self
-            .tensors
-            .get(name)
-            .ok_or_else(|| format!("missing tensor {name}"))?;
-        let raw = self.get_raw(name)?;
-        match t.dtype.as_str() {
-            "F16" => Ok(raw),
-            "BF16" => Ok(bf16_bytes_to_f16(&raw)),
-            "F32" => Ok(f32_bytes_to_f16(&raw)),
-            // MLX-quantized linear: packed U32 nibbles + F16 scales/biases.
-            "U32" => {
-                let base = name
-                    .strip_suffix(".weight")
-                    .ok_or_else(|| format!("{name}: quantized tensor without .weight suffix"))?;
-                let scales = self.get_raw(&format!("{base}.scales"))?;
-                let biases = self.get_raw(&format!("{base}.biases"))?;
-                dequant_mlx_q4(&raw, &t.shape, &scales, &biases, self.group_size)
-            }
-            other => Err(format!("{name}: unsupported dtype {other}")),
-        }
-    }
-
-    /// Read rows [r0, r1) of a 2-D tensor as fp16 bytes. For U32-quantized
-    /// tensors the packed weight rows and their per-row scale/bias stripes
-    /// are sliced independently, then dequantized.
-    fn get_f16_rows(&self, name: &str, r0: u64, r1: u64) -> Result<Vec<u8>, String> {
-        let t = self
-            .tensors
-            .get(name)
-            .ok_or_else(|| format!("missing tensor {name}"))?;
-        if t.shape.len() != 2 {
-            return Err(format!("{name}: expected 2-D tensor, got {:?}", t.shape));
-        }
-        let rows = t.shape[0];
-        if r1 > rows || r0 >= r1 {
-            return Err(format!("{name}: bad row range {r0}..{r1} of {rows}"));
-        }
-        let read_at = |t: &TensorInfo, off: u64, len: u64| -> Result<Vec<u8>, String> {
-            let mut fh = std::fs::File::open(&t.file).map_err(|e| e.to_string())?;
-            fh.seek(SeekFrom::Start(t.begin + off))
-                .map_err(|e| e.to_string())?;
-            let mut buf = vec![0u8; len as usize];
-            fh.read_exact(&mut buf).map_err(|e| e.to_string())?;
-            Ok(buf)
-        };
-        if t.dtype == "U32" {
-            let base = name
-                .strip_suffix(".weight")
-                .ok_or_else(|| format!("{name}: quantized tensor without .weight suffix"))?;
-            let st_t = self
-                .tensors
-                .get(&format!("{base}.scales"))
-                .ok_or_else(|| format!("{name}: missing scales"))?;
-            let bt_t = self
-                .tensors
-                .get(&format!("{base}.biases"))
-                .ok_or_else(|| format!("{name}: missing biases"))?;
-            let packed_row = (t.end - t.begin) / rows; // cols*4 bytes
-            let ngroups = t.shape[1] * 8 / self.group_size as u64; // unpacked groups
-            let srow = ngroups * 2;
-            let n = r1 - r0;
-            let wr = read_at(t, r0 * packed_row, n * packed_row)?;
-            let sr = read_at(st_t, r0 * srow, n * srow)?;
-            let br = read_at(bt_t, r0 * srow, n * srow)?;
-            return dequant_mlx_q4(&wr, &[n, t.shape[1]], &sr, &br, self.group_size);
-        }
-        let elem: u64 = match t.dtype.as_str() {
-            "F16" | "BF16" => 2,
-            "F32" => 4,
-            o => return Err(format!("{name}: unsupported dtype {o}")),
-        };
-        let row_bytes = t.shape[1] * elem;
-        let raw = read_at(t, r0 * row_bytes, (r1 - r0) * row_bytes)?;
-        match t.dtype.as_str() {
-            "F16" => Ok(raw),
-            "BF16" => Ok(bf16_bytes_to_f16(&raw)),
-            _ => Ok(f32_bytes_to_f16(&raw)),
-        }
-    }
-}
-
-/// Dequantize an MLX 4-bit affine-quantized weight to fp16 bytes.
-/// Layout: `weight` is U32 [rows, cols/8] — 8 consecutive input-dim nibbles
-/// per word, least-significant nibble first. `scales`/`biases` are F16
-/// [rows, cols/group_size]. Reconstruction: w = scale * q + bias.
-fn dequant_mlx_q4(
-    raw: &[u8],
-    shape: &[u64],
-    scales: &[u8],
-    biases: &[u8],
-    group: usize,
-) -> Result<Vec<u8>, String> {
-    if shape.len() != 2 {
-        return Err(format!("quantized weight must be 2-D, got {shape:?}"));
-    }
-    let (rows, packed_cols) = (shape[0] as usize, shape[1] as usize);
-    let cols = packed_cols * 8;
-    if group == 0 || cols % group != 0 {
-        return Err(format!("cols {cols} not divisible by group_size {group}"));
-    }
-    let ngroups = cols / group;
-    if scales.len() != rows * ngroups * 2 || biases.len() != scales.len() {
-        return Err(format!(
-            "scale/bias size mismatch: {} bytes for [{rows}x{ngroups}]",
-            scales.len()
-        ));
-    }
-    let mut out = Vec::with_capacity(rows * cols * 2);
-    for r in 0..rows {
-        let row = &raw[r * packed_cols * 4..(r + 1) * packed_cols * 4];
-        for w in 0..packed_cols {
-            let word =
-                u32::from_le_bytes([row[w * 4], row[w * 4 + 1], row[w * 4 + 2], row[w * 4 + 3]]);
-            for n in 0..8usize {
-                let i = w * 8 + n;
-                let g = i / group;
-                let so = (r * ngroups + g) * 2;
-                let s = half::bf16::from_le_bytes([scales[so], scales[so + 1]]).to_f32();
-                let b = half::bf16::from_le_bytes([biases[so], biases[so + 1]]).to_f32();
-                let q = ((word >> (n * 4)) & 0xF) as f32;
-                out.extend_from_slice(&half::f16::from_f32(s * q + b).to_le_bytes());
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn bf16_bytes_to_f16(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len());
-    for c in raw.chunks_exact(2) {
-        let b = half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]]));
-        out.extend_from_slice(&half::f16::from_f32(b.to_f32()).to_le_bytes());
-    }
-    out
-}
-
-fn f32_bytes_to_f16(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len() / 2);
-    for c in raw.chunks_exact(4) {
-        let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-        out.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
-    }
-    out
-}
 
 // ======== model config ========
 
@@ -373,6 +125,7 @@ impl Cfg {
 
     /// Two rope input rows (global + local) only when the arch has a
     /// second base frequency — keeps Qwen3 artifacts/inputs untouched.
+    #[allow(dead_code)] // used by the cfg(test) parity oracle
     fn rope_rows(&self) -> i64 {
         if std::env::var("BADAPPLE_GEMMA_NO_LOCAL_ROPE").is_ok() {
             return 1;
@@ -385,6 +138,7 @@ impl Cfg {
     }
 
     /// RoPE input row for layer `i`: 1 = local base, 0 = global.
+    #[allow(dead_code)] // used by the cfg(test) parity oracle
     fn rope_row(&self, i: i64) -> i64 {
         if self.rope_rows() == 2 && self.is_sliding(i) {
             1
@@ -393,6 +147,7 @@ impl Cfg {
         }
     }
 
+    #[allow(dead_code)] // used by the cfg(test) parity oracle
     fn is_sliding(&self, i: i64) -> bool {
         if std::env::var("BADAPPLE_GEMMA_NO_SLIDING").is_ok() {
             return false;
@@ -402,45 +157,6 @@ impl Cfg {
 }
 
 /// Gemma RMSNorm: out = x̂ · (1 + w) — fold the +1 into stored fp16 weights.
-fn f16_plus_one(bytes: &[u8]) -> Vec<u8> {
-    map_f16(bytes, |v| v + 1.0)
-}
-
-/// Multiply each fp16 column of a row-major [rows, cols] weight by the
-/// matching fp16 scale element: out[r][c] = w[r][c] * col[c]. Folds a
-/// broadcast elementwise norm-weight mul into a following projection.
-fn f16_scale_cols(w: &[u8], col: &[u8]) -> Vec<u8> {
-    let ncols = col.len() / 2;
-    let cv: Vec<f32> = col
-        .chunks_exact(2)
-        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-        .collect();
-    w.chunks_exact(2)
-        .enumerate()
-        .flat_map(|(i, b)| {
-            let v = half::f16::from_le_bytes([b[0], b[1]]).to_f32() * cv[i % ncols];
-            half::f16::from_f32(v).to_le_bytes()
-        })
-        .collect()
-}
-
-/// Gemma embeddings enter the graph pre-scaled by sqrt(d_model).
-fn f16_scale_all(bytes: &[u8], scale: f32) -> Vec<u8> {
-    if (scale - 1.0).abs() < f32::EPSILON {
-        return bytes.to_vec();
-    }
-    map_f16(bytes, |v| v * scale)
-}
-
-fn map_f16(bytes: &[u8], f: impl Fn(f32) -> f32) -> Vec<u8> {
-    bytes
-        .chunks_exact(2)
-        .flat_map(|b| {
-            let v = half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
-            half::f16::from_f32(f(v)).to_bits().to_le_bytes()
-        })
-        .collect()
-}
 
 // ======== weight table assembled per layer ========
 // WeightBin (in-memory weight.bin v2 builder) comes from mil_spec.
@@ -457,74 +173,12 @@ fn weight_bits() -> u32 {
 
 /// Symmetric per-row int8: scale_r = max|w_r| / 127, q = round(w / scale_r).
 /// `fp16` is row-major [rows, cols]. Returns (int8 bytes, fp16 scale bytes).
-fn quantize_q8_rows(fp16: &[u8], rows: usize) -> (Vec<u8>, Vec<u8>) {
-    let cols = fp16.len() / 2 / rows;
-    let mut q = Vec::with_capacity(rows * cols);
-    let mut scales = Vec::with_capacity(rows * 2);
-    let mut row = vec![0f32; cols];
-    for r in 0..rows {
-        let base = r * cols * 2;
-        let mut amax = 0f32;
-        for (c, v) in row.iter_mut().enumerate() {
-            let o = base + c * 2;
-            *v = half::f16::from_le_bytes([fp16[o], fp16[o + 1]]).to_f32();
-            amax = amax.max(v.abs());
-        }
-        // Round the scale to fp16 first so quantization uses the exact value
-        // the ANE will multiply by.
-        let scale = half::f16::from_f32(if amax > 0.0 { amax / 127.0 } else { 1.0 });
-        let s = scale.to_f32();
-        q.extend(
-            row.iter()
-                .map(|v| ((v / s).round().clamp(-127.0, 127.0) as i8) as u8),
-        );
-        scales.extend_from_slice(&scale.to_le_bytes());
-    }
-    (q, scales)
-}
-
-/// Symmetric per-row 4-bit palettization: scale_r = max|w_r| / 7, index =
-/// round(w / scale_r) + 8 clamped to [0, 15]. Packed two nibbles per byte,
-/// low nibble = even index. The LUT per row holds scale_r*(i-8) for i in
-/// 0..16 — reconstruction is identical to signed int4 + scale, packaged in
-/// the `constexpr_lut_to_dense` form the ANE lowers.
-/// `fp16` is row-major [rows, cols]. Returns (packed bytes, fp16 LUT bytes).
-fn quantize_q4_rows(fp16: &[u8], rows: usize) -> (Vec<u8>, Vec<u8>) {
-    let cols = fp16.len() / 2 / rows;
-    let mut q = Vec::with_capacity(rows * cols.div_ceil(2));
-    let mut lut = Vec::with_capacity(rows * 16 * 2);
-    let mut row = vec![0f32; cols];
-    for r in 0..rows {
-        let base = r * cols * 2;
-        let mut amax = 0f32;
-        for (c, v) in row.iter_mut().enumerate() {
-            let o = base + c * 2;
-            *v = half::f16::from_le_bytes([fp16[o], fp16[o + 1]]).to_f32();
-            amax = amax.max(v.abs());
-        }
-        let scale = half::f16::from_f32(if amax > 0.0 { amax / 7.0 } else { 1.0 });
-        let s = scale.to_f32();
-        let mut c = 0;
-        while c < cols {
-            let lo = ((row[c] / s).round().clamp(-8.0, 7.0) as i8 + 8) & 0xF;
-            let hi = if c + 1 < cols {
-                ((row[c + 1] / s).round().clamp(-8.0, 7.0) as i8 + 8) & 0xF
-            } else {
-                0
-            };
-            q.push((lo as u8) | ((hi as u8) << 4));
-            c += 2;
-        }
-        for i in 0..16 {
-            lut.extend_from_slice(&half::f16::from_f32(s * (i as f32 - 8.0)).to_le_bytes());
-        }
-    }
-    (q, lut)
-}
-
-/// α for the down_proj input pre-scale (int8 only; 1 = off). `BADAPPLE_Q8_DOWN_PRESCALE`.
 fn down_prescale() -> f32 {
-    if weight_bits() != 8 {
+    down_prescale_for(weight_bits())
+}
+
+fn down_prescale_for(bits: u32) -> f32 {
+    if bits != 8 {
         return 1.0;
     }
     // 64 measured exact (cos 0.99997 vs CPU FP16 over 12 layers) with headroom
@@ -535,22 +189,24 @@ fn down_prescale() -> f32 {
         .unwrap_or(64.0)
 }
 
-/// Emit a matmul weight [cout, cin, 1, 1] as fp16 or int8 per `weight_bits()`.
+/// Emit a matmul weight [cout, cin, 1, 1] as fp16 or int8 per `bits`.
+#[cfg(test)]
 fn weight_const(
     wb: &mut WeightBin,
     blk: &mut Block,
     name: &str,
     fp16: &[u8],
     shape: &[i64],
+    bits: u32,
 ) -> String {
-    if weight_bits() == 8 {
+    if bits == 8 {
         let (q, s) = quantize_q8_rows(fp16, shape[0] as usize);
         let mut scale_shape = vec![shape[0]];
         scale_shape.extend(std::iter::repeat_n(1, shape.len() - 1));
         let qoff = wb.put(&format!("{name}_q8"), DType::Int8, shape, &q);
         let soff = wb.put(&format!("{name}_scale"), DType::Fp16, &scale_shape, &s);
         blk.konst_q8(name, WEIGHTS_NAME, qoff, soff, shape)
-    } else if weight_bits() == 4 {
+    } else if bits == 4 {
         let (q, lut) = quantize_q4_rows(fp16, shape[0] as usize);
         let mut lut_shape = vec![shape[0]];
         lut_shape.extend(std::iter::repeat_n(1, shape.len() - 1));
@@ -572,23 +228,16 @@ fn weight_const(
 // slice_update (the packed-KV write op) fails ANE plan-build -14
 // under the ios19/CoreML9 lowering; ios18 plans it correctly — mil_kvpack
 // verified identical MIL passes at ios18 and fails at ios19.
+#[cfg(test)]
 const SPEC_VERSION: i32 = 9;
+#[cfg(test)]
 const OPSET: &str = "CoreML8";
+#[cfg(test)]
 const WEIGHTS_NAME: &str = "@model_path/weights/weight.bin";
 
 /// tile a (dh,) weight to (n*dh) elements for conv-broadcast use
-fn tile_head_w(bytes: &[u8], n: i64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len() * n as usize);
-    for _ in 0..n {
-        out.extend_from_slice(bytes);
-    }
-    out
-}
-
-/// Matmul-form linear projection: out[1,cout,1,s] = W[cout,d] @ x[1,d,1,s].
-/// Emitted in place of conv1x1_w where a `conv` op in the same graph as
-/// chained slice_updates fails ANE plan-build (-14) — matmul is the proven
 /// formulation (attention paths, mil_kvpack).
+#[cfg(test)]
 fn linear_w(blk: &mut Block, x: &str, w: &str, d: i64, cout: i64, s: i64, name: &str) -> String {
     let xr = blk.reshape(x, &[1, 1, d, s], &format!("{name}_xr"));
     let wr = blk.reshape(w, &[1, 1, cout, d], &format!("{name}_wr"));
@@ -614,6 +263,7 @@ fn linear_w(blk: &mut Block, x: &str, w: &str, d: i64, cout: i64, s: i64, name: 
 /// turning rsqrt(0) into +Inf (observed at l4, step 4 — inf, not the
 /// earlier NaN). The maximum(var, 1e-7) floor bounds rsqrt <= ~3162 for
 /// degenerate near-zero inputs, which are ~0 anyway.
+#[cfg(test)]
 fn rms_norm_big(
     blk: &mut Block,
     x: &str,
@@ -665,6 +315,8 @@ fn rms_norm_big(
     blk.mul(&xn, w, shape4, &format!("{pfx}_out"))
 }
 
+#[allow(dead_code)] // used by the cfg(test) parity oracle
+#[cfg(test)]
 fn conv1x1_w(blk: &mut Block, x: &str, w: &str, cout: i64, s: i64, name: &str) -> String {
     if s == 1 {
         return blk.conv1x1(x, w, None, cout, name);
@@ -706,11 +358,80 @@ fn conv1x1_w(blk: &mut Block, x: &str, w: &str, cout: i64, s: i64, name: &str) -
     )
 }
 
+/// Cfg → the Json `mil_layer_spec` consumes; the BADAPPLE_* debug knobs
+/// fold in here (they were env vars in the Rust emitter, fields in .cy).
+fn layer_cfg_json(cfg: &Cfg) -> Value {
+    let env_b = |k: &str| std::env::var(k).is_ok();
+    let mut j = json!({
+        "arch": cfg.arch_name(),
+        "d_model": cfg.d_model,
+        "n_layers": cfg.n_layers,
+        "vocab": cfg.vocab,
+        "embed_scale": cfg.embed_scale as f64,
+        "n_heads": cfg.n_heads,
+        "n_kv": cfg.n_kv,
+        "d_head": cfg.d_head,
+        "rope_dim": cfg.rope_dim,
+        "d_ff": cfg.d_ff,
+        "eps": cfg.eps as f64,
+        "attn_scale": cfg.attn_scale as f64,
+        "weight_bits": weight_bits(),
+        "norm_plus_one": cfg.norm_plus_one,
+        "tie_embeddings": cfg.tie_embeddings,
+        "has_qk_norm": cfg.has_qk_norm,
+        "rope_theta": cfg.rope_theta,
+        "rope_local_theta": cfg.rope_local_theta,
+        "sliding_window": cfg.sliding_window,
+        "sliding_pattern": cfg.sliding_pattern,
+        "down_prescale": down_prescale(),
+        "split_ffn": env_b("BADAPPLE_SPLIT_FFN"),
+        "qkv_input": env_b("BADAPPLE_QKV_INPUT"),
+        "gu_input": env_b("BADAPPLE_GU_INPUT"),
+        "gu_mm": env_b("BADAPPLE_GU_MM"),
+        "no_rope": env_b("BADAPPLE_NO_ROPE"),
+        "no_qknorm": env_b("BADAPPLE_NO_QKNORM"),
+        "ones_attn": env_b("BADAPPLE_ONES_ATTN"),
+        "kv_dup": env_b("BADAPPLE_KVDUP"),
+        "no_postnorm": env_b("BADAPPLE_NO_POSTNORM"),
+        "gemma_silu": env_b("BADAPPLE_GEMMA_SILU"),
+        "gemma_no_sliding": env_b("BADAPPLE_GEMMA_NO_SLIDING"),
+        "gemma_no_local_rope": env_b("BADAPPLE_GEMMA_NO_LOCAL_ROPE"),
+    });
+    if let Ok(v) = std::env::var("BADAPPLE_CUT") {
+        j["cut_at"] = json!(v);
+    }
+    if let Ok(v) = std::env::var("BADAPPLE_FFN_CUT") {
+        j["ffn_cut"] = json!(v);
+    }
+    if let Ok(v) = std::env::var("BADAPPLE_STOP_AT") {
+        j["stop_at"] = json!(v);
+    }
+    if let Ok(v) = std::env::var("BADAPPLE_SPLIT_GU") {
+        j["split_gu"] = json!(v.parse::<i64>().unwrap_or(1));
+    }
+    if let Ok(v) = std::env::var("BADAPPLE_SPEC_VERSION") {
+        if let Ok(n) = v.parse::<i64>() {
+            j["spec_version"] = json!(n);
+            j["opset"] = json!(std::env::var("BADAPPLE_OPSET").unwrap_or_else(|_| {
+                if n > 9 {
+                    "CoreML9".into()
+                } else {
+                    "CoreML8".into()
+                }
+            }));
+        }
+    }
+    j
+}
+
 /// Emit one stateful transformer-layer shard covering layers [ls, le).
 /// `s` is the token width per forward: 1 = decode shard, >1 = prefill shard
 /// (same state names/shapes so it shares MLState with the decode shards).
-#[allow(clippy::too_many_arguments)]
-fn emit_layer_shard(
+///
+/// The pre-port Rust emitter — kept as the byte-parity oracle for
+/// `mil_cy_layer_*_parity` tests.
+#[cfg(test)]
+fn emit_layer_shard_rust(
     st: &StIndex,
     cfg: &Cfg,
     ls: i64,
@@ -719,6 +440,7 @@ fn emit_layer_shard(
     out_dir: &Path,
     s: i64,
     is_prefill: bool,
+    bits: u32,
 ) -> Result<(PathBuf, PathBuf, Vec<u8>), String> {
     // Shard names are role-based, not width-based: a --decode-width >1
     // decode shard is still `layer_s..` (the bridge's decode lookup),
@@ -877,6 +599,7 @@ fn emit_layer_shard(
             &format!("w_qkv_{i}"),
             &qkv_w,
             &[q_dim + 2 * kv_dim, d, 1, 1],
+            bits,
         );
         // BADAPPLE_QKV_INPUT (debug): declare `qkv` as a raw input instead of
         // the weight conv — isolates conv/state-update plan interactions.
@@ -1513,6 +1236,7 @@ fn emit_layer_shard(
             &format!("w_o_{i}"),
             &ow,
             &[d, q_dim, 1, 1],
+            bits,
         );
         let o = conv1x1_w(&mut blk, &attn4, &wo, d, s, &format!("l{i}_o"));
         cut!("o", o, [1, d, 1, s]);
@@ -1662,6 +1386,7 @@ fn emit_layer_shard(
                         &wname,
                         &w[c * chunk * d as usize * 2..(c + 1) * chunk * d as usize * 2],
                         &[chunk as i64, d, 1, 1],
+                        bits,
                     );
                     let _ = chunk_b;
                     outs.push(conv1x1_w(
@@ -1689,6 +1414,7 @@ fn emit_layer_shard(
                 &format!("w_gu_{i}"),
                 &gu_w,
                 &[2 * cfg.d_ff, d, 1, 1],
+                bits,
             );
             // Post-update projections stay conv: matmul's reshapes on the
             // FFN-norm output fail plan-build where the conv passes
@@ -1786,12 +1512,13 @@ fn emit_layer_shard(
             &format!("w_down_{i}"),
             &dw,
             &[d, cfg.d_ff, 1, 1],
+            bits,
         );
         // The FFN hidden is the only un-normalized matmul input; Qwen3's
         // massive activation (~8e3 at layer 6) overflows the ANE's int8-weight
         // conv. Pre-scaling by 1/α and restoring by α is exact in real
         // arithmetic and keeps the int8 path inside FP16 range.
-        let alpha = down_prescale();
+        let alpha = down_prescale_for(bits);
         let ffn = if alpha > 1.0 {
             let inv = blk.konst_f16(&format!("l{i}_dinv"), 1.0 / alpha);
             let hs = blk.mul(&hidden, &inv, &[1, cfg.d_ff, 1, s], &format!("l{i}_hids"));
@@ -2078,17 +1805,9 @@ fn emit_layer_shard(
     Ok((pkg_dir, mlmodelc, weights))
 }
 
-/// Stateless FFN half of a split layer (BADAPPLE_SPLIT_FFN): consumes
-/// `x = concat(res1, ffn_norm_out)` [1, 2d, 1, s] emitted by the attention
-/// shard and emits the completed layer output `res1 + post_ffn_norm(ffn)`.
-///
-/// Why this exists: the wide FFN conv miscompiles when it shares a plan
-/// with the stateful attention chain — multi-token decode produced a res1
-/// 8.9-off and gu 3.2-off inside the monolithic graph while every cut
-/// ending before the conv was exact, and a standalone conv on a real
-/// input matched at 0.003. A model boundary is the only materialization
-/// the compiler cannot fuse across, so the conv lives in its own model.
-fn emit_ffn_shard(
+/// Pre-port Rust FFN-shard emitter — byte-parity oracle for the .cy path.
+#[cfg(test)]
+fn emit_ffn_shard_rust(
     st: &StIndex,
     cfg: &Cfg,
     ls: i64,
@@ -2096,6 +1815,7 @@ fn emit_ffn_shard(
     out_dir: &Path,
     s: i64,
     is_prefill: bool,
+    bits: u32,
 ) -> Result<(PathBuf, PathBuf, Vec<u8>), String> {
     if le - ls != 1 {
         // Each FFN shard consumes exactly one layer's split output —
@@ -2151,6 +1871,7 @@ fn emit_ffn_shard(
             &format!("w_gu_{i}"),
             &gu_w,
             &[2 * cfg.d_ff, d, 1, 1],
+            bits,
         );
         // Matmul, not conv: post-update matmul reshapes are the documented
         // -14 case, but this shard has no slice_update at all — and the
@@ -2212,12 +1933,13 @@ fn emit_ffn_shard(
             &format!("w_down_{i}"),
             &dw,
             &[d, cfg.d_ff, 1, 1],
+            bits,
         );
         // Down projection is matmul for the same reason as gate/up: the
         // conv form scatters outputs at stride 32 inside this plan, and
         // the matmul -14 case (post-slice_update reshapes) does not exist
         // in a stateless shard.
-        let alpha = down_prescale();
+        let alpha = down_prescale_for(bits);
         let ffn = if alpha > 1.0 {
             let inv = blk.konst_f16(&format!("l{i}_dinv"), 1.0 / alpha);
             let hs = blk.mul(&hidden, &inv, &[1, cfg.d_ff, 1, s], &format!("l{i}_hids"));
@@ -2315,6 +2037,7 @@ fn emit_ffn_shard(
 }
 
 /// per-head RMSNorm over axis 1 of (n, dh, 1, 1); weight application handled by caller.
+#[cfg(test)]
 fn head_rms(blk: &mut Block, x: &str, d: i64, eps: f32, shape4: &[i64], pfx: &str) -> String {
     // Same two-sided fp16 guard as rms_norm_big: 1/(8*sqrt(d)) prescale so
     // per-head activations survive |x| up to ~70k, plus a subnormal floor
@@ -2356,13 +2079,15 @@ fn head_rms(blk: &mut Block, x: &str, d: i64, eps: f32, shape4: &[i64], pfx: &st
     blk.mul(&xs, &r, shape4, &format!("{pfx}_xn"))
 }
 
-/// Emit a vocab-slice LM head shard (final norm + sliced projection).
-fn emit_head_shard(
+/// Pre-port Rust head-shard emitter — byte-parity oracle for the .cy path.
+#[cfg(test)]
+fn emit_head_shard_rust(
     st: &StIndex,
     cfg: &Cfg,
     vstart: i64,
     vend: i64,
     out_dir: &Path,
+    bits: u32,
 ) -> Result<(PathBuf, PathBuf), String> {
     let name = format!("head_v{:05}-{:05}", vstart, vend);
     let pkg_dir = out_dir.join(format!("{name}.mlpackage"));
@@ -2387,7 +2112,7 @@ fn emit_head_shard(
         "lm_head.weight"
     };
     let slice_f16 = st.get_f16_rows(lm_name, vstart as u64, vend as u64)?;
-    let wl = weight_const(&mut wb, &mut blk, "w_lm", &slice_f16, &[vsz, d, 1, 1]);
+    let wl = weight_const(&mut wb, &mut blk, "w_lm", &slice_f16, &[vsz, d, 1, 1], bits);
     let logits = blk.conv1x1(&normed, &wl, None, vsz, "logits");
     blk.outputs = vec![logits];
 
@@ -2416,10 +2141,9 @@ fn emit_head_shard(
     Ok((pkg_dir, out_dir.join(format!("{name}.mlmodelc"))))
 }
 
-/// Emit a NON-stateful debug package containing only the pre-attention prefix
-/// of layer `ls`, for numeric bisection. stage selects where to stop:
-/// an | q | qn | kn | rq | rk | v
-fn emit_probe(
+/// Pre-port Rust probe emitter — byte-parity oracle for the .cy path.
+#[cfg(test)]
+fn emit_probe_rust(
     st: &StIndex,
     cfg: &Cfg,
     ls: i64,
@@ -2827,6 +2551,7 @@ fn emit_probe(
     Err(format!("unknown probe stage {stage}"))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn finish_probe(
     pkg_dir: &Path,
@@ -2891,48 +2616,7 @@ fn finish_probe(
     ))
 }
 
-/// Write the raw fp16 embedding table [vocab, d] row-major.
-fn emit_embedding(st: &StIndex, cfg: &Cfg, path: &Path) -> Result<(), String> {
-    let raw = st.get_f16("model.embed_tokens.weight")?;
-    // Gemma3 scales embeddings by sqrt(d_model); the scale is baked here so
-    // the bridge's row-gather feeds `x` already scaled.
-    let raw = f16_scale_all(&raw, cfg.embed_scale);
-    std::fs::write(path, &raw).map_err(|e| e.to_string())?;
-    let want = (cfg.vocab * cfg.d_model * 2) as usize;
-    if raw.len() != want {
-        return Err(format!("embedding size {} != expected {}", raw.len(), want));
-    }
-    Ok(())
-}
-
 // ======== compile driver ========
-
-fn compile_pkg(pkg: &Path, out_dir: &Path) -> Result<PathBuf, String> {
-    let stem = pkg.file_stem().unwrap().to_string_lossy().to_string();
-    let out = out_dir.join(format!("{stem}.mlmodelc"));
-    if out.exists() {
-        std::fs::remove_dir_all(&out).map_err(|e| e.to_string())?;
-    }
-    let status = Command::new("xcrun")
-        .args(["coremlc", "compile"])
-        .arg(pkg)
-        .arg(out_dir)
-        .status()
-        .map_err(|e| format!("coremlc spawn: {e}"))?;
-    if !status.success() {
-        return Err(format!("coremlc failed for {pkg:?} (status {status})"));
-    }
-    if !out.exists() {
-        return Err(format!("compiled output missing: {out:?}"));
-    }
-    Ok(out)
-}
-
-fn rel(p: &Path, base: &Path) -> String {
-    p.strip_prefix(base)
-        .map(|r| r.to_string_lossy().to_string())
-        .unwrap_or_else(|_| p.to_string_lossy().to_string())
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -3047,407 +2731,556 @@ fn main() {
         cfg.vocab,
         cfg.rope_theta
     );
-    let st = match StIndex::load(&model_dir) {
-        Ok(s) => s,
+    // Early safetensors validation; the .cy side re-indexes per extern call.
+    if let Err(e) = StIndex::load(&model_dir) {
+        eprintln!("safetensors: {e}");
+        std::process::exit(1);
+    }
+
+    // The whole convert run is authored in Coyote (coyote/layer.cy):
+    // embedding emit, layer/prefill/ffn/head shard loops, coremlc
+    // compilation, and the manifest are all `mil_convert_run`. Rust keeps
+    // argv parsing, the config load, and the exit code.
+    let cfgj = layer_cfg_json(&cfg);
+    let opts = json!({
+        "seq": seq,
+        "lps": lps,
+        "head_shards": head_shards,
+        "only_lo": only_layers.map(|(a, _)| a).unwrap_or(-1),
+        "only_hi": only_layers.map(|(_, b)| b).unwrap_or(-1),
+        "no_compile": no_compile,
+        "keep_packages": keep_packages,
+        "prefill_chunk": prefill_chunk,
+        "decode_width": decode_width,
+        "split_ffn": split_ffn,
+        "probe_stage": probe_stage.clone().unwrap_or_default(),
+        "probe_layer": only_layers.map(|(a, _)| a).unwrap_or(0),
+    });
+    let dir = model_dir.to_string_lossy().to_string();
+    let out = out_dir.to_string_lossy().to_string();
+    match bad_apple::coyote_sys::mil_convert_run(&cfgj, &dir, &out, &opts) {
+        Ok(v) => {
+            if let Some(p) = v.get("probe") {
+                eprintln!("  probe result: {}", p["status"].as_str().unwrap_or("?"));
+                if let Some(e) = p.get("error").and_then(|e| e.as_str()) {
+                    eprintln!("    {e}");
+                }
+                return;
+            }
+            let ok = v["all_ok"].as_bool().unwrap_or(false);
+            eprintln!("manifest: {}", if ok { "complete" } else { "partial" });
+            if !ok {
+                std::process::exit(1);
+            }
+        }
         Err(e) => {
-            eprintln!("safetensors: {e}");
+            eprintln!("convert failed: {e}");
             std::process::exit(1);
         }
-    };
-    std::fs::create_dir_all(&out_dir).unwrap();
-    std::fs::create_dir_all(out_dir.join("logs")).unwrap();
-
-    if let Some(stage) = &probe_stage {
-        let ls = only_layers.map(|(a, _)| a).unwrap_or(0);
-        match emit_probe(&st, &cfg, ls, stage, &out_dir) {
-            Ok((pkg, mlpath, _)) => {
-                eprintln!("  probe {stage} layer {ls}: {pkg:?}");
-                if !no_compile {
-                    match compile_pkg(&pkg, &out_dir) {
-                        Ok(c) => eprintln!("  compiled -> {c:?}"),
-                        Err(e) => eprintln!("  compile failed: {e}"),
-                    }
-                }
-                if !keep_packages {
-                    let _ = std::fs::remove_dir_all(&pkg);
-                }
-                let _ = mlpath;
-            }
-            Err(e) => eprintln!("  probe emit failed: {e}"),
-        }
-        return;
     }
-
-    let (ls0, le0) = only_layers.unwrap_or((0, cfg.n_layers));
-
-    let mut manifest = json!({
-        "schema_version": 1,
-        "status": "pending",
-        "source": { "path": model_dir.to_string_lossy() },
-        "model": {
-            "architecture": cfg.arch_name(),
-            "total_layers": cfg.n_layers,
-            "hidden_size": cfg.d_model,
-            "vocab_size": cfg.vocab,
-            "seq_len": seq,
-            "quant_bits": weight_bits(),
-            "compute_units": "all",
-            "layers_per_shard": lps,
-            "decode_width": decode_width,
-            "split_ffn": split_ffn,
-            "stateful": true,
-            "rope_dim": cfg.rope_dim,
-            "rope_freq_base": cfg.rope_theta,
-            "rms_norm_eps": cfg.eps,
-            "native": true,
-            // Present only for dual-base architectures (Gemma3); the bridge
-            // fills rope row 1 with this base. Row 1 = sliding/local layers.
-            "rope_freq_base_local": cfg.rope_local_theta,
-            "sliding_window": cfg.sliding_window,
-            "sliding_window_pattern": cfg.sliding_pattern,
-        },
-        "shared": {
-            "embedding": {
-                "path": rel(&out_dir.join("embedding.f16"), &out_dir),
-                "shape": [cfg.vocab, cfg.d_model],
-                "dtype": "float16",
-                "status": "pending",
-            },
-            "lm_head_shards": [],
-        },
-        "shards": [],
-    });
-
-    // embedding
-    match emit_embedding(&st, &cfg, &out_dir.join("embedding.f16")) {
-        Ok(()) => {
-            manifest["shared"]["embedding"]["status"] = json!("complete");
-            manifest["shared"]["embedding"]["size_bytes"] =
-                json!((cfg.vocab * cfg.d_model * 2) as u64);
-            eprintln!(
-                "  embedding.f16 written ({} MB)",
-                cfg.vocab * cfg.d_model * 2 / 1_000_000
-            );
-        }
-        Err(e) => eprintln!("  embedding: {e}"),
-    }
-
-    // layer shards
-    let mut shard_entries = vec![];
-    let mut ls = ls0;
-    while ls < le0 {
-        let le = (ls + lps).min(le0);
-        eprint!("  shard [{ls},{le}) ... ");
-        std::io::stderr().flush().ok();
-        match emit_layer_shard(&st, &cfg, ls, le, seq, &out_dir, decode_width, false) {
-            Ok((pkg, mlmodelc, _w)) => {
-                let mut ent = Map::new();
-                ent.insert(
-                    "name".into(),
-                    json!(pkg.file_stem().unwrap().to_string_lossy()),
-                );
-                ent.insert("layer_start".into(), json!(ls));
-                ent.insert("layer_end".into(), json!(le));
-                if no_compile {
-                    ent.insert("status".into(), json!("packaged"));
-                    eprintln!("packaged (compile skipped)");
-                } else {
-                    match compile_pkg(&pkg, &out_dir) {
-                        Ok(c) => {
-                            ent.insert("status".into(), json!("compiled"));
-                            ent.insert("compiled_path".into(), json!(rel(&c, &out_dir)));
-                            let sz = dir_size(&c);
-                            ent.insert("compiled_size_bytes".into(), json!(sz));
-                            eprintln!("compiled ({:.1} MB)", sz as f64 / 1e6);
-                            if !keep_packages {
-                                // the runtime only consumes .mlmodelc; drop the
-                                // source package to halve the artifact footprint
-                                let _ = std::fs::remove_dir_all(&pkg);
-                            }
-                        }
-                        Err(e) => {
-                            ent.insert("status".into(), json!("compile_failed"));
-                            ent.insert("last_error".into(), json!(e));
-                            eprintln!("FAILED: {e}");
-                        }
-                    }
-                    let _ = mlmodelc;
-                }
-                if split_ffn {
-                    eprint!("  ffn [{ls},{le}) ... ");
-                    std::io::stderr().flush().ok();
-                    match emit_ffn_shard(&st, &cfg, ls, le, &out_dir, decode_width, false) {
-                        Ok((fpkg, _fc, _fw)) => {
-                            ent.insert("ffn_package_path".into(), json!(rel(&fpkg, &out_dir)));
-                            if no_compile {
-                                ent.insert("ffn_status".into(), json!("packaged"));
-                                eprintln!("packaged (compile skipped)");
-                            } else {
-                                match compile_pkg(&fpkg, &out_dir) {
-                                    Ok(c) => {
-                                        ent.insert("ffn_status".into(), json!("compiled"));
-                                        ent.insert(
-                                            "ffn_compiled_path".into(),
-                                            json!(rel(&c, &out_dir)),
-                                        );
-                                        let sz = dir_size(&c);
-                                        ent.insert("ffn_compiled_size_bytes".into(), json!(sz));
-                                        eprintln!("compiled ({:.1} MB)", sz as f64 / 1e6);
-                                        if !keep_packages {
-                                            let _ = std::fs::remove_dir_all(&fpkg);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        ent.insert("ffn_status".into(), json!("compile_failed"));
-                                        ent.insert("ffn_last_error".into(), json!(e));
-                                        eprintln!("FAILED: {e}");
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            ent.insert("ffn_status".into(), json!("emit_failed"));
-                            ent.insert("ffn_last_error".into(), json!(e));
-                            eprintln!("emit failed: {e}");
-                        }
-                    }
-                }
-                ent.insert("package_path".into(), json!(rel(&pkg, &out_dir)));
-                shard_entries.push(Value::Object(ent));
-            }
-            Err(e) => {
-                eprintln!("emit failed: {e}");
-                let mut ent = Map::new();
-                ent.insert("layer_start".into(), json!(ls));
-                ent.insert("layer_end".into(), json!(le));
-                ent.insert("status".into(), json!("emit_failed"));
-                ent.insert("last_error".into(), json!(e));
-                shard_entries.push(Value::Object(ent));
-            }
-        }
-        // persist after every shard (resumable)
-        manifest["shards"] = json!(shard_entries);
-        std::fs::write(
-            out_dir.join("conversion_manifest.json"),
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .ok();
-        ls = le;
-    }
-
-    // prefill shards: same layer groupings and state names as the decode
-    // shards, emitted at token width `prefill_chunk`. They write into the
-    // same MLState buffers, so a decode session can be primed in bulk.
-    if prefill_chunk > 0 {
-        manifest["model"]["prefill_chunk"] = json!(prefill_chunk);
-        let mut prefill_entries = vec![];
-        let mut pls = ls0;
-        while pls < le0 {
-            let ple = (pls + lps).min(le0);
-            eprint!("  prefill shard [{pls},{ple}) ... ");
-            std::io::stderr().flush().ok();
-            match emit_layer_shard(&st, &cfg, pls, ple, seq, &out_dir, prefill_chunk, true) {
-                Ok((pkg, mlmodelc, _w)) => {
-                    let mut ent = Map::new();
-                    ent.insert(
-                        "name".into(),
-                        json!(pkg.file_stem().unwrap().to_string_lossy()),
-                    );
-                    ent.insert("layer_start".into(), json!(pls));
-                    ent.insert("layer_end".into(), json!(ple));
-                    if no_compile {
-                        ent.insert("status".into(), json!("packaged"));
-                        eprintln!("packaged (compile skipped)");
-                    } else {
-                        match compile_pkg(&pkg, &out_dir) {
-                            Ok(c) => {
-                                ent.insert("status".into(), json!("compiled"));
-                                ent.insert("compiled_path".into(), json!(rel(&c, &out_dir)));
-                                let sz = dir_size(&c);
-                                ent.insert("compiled_size_bytes".into(), json!(sz));
-                                eprintln!("compiled ({:.1} MB)", sz as f64 / 1e6);
-                                if !keep_packages {
-                                    let _ = std::fs::remove_dir_all(&pkg);
-                                }
-                            }
-                            Err(e) => {
-                                ent.insert("status".into(), json!("compile_failed"));
-                                ent.insert("last_error".into(), json!(e));
-                                eprintln!("FAILED: {e}");
-                            }
-                        }
-                        let _ = mlmodelc;
-                    }
-                    if split_ffn {
-                        eprint!("  ffn prefill [{pls},{ple}) ... ");
-                        std::io::stderr().flush().ok();
-                        match emit_ffn_shard(&st, &cfg, pls, ple, &out_dir, prefill_chunk, true) {
-                            Ok((fpkg, _fc, _fw)) => {
-                                ent.insert("ffn_package_path".into(), json!(rel(&fpkg, &out_dir)));
-                                if no_compile {
-                                    ent.insert("ffn_status".into(), json!("packaged"));
-                                    eprintln!("packaged (compile skipped)");
-                                } else {
-                                    match compile_pkg(&fpkg, &out_dir) {
-                                        Ok(c) => {
-                                            ent.insert("ffn_status".into(), json!("compiled"));
-                                            ent.insert(
-                                                "ffn_compiled_path".into(),
-                                                json!(rel(&c, &out_dir)),
-                                            );
-                                            eprintln!("compiled");
-                                            if !keep_packages {
-                                                let _ = std::fs::remove_dir_all(&fpkg);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            ent.insert(
-                                                "ffn_status".into(),
-                                                json!("compile_failed"),
-                                            );
-                                            ent.insert("ffn_last_error".into(), json!(e));
-                                            eprintln!("FAILED: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                ent.insert("ffn_status".into(), json!("emit_failed"));
-                                ent.insert("ffn_last_error".into(), json!(e));
-                                eprintln!("emit failed: {e}");
-                            }
-                        }
-                    }
-                    ent.insert("package_path".into(), json!(rel(&pkg, &out_dir)));
-                    prefill_entries.push(Value::Object(ent));
-                }
-                Err(e) => {
-                    eprintln!("emit failed: {e}");
-                    let mut ent = Map::new();
-                    ent.insert("layer_start".into(), json!(pls));
-                    ent.insert("layer_end".into(), json!(ple));
-                    ent.insert("status".into(), json!("emit_failed"));
-                    ent.insert("last_error".into(), json!(e));
-                    prefill_entries.push(Value::Object(ent));
-                }
-            }
-            manifest["shards_prefill"] = json!(prefill_entries);
-            std::fs::write(
-                out_dir.join("conversion_manifest.json"),
-                serde_json::to_string_pretty(&manifest).unwrap(),
-            )
-            .ok();
-            pls = ple;
-        }
-    }
-
-    // head shards
-    let mut heads = vec![];
-    let width = (cfg.vocab + head_shards.max(1) - 1) / head_shards.max(1);
-    let mut vs = if head_shards == 0 { cfg.vocab } else { 0i64 };
-    while vs < cfg.vocab {
-        let ve = (vs + width).min(cfg.vocab);
-        eprint!("  head [{vs},{ve}) ... ");
-        std::io::stderr().flush().ok();
-        match emit_head_shard(&st, &cfg, vs, ve, &out_dir) {
-            Ok((pkg, _c)) => {
-                let mut ent = Map::new();
-                ent.insert(
-                    "name".into(),
-                    json!(pkg.file_stem().unwrap().to_string_lossy()),
-                );
-                ent.insert("vocab_start".into(), json!(vs));
-                ent.insert("vocab_end".into(), json!(ve));
-                ent.insert("package_path".into(), json!(rel(&pkg, &out_dir)));
-                if no_compile {
-                    ent.insert("status".into(), json!("packaged"));
-                    eprintln!("packaged");
-                } else {
-                    match compile_pkg(&pkg, &out_dir) {
-                        Ok(c) => {
-                            ent.insert("status".into(), json!("compiled"));
-                            ent.insert("compiled_path".into(), json!(rel(&c, &out_dir)));
-                            eprintln!("compiled ({:.1} MB)", dir_size(&c) as f64 / 1e6);
-                            if !keep_packages {
-                                let _ = std::fs::remove_dir_all(&pkg);
-                            }
-                        }
-                        Err(e) => {
-                            ent.insert("status".into(), json!("compile_failed"));
-                            ent.insert("last_error".into(), json!(e));
-                            eprintln!("FAILED: {e}");
-                        }
-                    }
-                }
-                heads.push(Value::Object(ent));
-            }
-            Err(e) => {
-                eprintln!("emit failed: {e}");
-                let mut ent = Map::new();
-                ent.insert("vocab_start".into(), json!(vs));
-                ent.insert("vocab_end".into(), json!(ve));
-                ent.insert("status".into(), json!("emit_failed"));
-                ent.insert("last_error".into(), json!(e));
-                heads.push(Value::Object(ent));
-            }
-        }
-        manifest["shared"]["lm_head_shards"] = json!(heads);
-        std::fs::write(
-            out_dir.join("conversion_manifest.json"),
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .ok();
-        vs = ve;
-    }
-
-    let all_ok = manifest["shards"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .all(|s| s["status"] == "compiled" || s["status"] == "packaged")
-        })
-        .unwrap_or(false)
-        && manifest["shared"]["lm_head_shards"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .all(|s| s["status"] == "compiled" || s["status"] == "packaged")
-            })
-            .unwrap_or(false)
-        && manifest["shared"]["embedding"]["status"] == "complete";
-    // Runtimes tokenize from the artifact dir itself (tokenizer.json for the
-    // vocab, tokenizer_config.json for the chat template).
-    for f in [
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "tokenizer.model",
-        "special_tokens_map.json",
-        "added_tokens.json",
-    ] {
-        if let Err(e) = std::fs::copy(model_dir.join(f), out_dir.join(f)) {
-            eprintln!("warning: could not copy {f}: {e}");
-        }
-    }
-    manifest["status"] = json!(if all_ok { "complete" } else { "partial" });
-    std::fs::write(
-        out_dir.join("conversion_manifest.json"),
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .ok();
-    eprintln!("manifest: {}", if all_ok { "complete" } else { "partial" });
 }
 
-fn dir_size(p: &Path) -> u64 {
-    let mut total = 0;
-    if let Ok(rd) = std::fs::read_dir(p) {
-        for e in rd.flatten() {
-            let m = e.path();
-            if m.is_dir() {
-                total += dir_size(&m);
-            } else {
-                total += e.metadata().map(|m| m.len()).unwrap_or(0);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Synthetic single-layer safetensors fixture — deterministic F16
+    /// contents (parity needs identical bytes, not real weights).
+    fn write_fixture(dir: &Path, d: usize, nh: usize, nkv: usize, dh: usize, dff: usize) {
+        let (q_dim, kv_dim) = (nh * dh, nkv * dh);
+        let mk = |shape: &[usize]| -> Vec<u8> {
+            let n: usize = shape.iter().product();
+            let mut b = Vec::with_capacity(n * 2);
+            for i in 0..n {
+                // Small well-conditioned fp16 bits — never inf/nan.
+                let bits = 0x2000u16 + (i % 61) as u16 * 13;
+                b.extend_from_slice(&bits.to_le_bytes());
             }
+            b
+        };
+        let p = "model.layers.0";
+        let tensors: Vec<(String, Vec<u64>, Vec<u8>)> = vec![
+            (
+                format!("{p}.input_layernorm.weight"),
+                vec![d as u64],
+                mk(&[d]),
+            ),
+            (
+                format!("{p}.self_attn.q_proj.weight"),
+                vec![q_dim as u64, d as u64],
+                mk(&[q_dim, d]),
+            ),
+            (
+                format!("{p}.self_attn.k_proj.weight"),
+                vec![kv_dim as u64, d as u64],
+                mk(&[kv_dim, d]),
+            ),
+            (
+                format!("{p}.self_attn.v_proj.weight"),
+                vec![kv_dim as u64, d as u64],
+                mk(&[kv_dim, d]),
+            ),
+            (
+                format!("{p}.self_attn.q_norm.weight"),
+                vec![dh as u64],
+                mk(&[dh]),
+            ),
+            (
+                format!("{p}.self_attn.k_norm.weight"),
+                vec![dh as u64],
+                mk(&[dh]),
+            ),
+            (
+                format!("{p}.self_attn.o_proj.weight"),
+                vec![d as u64, q_dim as u64],
+                mk(&[d, q_dim]),
+            ),
+            (
+                format!("{p}.post_attention_layernorm.weight"),
+                vec![d as u64],
+                mk(&[d]),
+            ),
+            (
+                format!("{p}.mlp.gate_proj.weight"),
+                vec![dff as u64, d as u64],
+                mk(&[dff, d]),
+            ),
+            (
+                format!("{p}.mlp.up_proj.weight"),
+                vec![dff as u64, d as u64],
+                mk(&[dff, d]),
+            ),
+            (
+                format!("{p}.mlp.down_proj.weight"),
+                vec![d as u64, dff as u64],
+                mk(&[d, dff]),
+            ),
+            ("model.norm.weight".to_string(), vec![d as u64], mk(&[d])),
+            (
+                "model.embed_tokens.weight".to_string(),
+                vec![64, d as u64],
+                mk(&[64, d]),
+            ),
+            (
+                "lm_head.weight".to_string(),
+                vec![64, d as u64],
+                mk(&[64, d]),
+            ),
+        ];
+        let mut hdr = serde_json::Map::new();
+        let mut blob = Vec::new();
+        for (name, shape, data) in &tensors {
+            let begin = blob.len();
+            blob.extend_from_slice(data);
+            hdr.insert(
+                name.clone(),
+                json!({
+                    "dtype": "F16",
+                    "shape": shape,
+                    "data_offsets": [begin, blob.len()],
+                }),
+            );
+        }
+        let hbuf = serde_json::to_vec(&Value::Object(hdr)).unwrap();
+        let mut out = (hbuf.len() as u64).to_le_bytes().to_vec();
+        out.extend_from_slice(&hbuf);
+        out.extend_from_slice(&blob);
+        std::fs::write(dir.join("model.safetensors"), out).unwrap();
+    }
+
+    fn qwen_cfg_json(cfg: &Cfg) -> Value {
+        json!({
+            "arch": cfg.arch_name(),
+            "d_model": cfg.d_model,
+            "n_heads": cfg.n_heads,
+            "n_kv": cfg.n_kv,
+            "d_head": cfg.d_head,
+            "rope_dim": cfg.rope_dim,
+            "d_ff": cfg.d_ff,
+            "eps": cfg.eps as f64,
+            "attn_scale": cfg.attn_scale as f64,
+            "weight_bits": 16,
+            "norm_plus_one": cfg.norm_plus_one,
+            "has_qk_norm": cfg.has_qk_norm,
+            "rope_theta": cfg.rope_theta,
+            "rope_local_theta": cfg.rope_local_theta,
+            "sliding_window": cfg.sliding_window,
+            "sliding_pattern": cfg.sliding_pattern,
+            "down_prescale": 1.0,
+        })
+    }
+
+    fn layer_parity(s: i64) {
+        let dir = std::env::temp_dir().join(format!("ba_cy_parity_{s}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, nh, nkv, dh, dff, seq) = (16usize, 2usize, 1usize, 8usize, 32usize, 16i64);
+        write_fixture(&dir, d, nh, nkv, dh, dff);
+        let st = StIndex::load(&dir).unwrap();
+        let cfg = Cfg {
+            arch: Arch::Qwen3,
+            d_model: d as i64,
+            n_layers: 1,
+            n_heads: nh as i64,
+            n_kv: nkv as i64,
+            d_head: dh as i64,
+            d_ff: dff as i64,
+            vocab: 64,
+            rope_theta: 1e6,
+            rope_local_theta: 1e6,
+            eps: 1e-6,
+            rope_dim: dh as i64,
+            has_qk_norm: true,
+            tie_embeddings: false,
+            attn_scale: 1.0 / (dh as f32).sqrt(),
+            sliding_window: 0,
+            sliding_pattern: 0,
+            norm_plus_one: false,
+            embed_scale: 1.0,
+        };
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (pkg, _mlc, w_rust) =
+            emit_layer_shard_rust(&st, &cfg, 0, 1, seq, &out_dir, s, false, 16).expect("rust emit");
+        let spec_rust =
+            std::fs::read(pkg.join("Data/com.apple.CoreML/model.mlmodel")).expect("spec bytes");
+        let (spec_cy, w_cy) = bad_apple::coyote_sys::mil_layer_emit(
+            &qwen_cfg_json(&cfg),
+            dir.to_str().unwrap(),
+            0,
+            1,
+            seq,
+            s,
+            false,
+        )
+        .expect("coyote emit");
+        assert_eq!(spec_cy, spec_rust, "s={s}: .cy spec != rust spec");
+        assert_eq!(w_cy, w_rust, "s={s}: .cy weight.bin != rust weight.bin");
+    }
+
+    /// Quantized weight paths: layer decode at bits=8 (constexpr
+    /// blockwise_shift_scale + the down-projection prescale α ops) and
+    /// bits=4 (constexpr_lut_to_dense). Explicit `bits` params keep this
+    /// deterministic under parallel test threads — no env globals.
+    fn quant_parity(bits: u32) {
+        let dir = std::env::temp_dir().join(format!("ba_cy_q{bits}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, nh, nkv, dh, dff, seq) = (16usize, 2usize, 1usize, 8usize, 32usize, 16i64);
+        write_fixture(&dir, d, nh, nkv, dh, dff);
+        let st = StIndex::load(&dir).unwrap();
+        let cfg = Cfg {
+            arch: Arch::Qwen3,
+            d_model: d as i64,
+            n_layers: 1,
+            n_heads: nh as i64,
+            n_kv: nkv as i64,
+            d_head: dh as i64,
+            d_ff: dff as i64,
+            vocab: 64,
+            rope_theta: 1e6,
+            rope_local_theta: 1e6,
+            eps: 1e-6,
+            rope_dim: dh as i64,
+            has_qk_norm: true,
+            tie_embeddings: false,
+            attn_scale: 1.0 / (dh as f32).sqrt(),
+            sliding_window: 0,
+            sliding_pattern: 0,
+            norm_plus_one: false,
+            embed_scale: 1.0,
+        };
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (pkg, _mlc, w_rust) =
+            emit_layer_shard_rust(&st, &cfg, 0, 1, seq, &out_dir, 1, false, bits)
+                .expect("rust emit");
+        let spec_rust =
+            std::fs::read(pkg.join("Data/com.apple.CoreML/model.mlmodel")).expect("spec bytes");
+        let mut cfgj = qwen_cfg_json(&cfg);
+        cfgj["weight_bits"] = json!(bits);
+        cfgj["down_prescale"] = json!(down_prescale_for(bits) as f64);
+        let (spec_cy, w_cy) = bad_apple::coyote_sys::mil_layer_emit(
+            &cfgj,
+            dir.to_str().unwrap(),
+            0,
+            1,
+            seq,
+            1,
+            false,
+        )
+        .expect("coyote emit");
+        assert_eq!(spec_cy, spec_rust, "bits={bits}: .cy spec != rust spec");
+        assert_eq!(w_cy, w_rust, "bits={bits}: .cy weight.bin != rust");
+    }
+
+    #[test]
+    fn mil_cy_layer_q8_parity() {
+        quant_parity(8);
+    }
+
+    #[test]
+    fn mil_cy_layer_q4_parity() {
+        quant_parity(4);
+    }
+
+    #[test]
+    fn mil_cy_layer_decode_parity() {
+        layer_parity(1);
+    }
+
+    #[test]
+    fn mil_cy_layer_prefill_parity() {
+        layer_parity(4);
+    }
+
+    fn ffn_parity(s: i64) {
+        let dir = std::env::temp_dir().join(format!("ba_cy_ffn_{s}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, nh, nkv, dh, dff) = (16usize, 2usize, 1usize, 8usize, 32usize);
+        write_fixture(&dir, d, nh, nkv, dh, dff);
+        let st = StIndex::load(&dir).unwrap();
+        let cfg = Cfg {
+            arch: Arch::Qwen3,
+            d_model: d as i64,
+            n_layers: 1,
+            n_heads: nh as i64,
+            n_kv: nkv as i64,
+            d_head: dh as i64,
+            d_ff: dff as i64,
+            vocab: 64,
+            rope_theta: 1e6,
+            rope_local_theta: 1e6,
+            eps: 1e-6,
+            rope_dim: dh as i64,
+            has_qk_norm: true,
+            tie_embeddings: false,
+            attn_scale: 1.0 / (dh as f32).sqrt(),
+            sliding_window: 0,
+            sliding_pattern: 0,
+            norm_plus_one: false,
+            embed_scale: 1.0,
+        };
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (pkg, _mlc, w_rust) =
+            emit_ffn_shard_rust(&st, &cfg, 0, 1, &out_dir, s, s != 1, 16).expect("rust emit");
+        let spec_rust =
+            std::fs::read(pkg.join("Data/com.apple.CoreML/model.mlmodel")).expect("spec bytes");
+        let (spec_cy, w_cy) = bad_apple::coyote_sys::mil_ffn_emit(
+            &qwen_cfg_json(&cfg),
+            dir.to_str().unwrap(),
+            0,
+            1,
+            s,
+        )
+        .expect("coyote emit");
+        assert_eq!(spec_cy, spec_rust, "s={s}: .cy spec != rust spec");
+        assert_eq!(w_cy, w_rust, "s={s}: .cy weight.bin != rust weight.bin");
+    }
+
+    #[test]
+    fn mil_cy_ffn_decode_parity() {
+        ffn_parity(1);
+    }
+
+    #[test]
+    fn mil_cy_ffn_prefill_parity() {
+        ffn_parity(4);
+    }
+
+    #[test]
+    fn mil_cy_head_parity() {
+        let dir = std::env::temp_dir().join(format!("ba_cy_head_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, nh, nkv, dh, dff) = (16usize, 2usize, 1usize, 8usize, 32usize);
+        write_fixture(&dir, d, nh, nkv, dh, dff);
+        let st = StIndex::load(&dir).unwrap();
+        let cfg = Cfg {
+            arch: Arch::Qwen3,
+            d_model: d as i64,
+            n_layers: 1,
+            n_heads: nh as i64,
+            n_kv: nkv as i64,
+            d_head: dh as i64,
+            d_ff: dff as i64,
+            vocab: 64,
+            rope_theta: 1e6,
+            rope_local_theta: 1e6,
+            eps: 1e-6,
+            rope_dim: dh as i64,
+            has_qk_norm: true,
+            tie_embeddings: false,
+            attn_scale: 1.0 / (dh as f32).sqrt(),
+            sliding_window: 0,
+            sliding_pattern: 0,
+            norm_plus_one: false,
+            embed_scale: 1.0,
+        };
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (pkg, _mlc) = emit_head_shard_rust(&st, &cfg, 0, 32, &out_dir, 16).expect("rust emit");
+        let spec_rust =
+            std::fs::read(pkg.join("Data/com.apple.CoreML/model.mlmodel")).expect("spec bytes");
+        let w_rust =
+            std::fs::read(pkg.join("Data/com.apple.CoreML/weights/weight.bin")).expect("weights");
+        let (spec_cy, w_cy) = bad_apple::coyote_sys::mil_head_emit(
+            &qwen_cfg_json(&cfg),
+            dir.to_str().unwrap(),
+            0,
+            32,
+        )
+        .expect("coyote emit");
+        assert_eq!(spec_cy, spec_rust, ".cy head spec != rust spec");
+        assert_eq!(w_cy, w_rust, ".cy head weight.bin != rust weight.bin");
+    }
+
+    #[test]
+    fn mil_cy_probe_parity() {
+        let dir = std::env::temp_dir().join(format!("ba_cy_probe_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, nh, nkv, dh, dff) = (16usize, 2usize, 1usize, 8usize, 32usize);
+        write_fixture(&dir, d, nh, nkv, dh, dff);
+        let st = StIndex::load(&dir).unwrap();
+        let cfg = Cfg {
+            arch: Arch::Qwen3,
+            d_model: d as i64,
+            n_layers: 1,
+            n_heads: nh as i64,
+            n_kv: nkv as i64,
+            d_head: dh as i64,
+            d_ff: dff as i64,
+            vocab: 64,
+            rope_theta: 1e6,
+            rope_local_theta: 1e6,
+            eps: 1e-6,
+            rope_dim: dh as i64,
+            has_qk_norm: true,
+            tie_embeddings: false,
+            attn_scale: 1.0 / (dh as f32).sqrt(),
+            sliding_window: 0,
+            sliding_pattern: 0,
+            norm_plus_one: false,
+            embed_scale: 1.0,
+        };
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // Deepest stages: rq (norm+qkv+slice+head_rms+rope) and kv (state round-trip).
+        for stage in ["an", "qn", "rq", "kv"] {
+            let (pkg, _mlc, w_rust) =
+                emit_probe_rust(&st, &cfg, 0, stage, &out_dir).expect("rust probe");
+            let spec_rust =
+                std::fs::read(pkg.join("Data/com.apple.CoreML/model.mlmodel")).expect("spec bytes");
+            let (spec_cy, w_cy) = bad_apple::coyote_sys::mil_probe_emit(
+                &qwen_cfg_json(&cfg),
+                dir.to_str().unwrap(),
+                0,
+                stage,
+            )
+            .expect("coyote probe");
+            assert_eq!(spec_cy, spec_rust, "stage={stage}: .cy spec != rust spec");
+            assert_eq!(w_cy, w_rust, "stage={stage}: .cy weight.bin != rust");
         }
     }
-    total
+
+    /// End-to-end: mil_convert_run drives the whole pipeline in-language —
+    /// embedding emit, layer shard, prefill shard, lm-head shard, manifest —
+    /// with compile skipped. Asserts the manifest schema/statuses.
+    #[test]
+    fn mil_cy_convert_run_no_compile() {
+        let dir = std::env::temp_dir().join(format!("ba_cy_run_{}", std::process::id()));
+        let out = dir.join("artifacts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, nh, nkv, dh, dff) = (16usize, 2usize, 1usize, 8usize, 32usize);
+        write_fixture(&dir, d, nh, nkv, dh, dff);
+        let cfg = Cfg {
+            arch: Arch::Qwen3,
+            d_model: d as i64,
+            n_layers: 1,
+            n_heads: nh as i64,
+            n_kv: nkv as i64,
+            d_head: dh as i64,
+            d_ff: dff as i64,
+            vocab: 64,
+            rope_theta: 1e6,
+            rope_local_theta: 1e6,
+            eps: 1e-6,
+            rope_dim: dh as i64,
+            has_qk_norm: true,
+            tie_embeddings: false,
+            attn_scale: 1.0 / (dh as f32).sqrt(),
+            sliding_window: 0,
+            sliding_pattern: 0,
+            norm_plus_one: false,
+            embed_scale: 1.0,
+        };
+        let opts = json!({
+            "seq": 16,
+            "lps": 1,
+            "head_shards": 2,
+            "only_lo": -1,
+            "only_hi": -1,
+            "no_compile": true,
+            "keep_packages": true,
+            "prefill_chunk": 4,
+            "decode_width": 1,
+            "split_ffn": false,
+            "probe_stage": "",
+            "probe_layer": 0,
+        });
+        let v = bad_apple::coyote_sys::mil_convert_run(
+            &layer_cfg_json(&cfg),
+            dir.to_str().unwrap(),
+            out.to_str().unwrap(),
+            &opts,
+        )
+        .expect("mil_convert_run");
+        assert_eq!(v["all_ok"].as_bool(), Some(true), "run: {v}");
+
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(out.join("conversion_manifest.json")).expect("manifest file"),
+        )
+        .expect("manifest json");
+        assert_eq!(manifest["status"].as_str(), Some("complete"));
+        assert_eq!(manifest["schema_version"].as_i64(), Some(1));
+
+        let shards = manifest["shards"].as_array().expect("shards");
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0]["status"].as_str(), Some("packaged"));
+        assert_eq!(shards[0]["layer_start"].as_i64(), Some(0));
+        assert_eq!(shards[0]["layer_end"].as_i64(), Some(1));
+
+        let prefill = manifest["shards_prefill"]
+            .as_array()
+            .expect("prefill shards");
+        assert_eq!(prefill.len(), 1);
+        assert_eq!(prefill[0]["status"].as_str(), Some("packaged"));
+
+        let heads = manifest["shared"]["lm_head_shards"]
+            .as_array()
+            .expect("head shards");
+        assert_eq!(heads.len(), 2);
+        assert_eq!(heads[0]["status"].as_str(), Some("packaged"));
+        assert_eq!(heads[0]["vocab_start"].as_i64(), Some(0));
+        assert_eq!(heads[0]["vocab_end"].as_i64(), Some(32));
+        assert_eq!(heads[1]["vocab_start"].as_i64(), Some(32));
+        assert_eq!(heads[1]["vocab_end"].as_i64(), Some(64));
+
+        assert_eq!(
+            manifest["shared"]["embedding"]["status"].as_str(),
+            Some("complete")
+        );
+        assert_eq!(
+            std::fs::metadata(out.join("embedding.f16")).unwrap().len() as i64,
+            64 * d as i64 * 2
+        );
+        // Packages were emitted.
+        assert!(out
+            .join("layer_s00-01.mlpackage/Data/com.apple.CoreML/model.mlmodel")
+            .is_file());
+        assert!(out
+            .join("prefill_s00-01.mlpackage/Data/com.apple.CoreML/model.mlmodel")
+            .is_file());
+        assert!(out
+            .join("head_v00000-00032.mlpackage/Data/com.apple.CoreML/model.mlmodel")
+            .is_file());
+    }
 }
