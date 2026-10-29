@@ -247,6 +247,10 @@ for label in "${DAEMONS[@]}"; do
     incoming="${BACKUP_DIR}/${label}.incoming"
     render_plist "${REPO_ROOT}/src/platform/apple_bridge/${label}.plist" "${incoming}"
     plutil -lint "${incoming}" >/dev/null
+    if [[ "${label}" == "com.badapple.mlx" && "${BADAPPLE_ALLOW_DOWNLOADS:-0}" == "1" ]]; then
+        plutil -insert "EnvironmentVariables.BADAPPLE_ALLOW_DOWNLOADS" -string "1" "${incoming}" 2>/dev/null \
+            || plutil -replace "EnvironmentVariables.BADAPPLE_ALLOW_DOWNLOADS" -string "1" "${incoming}"
+    fi
     install -o root -g wheel -m 644 "${incoming}" "${target}"
 done
 
@@ -256,12 +260,22 @@ for label in "${DAEMONS[@]}"; do
 done
 
 ready=0
-for _ in {1..90}; do
+tries=90
+# A first-run model download (~4-6 GB) can far exceed the default window.
+if [[ "${BADAPPLE_ALLOW_DOWNLOADS:-0}" == "1" ]]; then
+    tries=360
+fi
+for ((i = 0; i < tries; i++)); do
     if [[ -S /var/run/badapple/substrate.sock && -S /var/run/badapple/substrate_mlx.sock ]]; then
         if "${REPO_ROOT}/target/release/badapple" -n 16 "Reply only: ready" >/dev/null 2>&1; then
             ready=1
             break
         fi
+    fi
+    if grep -qiE "downloads are disabled|no model weights|weights.*(missing|not found)" \
+        /var/lib/bad_apple/mlx_server.log 2>/dev/null; then
+        fail "model weights missing and downloads disabled — seed ~/.cache/huggingface \
+(hf download mlx-community/Qwen3-8B-4bit) or re-run with BADAPPLE_ALLOW_DOWNLOADS=1"
     fi
     sleep 5
 done
