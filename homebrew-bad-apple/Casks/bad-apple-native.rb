@@ -2,7 +2,7 @@ cask "bad-apple-native" do
   version "0.9.9"
   # Update this sha256 for each release. package_minimal_release.sh
   # (BADAPPLE_NATIVE=1) prints the final hash.
-  sha256 "555fe705ba3f414a5e3606c630e84142bd41f4fa64776d9f1228e751b776ec39"
+  sha256 "5c7386e18457ae0d760eb1d1531f85fb5cd35242babfaca76ebb86842c6decca"
 
   url "https://github.com/savageAZfck/bad-apple-releases/releases/download/v#{version}/Bad_Apple-#{version}-native-unsigned.zip"
   name "Bad Apple (native organs)"
