@@ -76,6 +76,33 @@ public actor BadAppleANEBrain {
         }()
     }
 
+    // Native aned lane — libbad_apple's `bad_apple_ane_native_*` exports
+    // drive the Rust `ane_core` (mil_infer/aned decoder, no CoreML
+    // frontend). Resolved lazily; nil when libbad_apple isn't loaded.
+    private typealias NativeLoadFn = @convention(c) (UnsafePointer<CChar>?) -> Int32
+    private typealias NativePredictFn = @convention(c) (UnsafePointer<Int32>?, Int) -> Int32
+    private typealias NativeResetFn = @convention(c) () -> Int32
+    private typealias NativeUnloadFn = @convention(c) () -> Void
+
+    private struct NativeBridge {
+        let load: NativeLoadFn
+        let predict: NativePredictFn
+        let reset: NativeResetFn
+        let unload: NativeUnloadFn
+
+        static let resolved: NativeBridge? = {
+            let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)
+            func sym<T>(_ name: String, _: T.Type) -> T? {
+                dlsym(rtldDefault, name).map { unsafeBitCast($0, to: T.self) }
+            }
+            guard let load = sym("bad_apple_ane_native_load", NativeLoadFn.self),
+                  let predict = sym("bad_apple_ane_native_predict_next", NativePredictFn.self),
+                  let reset = sym("bad_apple_ane_native_reset", NativeResetFn.self),
+                  let unload = sym("bad_apple_ane_native_unload", NativeUnloadFn.self) else { return nil }
+            return NativeBridge(load: load, predict: predict, reset: reset, unload: unload)
+        }()
+    }
+
     /// Opaque bridge handle; only ever touched on `queue`.
     private final class Handle: @unchecked Sendable {
         let raw: UnsafeMutableRawPointer
@@ -157,13 +184,22 @@ public actor BadAppleANEBrain {
         loadTask = Task { await self.load() }
     }
 
+    /// True when the brain runs through libbad_apple's native aned lane
+    /// rather than the CoreML bridge — set after a refused bridge create.
+    private var usingNative = false
+
     public func unload(reason: String) {
         guard let current = handle else { return }
         handle = nil
         state = Self.enabled ? .unloaded : .disabled
         lastError = reason
         NSLog("[BadAppleANEBrain] unloaded: %@", reason)
-        if let bridge = Bridge.resolved {
+        if usingNative {
+            usingNative = false
+            if let native = NativeBridge.resolved {
+                queue.async { native.unload() }
+            }
+        } else if let bridge = Bridge.resolved {
             queue.async { bridge.destroy(current.raw) }
         }
     }
@@ -204,9 +240,27 @@ public actor BadAppleANEBrain {
             queue.async { cont.resume(returning: path.withCString { bridge.create($0) }) }
         }
         guard let raw else {
+            // CoreML's frontend refused the artifact (e.g. M1 ANEF on
+            // spec-v10 ops) — fall back to libbad_apple's native aned lane.
+            if let native = NativeBridge.resolved {
+                let nativeOK: Int32 = await withCheckedContinuation { cont in
+                    queue.async { cont.resume(returning: path.withCString { native.load($0) }) }
+                }
+                if nativeOK == 1 {
+                    usingNative = true
+                    handle = Handle(UnsafeMutableRawPointer(bitPattern: 1)!)
+                    loadSeconds = Date().timeIntervalSince(started)
+                    consecutiveFaults = 0
+                    lastError = nil
+                    state = .ready
+                    NSLog("[BadAppleANEBrain] ready in %.1fs via native aned backend (CoreML refused)", loadSeconds)
+                    return
+                }
+            }
             fail("bridge failed to create the Neural Engine core (see log for CoreML error)")
             return
         }
+        usingNative = false
         handle = Handle(raw)
         loadSeconds = Date().timeIntervalSince(started)
         consecutiveFaults = 0
@@ -244,7 +298,7 @@ public actor BadAppleANEBrain {
     /// callers are expected to fall back to the GPU brain.
     public func generate(prompt: String, systemPrompt: String?, maxTokens: Int) async throws -> String {
         guard Self.enabled else { throw BrainError.disabled }
-        guard state == .ready, let handle, let tokenizer, let bridge = Bridge.resolved else {
+        guard state == .ready, let handle, let tokenizer, usingNative || Bridge.resolved != nil else {
             if state == .unloaded || state == .failed { startIfEnabled() }
             throw BrainError.notReady(state)
         }
@@ -271,8 +325,25 @@ public actor BadAppleANEBrain {
 
         let stops = stopTokens
         let started = Date()
+        let bridge = Bridge.resolved
         let output: [Int32]? = await withCheckedContinuation { cont in
             queue.async {
+                if self.usingNative, let native = NativeBridge.resolved {
+                    _ = native.reset()
+                    var produced: [Int32] = []
+                    var next = promptTokens.withUnsafeBufferPointer {
+                        native.predict($0.baseAddress, $0.count)
+                    }
+                    while next >= 0, !stops.contains(next), produced.count < budget {
+                        produced.append(next)
+                        var token = next
+                        next = native.predict(&token, 1)
+                    }
+                    _ = native.reset()
+                    cont.resume(returning: next < 0 ? nil : produced)
+                    return
+                }
+                guard let bridge else { cont.resume(returning: nil); return }
                 _ = bridge.reset(handle.raw)
                 var produced: [Int32] = []
                 var next = promptTokens.withUnsafeBufferPointer {

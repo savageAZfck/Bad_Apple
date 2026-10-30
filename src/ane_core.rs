@@ -268,9 +268,19 @@ impl CoyoteAneDecoder {
     }
 }
 
+struct MilInferDecoder {
+    dec: mil_infer::Decoder,
+    load_us: u64,
+    prewarm_us: u64,
+}
+
 enum AneBackend {
     Coyote(CoyoteAneDecoder),
     Bridge(BridgeAneDecoder),
+    /// Native aned path — ANEC compile + e5rt runtime, no CoreML frontend.
+    /// This is the backend that survives hosts whose ANEF rejects the
+    /// artifact (e.g. M1-class silicon on spec-v10 ops).
+    MilInfer(MilInferDecoder),
 }
 
 pub struct AneCore {
@@ -348,17 +358,43 @@ impl AneCore {
             });
         }
 
+        let seq_len = read_seq_len_from_manifest(&config.model_path).max(1);
+        let max_context_tokens = config.max_context_tokens.min(seq_len).max(1);
+        let shard_dir = if config.model_path.is_dir() {
+            config.model_path.clone()
+        } else {
+            config
+                .model_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default()
+        };
+        // BADAPPLE_ANE_BACKEND: `milinfer`/`native` forces the aned path,
+        // `coreml`/`bridge` forces CoreML; anything else tries CoreML first
+        // then falls back to mil_infer when the bridge rejects the artifact.
+        let pref = std::env::var("BADAPPLE_ANE_BACKEND").unwrap_or_default();
+        let force_mil = matches!(pref.as_str(), "milinfer" | "mil" | "native");
+        let coreml_only = matches!(pref.as_str(), "coreml" | "bridge");
+
+        if force_mil {
+            return Self::load_milinfer(
+                &shard_dir,
+                seq_len,
+                max_context_tokens,
+                tokenizer,
+                chat_template,
+                qwen_chat_fallback,
+                eos_tokens,
+                config,
+            );
+        }
+
         let symbols = load_bridge_symbols()?;
         let model_path = CString::new(config.model_path.to_string_lossy().as_bytes())
             .map_err(|error| AneCoreError::Bridge(error.to_string()))?;
-        let handle = NonNull::new(unsafe { (symbols.create)(model_path.as_ptr()) })
-            .ok_or_else(|| AneCoreError::Bridge("model load returned null".to_string()))?;
-
-        let seq_len = read_seq_len_from_manifest(&config.model_path).max(1);
-        let max_context_tokens = config.max_context_tokens.min(seq_len).max(1);
-
-        Ok(Self {
-            backend: AneBackend::Bridge(BridgeAneDecoder {
+        if let Some(handle) = NonNull::new(unsafe { (symbols.create)(model_path.as_ptr()) }) {
+            return Ok(Self {
+                backend: AneBackend::Bridge(BridgeAneDecoder {
                 _library: symbols.library,
                 handle,
                 destroy: symbols.destroy,
@@ -372,6 +408,58 @@ impl AneCore {
                 forward_hidden_multi: symbols.forward_hidden_multi,
                 rewind: symbols.rewind,
                 position: symbols.position,
+            }),
+                tokenizer,
+                max_context_tokens,
+                chat_template,
+                qwen_chat_fallback,
+                eos_tokens,
+                seq_len,
+                config: config.clone(),
+            });
+        }
+
+        if coreml_only {
+            return Err(AneCoreError::Bridge(
+                "model load returned null".to_string(),
+            ));
+        }
+        // CoreML rejected the artifact — fall back to the aned path.
+        Self::load_milinfer(
+            &shard_dir,
+            seq_len,
+            max_context_tokens,
+            tokenizer,
+            chat_template,
+            qwen_chat_fallback,
+            eos_tokens,
+            config,
+        )
+    }
+
+    fn load_milinfer(
+        dir: &Path,
+        seq_len: usize,
+        max_context_tokens: usize,
+        tokenizer: Tokenizer,
+        chat_template: Option<ChatTemplate>,
+        qwen_chat_fallback: bool,
+        eos_tokens: Vec<u32>,
+        config: &AneCoreConfig,
+    ) -> Result<Self, AneCoreError> {
+        let t0 = Instant::now();
+        let dec = mil_infer::ane_decode::Decoder::open_dir(
+            dir,
+            mil_infer::e5rt::DeviceMask::Ane,
+        )
+        .map_err(|e| {
+            AneCoreError::Bridge(format!("mil_infer decode open {}: {e}", dir.display()))
+        })?;
+        Ok(Self {
+            backend: AneBackend::MilInfer(MilInferDecoder {
+                dec,
+                load_us: t0.elapsed().as_micros() as u64,
+                prewarm_us: 0,
             }),
             tokenizer,
             max_context_tokens,
@@ -394,6 +482,13 @@ impl AneCore {
                 ok
             }
             AneBackend::Bridge(b) => unsafe { (b.prewarm)(b.handle.as_ptr()) },
+            AneBackend::MilInfer(d) => {
+                let t0 = Instant::now();
+                let ok = d.dec.push(0, false).is_ok();
+                let _ = d.dec.reset();
+                d.prewarm_us = t0.elapsed().as_micros() as u64;
+                ok
+            }
         }
     }
 
@@ -405,6 +500,7 @@ impl AneCore {
                 true
             }
             AneBackend::Bridge(b) => unsafe { (b.reset)(b.handle.as_ptr()) },
+            AneBackend::MilInfer(d) => d.dec.reset().is_ok(),
         }
     }
 
@@ -418,12 +514,13 @@ impl AneCore {
                 }
             }
             AneBackend::Bridge(b) => unsafe { (b.ane_ratio)(b.handle.as_ptr()) },
+            AneBackend::MilInfer(_) => 1.0,
         }
     }
 
     pub fn compute_units_raw_value(&self) -> i32 {
         match &self.backend {
-            AneBackend::Coyote(_) => 2,
+            AneBackend::Coyote(_) | AneBackend::MilInfer(_) => 2,
             AneBackend::Bridge(b) => unsafe { (b.compute_units)(b.handle.as_ptr()) },
         }
     }
@@ -431,6 +528,7 @@ impl AneCore {
     pub fn selection_latency_us(&self) -> Option<(u64, u64)> {
         match &self.backend {
             AneBackend::Coyote(c) => Some((c.load_us, c.prewarm_us)),
+            AneBackend::MilInfer(d) => Some((d.load_us, d.prewarm_us)),
             AneBackend::Bridge(b) => {
                 let mut load = 0;
                 let mut prewarm = 0;
@@ -484,6 +582,25 @@ impl AneCore {
                 };
                 (token >= 0).then_some(token)
             }
+            AneBackend::MilInfer(d) => {
+                let row_bytes = d.dec.hidden_bytes();
+                if row_bytes == 0 || hidden_f16.is_empty() || hidden_f16.len() % row_bytes != 0 {
+                    return None;
+                }
+                let rows = hidden_f16.len() / row_bytes;
+                let mut last_tok = None;
+                for r in 0..rows {
+                    match d
+                        .dec
+                        .push_hidden(&hidden_f16[r * row_bytes..(r + 1) * row_bytes], r + 1 == rows)
+                    {
+                        Ok(Some(tok)) => last_tok = Some(tok as i32),
+                        Ok(None) => {}
+                        Err(_) => return None,
+                    }
+                }
+                last_tok
+            }
         }
     }
 
@@ -533,6 +650,24 @@ impl AneCore {
                 out.truncate(n as usize);
                 Some(out)
             }
+            AneBackend::MilInfer(d) => {
+                let row_bytes = d.dec.hidden_bytes();
+                if row_bytes == 0 || hidden_f16.is_empty() || hidden_f16.len() % row_bytes != 0 {
+                    return None;
+                }
+                let rows = hidden_f16.len() / row_bytes;
+                let mut out = Vec::with_capacity(rows);
+                for r in 0..rows {
+                    match d
+                        .dec
+                        .push_hidden(&hidden_f16[r * row_bytes..(r + 1) * row_bytes], true)
+                    {
+                        Ok(Some(tok)) => out.push(tok as i32),
+                        _ => return None,
+                    }
+                }
+                Some(out)
+            }
         }
     }
 
@@ -555,6 +690,7 @@ impl AneCore {
                 let Some(f) = b.rewind else { return false };
                 unsafe { f(b.handle.as_ptr(), pos) }
             }
+            AneBackend::MilInfer(d) => d.dec.rewind(pos as usize).is_ok(),
         }
     }
 
@@ -563,6 +699,7 @@ impl AneCore {
         match &self.backend {
             AneBackend::Coyote(c) => Some(c.pos as i32),
             AneBackend::Bridge(b) => b.position.map(|f| unsafe { f(b.handle.as_ptr()) }),
+            AneBackend::MilInfer(d) => Some(d.dec.position() as i32),
         }
     }
 
@@ -739,6 +876,30 @@ impl AneCore {
             AneBackend::Bridge(b) => unsafe {
                 (b.predict)(b.handle.as_ptr(), tokens.as_ptr(), tokens.len())
             },
+            AneBackend::MilInfer(d) => {
+                let mut last_tok = -1i32;
+                let mut ok = true;
+                for (i, &t) in tokens.iter().enumerate() {
+                    if t < 0 {
+                        ok = false;
+                        break;
+                    }
+                    let project = i + 1 == tokens.len();
+                    match d.dec.push(t as u32, project) {
+                        Ok(Some(tok)) => last_tok = tok as i32,
+                        Ok(None) => {}
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    last_tok
+                } else {
+                    -1
+                }
+            }
         };
         LAST_TOKEN_LATENCY_US.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         TOKEN_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1068,6 +1229,60 @@ pub fn initialize_from_env() -> Result<(), AneCoreError> {
 
 pub fn is_available() -> bool {
     ENGINE.lock().ok().is_some_and(|guard| guard.is_some())
+}
+
+/// Initialize the engine from a conversion-manifest path — the FFI lane
+/// used by `BadAppleANEBrain` when the CoreML bridge rejects the artifact.
+/// Re-initializing is a no-op when the same manifest is already live.
+pub fn initialize_native(manifest_path: &Path) -> Result<(), AneCoreError> {
+    if ENGINE.lock().ok().is_some_and(|g| g.is_some()) {
+        return Ok(());
+    }
+    let dir = if manifest_path.is_dir() {
+        manifest_path.to_path_buf()
+    } else {
+        manifest_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+    };
+    let config = AneCoreConfig {
+        model_path: manifest_path.to_path_buf(),
+        tokenizer_path: dir.join("tokenizer.json"),
+        max_context_tokens: std::env::var("BADAPPLE_ANE_MAX_CONTEXT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2048),
+        bucket_paths: HashMap::new(),
+    };
+    let _ = CONFIG.set(config.clone());
+    let mut engine = ENGINE
+        .lock()
+        .map_err(|e| AneCoreError::Bridge(e.to_string()))?;
+    *engine = Some(AneCore::load(&config)?);
+    Ok(())
+}
+
+pub fn unload_native() {
+    if let Ok(mut guard) = ENGINE.lock() {
+        *guard = None;
+    }
+}
+
+pub fn predict_next_tokens(tokens: &[i32]) -> Result<i32, AneCoreError> {
+    with_engine_result(|engine| engine.predict_tokens(tokens))
+}
+
+pub fn reset_native() -> bool {
+    with_engine_result(|engine| Ok(engine.reset())).unwrap_or(false)
+}
+
+pub fn position_native() -> i32 {
+    with_engine(|engine| engine.position().unwrap_or(-1)).unwrap_or(-1)
+}
+
+pub fn rewind_native(pos: i32) -> bool {
+    with_engine_result(|engine| Ok(engine.rewind(pos))).unwrap_or(false)
 }
 
 pub fn prewarm() -> bool {

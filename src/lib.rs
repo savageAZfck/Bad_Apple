@@ -435,6 +435,53 @@ pub unsafe extern "C" fn bad_apple_dispatch_desktop_notification(
     apple_intelligence::dispatch_desktop_notification(title, body);
 }
 
+// Native ANE lane — mirrors the `bad_apple_ane_*` bridge ABI the menu-bar
+// brain dlsyms, but drives the Rust `ane_core` (which falls back to the
+// mil_infer/aned decoder when CoreML rejects the artifact, e.g. M1 ANEF).
+#[no_mangle]
+pub unsafe extern "C" fn bad_apple_ane_native_load(path: *const c_char) -> i32 {
+    if path.is_null() {
+        return 0;
+    }
+    let path = match CStr::from_ptr(path).to_str() {
+        Ok(s) => std::path::PathBuf::from(s),
+        Err(_) => return 0,
+    };
+    ane_core::initialize_native(&path).is_ok() as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bad_apple_ane_native_predict_next(
+    tokens: *const i32,
+    len: usize,
+) -> i32 {
+    if tokens.is_null() || len == 0 {
+        return -1;
+    }
+    let toks = std::slice::from_raw_parts(tokens, len);
+    ane_core::predict_next_tokens(toks).unwrap_or(-1)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bad_apple_ane_native_reset() -> i32 {
+    ane_core::reset_native() as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bad_apple_ane_native_unload() {
+    ane_core::unload_native();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bad_apple_ane_native_position() -> i32 {
+    ane_core::position_native()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bad_apple_ane_native_rewind(pos: i32) -> i32 {
+    ane_core::rewind_native(pos) as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
