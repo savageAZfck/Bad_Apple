@@ -438,6 +438,7 @@ pub unsafe extern "C" fn bad_apple_dispatch_desktop_notification(
 // Native ANE lane — mirrors the `bad_apple_ane_*` bridge ABI the menu-bar
 // brain dlsyms, but drives the Rust `ane_core` (which falls back to the
 // mil_infer/aned decoder when CoreML rejects the artifact, e.g. M1 ANEF).
+#[cfg(feature = "coyote-sys")]
 #[no_mangle]
 pub unsafe extern "C" fn bad_apple_ane_native_load(path: *const c_char) -> i32 {
     if path.is_null() {
@@ -450,6 +451,7 @@ pub unsafe extern "C" fn bad_apple_ane_native_load(path: *const c_char) -> i32 {
     ane_core::initialize_native(&path).is_ok() as i32
 }
 
+#[cfg(feature = "coyote-sys")]
 #[no_mangle]
 pub unsafe extern "C" fn bad_apple_ane_native_predict_next(
     tokens: *const i32,
@@ -462,21 +464,25 @@ pub unsafe extern "C" fn bad_apple_ane_native_predict_next(
     ane_core::predict_next_tokens(toks).unwrap_or(-1)
 }
 
+#[cfg(feature = "coyote-sys")]
 #[no_mangle]
 pub unsafe extern "C" fn bad_apple_ane_native_reset() -> i32 {
     ane_core::reset_native() as i32
 }
 
+#[cfg(feature = "coyote-sys")]
 #[no_mangle]
 pub unsafe extern "C" fn bad_apple_ane_native_unload() {
     ane_core::unload_native();
 }
 
+#[cfg(feature = "coyote-sys")]
 #[no_mangle]
 pub unsafe extern "C" fn bad_apple_ane_native_position() -> i32 {
     ane_core::position_native()
 }
 
+#[cfg(feature = "coyote-sys")]
 #[no_mangle]
 pub unsafe extern "C" fn bad_apple_ane_native_rewind(pos: i32) -> i32 {
     ane_core::rewind_native(pos) as i32
