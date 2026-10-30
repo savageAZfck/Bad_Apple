@@ -22,7 +22,10 @@ private enum IdentityError: Error, CustomStringConvertible {
 
 private func keyURL() throws -> URL {
     if let configured = ProcessInfo.processInfo.environment["BADAPPLE_IDENTITY_BLOB"] {
-        return URL(fileURLWithPath: configured)
+        let url = URL(fileURLWithPath: configured)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        return url
     }
     let base = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/BadApple", isDirectory: true)
