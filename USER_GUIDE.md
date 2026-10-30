@@ -96,6 +96,20 @@ What happens next:
 2. The first time you open the menu bar app you may see the unsigned-app
    warning covered above.
 
+**The Neural Engine brain** arrives by a one-shot LaunchAgent at first login —
+no terminal step. If it was skipped (air-gapped install, `BADAPPLE_AIRGAP=1`),
+fetch it later with:
+
+```bash
+bash ~/.bad_apple/versions/*/bad_apple/src/platform/apple_bridge/install_ane_brain.sh
+```
+
+The brain loads through CoreML first; when Apple's frontend refuses the
+artifact — on **M1** silicon this is expected — she automatically falls back
+to her native `aned` lane (same shards, direct ANE compile, no CoreML).
+`BADAPPLE_ANE_BACKEND=milinfer` forces the native lane, `coreml` forces
+the bridge. Status shows in the menu bar row as `ane neural engine`.
+
 When it finishes you have: `/Applications/Bad Apple.app`, the `badapple`
 command, and her daemons running.
 
