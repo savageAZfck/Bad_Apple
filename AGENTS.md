@@ -92,6 +92,14 @@ sudo /Applications/Bad\ Apple.app/Contents/Resources/update_bad_apple.sh
 
 The updater compares the installed `CFBundleShortVersionString` against the latest GitHub release, downloads `Bad_Apple-<version>-unsigned.zip`, backs up the old app, and replaces it. It then strips quarantine and restarts the menu bar.
 
+## Operational rules — hard-won
+
+- **Never rebuild binaries under live daemons.** `cargo build --release` or the bridge build rewrites `target/release/*` in place — if any daemon or LaunchAgent respawns mid-build it loads a stale/unsigned binary and the identity-verify path breaks (`invalid base64 inputs`, every query dies). Build first, then install, then restart — never mid-flight.
+- **Restart all three daemons together** — `gatekeeper`, `mlx`, `supervisor` (the documented `load -w` command below). Piecemeal restarts leave the proxy/engine/identity versions skewed against each other.
+- **The Touchstone battery needs the engine to itself.** Every model-facing probe is a real inference (~60-90s through RAG/tools/persona routing). Do not run `badapple` queries concurrently — the engine serializes and stale queued requests delay probes for minutes. Give it `--timeout 2400`.
+- **Signed binaries only.** `badapple-identity-agent` must carry a signature (adhoc is fine) or Secure Enclave refuses and all queries fail. Cargo builds are unsigned — the bridge build script signs; never leave a bare `cargo build` binary as the running agent.
+- **Verify readiness before attesting.** `touchstone run` against a cold or broken verify path produces a misleading `partial` — test one `badapple` query first; if it fails, fix that before burning a battery run.
+
 ## Start / restart the daemon
 
 The live setup uses the Rust `gatekeeper` on `/var/run/badapple/substrate.sock` as the front proxy. Restart both after a CLI/Rust change; only the MLX daemon needs a restart after a Swift engine change.
