@@ -1,6 +1,6 @@
 [package]
 name = "bad_apple"
-version = "0.9.9"
+version = "1.0.0"
 edition = "2021"
 authors = ["Adam Clark <savagetism@icloud.com>"]
 repository = "https://github.com/savageAZfck/Bad_Apple"
@@ -97,6 +97,30 @@ path = "src/bin/badapple-bulletin.rs"
 name = "badapple-aneconvert"
 path = "src/bin/badapple-aneconvert.rs"
 required-features = ["coyote-sys"]
+
+[[bin]]
+name = "badapple-evolve"
+path = "src/bin/badapple-evolve.rs"
+
+[[bin]]
+name = "badapple-jury"
+path = "src/bin/badapple-jury.rs"
+
+[[bin]]
+name = "badapple-embodiment"
+path = "src/bin/badapple-embodiment.rs"
+
+[[bin]]
+name = "badapple-identity"
+path = "src/bin/badapple-identity.rs"
+
+[[bin]]
+name = "badapple-regen"
+path = "src/bin/badapple-regen.rs"
+
+[[bin]]
+name = "badapple-referee"
+path = "src/bin/badapple-referee.rs"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }

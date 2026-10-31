@@ -541,6 +541,16 @@ final class BadAppleToolRouter: @unchecked Sendable {
             requiresApproval: true
         ),
         BadAppleTool(
+            name: "evolve_organ",
+            description: "Run the Darwinian organ loop on the organism's own .cy source: emit variant programs, gate each through coyote-apple parity across CPU/GPU/ANE, score the survivors on the organ self-test, and file the fittest as a proposed amendment for council ratification. The organ target is fixed — this is self-evolution, not a compiler service.",
+            parameters: [
+                .init(name: "pop", description: "Population size per generation (1-8, default 4).", required: false),
+                .init(name: "gens", description: "Generations to run (1-5, default 2).", required: false),
+                .init(name: "axis", description: "Mutation axis hint guiding variant direction.", required: false),
+            ],
+            requiresApproval: true
+        ),
+        BadAppleTool(
             name: "screen_capture",
             description: "Capture the main Mac screen to a PNG and return the local file path.",
             parameters: [
@@ -3054,6 +3064,8 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             return runShell(command: args["command"] ?? "", timeout: timeout)
         case "write_file":
             return writeFile(path: args["path"] ?? "", content: args["content"] ?? "")
+        case "evolve_organ":
+            return evolveOrgan(pop: args["pop"], gens: args["gens"], axis: args["axis"])
         case "screen_capture":
             return screenCapture(path: args["path"])
         case "run_applescript":
@@ -6234,6 +6246,48 @@ final class BadAppleToolExecutor: @unchecked Sendable {
             fm.currentDirectoryPath + "/target/release/badapple",
         ]
         return candidates.first { !$0.isEmpty && fm.isExecutableFile(atPath: $0) }
+    }
+
+    /// `evolve_organ` — the Darwinian loop as a first-class tool. The organ
+    /// target is fixed to the organism's own .cy source (never arbitrary —
+    /// this is self-modification, so the surface is pinned). Pop/gens are
+    /// clamped; each variant pays an ANE compile + bench, so the run can
+    /// take minutes — the executor's policy timeout governs the ceiling.
+    private func evolveOrgan(pop: String?, gens: String?, axis: String?) -> String {
+        let fm = FileManager.default
+        let env = ProcessInfo.processInfo.environment
+        let bin = env["BADAPPLE_EVOLVE_BIN"] ?? [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/badapple-evolve").path,
+            "/Applications/Bad Apple.app/Contents/Helpers/badapple-evolve",
+            "/usr/local/bin/badapple-evolve",
+            fm.currentDirectoryPath + "/target/release/badapple-evolve",
+        ].first { !$0.isEmpty && fm.isExecutableFile(atPath: $0) }
+        guard let binary = bin else {
+            return "Error: badapple-evolve binary not found (built with cargo build --release)"
+        }
+        let organ = env["BADAPPLE_EVOLVE_ORGAN"]
+            ?? fm.currentDirectoryPath + "/coyote/badapple_organs.cy"
+        guard fm.fileExists(atPath: organ) else {
+            return "Error: organ source not found at \(organ)"
+        }
+        let pop = max(1, min(8, Int(pop ?? "") ?? 4))
+        let gens = max(1, min(5, Int(gens ?? "") ?? 2))
+        var args = [organ, "--pop", String(pop), "--gens", String(gens)]
+        if let axis = axis, !axis.isEmpty {
+            args += ["--axis", String(axis.prefix(200))]
+        }
+        let result = runProcess(
+            launchPath: binary,
+            arguments: args,
+            timeout: 1800,
+            workingDirectory: fm.currentDirectoryPath
+        )
+        let out = (result.stdout + "\n" + result.stderr)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.exitCode != 0 {
+            return "Error (\(result.exitCode)): \(String(out.suffix(2000)))"
+        }
+        return out.isEmpty ? "evolution run produced no output" : String(out.suffix(5000))
     }
 
     // MARK: - Private Helpers
