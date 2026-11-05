@@ -2941,6 +2941,7 @@ fn run_ify_subcommand(args: &[String]) -> Result<()> {
                 "approvals": {"granted": state.approvals_granted, "denied": state.approvals_denied},
                 "firewall_hits": state.firewall_hits,
                 "kill_switch_events": state.kill_switch_events,
+                "ledger_anchors": state.ledger_anchors.len(),
                 "state_dir": bad_apple::ify::ify_dir(),
             });
             println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -2977,6 +2978,16 @@ fn run_ify_subcommand(args: &[String]) -> Result<()> {
                 println!("{line}");
             }
         }
+        "anchor" => {
+            let reason = args[1..].join(" ");
+            let reason = if reason.trim().is_empty() {
+                "operator acknowledged".to_string()
+            } else {
+                reason
+            };
+            let out = bad_apple::ify::acknowledge_segment(&reason)?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
         "proposals" => {
             let dir = bad_apple::ify::proposals_dir();
             let mut paths: Vec<_> = std::fs::read_dir(&dir)
@@ -2987,7 +2998,7 @@ fn run_ify_subcommand(args: &[String]) -> Result<()> {
                 println!("{}", p.display());
             }
         }
-        _ => bail!("unknown ify subcommand: {sub}\nusage: badapple ify <status|once|findings [n]|proposals>"),
+        _ => bail!("unknown ify subcommand: {sub}\nusage: badapple ify <status|once|findings [n]|proposals|anchor [reason...]>"),
     }
     Ok(())
 }

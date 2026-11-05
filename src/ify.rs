@@ -80,6 +80,30 @@ pub struct EventStat {
     pub hourly: [u64; 24],
 }
 
+/// An operator-acknowledged discontinuity in the ledger chain.
+///
+/// The ledger is append-only: when its head is lost (truncation, partial
+/// restore), the surviving segment's first line still commits to the lost
+/// predecessor through its `prev_hash`. Recording that boundary here lets
+/// IFY verify the surviving segment from the acknowledged point instead of
+/// braking on the same historical break forever — while any mismatch
+/// *after* the boundary still fires `chain_break`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LedgerAnchor {
+    /// Byte offset in ledger.jsonl where the accepted segment begins.
+    pub offset: u64,
+    /// The `prev_hash` committed by the first surviving line — the hash of
+    /// the last line lost before the boundary.
+    pub boundary_prev: String,
+    /// Hash of the first surviving line.
+    pub first_line_hash: String,
+    /// The chain tip IFY held when the discontinuity was found.
+    pub prior_tip: String,
+    /// Why the discontinuity was accepted (operator-supplied).
+    pub reason: String,
+    pub recorded_ts: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IfyState {
     pub version: u32,
@@ -114,6 +138,9 @@ pub struct IfyState {
     pub fired: HashMap<String, i64>,
     #[serde(default)]
     pub last_brake_ts: f64,
+    /// Operator-acknowledged ledger segment boundaries (head truncations).
+    #[serde(default)]
+    pub ledger_anchors: Vec<LedgerAnchor>,
 }
 
 impl Default for IfyState {
@@ -138,6 +165,7 @@ impl Default for IfyState {
             firewall_times: Vec::new(),
             fired: HashMap::new(),
             last_brake_ts: 0.0,
+            ledger_anchors: Vec::new(),
         }
     }
 }
@@ -374,30 +402,73 @@ pub fn tail_ledger(state: &mut IfyState, secrets: &[Vec<u8>]) -> std::io::Result
             offset += line_len;
             continue;
         }
-        match sovereign_ledger::import::verify_badapple_line(line, secrets, &state.ledger_tip) {
-            Ok(new_tip) => {
-                if let Some(ev) = parse_event(line) {
-                    observe_event(state, &ev, &mut report.findings);
-                }
-                state.ledger_tip = new_tip;
-                state.events_seen += 1;
-                report.new_events += 1;
-                offset += line_len;
-            }
+        let result =
+            sovereign_ledger::import::verify_badapple_line(line, secrets, &state.ledger_tip);
+        let (new_tip, anchored) = match result {
+            Ok(t) => (t, false),
             Err(e) => {
-                report.chain_broken = true;
-                report.findings.push(Finding {
-                    id: finding_id("chain_break"),
-                    ts: now_secs(),
-                    rule: "chain_break".into(),
-                    severity: Severity::Critical,
-                    observed: format!("verify failed: {e}"),
-                    baseline: format!("prev {}", &state.ledger_tip[..16.min(state.ledger_tip.len())]),
-                    detail: "a ledger line failed hash-chain verification — the audit trail was modified".into(),
+                // An operator-acknowledged segment boundary excuses exactly
+                // one line: the first survivor of a head-truncated ledger,
+                // which still commits to its lost predecessor via prev_hash.
+                // Re-verify the line against its own committed prev_hash —
+                // every other check (content hash, MAC) still runs — and
+                // only then continue the segment.
+                let line_prev = serde_json::from_str::<Value>(line).ok().and_then(|v| {
+                    v.get("prev_hash")
+                        .and_then(|h| h.as_str())
+                        .map(String::from)
                 });
-                break;
+                let accepted = line_prev.and_then(|prev| {
+                    let hit = state
+                        .ledger_anchors
+                        .iter()
+                        .any(|a| a.offset == offset && a.boundary_prev == prev);
+                    if !hit {
+                        return None;
+                    }
+                    sovereign_ledger::import::verify_badapple_line(line, secrets, &prev)
+                        .ok()
+                        .map(|t| (t, prev))
+                });
+                match accepted {
+                    Some((t, _)) => (t, true),
+                    None => {
+                        report.chain_broken = true;
+                        report.findings.push(Finding {
+                            id: finding_id("chain_break"),
+                            ts: now_secs(),
+                            rule: "chain_break".into(),
+                            severity: Severity::Critical,
+                            observed: format!("verify failed: {e}"),
+                            baseline: format!(
+                                "prev {}",
+                                &state.ledger_tip[..16.min(state.ledger_tip.len())]
+                            ),
+                            detail: "a ledger line failed hash-chain verification — the audit trail was modified".into(),
+                        });
+                        break;
+                    }
+                }
             }
+        };
+        if anchored {
+            report.findings.push(Finding {
+                id: finding_id("segment_anchor"),
+                ts: now_secs(),
+                rule: "segment_anchor".into(),
+                severity: Severity::Info,
+                observed: format!("resumed at acknowledged ledger boundary (offset {offset})"),
+                baseline: "operator-recorded anchor".into(),
+                detail: "head-truncated ledger segment verified from its committed boundary — a recorded discontinuity, not new tampering".into(),
+            });
         }
+        if let Some(ev) = parse_event(line) {
+            observe_event(state, &ev, &mut report.findings);
+        }
+        state.ledger_tip = new_tip;
+        state.events_seen += 1;
+        report.new_events += 1;
+        offset += line_len;
     }
     state.ledger_offset = offset;
     Ok(report)
@@ -680,6 +751,116 @@ pub fn brake(reason: &str) -> Value {
         }
     }
     outcome
+}
+
+/// Record an operator-acknowledged ledger discontinuity at the current
+/// tail position and re-anchor the verification cursor onto the surviving
+/// segment's committed boundary.
+///
+/// Refuses to anchor unless the ledger actually breaks at the current
+/// offset — a discontinuity that isn't there cannot be acknowledged — and
+/// re-verifies the boundary line against its own committed `prev_hash`,
+/// so only a well-formed segment can be anchored. Afterwards the segment
+/// verifies normally; any *new* mismatch still fires `chain_break`.
+pub fn acknowledge_segment(reason: &str) -> std::io::Result<Value> {
+    let secrets = load_slicks_secrets();
+    let mut state = load_state();
+    let path = ledger_path();
+    let mut file = fs::File::open(&path)?;
+    file.seek(SeekFrom::Start(state.ledger_offset))?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)?;
+
+    // Find the first unconsumed non-empty line and its file offset — the
+    // same line tail_ledger would verify next.
+    let mut offset = state.ledger_offset;
+    let mut boundary: Option<(u64, &str)> = None;
+    for line in buf.lines() {
+        let line_len = line.len() as u64 + 1;
+        if line.trim().is_empty() {
+            offset += line_len;
+            continue;
+        }
+        boundary = Some((offset, line));
+        break;
+    }
+    let Some((line_offset, line)) = boundary else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no unconsumed ledger lines — nothing to anchor",
+        ));
+    };
+
+    let v: Value = serde_json::from_str(line).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("boundary line is not valid JSON: {e}"),
+        )
+    })?;
+    let prev = v
+        .get("prev_hash")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "boundary line has no prev_hash field",
+            )
+        })?
+        .to_string();
+    let hash = v
+        .get("hash")
+        .and_then(|h| h.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // The ledger must actually break here — anchoring a clean chain would
+    // record a discontinuity that never happened.
+    if sovereign_ledger::import::verify_badapple_line(line, &secrets, &state.ledger_tip).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "ledger verifies cleanly at offset {line_offset} — no discontinuity to acknowledge"
+            ),
+        ));
+    }
+    // …and the boundary line itself must be genuine: it has to verify
+    // against its own committed prev_hash, or the segment is corrupt and
+    // anchoring would launder tampering into accepted history.
+    let new_tip = sovereign_ledger::import::verify_badapple_line(line, &secrets, &prev).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("boundary line fails verification against its own prev_hash: {e} — refusing to anchor a corrupt segment"),
+        )
+    })?;
+
+    let prior_tip = state.ledger_tip.clone();
+    let already = state
+        .ledger_anchors
+        .iter()
+        .any(|a| a.offset == line_offset && a.boundary_prev == prev);
+    if !already {
+        state.ledger_anchors.push(LedgerAnchor {
+            offset: line_offset,
+            boundary_prev: prev.clone(),
+            first_line_hash: hash.clone(),
+            prior_tip: prior_tip.clone(),
+            reason: reason.to_string(),
+            recorded_ts: now_secs(),
+        });
+    }
+    state.ledger_tip = prev.clone();
+    save_state(&state);
+
+    Ok(json!({
+        "anchored": true,
+        "already_anchored": already,
+        "offset": line_offset,
+        "boundary_prev": prev,
+        "first_line_hash": hash,
+        "prior_tip": prior_tip,
+        "reason": reason,
+        "resumes_at_tip": new_tip,
+    }))
 }
 
 /// Render a finding in plain English via the fast tier. Numbers only —

@@ -57,6 +57,7 @@ fn status_report(state: &ify::IfyState) -> serde_json::Value {
         "approvals": {"granted": state.approvals_granted, "denied": state.approvals_denied},
         "firewall_hits": state.firewall_hits,
         "kill_switch_events": state.kill_switch_events,
+        "ledger_anchors": state.ledger_anchors.len(),
         "recent_findings": recent,
     })
 }
