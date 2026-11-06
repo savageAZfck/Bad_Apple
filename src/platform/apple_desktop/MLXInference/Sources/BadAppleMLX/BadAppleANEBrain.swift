@@ -253,6 +253,11 @@ public actor BadAppleANEBrain {
                     consecutiveFaults = 0
                     lastError = nil
                     state = .ready
+                    let nativeDelta = Int64(Self.physFootprintBytes()) - Int64(footprintBefore)
+                    if nativeDelta > 0 {
+                        Self.recordFootprint(artifactDir: manifest.deletingLastPathComponent(),
+                                             bytes: UInt64(nativeDelta))
+                    }
                     NSLog("[BadAppleANEBrain] ready in %.1fs via native aned backend (CoreML refused)", loadSeconds)
                     return
                 }
@@ -267,6 +272,10 @@ public actor BadAppleANEBrain {
         lastError = nil
         state = .ready
         let footprintDelta = Int64(Self.physFootprintBytes()) - Int64(footprintBefore)
+        if footprintDelta > 0 {
+            Self.recordFootprint(artifactDir: manifest.deletingLastPathComponent(),
+                                 bytes: UInt64(footprintDelta))
+        }
         NSLog("[BadAppleANEBrain] ready in %.1fs (context %d) — real footprint delta %+.2f GiB%s",
               loadSeconds, contextLimit, Double(footprintDelta) / 1_073_741_824,
               Self.bestEffortEnabled ? " [best-effort]" : "")
@@ -408,6 +417,58 @@ public actor BadAppleANEBrain {
         return (model["seq_len"] as? NSNumber)?.intValue
     }
 
+    /// Persisted measured-footprint records, keyed by artifact dir path —
+    /// the gate prefers a real residency measurement over summing artifact
+    /// file sizes, since shards mmap and the kernel can evict their pages.
+    nonisolated static var footprintStoreURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory() + "/.bad_apple/ane_footprints.json")
+    }
+
+    /// Newest weight.bin mtime under the artifact dir — invalidates a stored
+    /// measurement when the shards have been regenerated since it was taken.
+    nonisolated static func newestWeightMtime(artifactDir: URL) -> TimeInterval {
+        var newest: TimeInterval = 0
+        if let walker = FileManager.default.enumerator(
+            at: artifactDir, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]) {
+            for case let url as URL in walker where url.lastPathComponent == "weight.bin" {
+                let m = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate?.timeIntervalSince1970) ?? 0
+                if m > newest { newest = m }
+            }
+        }
+        return newest
+    }
+
+    /// The measured resident cost of this artifact from a previous load, if
+    /// the stored measurement still matches the on-disk shards.
+    nonisolated static func measuredResidentBytes(artifactDir: URL) -> UInt64? {
+        guard let data = try? Data(contentsOf: footprintStoreURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rec = root[artifactDir.path] as? [String: Any],
+              let bytes = rec["bytes"] as? NSNumber,
+              let mtime = rec["mtime"] as? NSNumber,
+              mtime.doubleValue == newestWeightMtime(artifactDir: artifactDir)
+        else { return nil }
+        return bytes.uint64Value
+    }
+
+    /// Records the real phys_footprint delta of a completed load so the next
+    /// admission decision prices actual residency instead of artifact size.
+    nonisolated static func recordFootprint(artifactDir: URL, bytes: UInt64) {
+        var root: [String: Any] = [:]
+        if let data = try? Data(contentsOf: footprintStoreURL),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            root = existing
+        }
+        root[artifactDir.path] = [
+            "bytes": NSNumber(value: bytes),
+            "mtime": NSNumber(value: newestWeightMtime(artifactDir: artifactDir))
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: root) {
+            try? data.write(to: footprintStoreURL)
+        }
+    }
+
     /// Resident cost of the artifact: every compiled shard's weights. The
     /// embedding table is mmapped and only touched one row per token, so it
     /// is excluded — the kernel can evict it for free.
@@ -462,7 +523,9 @@ public actor BadAppleANEBrain {
 
     /// nil = admitted; otherwise the reason the load is refused.
     nonisolated static func admissionRefusal(artifactDir: URL, extraReserve: UInt64 = 0) -> String? {
-        let need = residentBytes(artifactDir: artifactDir) + reserveBytes + extraReserve
+        let artifact = measuredResidentBytes(artifactDir: artifactDir)
+            ?? residentBytes(artifactDir: artifactDir)
+        let need = artifact + reserveBytes + extraReserve
         let have = reclaimableBytes()
         if bestEffortEnabled {
             if have < need {
