@@ -202,6 +202,15 @@ macuahuitl = "0.1.1"
 [build-dependencies]
 cbindgen = "0.29"
 
+# All mil_* crates resolve to the git workspace — crates.io releases
+# lag the repo (e.g. mil_infer::espresso::SharedSurface), and mixing
+# sources puts two mil_infer rlibs in one link → undefined symbols.
+[patch.crates-io]
+mil_spec = { git = "https://github.com/savageAZfck/mil_spec" }
+mil_infer = { git = "https://github.com/savageAZfck/mil_spec" }
+mil_machines = { git = "https://github.com/savageAZfck/mil_spec" }
+mil_compile = { git = "https://github.com/savageAZfck/mil_spec" }
+
 [profile.release]
 opt-level = 3
 codegen-units = 1
